@@ -37,7 +37,7 @@ import type { DaemonHttpAddress, LocalTailscale } from "../tailscale/local.ts";
 import { BoxSetupLog } from "./box-exec.ts";
 import { ByoMachines } from "./byo.ts";
 import { BoxError, errorLine } from "./errors.ts";
-import { BoxLifecycle, systemClock, type BoxAgentClis, type BoxClock, type BoxGitAccess, type ManagedAgentHome } from "./lifecycle.ts";
+import { BoxLifecycle, systemClock, type BoxAgentClis, type BoxClock, type BoxGitAccess, type DeviceHostPreparer, type ManagedAgentHome } from "./lifecycle.ts";
 import { resolvePlacement } from "./placement.ts";
 import { BoxProjects } from "./projects.ts";
 import { BoxReconciler } from "./reconciler.ts";
@@ -52,7 +52,7 @@ export { sendBoxError } from "./routes.ts";
 export { isBoxLocation } from "./projects.ts";
 export type { BoxRecordStore } from "./store.ts";
 export type { BlacksmithCheck, BlacksmithSetupDriver, BoxHostingAccounts, TailscaleCredentials } from "./settings.ts";
-export type { BoxGitAccess, ManagedAgentHome } from "./lifecycle.ts";
+export type { BoxGitAccess, DeviceHostPreparer, ManagedAgentHome } from "./lifecycle.ts";
 export type { DeviceCacheWarmRequest, DeviceCacheWarmRun, DeviceCacheWarmStatus } from "../providers/blacksmith.ts";
 
 export interface BoxServiceDeps {
@@ -102,6 +102,17 @@ export interface CreateTemporaryBoxRequest {
   purposeNote: string;
 }
 
+/** A device host the device service rents (devices spec §6.3): purpose `device-host`, no chat. */
+export interface CreateDeviceHostBoxRequest {
+  kind: BoxKind;
+  provider: BoxProviderId;
+  size: string;
+  image?: string;
+  lifetimeMinutes: number;
+  /** "iPhone & iPad simulators". */
+  purposeNote: string;
+}
+
 export interface BoxService {
   registry: StoreBoxRegistry;
   /** Bring-your-own machines: pairing, settings, removal (and the hub's pair route). */
@@ -125,7 +136,15 @@ export interface BoxService {
   startTemporaryBox(request: CreateTemporaryBoxRequest): Promise<BoxSummary>;
   /** Create a temporary box and resolve once it is ready (rejects, torn down, when setup fails). Aborting destroys it. */
   createTemporaryBox(request: CreateTemporaryBoxRequest, signal?: AbortSignal): Promise<BoxSummary>;
-  destroyBox(boxId: string, reason: BoxDestroyedReason): Promise<BoxSummary>;
+  /** `message`: the destroyed box's reason line instead of the reason's own (a device host torn down for idleness). */
+  destroyBox(boxId: string, reason: BoxDestroyedReason, message?: string): Promise<BoxSummary>;
+  /**
+   * Devices: persist a device-host box's record and start its setup (create, connect, `devices`,
+   * ready) in the background; resolves with its summary once the record exists.
+   */
+  startDeviceHostBox(request: CreateDeviceHostBoxRequest): Promise<BoxSummary>;
+  /** Devices: who runs the `devices` setup step of device-host boxes (the device service while it runs; null: nobody). */
+  setDeviceHostPreparer(preparer: DeviceHostPreparer | null): void;
   startBlacksmithTest(): Promise<void>;
   /**
    * Start the Blacksmith device-cache workflow for one OS (the device service's "Warm caches");
@@ -187,6 +206,7 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     providersChanged: publishProviders
   });
   let reconciler: BoxReconciler;
+  let deviceHostPreparer: DeviceHostPreparer | null = null;
   const lifecycle = new BoxLifecycle({
     baseDir: deps.baseDir,
     store,
@@ -204,7 +224,8 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
     logger,
     onProviderError: () => void reconciler.requestRun(),
-    ...(deps.agentBuilds ? { agentBuilds: deps.agentBuilds } : {})
+    ...(deps.agentBuilds ? { agentBuilds: deps.agentBuilds } : {}),
+    deviceHostPreparer: () => deviceHostPreparer
   });
   reconciler = new BoxReconciler({
     store,
@@ -259,16 +280,48 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     publishProviders();
   };
 
-  const destroyBox = async (boxId: string, reason: BoxDestroyedReason): Promise<BoxSummary> => {
+  const destroyBox = async (boxId: string, reason: BoxDestroyedReason, message?: string): Promise<BoxSummary> => {
     const existing = store.get(boxId);
     if (!existing) throw new BoxError(404, "BOX_NOT_FOUND", "No such box.");
     // An idle machine of the owner's is removed (Remove machine), never destroyed; a lent one is released below.
     if (existing.provider === "byo" && existing.purpose === "machine") {
       throw new BoxError(409, "BOX_INVALID_REQUEST", "This is one of your own machines: remove it from its row instead.");
     }
-    const record = await lifecycle.destroy(boxId, reason);
+    const record = await lifecycle.destroy(boxId, reason, message ?? null);
     const summary = registry.summarize(record);
     if (!summary) throw new BoxError(500, "BOXES_UNAVAILABLE", "The destroyed box's record cannot be shown.");
+    return summary;
+  };
+
+  const startDeviceHostBox = async (request: CreateDeviceHostBoxRequest): Promise<BoxSummary> => {
+    if (!enabled) throw new BoxError(409, "BOXES_DISABLED", "Ephemeral AI VMs is turned off in Settings → Plugins.");
+    if (request.provider === "byo") throw new BoxError(400, "BOX_INVALID_REQUEST", "Your own machines become device hosts from their own row, not by renting.");
+    const placement = await resolvePlacement(settings, {
+      kind: request.kind,
+      provider: request.provider,
+      size: request.size,
+      image: request.image,
+      lifetimeMinutes: request.lifetimeMinutes,
+      explicit: false,
+      lifetimeRequired: true
+    });
+    const record = await lifecycle.create({
+      purpose: "device-host",
+      kind: placement.kind,
+      provider: placement.adapter.id,
+      size: placement.size.id,
+      sizeLabel: placement.size.label,
+      region: placement.region.id,
+      regionLabel: placement.region.label,
+      image: placement.image,
+      hourlyUsd: placement.size.hourlyUsd,
+      lifetimeMinutes: placement.lifetimeMinutes,
+      project: null,
+      threadId: null,
+      purposeNote: request.purposeNote.trim().replace(/\s+/g, " ").slice(0, MAX_PURPOSE_NOTE) || null
+    });
+    const summary = registry.summarize(record);
+    if (!summary) throw new BoxError(500, "BOXES_UNAVAILABLE", "The new box's record cannot be shown.");
     return summary;
   };
 
@@ -387,6 +440,10 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     startTemporaryBox,
     createTemporaryBox,
     destroyBox,
+    startDeviceHostBox,
+    setDeviceHostPreparer(preparer) {
+      deviceHostPreparer = preparer;
+    },
 
     async startBlacksmithTest() {
       if (!settings.blacksmithReady()) throw new BoxError(409, "BOX_PROVIDER_NOT_CONFIGURED", "Finish the Blacksmith setup steps first.");

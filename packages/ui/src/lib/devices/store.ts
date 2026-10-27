@@ -44,6 +44,8 @@ import {
   type DeviceSetupJob,
   type DeviceSetupRequest,
   type DeviceSetupResponse,
+  type DeviceUserActionRequest,
+  type DeviceUserActionResponse,
   type EventMessage
 } from "@orquester/api";
 
@@ -56,8 +58,11 @@ import {
   sanitizeLeasePayload,
   sanitizePoolSummary,
   sanitizeSettingsPayload,
-  sanitizeSetupPayload
+  sanitizeSetupPayload,
+  sanitizeUserActionResponse
 } from "./validate";
+import { resetLocalDeviceActions } from "./local-actions";
+import { resetDevicePanelFocus } from "./panel-focus";
 
 /** The routes this store calls — `ApiClient` satisfies it; tests pass a fake. */
 export interface DevicesApi {
@@ -68,6 +73,7 @@ export interface DevicesApi {
   openDeviceLease(req: DeviceOpenRequest): Promise<DeviceLeaseResponse>;
   releaseDeviceLease(leaseId: string, shutdown?: boolean): Promise<DeviceLeaseResponse>;
   setDeviceController(leaseId: string, controller: DeviceController): Promise<DeviceLeaseResponse>;
+  deviceUserAction(leaseId: string, req: DeviceUserActionRequest): Promise<DeviceUserActionResponse>;
   updateDevicesSettings(patch: DevicesSettingsPatch): Promise<DevicesSettingsResponse>;
   startDeviceSetup(platform: DevicePlatform, req?: DeviceSetupRequest): Promise<DeviceSetupResponse>;
 }
@@ -124,12 +130,17 @@ function write(slot: Slot, patch: Partial<DevicesState>): void {
   devicesStore.setState(patch);
 }
 
-/** A connection switch: forget everything; answers still in flight are dropped. */
+/**
+ * A connection switch: forget everything — the store, each chat's selected device and the panel's
+ * own action rows (lease ids of another daemon mean nothing here); answers still in flight are dropped.
+ */
 export function resetDevices(): void {
   generation += 1;
   boundConnectionId = null;
   for (const slot of Object.keys(revisions) as Slot[]) revisions[slot] = 0;
   devicesStore.setState(INITIAL, true);
+  resetDevicePanelFocus();
+  resetLocalDeviceActions();
 }
 
 /** The plugin turned on or off (the app store calls this on every plugins list). Off empties the store. */
@@ -294,6 +305,21 @@ export function releaseDevice(api: DevicesApi, leaseId: string, shutdown = false
 /** Take over (`user`) or give back (`agent`). */
 export function setDeviceController(api: DevicesApi, leaseId: string, controller: DeviceController): Promise<DeviceLeaseSummary> {
   return mutate(api, () => api.setDeviceController(leaseId, controller), sanitizeLeasePayload, upsertLease);
+}
+
+/**
+ * One of the panel's buttons that is not hub input (`deviceRoutes.userAction`): the answer's lease
+ * (now the user's, or released after a power off) and its log row apply at once.
+ */
+export function runDeviceUserAction(api: DevicesApi, leaseId: string, req: DeviceUserActionRequest): Promise<{ lease: DeviceLeaseSummary; entry: DeviceActionEntry }> {
+  return mutate(api, () => api.deviceUserAction(leaseId, req), sanitizeUserActionResponse, ({ lease, entry }) => {
+    if (lease.state === "released") {
+      removeLease(lease.id);
+      return;
+    }
+    upsertLease(lease);
+    appendAction(lease.id, entry);
+  });
 }
 
 export function updateDevicesSettings(api: DevicesApi, patch: DevicesSettingsPatch): Promise<DevicesSettings> {

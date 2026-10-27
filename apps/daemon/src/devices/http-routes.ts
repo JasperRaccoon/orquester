@@ -22,6 +22,7 @@ import {
   parseDeviceOpenRequest,
   parseDeviceSetupRequest,
   parseDevicesSettingsPatch,
+  parseDeviceUserActionRequest,
   type DeviceActionsResponse,
   type DeviceHostsResponse,
   type DeviceLeaseResponse,
@@ -29,7 +30,8 @@ import {
   type DevicesListResponse,
   type DevicesSettingsResponse,
   type DevicesStateResponse,
-  type DeviceSetupResponse
+  type DeviceSetupResponse,
+  type DeviceUserActionResponse
 } from "@orquester/api";
 
 import { DeviceError, devicesDisabled, isDeviceError } from "./errors.ts";
@@ -148,6 +150,24 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
       const parsed = parseDeviceControllerRequest(request.body);
       if (!parsed.ok) throw new DeviceError("INVALID_ARGUMENT", parsed.message);
       return { lease: service.setController(request.params.leaseId, parsed.value.controller) };
+    })
+  );
+
+  // The panel's buttons that are not hub input: the user's own (an agent's or external client's
+  // principal is refused — agents drive devices through their tools, under the controller rules).
+  app.post<Params<"leaseId">>(
+    `${deviceRoutes.leases}/:leaseId/user-action`,
+    withService(async (service, request: FastifyRequest<Params<"leaseId">>, reply): Promise<DeviceUserActionResponse> => {
+      const principal = (request as FastifyRequest & { principal?: { kind: string } | null }).principal;
+      if (principal && principal.kind !== "user") throw new DeviceError("PERMISSION_DENIED", "Only a person uses the Device panel's buttons; agents use device_action.");
+      const parsed = parseDeviceUserActionRequest(request.body);
+      if (!parsed.ok) throw new DeviceError("INVALID_ARGUMENT", parsed.message);
+      const abort = new AbortController();
+      // The panel went away before the answer: stop what is still running on the device's behalf.
+      reply.raw.once("close", () => {
+        if (!reply.raw.writableFinished) abort.abort();
+      });
+      return service.userAction(request.params.leaseId, parsed.value, abort.signal);
     })
   );
 

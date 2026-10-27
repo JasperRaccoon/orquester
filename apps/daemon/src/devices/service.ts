@@ -53,7 +53,9 @@ import {
   type DevicesSettings,
   type DevicesSettingsPatch,
   type DevicesStateResponse,
-  type DeviceSummary
+  type DeviceSummary,
+  type DeviceUserActionRequest,
+  type DeviceUserActionResponse
 } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
@@ -101,6 +103,7 @@ import type {
   DeviceToolOpenResult,
   DeviceToolsPort
 } from "./tools-port.ts";
+import { runUserAction } from "./user-actions.ts";
 
 /** How long `open_device` waits for a device before answering `starting` (spec §9: 9 min). */
 export const OPEN_DEVICE_WAIT_MS = 9 * 60_000;
@@ -697,8 +700,13 @@ export class DeviceService implements DeviceToolsPort {
     return this.deps.factories.find((factory) => factory.provision !== undefined && factory.platforms.includes(platform)) ?? null;
   }
 
-  /** Until the host reports a change, the call aborts, or {@link HOST_WAIT_MS} passes. */
+  /**
+   * Until the host's status changes (or it goes), the call aborts, or {@link HOST_WAIT_MS} passes.
+   * Progress lines of a starting host (a rented Mac being prepared) are changes too, but only a new
+   * status is worth another placement round.
+   */
   private waitForHost(hostId: string, signal: AbortSignal): Promise<void> {
+    const status = this.hosts.get(hostId)?.state().status;
     return new Promise((resolve) => {
       const finish = () => {
         clearTimeout(timer);
@@ -707,7 +715,7 @@ export class DeviceService implements DeviceToolsPort {
         resolve();
       };
       const unsubscribe = this.hosts.onChange((changed) => {
-        if (changed === hostId) finish();
+        if (changed === hostId && this.hosts.get(hostId)?.state().status !== status) finish();
       });
       const timer = setTimeout(finish, HOST_WAIT_MS);
       timer.unref?.();
@@ -864,6 +872,33 @@ export class DeviceService implements DeviceToolsPort {
     const next = withController(lease, controller, this.iso());
     if (next !== lease) this.commit(next);
     return this.summary(next)!;
+  }
+
+  /**
+   * The panel's buttons that are not hub input (`deviceRoutes.userAction`, `user-actions.ts`): the
+   * user takes control first (never `DEVICE_CONTROLLED_BY_USER`), and the log shows it as theirs.
+   */
+  userAction(leaseId: string, request: DeviceUserActionRequest, signal: AbortSignal): Promise<DeviceUserActionResponse> {
+    this.assertRunning();
+    let lease = this.requireLease(leaseId);
+    if (request.kind !== "power_off" && isLiveLease(lease)) {
+      const next = userInput(lease, this.iso());
+      if (next.controller !== lease.controller) this.commit(next);
+      lease = next;
+    }
+    return runUserAction(
+      {
+        lease,
+        host: this.hosts.get(lease.hostId) ?? null,
+        actions: this.deps.actions,
+        record: (draft) => this.recordAction(leaseId, { ...draft, actor: "user" }),
+        powerOff: () => this.releaseLease(leaseId, "user", { shutdown: true }),
+        summary: () => this.lease(leaseId) ?? null,
+        logger: this.logger
+      },
+      request,
+      signal
+    );
   }
 
   /**
@@ -1171,14 +1206,20 @@ export class DeviceService implements DeviceToolsPort {
     this.deps.publish(DEVICES_HOSTS_EVENT, { hosts: this.hostSummaries() });
   }
 
-  /** A host was added, removed or changed: republish; a removed host's leases are lost (not at shutdown). */
+  /**
+   * A host was added, removed or changed: republish. A removed host's leases are lost (not at
+   * shutdown); an unreachable one's ready leases are suspended (its devices keep running), and
+   * resume when it is ready again.
+   */
   private hostChanged(hostId: string): void {
     if (this.stopping) return;
     this.pool.kick();
     if (this.running && this.hosts.get(hostId)) void this.checkHostDevices(hostId).catch(() => undefined);
-    if (!this.hosts.get(hostId)) {
-      const lost = hostLeasesChanged(this.leases, hostId, "lost", this.iso(), "Its host is gone.");
-      for (const lease of lost) this.commit(lease);
+    const host = this.hosts.get(hostId);
+    const status = host?.state().status;
+    const change = !host ? "lost" : status === "unreachable" ? "suspended" : status === "ready" ? "ready" : null;
+    if (change) {
+      for (const lease of hostLeasesChanged(this.leases, hostId, change, this.iso(), "Its host is gone.")) this.commit(lease);
     }
     this.publishHosts();
   }

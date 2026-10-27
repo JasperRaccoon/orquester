@@ -7,7 +7,8 @@
  *   tags; the installation id keeps another appdir's reconciler (same provider account) off it.
  * - Setup runs in the background, one step at a time; every step's state is persisted (and so
  *   broadcast) as it changes, and its progress goes to the box's setup log. A temporary box runs
- *   create, connect and ready only.
+ *   create, connect and ready only; a device host create, connect, `devices` (the device service's
+ *   {@link DeviceHostPreparer}) and ready.
  * - Failing to create, connect or make the host paths tears the box down (`provisioning-failed`);
  *   any later step fails on its own and the box still becomes ready, its `stateReason` naming the
  *   step. A pipeline resumed after a restart skips the steps already finished.
@@ -144,11 +145,20 @@ export interface BoxLifecycleDeps {
    * (no Go toolchain to build them), and nothing billable is created. Absent: not checked.
    */
   agentBuilds?: { current(): Promise<{ version: string } | null> };
+  /** Who prepares device-host boxes (the device service while it runs); null or absent: the `devices` step is skipped. */
+  deviceHostPreparer?: () => DeviceHostPreparer | null;
 }
 
 export interface BoxAgentClis {
   ensure(connection: BoxConnection, agent: BoxAgentId, onProgress: (line: string) => void): Promise<{ installed: boolean }>;
 }
+
+/**
+ * The `devices` setup step of a device-host box (devices spec §6.3): the device service installs
+ * the device tools and starts its helpers over the box link. Resolves once the box can run devices;
+ * rejects with a message for the owner (the box is then torn down).
+ */
+export type DeviceHostPreparer = (input: { boxId: string; connection: BoxConnection; signal: AbortSignal; log: (line: string) => void }) => Promise<void>;
 
 export interface CreateBoxSpec {
   purpose: BoxPurpose;
@@ -597,7 +607,12 @@ export class BoxLifecycle {
           : undefined);
       if (!connected || !link) return this.stepMessage(boxId, "connect");
 
-      if (!temporary) {
+      if (initial.purpose === "device-host") {
+        // A device host that cannot run devices is of no use: a failed `devices` step tears it down.
+        if (!(await this.runStep(boxId, "devices", signal, (log) => this.prepareDevices(boxId, link, signal, log)))) {
+          return this.stepMessage(boxId, "devices");
+        }
+      } else if (!temporary) {
         if (!(await this.runStep(boxId, "paths", signal, () => this.ensurePaths(boxId, link, signal)))) {
           return this.stepMessage(boxId, "paths");
         }
@@ -690,6 +705,27 @@ export class BoxLifecycle {
     } catch (error) {
       if (!this.shutdown.signal.aborted) this.deps.onProviderError(adapter.id);
       throw error;
+    }
+    return { state: "done" };
+  }
+
+  /** The `devices` step: the device service's preparer, its progress lines shown on the step. */
+  private async prepareDevices(boxId: string, connection: BoxConnection, signal: AbortSignal, log: (line: string) => void): Promise<StepOutcome> {
+    const preparer = this.deps.deviceHostPreparer?.() ?? null;
+    if (!preparer) return { state: "skipped", message: "Device simulators is off: the device service prepares the box when it starts." };
+    const progress = this.stepProgress(boxId, "devices");
+    try {
+      await preparer({
+        boxId,
+        connection,
+        signal,
+        log: (line) => {
+          log(line);
+          progress.set(line);
+        }
+      });
+    } finally {
+      await progress.close();
     }
     return { state: "done" };
   }

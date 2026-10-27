@@ -15,6 +15,7 @@ let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let DevicePanel: typeof import("./DevicePanel").DevicePanel;
 let ControllerPill: typeof import("./DeviceLiveView").ControllerPill;
+let DeviceToolbar: typeof import("./DeviceToolbar").DeviceToolbar;
 let devicesStore: typeof import("../../lib/devices/store").devicesStore;
 let resetDevices: typeof import("../../lib/devices/store").resetDevices;
 let useAppStore: typeof import("../../store/app").useAppStore;
@@ -34,6 +35,7 @@ before(async () => {
   ({ createRoot } = await import("react-dom/client"));
   ({ DevicePanel } = await import("./DevicePanel"));
   ({ ControllerPill } = await import("./DeviceLiveView"));
+  ({ DeviceToolbar } = await import("./DeviceToolbar"));
   ({ devicesStore, resetDevices } = await import("../../lib/devices/store"));
   ({ useAppStore } = await import("../../store/app"));
 });
@@ -174,6 +176,34 @@ describe("DevicePanel", () => {
     const tab = host.querySelector('[role="tab"]')!.parentElement!;
     await act(async () => tab.dispatchEvent(new dom.window.MouseEvent("auxclick", { bubbles: true, button: 1 })));
     assert.deepEqual(calls, ["release l1"]);
+  });
+
+  it("the toolbar: Rotate is live for Android, More → Restart app asks for it", async () => {
+    const pressed: string[] = [];
+    const toolbar = (rotate: { enabled: boolean; reason: string | null }) =>
+      createElement(DeviceToolbar, {
+        layout: "bar",
+        platform: "android",
+        input: { enabled: true },
+        onButton: (name) => pressed.push(name),
+        rotate: { ...rotate, onRotate: () => pressed.push("rotate") },
+        screenshot: { enabled: true, pending: false, onShot: () => undefined },
+        keyboard: { enabled: true, active: false, onToggle: () => undefined },
+        view: { mode: "flat", unavailable: null, enabled: true, onMode: () => undefined },
+        more: { releasing: false, restarting: false, onRestartApp: () => pressed.push("restart"), onRelease: () => undefined, onPowerOff: () => undefined, onCopyKey: () => undefined }
+      });
+    await act(async () => root.render(toolbar({ enabled: true, reason: null })));
+    await act(async () => button("Rotate")!.click());
+    await act(async () => (host.querySelector('[aria-label="More device actions"]')!.closest("button") as HTMLButtonElement).click());
+    const restart = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Restart app") as HTMLButtonElement | undefined;
+    assert.ok(restart, "More lists Restart app");
+    await act(async () => restart.click());
+    assert.deepEqual(pressed, ["rotate", "restart"]);
+    // Disabled while the video is not up: the press is refused and the tooltip says why.
+    await act(async () => root.render(toolbar({ enabled: false, reason: "Waiting for video" })));
+    await act(async () => button("Rotate")!.click());
+    assert.deepEqual(pressed, ["rotate", "restart"]);
+    assert.match(text(), /Rotate — Waiting for video/);
   });
 
   it("the controller pill: Take over while the agent drives, Give back after", async () => {

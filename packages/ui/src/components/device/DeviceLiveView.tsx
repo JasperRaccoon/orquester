@@ -21,15 +21,27 @@ import { copyText } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { deliverToComposerDraft } from "../../lib/composer-inbox";
 import { deviceViewKey, effectiveDeviceViewMode, readDeviceViewPrefs, writeDeviceViewPrefs, type DeviceViewPrefs } from "../../lib/devices/device-view-prefs";
+import { useDeviceHosts } from "../../lib/devices/hooks";
 import { logLocalDeviceAction } from "../../lib/devices/local-actions";
-import { setDeviceController } from "../../lib/devices/store";
+import { runDeviceUserAction, setDeviceController } from "../../lib/devices/store";
 import { DeviceAgentOverlay } from "./DeviceAgentOverlay";
 import { DeviceActionLog } from "./DeviceActionLog";
 import type { ActionLogRow } from "./action-log.logic";
 import { gestureSummary } from "./action-log.logic";
-import { controllerPill, deviceFoldUrl, deviceKeyOf, deviceStreamUrls, inputTakesOver, takeOverToast } from "./device-panel.logic";
+import {
+  controllerPill,
+  deviceFoldUrl,
+  deviceKeyOf,
+  deviceStreamUrls,
+  hostStreamCaps,
+  inputTakesOver,
+  nextRotation,
+  rotateControl,
+  takeOverToast
+} from "./device-panel.logic";
 import { DeviceToolbar, type ToolbarLayout } from "./DeviceToolbar";
 import { requestAndroidFold, type AndroidFoldState } from "./fold";
+import { screenshotTurn, uprightCanvas } from "./screenshot";
 import { useDeviceStream, type DeviceButton, type DeviceOrientation } from "./stream";
 import { androidFoldAngle } from "./three/DeviceAndroidFoldControls";
 import { DeviceViewport, type DeviceViewportHandle, type DeviceViewUnavailable } from "./three/DeviceViewport";
@@ -129,9 +141,13 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
     () => ({ video: urls?.video ?? "", ...(urls?.input ? { input: urls.input } : {}), ...(urls?.screenshot ? { screenshot: urls.screenshot } : {}) }),
     [urls]
   );
+  // iOS: H.264 (and with it the 3D view) only where the host says its encoder works (physical Macs).
+  const h264 = hostStreamCaps(useDeviceHosts(), lease.hostId).h264;
+  const hostCaps = React.useMemo(() => ({ h264 }), [h264]);
   const stream = useDeviceStream({
     platform: lease.platform,
     urls: streamUrls,
+    hostCaps,
     enabled: props.visible && docVisible && urls !== null && !restarting,
     onFrame: () => viewport.current?.notifyFrame()
   });
@@ -291,7 +307,28 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
     else props.onNotice("The device isn't taking input yet.", "danger");
   };
   const orientation: DeviceOrientation = stream.screenConfig?.orientation ?? "portrait";
+  // The daemon's user actions (not hub input): it hands control to the user and logs them as theirs.
+  const [pending, setPending] = React.useState<"rotate" | "restart_app" | null>(null);
+  const userAction = (kind: "rotate" | "restart_app") => {
+    if (!api || pending) return;
+    if (inputTakesOver(lease) && !tookOver.current) {
+      tookOver.current = true;
+      setToast(takeOverToast(props.agentName));
+    }
+    setPending(kind);
+    runDeviceUserAction(api, lease.id, kind === "rotate" ? { kind, orientation: nextRotation(orientation) } : { kind })
+      .then(({ entry }) => {
+        if (kind === "restart_app") props.onNotice(entry.summary);
+      })
+      .catch((err) => props.onNotice(errorText(err), "danger"))
+      .finally(() => setPending(null));
+  };
   const rotate = () => {
+    // Android emulators turn through their accelerometer (the daemon), so the captured video turns too.
+    if (lease.platform === "android") {
+      userAction("rotate");
+      return;
+    }
     noteInput();
     const next = NEXT_ORIENTATION[orientation];
     if (stream.sendOrientation(next)) logLocalDeviceAction(lease.id, next.startsWith("landscape") ? "Rotated to landscape" : "Rotated to portrait");
@@ -302,7 +339,9 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
     if (!canvas || canvas.width === 0) return;
     setShooting(true);
     try {
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+      // serve-sim's frames stay portrait while iOS is in landscape: turn the capture upright.
+      const frame = uprightCanvas(canvas, screenshotTurn(lease.platform, { width: canvas.width, height: canvas.height }, orientation));
+      const blob = await new Promise<Blob | null>((resolve) => frame.toBlob(resolve, "image/png"));
       if (!blob) throw new Error("The frame could not be captured.");
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       const name = `${(props.name || "device").replace(/[^\w.-]+/g, "-")}-${stamp}.png`;
@@ -369,11 +408,7 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
       platform={lease.platform}
       input={inputControl}
       onButton={pressButton}
-      rotate={{
-        enabled: lease.platform === "ios" && stream.inputReady,
-        reason: lease.platform === "android" ? "Not available for Android from the panel yet; the agent can rotate it" : NOT_READY,
-        onRotate: rotate
-      }}
+      rotate={{ ...rotateControl(lease.platform, { inputReady: stream.inputReady, live, pending: pending === "rotate" }), onRotate: rotate }}
       screenshot={{ enabled: live && !shooting, reason: shooting ? "Taking a screenshot…" : "Waiting for video", pending: shooting, onShot: (download) => void screenshot(download) }}
       keyboard={{ enabled: stream.inputReady, reason: NOT_READY, active: focused, onToggle: toggleKeyboard }}
       view={{
@@ -396,6 +431,8 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
         : {})}
       more={{
         releasing: props.releasing,
+        restarting: pending === "restart_app",
+        onRestartApp: () => userAction("restart_app"),
         onRelease: () => props.onRelease(false),
         onPowerOff: () => props.onRelease(true),
         onCopyKey: () => {

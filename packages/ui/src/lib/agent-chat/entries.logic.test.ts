@@ -804,6 +804,23 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
       })
     );
     assert.equal(workEntryDisplayLabel(slimmed), "Took a screenshot of Pixel 9");
+    // After a reload every device row keeps the daemon's words (its `deviceRef` carries them).
+    const reloaded = (tool: string, deviceRef: Record<string, unknown>) =>
+      workEntryDisplayLabel(
+        workLogEntryFromActivity(
+          activity("tool.completed", {
+            itemType: "mcp_tool_call",
+            title: "MCP tool call",
+            data: { toolName: `mcp__orquester__${tool}`, sessionTool: { name: tool, references: { deviceRef } } }
+          })
+        )
+      );
+    const base = { device: "local/emulator-5554", leaseId: "l1", name: "Pixel 9" };
+    assert.equal(reloaded("open_device", base), "Opened Pixel 9");
+    assert.equal(reloaded("device_action", { ...base, action: "tap", summary: "Tapped @e7 “Search”" }), "Tapped “Search”");
+    assert.equal(reloaded("device_action", { ...base, action: "snapshot", summary: "Read the screen (12 elements)" }), "Read the screen of Pixel 9");
+    assert.equal(reloaded("device_install", base), "Installed a build on Pixel 9");
+    assert.equal(reloaded("close_device", base), "Closed Pixel 9");
     // An unmarked row links nowhere.
     const unmarked = workLogEntryFromActivity(
       activity("tool.completed", { itemType: "mcp_tool_call", title: "MCP tool call", data: { toolName: "mcp__orquester__device_action", result } })

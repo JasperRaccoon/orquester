@@ -9,7 +9,7 @@ import { deflateSync } from "node:zlib";
 import { DEVICE_ACTION_KINDS, type DeviceActionInput } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
-import { createDeviceActionExecutor, planAction, renderSettle, renderSnapshot, resolvePoint, shellQuote, swipePoints, type PlanContext } from "./actions.ts";
+import { createDeviceActionExecutor, homePackageOf, planAction, renderSettle, renderSnapshot, resolvePoint, shellQuote, swipePoints, type PlanContext } from "./actions.ts";
 import { parseAgentDeviceJson, type AgentDeviceClient, type AgentDeviceResult } from "./agent-device.ts";
 import { isDeviceError } from "./errors.ts";
 import { FakeDeviceHost } from "./testing.ts";
@@ -330,4 +330,39 @@ test("a stale Orquester session holding the device is closed and the call retrie
   const foreign = createDeviceActionExecutor({ agentDevice: { run: async () => inUse("someone-else") }, logger: quiet });
   const refused = await foreign.execute({ host: new FakeDeviceHost(), lease: lease() }, { action: "snapshot" }, signal).catch((error: unknown) => error);
   assert.ok(isDeviceError(refused) && refused.code === "DEVICE_BUSY");
+});
+
+test("restartApp: the app in front is relaunched; the home screen is refused (Android asks the launcher, iOS knows SpringBoard)", async () => {
+  // Android: appstate (fixture: the Pixel launcher in front) against the resolved HOME package.
+  assert.equal(homePackageOf("priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\ncom.google.android.apps.nexuslauncher/.NexusLauncherActivity\n"), "com.google.android.apps.nexuslauncher");
+  assert.equal(homePackageOf("No activity found\n"), null);
+  const host = new FakeDeviceHost();
+  host.runImpl = async () => ({ exitCode: 0, stdout: "priority=0\ncom.google.android.apps.nexuslauncher/.NexusLauncherActivity\n", stderr: "" });
+  let front = "launcher";
+  const agent = new ScriptedAgentDevice((command) => {
+    if (command === "appstate") return front === "launcher" ? result("appstate") : ok({ platform: "android", package: "com.example.app", activity: "com.example.app.Main" });
+    return ok({ message: "Opened" });
+  });
+  const executor = createDeviceActionExecutor({ agentDevice: agent, logger: quiet });
+  const refused = await executor.restartApp!({ host, lease: lease() }, signal).catch((error: unknown) => error);
+  assert.ok(isDeviceError(refused) && refused.code === "INVALID_ARGUMENT" && /home screen/.test(refused.message), String(refused));
+  assert.ok(!agent.calls.some((call) => call.command === "open"), "nothing relaunched");
+  front = "app";
+  assert.deepEqual(await executor.restartApp!({ host, lease: lease() }, signal), { appId: "com.example.app" });
+  assert.deepEqual(agent.calls.at(-1), { command: "open", args: ["com.example.app", "--relaunch"] });
+  assert.deepEqual(host.runs.at(-1)!.args, ["-s", "emulator-5554", "shell", "cmd", "package", "resolve-activity", "--brief", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"]);
+
+  // iOS: the session is bound to the foreground app first (appstate answers per session).
+  let iosFront = "com.apple.springboard";
+  const iosAgent = new ScriptedAgentDevice((command) => (command === "open" ? ok({ appBundleId: iosFront }) : ok()));
+  const iosExecutor = createDeviceActionExecutor({ agentDevice: iosAgent, logger: quiet });
+  const iosCtx = { host: new FakeDeviceHost("box:mac", "box", ["ios"]), lease: lease({ platform: "ios", deviceId: "UDID-1" }) };
+  const home = await iosExecutor.restartApp!(iosCtx, signal).catch((error: unknown) => error);
+  assert.ok(isDeviceError(home) && home.code === "INVALID_ARGUMENT", String(home));
+  iosFront = "com.example.ios";
+  assert.deepEqual(await iosExecutor.restartApp!(iosCtx, signal), { appId: "com.example.ios" });
+  assert.deepEqual(
+    iosAgent.calls.map((call) => [call.command, ...call.args].join(" ")),
+    ["open --foreground", "open --foreground", "open com.example.ios --relaunch"]
+  );
 });

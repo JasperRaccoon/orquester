@@ -78,6 +78,12 @@ export interface DeviceActionExecutor {
   install(ctx: DeviceActionContext, localPath: string, signal: AbortSignal): Promise<DeviceInstallResult>;
   /** Launch an app (the `open_device` `app` argument). */
   launch(ctx: DeviceActionContext, app: string, signal: AbortSignal): Promise<void>;
+  /**
+   * The panel's Restart app: stop the app in front and launch it again (agent-device `open
+   * --relaunch`: iOS `simctl launch --terminate-running-process`, Android force-stop + start).
+   * Resolves its bundle id / package; refuses `INVALID_ARGUMENT` when the home screen is in front.
+   */
+  restartApp?(ctx: DeviceActionContext, signal: AbortSignal): Promise<{ appId: string }>;
   /** The lease ended: end its agent-device session (Android restores its keyboard) and forget its state. Never rejects. */
   end?(ctx: DeviceActionContext): Promise<void>;
 }
@@ -420,6 +426,19 @@ function isLandscapeNative(wmSize: string): boolean {
   return last !== undefined && Number(last[1]) > Number(last[2]);
 }
 
+/** The iOS home screen's bundle id. */
+const SPRINGBOARD = "com.apple.springboard";
+
+/** The launcher package `cmd package resolve-activity --brief … HOME` names (its last `pkg/activity` line), or null. */
+export function homePackageOf(stdout: string): string | null {
+  const line = stdout
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter((entry) => /^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(entry))
+    .at(-1);
+  return line ? line.slice(0, line.indexOf("/")) : null;
+}
+
 // ---------------------------------------------------------------------------
 // The executor
 // ---------------------------------------------------------------------------
@@ -732,6 +751,35 @@ export function createDeviceActionExecutor(deps: DeviceActionExecutorDeps): Devi
       const state = stateOf(ctx.lease);
       state.sessionOpen = true;
       state.refs = {};
+    },
+
+    async restartApp(ctx, signal) {
+      const { lease } = ctx;
+      if (lease.deviceId === null) throw new DeviceError("UNAVAILABLE", "The device is still starting.");
+      const state = stateOf(lease);
+      let app: string | null;
+      let home: string | null;
+      if (platformOf(lease) === "ios") {
+        // `appstate` answers per session: binding the session to the app in front first makes it the foreground's.
+        const opened = await raw(ctx, "open", ["--foreground"], signal, { timeoutMs: OPEN_TIMEOUT_MS });
+        state.sessionOpen = true;
+        state.refs = {};
+        app = appIdOf(opened) ?? appIdOf(await raw(ctx, "appstate", [], signal, { timeoutMs: 30_000 }));
+        home = SPRINGBOARD;
+      } else {
+        app = appIdOf(await call(ctx, "appstate", [], signal, { timeoutMs: 30_000 }));
+        const resolved = await ctx.host
+          .run("adb", ["-s", lease.deviceId, "shell", "cmd", "package", "resolve-activity", "--brief", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"], { signal, timeoutMs: 30_000 })
+          .catch(() => null);
+        home = resolved && resolved.exitCode === 0 ? homePackageOf(resolved.stdout) : null;
+      }
+      if (app === null || app === home || (home === null && /launcher/i.test(app))) {
+        throw new DeviceError("INVALID_ARGUMENT", "No app is open: the home screen is in front.");
+      }
+      await call(ctx, "open", [app, "--relaunch"], signal, { timeoutMs: OPEN_TIMEOUT_MS });
+      state.sessionOpen = true;
+      state.refs = {};
+      return { appId: app };
     },
 
     async end(ctx) {

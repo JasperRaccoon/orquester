@@ -18,6 +18,7 @@ import {
   deviceRoutes,
   deviceToolReferenceOfActivityData,
   parseDeviceControllerRequest,
+  parseDeviceUserActionRequest,
   parseDeviceKey,
   parseDeviceOpenRequest,
   parseDeviceSetupRequest,
@@ -68,6 +69,7 @@ test("routes encode their parameters", () => {
   assert.equal(deviceRoutes.hostDrain("box:x1"), "/api/devices/hosts/box%3Ax1/drain");
   assert.equal(deviceRoutes.pool, "/api/devices/pool");
   assert.equal(deviceRoutes.cacheWarm, "/api/devices/pool/caches/warm");
+  assert.equal(deviceRoutes.userAction("l/1"), "/api/devices/leases/l%2F1/user-action");
 });
 
 test("drain and cache-warm requests", () => {
@@ -77,6 +79,18 @@ test("drain and cache-warm requests", () => {
   assert.deepEqual(parseDeviceCacheWarmRequest({ platform: "android" }), { ok: true, value: { platform: "android" } });
   assert.equal(parseDeviceCacheWarmRequest({ platform: "windows" }).ok, false);
   assert.equal(parseDeviceCacheWarmRequest({}).ok, false);
+});
+
+test("user action requests: each kind with its own field, nothing else", () => {
+  assert.deepEqual(parseDeviceUserActionRequest({ kind: "rotate", orientation: "landscape" }), { ok: true, value: { kind: "rotate", orientation: "landscape" } });
+  assert.deepEqual(parseDeviceUserActionRequest({ kind: "appearance", appearance: "dark", extra: 1 }), { ok: true, value: { kind: "appearance", appearance: "dark" } });
+  assert.deepEqual(parseDeviceUserActionRequest({ kind: "restart_app" }), { ok: true, value: { kind: "restart_app" } });
+  assert.deepEqual(parseDeviceUserActionRequest({ kind: "power_off" }), { ok: true, value: { kind: "power_off" } });
+  assert.equal(parseDeviceUserActionRequest({ kind: "rotate" }).ok, false);
+  assert.equal(parseDeviceUserActionRequest({ kind: "rotate", orientation: "sideways" }).ok, false);
+  assert.equal(parseDeviceUserActionRequest({ kind: "appearance", appearance: "sepia" }).ok, false);
+  assert.equal(parseDeviceUserActionRequest({ kind: "tap" }).ok, false);
+  assert.equal(parseDeviceUserActionRequest(null).ok, false);
 });
 
 test("open request: platform-matched profile, deviceId needs hostId, junk refused", () => {
