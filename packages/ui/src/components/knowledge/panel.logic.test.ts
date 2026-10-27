@@ -31,20 +31,21 @@ function detail(overrides: Partial<KnowledgeEntryDetail> = {}): KnowledgeEntryDe
 }
 
 describe("the similar section", () => {
-  it("orders by similarity (none last), then shared concepts, then newest, then id; meaning first in each", () => {
+  it("keeps the daemon's ranking (its hybrid of meaning, shared concepts and more), meaning first in each item's reasons", () => {
     const concepts = (shared: number) => ({ kind: "concepts" as const, concepts: [], shared });
+    // Ranked by the daemon: a strongly shared entry with no similarity may rank above closer ones.
     const items = [
-      similar("ke_bbbbbbbbbbb1", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-01T00:00:00Z" }),
-      similar("ke_bbbbbbbbbbb2", { similarity: 0.8, reasons: [{ kind: "author", value: "x" }, { kind: "meaning", similarity: 0.8 }] }),
-      similar("ke_bbbbbbbbbbb3", { similarity: 0.95, reasons: [{ kind: "meaning", similarity: 0.95 }] }),
       similar("ke_bbbbbbbbbbb4", { similarity: null, reasons: [concepts(3)] }),
-      similar("ke_bbbbbbbbbbb5", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-05T00:00:00Z" }),
-      similar("ke_bbbbbbbbbbb6", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-05T00:00:00Z" })
+      similar("ke_bbbbbbbbbbb2", { similarity: 0.8, reasons: [{ kind: "author", value: "x" }, { kind: "meaning", similarity: 0.8 }] }),
+      similar("ke_bbbbbbbbbbb1", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-01T00:00:00Z" }),
+      similar("ke_bbbbbbbbbbb3", { similarity: 0.95, reasons: [{ kind: "meaning", similarity: 0.95 }] }),
+      similar("ke_bbbbbbbbbbb6", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-05T00:00:00Z" }),
+      similar("ke_bbbbbbbbbbb5", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-05T00:00:00Z" })
     ];
     const { items: ordered } = similarSection(detail({ similar: items }));
     assert.deepEqual(
       ordered.map((i) => i.entry.id.slice(-1)),
-      ["3", "2", "4", "5", "6", "1"]
+      ["4", "2", "1", "3", "6", "5"]
     );
     assert.deepEqual(ordered[1]!.reasons.map((r) => r.kind), ["meaning", "author"]);
   });
