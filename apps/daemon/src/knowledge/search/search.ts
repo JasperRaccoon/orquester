@@ -60,6 +60,8 @@ export const KNOWLEDGE_ENTRIES_MAX_LIMIT = 200;
 export const KNOWLEDGE_QUERY_MAX = 1_000;
 const RELATED_LIMIT = 8;
 const CONCEPT_ENTRIES_LIMIT = 50;
+/** Ids of a concept detail's visible entries (`KnowledgeConceptDetail.entryIds`), newest first. */
+const CONCEPT_ENTRY_IDS_LIMIT = 2_000;
 /** Candidates each signal list keeps. */
 const CANDIDATES = 100;
 const RRF_K = 60;
@@ -320,7 +322,7 @@ export class KnowledgeSearch {
       ]);
       const seeds = [...conceptHits.slice(0, 5)];
       for (const [entryId] of [...preliminary].slice(0, 3)) {
-        for (const concept of this.graph.conceptsOfEntry(entryId)) if (!seeds.includes(concept.id)) seeds.push(concept.id);
+        for (const conceptId of this.graph.conceptIdsOfEntry(entryId)) if (!seeds.includes(conceptId)) seeds.push(conceptId);
       }
       const expansionScores = new Map<string, number>();
       seeds.forEach((conceptId, rank) => {
@@ -365,7 +367,7 @@ export class KnowledgeSearch {
           .slice(0, 3)
           .map((e) => e.id);
         // With filters, a concept whose visible entries all fail them is not a hit.
-        if (entryIds.length > 0 && this.graph.conceptRef(id)) conceptItems.push({ id, fused, entryIds });
+        if (entryIds.length > 0 && this.graph.conceptRef(id, scope)) conceptItems.push({ id, fused, entryIds });
       }
     }
 
@@ -389,7 +391,7 @@ export class KnowledgeSearch {
       const concept = conceptItems[c];
       if (concept && (!entry || concept.fused > entry.fused)) {
         c += 1;
-        const ref = this.graph.conceptRef(concept.id)!;
+        const ref = this.graph.conceptRef(concept.id, scope)!;
         hits.push({
           kind: "concept",
           score: normalized(concept.fused),
@@ -535,7 +537,7 @@ export class KnowledgeSearch {
       terms,
       passage: meaningHit ? { start: meaningHit.span.start, end: meaningHit.span.end, chunk: meaningHit.chunk, chunks: meaningHit.chunks } : null,
       concepts: (signals.expansionSeeds.get(id) ?? [])
-        .map((conceptId) => this.graph.conceptRef(conceptId))
+        .map((conceptId) => this.graph.conceptRef(conceptId, scope))
         .filter((ref): ref is NonNullable<typeof ref> => ref !== null)
         .map(({ id: conceptId, name, type }): KnowledgeConceptRef => ({ id: conceptId, name, type }))
     };
@@ -623,7 +625,7 @@ export class KnowledgeSearch {
     const novelty = this.similarity.novelty(id, scope);
     return {
       entry: { ...entry, savedFrom: { ...entry.savedFrom }, collections: visibleCollections(entry, scope) },
-      concepts: this.graph.conceptsOfEntry(id),
+      concepts: this.graph.conceptsOfEntry(id, scope),
       related,
       similar,
       possibleDuplicates,
@@ -647,19 +649,19 @@ export class KnowledgeSearch {
     const scope = this.scope(visibility);
     const view = this.graph.concept(id, scope);
     if (!view) return null;
-    const entries = view.entryIds
+    // Every visible entry behind it (a merged concept's: those of its visible sources), newest first.
+    const newest = view.entryIds
       .map((entryId) => this.store.getMeta(entryId))
       .filter((m): m is KnowledgeEntryMeta => m !== null)
-      .sort(newestFirst)
-      .slice(0, CONCEPT_ENTRIES_LIMIT)
-      .map((m) => this.summary(m, scope));
+      .sort(newestFirst);
     return {
       concept: view.concept,
       collections: view.collections,
-      entries,
+      entries: newest.slice(0, CONCEPT_ENTRIES_LIMIT).map((m) => this.summary(m, scope)),
       neighbors: view.neighbors,
       mergedFrom: view.mergedFrom,
-      similarConcepts: view.similarConcepts
+      similarConcepts: view.similarConcepts,
+      entryIds: newest.slice(0, CONCEPT_ENTRY_IDS_LIMIT).map((m) => m.id)
     };
   }
 

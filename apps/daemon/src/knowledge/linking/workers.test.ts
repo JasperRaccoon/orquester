@@ -170,6 +170,52 @@ describe("WorkerPool", () => {
     assert.ok(h.port.calls.indexOf(`usage:${chat.id}`) < h.port.calls.indexOf(`stop:${chat.id}`));
   });
 
+  it("stop() interrupts a working chat's turn and lets it end before reading its usage: the last turn's tokens count", async () => {
+    const h = await harness({ mode: "manual", concurrency: 1 });
+    await h.addTasks(1);
+    await flushAsync();
+    const chat = h.port.sessions[0]!;
+    chat.answered.push("earlier-task");
+    chat.runningTurn = { in: 500, out: 50 }; // reported only once the turn ends
+    await h.pool.stop();
+    assert.deepEqual(
+      h.events.filter((e) => e.kind === "tokens").map((e) => e.kind === "tokens" && [e.sessionId, e.in, e.out]),
+      [[chat.id, 1500, 150]]
+    );
+    assert.deepEqual(
+      h.port.calls.filter((call) => call.endsWith(`:${chat.id}`)),
+      [`interrupt:${chat.id}`, `usage:${chat.id}`, `stop:${chat.id}`],
+      "interrupt (and its turn ended), then usage, then close"
+    );
+  });
+
+  it("a chat that failed mid-turn is interrupted before its usage is read; one that finished is not interrupted", async () => {
+    const h = await harness({ mode: "manual", concurrency: 1 });
+    await h.addTasks(2);
+    await flushAsync();
+    const failing = h.port.sessions[0]!;
+    failing.runningTurn = { in: 300, out: 30 };
+    failing.end({ kind: "failed", message: "crashed" });
+    await h.untilEvent((e) => e.kind === "worker" && e.record.sessionId === failing.id && e.record.state === "failed");
+    assert.deepEqual(
+      h.events.filter((e) => e.kind === "tokens" && e.sessionId === failing.id).map((e) => e.kind === "tokens" && e.in),
+      [300]
+    );
+    assert.deepEqual(
+      h.port.calls.filter((call) => call.endsWith(`:${failing.id}`)),
+      [`interrupt:${failing.id}`, `usage:${failing.id}`, `stop:${failing.id}`]
+    );
+    await flushAsync();
+    const done = h.port.sessions[1]!;
+    done.end({ kind: "done" });
+    await h.untilEvent((e) => e.kind === "worker" && e.record.sessionId === done.id && e.record.state === "done");
+    assert.deepEqual(
+      h.port.calls.filter((call) => call.endsWith(`:${done.id}`)),
+      [`usage:${done.id}`, `stop:${done.id}`]
+    );
+    await h.pool.stop();
+  });
+
   it("a usage limit cools the account down and fails over to another account", async () => {
     const h = await harness({
       concurrency: 1,

@@ -67,7 +67,7 @@ const SINGLE_SOURCE_MIN_CLUSTER = 3;
 
 export interface KnowledgeInsightsOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
-  graph: ContradictionGraph & Pick<KnowledgeGraph, "revision">;
+  graph: ContradictionGraph & Pick<KnowledgeGraph, "revision" | "conceptsOfEntry">;
   similarity: Pick<KnowledgeSimilarity, "graph">;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
@@ -131,7 +131,7 @@ export class KnowledgeInsights {
           findLinkGaps({
             ids: visible.map((meta) => meta.id),
             index: vectors.index,
-            conceptsOf: (id) => this.options.graph.conceptsOfEntry(id).map((concept) => concept.id),
+            conceptsOf: (id) => this.options.graph.conceptIdsOfEntry(id),
             minimum: vectors.thresholds.strong,
             limit: Number.POSITIVE_INFINITY
           })
@@ -171,7 +171,7 @@ export class KnowledgeInsights {
     const conceptsOf = new Map<string, readonly KnowledgeConceptRef[]>();
     const entriesOf = new Map<string, string[]>();
     for (const meta of visible) {
-      const concepts = graph.conceptsOfEntry(meta.id);
+      const concepts = graph.conceptsOfEntry(meta.id, scope);
       conceptsOf.set(meta.id, concepts);
       for (const concept of concepts) {
         let list = entriesOf.get(concept.id);

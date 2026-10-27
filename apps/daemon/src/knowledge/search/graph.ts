@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
@@ -21,18 +22,26 @@ export interface GraphConcept extends KnowledgeConcept {
   /** Entry ids from the node's `source_files` (only files named `<entryId>.md`). */
   entryIds: readonly string[];
   /**
-   * Set on a concept other concepts were merged into (phase 2 spec, "Concept merges"): its own
-   * aliases, and each folded concept with the entries it came from (so a caller only sees the ones
-   * a visible entry backs). `aliases` and `entryIds` above are the unions.
+   * Set on a concept other concepts were merged into (phase 2 spec, "Concept merges"): every concept
+   * of the merge as myKG wrote it, the kept one first, each with the entries it came from. A scoped
+   * caller is shown only what the sources a visible entry backs say (their names, descriptions,
+   * attributes, aliases, confidence; `View.present`): the fields above are the unions, read by
+   * unscoped callers only.
    */
-  merge?: { id: string; ownAliases: readonly string[]; members: readonly GraphMergedConcept[] };
+  merge?: { id: string; sources: readonly GraphConceptSource[] };
 }
 
-/** A concept folded into another by a merge. */
-export interface GraphMergedConcept {
-  ref: KnowledgeConceptRef;
-  aliases: readonly string[];
+/** One concept of a merge as myKG wrote it: what it brought, and the entries behind it. */
+export interface GraphConceptSource extends KnowledgeConcept {
   entryIds: readonly string[];
+}
+
+/** One of myKG's edges a merged-graph edge stands for (a merge folds repeated edges into one). */
+export interface GraphEdgeSource {
+  id: string;
+  confidence: number;
+  entryIds: readonly string[] | null;
+  context?: string;
 }
 
 /** An edge as held in memory. */
@@ -45,6 +54,12 @@ export interface GraphEdge extends KnowledgeEdge {
   entryIds: readonly string[] | null;
   /** myKG's `context` attribute of a `contradicts` edge (what the two disagree on); absent otherwise. */
   context?: string;
+  /**
+   * Set when a merge folded repeated edges into this one: each with its own provenance, so a scoped
+   * caller gets the id, confidence and context of the ones it can see only (the fields above are
+   * the first one's id and the unions).
+   */
+  sources?: readonly GraphEdgeSource[];
 }
 
 /**
@@ -81,7 +96,10 @@ interface Snapshot {
   edges: readonly GraphEdge[];
   adjacency: ReadonlyMap<string, readonly GraphEdge[]>;
   entryConcepts: ReadonlyMap<string, readonly string[]>;
+  /** Unmerged concepts by id; a merged concept per source ({@link sourceKey}). */
   bm25: Bm25Index;
+  /** BM25 keys beyond one per concept (a search asks for that many more, then folds sources). */
+  extraSearchKeys: number;
   /** Folded concept id → the concept it was merged into. */
   mergedInto: ReadonlyMap<string, string>;
   merges: readonly EffectiveConceptMerge[];
@@ -94,6 +112,7 @@ const EMPTY: Snapshot = {
   adjacency: new Map(),
   entryConcepts: new Map(),
   bm25: new Bm25Index(),
+  extraSearchKeys: 0,
   mergedInto: new Map(),
   merges: []
 };
@@ -194,8 +213,9 @@ function parseEdge(raw: unknown): GraphEdge | null {
   return parsed;
 }
 
-async function readJsonl(path: string, logger: KnowledgeLogger, what: string): Promise<unknown[]> {
+async function readJsonl(path: string, logger: KnowledgeLogger, what: string, digest?: ReturnType<typeof createHash>): Promise<unknown[]> {
   const text = await readFile(path, "utf8");
+  digest?.update(`${text.length}\u0000`).update(text);
   const out: unknown[] = [];
   let bad = 0;
   for (const line of text.split("\n")) {
@@ -266,6 +286,31 @@ function unionAliases(name: string, lists: readonly (readonly string[])[]): stri
 }
 
 /**
+ * What a merged concept says, from these of its sources (the visible ones, in merge order: the kept
+ * concept first): the first one's id and name, the highest confidence, the first description, the
+ * attributes (an earlier source's win), and every other name and alias as aliases.
+ */
+function combineSources(sources: readonly GraphConceptSource[]): KnowledgeConcept {
+  const first = sources[0]!;
+  const attributes: KnowledgeConcept["attributes"] = {};
+  for (const source of [...sources].reverse()) Object.assign(attributes, source.attributes);
+  return {
+    id: first.id,
+    name: first.name,
+    type: first.type,
+    confidence: Math.max(...sources.map((s) => s.confidence)),
+    description: sources.find((s) => s.description !== null)?.description ?? null,
+    aliases: unionAliases(first.name, [first.aliases, ...sources.slice(1).flatMap((s) => [[s.name], s.aliases])]),
+    attributes
+  };
+}
+
+/** An edge source as it stands alone. */
+function edgeSourceOf(edge: GraphEdge): GraphEdgeSource {
+  return { id: edge.id, confidence: edge.confidence, entryIds: edge.entryIds, ...(edge.context !== undefined ? { context: edge.context } : {}) };
+}
+
+/**
  * The merge overlay over myKG's graph (phase 2 spec, "Concept merges"): each merge whose kept
  * concept exists folds in its other concepts that exist (same type, not claimed by an earlier
  * merge). The kept concept gets the union of their entries, their names and aliases as aliases,
@@ -294,22 +339,12 @@ function applyConceptMerges(
       claimed.add(member.id);
       mergedInto.set(member.id, keep.id);
     }
-    const attributes: GraphConcept["attributes"] = {};
-    for (const source of [...members].reverse()) Object.assign(attributes, source.attributes);
-    Object.assign(attributes, keep.attributes);
-    replaced.set(keep.id, {
-      ...keep,
-      confidence: Math.max(keep.confidence, ...members.map((m) => m.confidence)),
-      description: keep.description ?? members.find((m) => m.description !== null)?.description ?? null,
-      aliases: unionAliases(keep.name, [keep.aliases, ...members.flatMap((m) => [[m.name], m.aliases])]),
-      attributes,
-      entryIds: unionIds([keep.entryIds, ...members.map((m) => m.entryIds)]),
-      merge: {
-        id: merge.id,
-        ownAliases: keep.aliases,
-        members: members.map((m) => ({ ref: toRef(m), aliases: m.aliases, entryIds: m.entryIds }))
-      }
-    });
+    const sources: GraphConceptSource[] = [keep, ...members].map(({ merge: _merge, ...source }) => ({
+      ...source,
+      aliases: [...source.aliases],
+      attributes: { ...source.attributes }
+    }));
+    replaced.set(keep.id, { ...combineSources(sources), entryIds: unionIds(sources.map((s) => s.entryIds)), merge: { id: merge.id, sources } });
     effective.push({
       id: merge.id,
       type: merge.type,
@@ -334,7 +369,9 @@ function applyConceptMerges(
     const key = `${edge.type}\u0000${from}\u0000${to}`;
     const same = byKey.get(key);
     if (same) {
-      // One edge for the pair: the first's id, every source (none at all wins: visible iff both ends are).
+      // One edge for the pair: the first's id, every source (none at all wins: visible iff both ends
+      // are). Each source keeps its own provenance: a scoped caller sees only the visible ones'.
+      same.sources = [...(same.sources ?? [edgeSourceOf(same)]), edgeSourceOf(edge)];
       same.entryIds = same.entryIds === null || edge.entryIds === null ? null : unionIds([same.entryIds, edge.entryIds]);
       same.confidence = Math.max(same.confidence, edge.confidence);
       if (same.context === undefined && edge.context !== undefined) same.context = edge.context;
@@ -360,20 +397,36 @@ function buildGraphSnapshot(base: BaseGraph, merges: readonly ConceptMergeOverla
   }
   const entryConcepts = new Map<string, string[]>();
   const bm25 = new Bm25Index();
+  let sourceKeys = 0;
   for (const concept of concepts.values()) {
     for (const entryId of concept.entryIds) {
       let list = entryConcepts.get(entryId);
       if (!list) entryConcepts.set(entryId, (list = []));
       list.push(concept.id);
     }
-    bm25.add(concept.id, [
-      { tokens: tokenize(concept.name), weight: 3 },
-      { tokens: tokenize(concept.aliases.join(" ")), weight: 2 },
-      { tokens: tokenize(Object.values(concept.attributes).map((a) => a.value).join(" ")), weight: 1 },
-      { tokens: tokenize(concept.description ?? ""), weight: 1 }
-    ]);
+    if (concept.merge) {
+      // Each source on its own: a scoped search matches only what a source it can see says.
+      concept.merge.sources.forEach((source, index) => bm25.add(sourceKey(concept.id, index), conceptFields(source)));
+      sourceKeys += concept.merge.sources.length - 1;
+    } else {
+      bm25.add(concept.id, conceptFields(concept));
+    }
   }
-  return { concepts, edges: edgeList, adjacency, entryConcepts, bm25, mergedInto, merges: effective };
+  return { concepts, edges: edgeList, adjacency, entryConcepts, bm25, extraSearchKeys: sourceKeys, mergedInto, merges: effective };
+}
+
+function conceptFields(concept: KnowledgeConcept): { tokens: string[]; weight: number }[] {
+  return [
+    { tokens: tokenize(concept.name), weight: 3 },
+    { tokens: tokenize(concept.aliases.join(" ")), weight: 2 },
+    { tokens: tokenize(Object.values(concept.attributes).map((a) => a.value).join(" ")), weight: 1 },
+    { tokens: tokenize(concept.description ?? ""), weight: 1 }
+  ];
+}
+
+/** The BM25 key of one source of a merged concept (an unmerged concept's key is its id). */
+function sourceKey(conceptId: string, index: number): string {
+  return `${conceptId}\u0000${index}`;
 }
 
 /**
@@ -386,6 +439,8 @@ class View {
   private readonly concepts = new Map<string, boolean>();
   private readonly degrees = new Map<string, number>();
   private readonly conceptEntries = new Map<string, string[]>();
+  private readonly sources = new Map<string, readonly GraphConceptSource[]>();
+  private readonly presented = new Map<string, KnowledgeConcept>();
 
   constructor(
     readonly snapshot: Snapshot,
@@ -416,6 +471,95 @@ class View {
   edge(edge: GraphEdge): boolean {
     if (!this.concept(edge.from) || !this.concept(edge.to)) return false;
     return edge.entryIds === null || edge.entryIds.some((entryId) => this.entry(entryId));
+  }
+
+  /** Whether a source (of a merged concept or edge) is backed by a visible entry (no provenance: yes). */
+  private backed(entryIds: readonly string[] | null): boolean {
+    return entryIds === null || entryIds.some((entryId) => this.entry(entryId));
+  }
+
+  /**
+   * The sources of a visible merged concept that a visible entry backs, in merge order (the kept
+   * concept first when it is one of them); null for an unmerged concept.
+   */
+  visibleSources(conceptId: string): readonly GraphConceptSource[] | null {
+    const concept = this.snapshot.concepts.get(conceptId);
+    if (!concept?.merge) return null;
+    let sources = this.sources.get(conceptId);
+    if (!sources) {
+      sources = concept.merge.sources.filter((source) => this.backed(source.entryIds));
+      this.sources.set(conceptId, sources);
+    }
+    return sources;
+  }
+
+  /**
+   * A visible concept as this scope sees it: a merged one says only what its visible sources say,
+   * under the first one's id and name (the kept concept's while one of its own entries is visible,
+   * else a visible folded concept's: a hidden concept is never named). Null when not visible.
+   */
+  present(conceptId: string): KnowledgeConcept | null {
+    if (!this.concept(conceptId)) return null;
+    let shown = this.presented.get(conceptId);
+    if (!shown) {
+      const concept = this.snapshot.concepts.get(conceptId)!;
+      const sources = this.visibleSources(conceptId);
+      if (sources && sources.length > 0) shown = combineSources(sources);
+      else {
+        const { entryIds: _entries, merge: _merge, ...wire } = concept;
+        shown = wire;
+      }
+      this.presented.set(conceptId, shown);
+    }
+    return shown;
+  }
+
+  /** The id a visible concept goes by in this scope (see {@link present}). */
+  shownId(conceptId: string): string {
+    return this.present(conceptId)?.id ?? conceptId;
+  }
+
+  ref(conceptId: string): KnowledgeConceptRef {
+    const shown = this.present(conceptId)!;
+    return { id: shown.id, name: shown.name, type: shown.type };
+  }
+
+  /**
+   * The concept a requested id names in this scope: a folded concept's id answers the concept it
+   * was merged into, but only while it is one of that concept's visible sources (a hidden source's
+   * id names nothing). Null when nothing visible goes by it.
+   */
+  resolve(requested: string): string | null {
+    const id = this.snapshot.mergedInto.get(requested) ?? requested;
+    if (!this.concept(id)) return null;
+    const sources = this.visibleSources(id);
+    if (sources && !sources.some((source) => source.id === requested)) return null;
+    return id;
+  }
+
+  /**
+   * An edge as this scope sees it: its ends by the ids they go by here; for a folded edge, the id,
+   * confidence and `contradicts` context of its sources a visible entry backs. `from`/`to` stay the
+   * graph's own ids when `internalEnds` (callers that walk the graph further).
+   */
+  presentEdge(edge: GraphEdge, internalEnds = false): GraphEdge {
+    const sources = edge.sources?.filter((source) => this.backed(source.entryIds)) ?? [];
+    const from = internalEnds ? edge.from : this.shownId(edge.from);
+    const to = internalEnds ? edge.to : this.shownId(edge.to);
+    if (sources.length === 0) {
+      const { sources: _sources, ...plain } = edge;
+      return { ...plain, from, to };
+    }
+    const context = sources.find((source) => source.context !== undefined)?.context;
+    return {
+      id: sources[0]!.id,
+      type: edge.type,
+      from,
+      to,
+      confidence: Math.max(...sources.map((source) => source.confidence)),
+      entryIds: edge.entryIds,
+      ...(context !== undefined ? { context } : {})
+    };
   }
 
   visibleEdges(conceptId: string): GraphEdge[] {
@@ -450,7 +594,7 @@ class View {
   }
 
   node(conceptId: string): KnowledgeGraphNode {
-    const concept = this.snapshot.concepts.get(conceptId)!;
+    const concept = this.present(conceptId)!;
     return {
       id: concept.id,
       name: concept.name,
@@ -461,10 +605,12 @@ class View {
       degree: this.degree(conceptId)
     };
   }
-}
 
-function toEdge(edge: GraphEdge): KnowledgeEdge {
-  return { id: edge.id, type: edge.type, from: edge.from, to: edge.to, confidence: edge.confidence };
+  /** A visible edge on the wire: as this scope sees it ({@link presentEdge}). */
+  wireEdge(edge: GraphEdge): KnowledgeEdge {
+    const shown = this.presentEdge(edge);
+    return { id: shown.id, type: shown.type, from: shown.from, to: shown.to, confidence: shown.confidence };
+  }
 }
 
 function toRef(concept: GraphConcept): KnowledgeConceptRef {
@@ -509,6 +655,9 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   private appliedLoad = 0;
   /** Moves with every snapshot swapped in (a load, or the overlay re-applied). */
   private applied = 0;
+  /** What myKG's files held at the last load applied (a digest), and a revision that moves only when they, or the merges in effect, change. */
+  private baseDigest: string | null = null;
+  private content = 0;
   private readonly getMeta: (id: string) => KnowledgeEntryMeta | null;
   private readonly logger: KnowledgeLogger;
 
@@ -523,8 +672,11 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     const dir = (await exists(join(outputDir, "nodes.jsonl"))) ? outputDir : join(outputDir, "output");
     const nodesPath = join(dir, "nodes.jsonl");
     const edgesPath = join(dir, "edges.jsonl");
-    const nodes = await readJsonl(nodesPath, this.logger, "nodes.jsonl");
-    const edges = (await exists(edgesPath)) ? await readJsonl(edgesPath, this.logger, "edges.jsonl") : [];
+    const digest = createHash("sha256");
+    const nodes = await readJsonl(nodesPath, this.logger, "nodes.jsonl", digest);
+    digest.update("\u0001");
+    const edges = (await exists(edgesPath)) ? await readJsonl(edgesPath, this.logger, "edges.jsonl", digest) : [];
+    const contentDigest = digest.digest("hex");
     const { base, skipped } = parseGraph(nodes, edges);
     if (skipped > 0) this.logger.warn(`knowledge: skipped ${skipped} graph record(s) (unreadable, repeated, or an edge to an unknown concept)`);
     if (seq < this.appliedLoad) {
@@ -533,6 +685,10 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     }
     this.base = base;
     this.appliedLoad = seq;
+    if (contentDigest !== this.baseDigest) {
+      this.baseDigest = contentDigest;
+      this.content += 1;
+    }
     this.swap(buildGraphSnapshot(base, this.merges));
     for (const listener of this.loadListeners) {
       try {
@@ -555,7 +711,9 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
    */
   setConceptMerges(merges: readonly ConceptMergeOverlay[]): void {
     this.merges = [...merges];
+    const before = JSON.stringify(this.snapshot.merges);
     this.swap(buildGraphSnapshot(this.base, this.merges));
+    if (JSON.stringify(this.snapshot.merges) !== before) this.content += 1;
   }
 
   /** The merges in effect on the current graph. */
@@ -571,6 +729,14 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   /** Moves with every load swapped in (not with the overlay). */
   loadRevision(): number {
     return this.appliedLoad;
+  }
+
+  /**
+   * Moves only when what the graph says may have changed: a load of files that differ from the
+   * last ones loaded, or a change of the merges in effect (a reload of the same files does not).
+   */
+  contentRevision(): number {
+    return this.content;
   }
 
   /** Called after every load swapped in a graph. */
@@ -630,8 +796,8 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
         frontier = [...(view.snapshot.entryConcepts.get(options.focus) ?? [])].filter((id) => view.concept(id));
         hops = 1; // the entry's own concepts are the first hop
       } else {
-        const focus = view.snapshot.mergedInto.get(options.focus) ?? options.focus;
-        if (!view.concept(focus)) return null;
+        const focus = view.resolve(options.focus);
+        if (focus === null) return null;
         frontier = [focus];
         hops = 0;
       }
@@ -673,7 +839,7 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     const keptSet = new Set(kept);
     return {
       nodes: kept.map((id) => view.node(id)),
-      edges: (truncated ? allEdges.filter((e) => keptSet.has(e.from) && keptSet.has(e.to)) : allEdges).map(toEdge),
+      edges: (truncated ? allEdges.filter((e) => keptSet.has(e.from) && keptSet.has(e.to)) : allEdges).map((edge) => view.wireEdge(edge)),
       truncated,
       totals: { nodes: selected.length, edges: allEdges.length }
     };
@@ -682,63 +848,89 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   /**
    * A visible concept with its visible collections, entries and neighbours, the concepts merged
    * into it and similar ones; null when hidden or unknown. The id of a concept merged into another
-   * answers that one (links to it keep working).
+   * answers that one (links to it keep working) while that folded concept is visible. A merged
+   * concept says only what its visible sources say (`View.present`).
    */
   concept(requested: string, scope: KnowledgeScope): KnowledgeConceptView | null {
     const view = this.view(scope);
-    const id = view.snapshot.mergedInto.get(requested) ?? requested;
-    const concept = view.snapshot.concepts.get(id);
-    if (!concept || !view.concept(id)) return null;
-    const { entryIds: _entries, merge, ...wire } = concept;
-    // A folded concept shows (as "merged from" and as aliases) only when a visible entry backs it.
-    const members = (merge?.members ?? []).filter((member) => member.entryIds.some((entryId) => view.entry(entryId)));
-    const aliases = merge ? unionAliases(concept.name, [merge.ownAliases, ...members.flatMap((m) => [[m.ref.name], m.aliases])]) : [...wire.aliases];
+    const id = view.resolve(requested);
+    if (id === null) return null;
+    const shown = view.present(id)!;
+    // A folded concept shows (as "merged from", and its names as aliases) only when a visible entry backs it.
+    const mergedFrom = (view.visibleSources(id) ?? []).filter((source) => source.id !== shown.id).map((source) => ({ id: source.id, name: source.name, type: source.type }));
     const similarConcepts: KnowledgeConceptView["similarConcepts"] = [];
     for (const hit of this.similarProvider?.(id) ?? []) {
       if (similarConcepts.length >= SIMILAR_CONCEPTS_LIMIT) break;
-      const other = view.snapshot.concepts.get(hit.id);
-      if (!other || other.id === id || !view.concept(other.id) || similarConcepts.some((s) => s.concept.id === other.id)) continue;
-      similarConcepts.push({ concept: toRef(other), similarity: hit.similarity });
+      const other = view.snapshot.mergedInto.get(hit.id) ?? hit.id;
+      if (other === id || !view.concept(other)) continue;
+      const ref = view.ref(other);
+      if (similarConcepts.some((s) => s.concept.id === ref.id)) continue;
+      similarConcepts.push({ concept: ref, similarity: hit.similarity });
     }
     return {
-      concept: { ...wire, aliases, attributes: { ...wire.attributes } },
+      concept: { ...shown, aliases: [...shown.aliases], attributes: { ...shown.attributes } },
       collections: view.collectionsOf(id),
       entryIds: view.entriesOf(id),
       neighbors: view.visibleEdges(id).map((edge) => ({
-        edge: toEdge(edge),
-        concept: toRef(view.snapshot.concepts.get(edge.from === id ? edge.to : edge.from)!)
+        edge: view.wireEdge(edge),
+        concept: view.ref(edge.from === id ? edge.to : edge.from)
       })),
-      mergedFrom: members.map((member) => ({ ...member.ref })),
+      mergedFrom,
       similarConcepts
     };
   }
 
   /**
-   * The merges in effect whose kept concept the scope can see, each with only its folded concepts
-   * a visible entry backs (a merge with none of those is left out).
+   * The merges in effect whose concept the scope can see, as it sees them: `into` is the merged
+   * concept under the name it goes by here (`View.present`), `merged` its other visible sources (a
+   * merge with none of those is left out). Hidden concepts are never named.
    */
   visibleConceptMerges(scope: KnowledgeScope): EffectiveConceptMerge[] {
     const view = this.view(scope);
     const out: EffectiveConceptMerge[] = [];
     for (const merge of view.snapshot.merges) {
-      const concept = view.snapshot.concepts.get(merge.into.id);
-      if (!concept?.merge || !view.concept(concept.id)) continue;
-      const visible = new Set(concept.merge.members.filter((m) => m.entryIds.some((entryId) => view.entry(entryId))).map((m) => m.ref.id));
-      const merged = merge.merged.filter((ref) => visible.has(ref.id));
-      if (merged.length > 0) out.push({ ...merge, into: { ...merge.into }, merged: merged.map((ref) => ({ ...ref })) });
+      const id = merge.into.id;
+      if (!view.concept(id)) continue;
+      const into = view.ref(id);
+      const merged = (view.visibleSources(id) ?? []).filter((source) => source.id !== into.id).map((source) => ({ id: source.id, name: source.name, type: source.type }));
+      if (merged.length > 0) out.push({ ...merge, into, merged });
     }
     return out;
   }
 
-  conceptRef(id: string): (KnowledgeConceptRef & { description: string | null }) | null {
-    const concept = this.snapshot.concepts.get(id);
-    return concept ? { ...toRef(concept), description: concept.description } : null;
+  /** A visible concept's ref (and description) as the scope sees it; a folded concept's id answers its merge. Null when not visible. */
+  conceptRef(id: string, scope: KnowledgeScope): (KnowledgeConceptRef & { description: string | null }) | null {
+    const view = this.view(scope);
+    const canonical = view.snapshot.mergedInto.get(id) ?? id;
+    const shown = view.present(canonical);
+    return shown ? { id: shown.id, name: shown.name, type: shown.type, description: shown.description } : null;
   }
 
-  /** The concepts linked to an entry (all visible whenever the entry is: each has it as a source). */
-  conceptsOfEntry(entryId: string): KnowledgeConceptRef[] {
+  /** A concept's type (unscoped: the same for every source of a merge); null when unknown. */
+  conceptType(id: string): string | null {
+    return this.snapshot.concepts.get(this.snapshot.mergedInto.get(id) ?? id)?.type ?? null;
+  }
+
+  /**
+   * The concepts linked to an entry as the scope sees them (all visible whenever the entry is: each
+   * has it as a source; a merged one under the name it goes by there).
+   */
+  conceptsOfEntry(entryId: string, scope: KnowledgeScope): KnowledgeConceptRef[] {
     const snapshot = this.snapshot;
-    return (snapshot.entryConcepts.get(entryId) ?? []).map((id) => toRef(snapshot.concepts.get(id)!));
+    let view: View | null = null;
+    const out: KnowledgeConceptRef[] = [];
+    for (const id of snapshot.entryConcepts.get(entryId) ?? []) {
+      const concept = snapshot.concepts.get(id)!;
+      // Unmerged: what myKG wrote (read per entry in loops, so no scoped view unless a merge needs one).
+      if (!concept.merge) out.push(toRef(concept));
+      else if ((view ??= new View(snapshot, this.getMeta, scope)).concept(id)) out.push(view.ref(id));
+    }
+    return out;
+  }
+
+  /** The graph's own ids of the concepts linked to an entry (for walking the graph; never shown as such). */
+  conceptIdsOfEntry(entryId: string): readonly string[] {
+    return this.snapshot.entryConcepts.get(entryId) ?? [];
   }
 
   /** How many concepts the entry links to (what `linkCount` shows for a visible entry). */
@@ -763,29 +955,53 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
       .map(({ id, shared }) => ({ id, shared }));
   }
 
-  /** BM25 over visible concepts' names, aliases, attribute values and descriptions. */
+  /**
+   * BM25 over visible concepts' names, aliases, attribute values and descriptions; a merged concept
+   * matches on what its visible sources say only. Answers the graph's own ids.
+   */
   searchConcepts(terms: readonly string[], scope: KnowledgeScope, limit: number): { id: string; score: number }[] {
     const view = this.view(scope);
-    return view.snapshot.bm25.search(terms, (id) => view.concept(id), limit).map((hit) => ({ id: hit.key, score: hit.score }));
+    const accept = (key: string): boolean => {
+      const at = key.indexOf("\u0000");
+      if (at < 0) return view.concept(key);
+      const id = key.slice(0, at);
+      const source = view.snapshot.concepts.get(id)?.merge?.sources[Number(key.slice(at + 1))];
+      return source !== undefined && view.concept(id) && (view.visibleSources(id) ?? []).includes(source);
+    };
+    const best = new Map<string, number>();
+    for (const hit of view.snapshot.bm25.search(terms, accept, limit + view.snapshot.extraSearchKeys)) {
+      const at = hit.key.indexOf("\u0000");
+      const id = at < 0 ? hit.key : hit.key.slice(0, at);
+      if (!best.has(id)) best.set(id, hit.score);
+    }
+    return [...best].map(([id, score]) => ({ id, score })).slice(0, limit);
   }
 
-  /** Visible entries behind a concept (the one-hop expansion). */
+  /** Visible entries behind a concept (the one-hop expansion); a folded concept's id answers its merge. */
   visibleEntriesOf(conceptId: string, scope: KnowledgeScope): string[] {
-    return this.view(scope).entriesOf(conceptId);
+    const view = this.view(scope);
+    return view.entriesOf(view.snapshot.mergedInto.get(conceptId) ?? conceptId);
   }
 
   /**
    * Visible edges of one relation type, compared without case (`contradicts` for the phase 2
-   * spec's "Contradictions"), as held in memory with whatever attributes the snapshot keeps;
-   * `around`: only those touching one of these concepts.
+   * spec's "Contradictions"), with whatever attributes the snapshot keeps; `around`: only those
+   * touching one of these concepts. Each as the scope sees it (`View.presentEdge`: a folded edge's
+   * id, confidence and context are its visible sources'), with the graph's own ids as `from`/`to`.
    */
   visibleEdgesOfType(type: string, scope: KnowledgeScope, around?: Iterable<string>): GraphEdge[] {
     const view = this.view(scope);
     const wanted = type.toLowerCase();
     const matches = (edge: GraphEdge): boolean => edge.type.toLowerCase() === wanted && view.edge(edge);
-    if (!around) return view.snapshot.edges.filter(matches);
-    const out = new Set<GraphEdge>();
-    for (const conceptId of around) for (const edge of view.snapshot.adjacency.get(conceptId) ?? []) if (matches(edge)) out.add(edge);
-    return [...out];
+    let edges: GraphEdge[];
+    if (!around) edges = view.snapshot.edges.filter(matches);
+    else {
+      const out = new Set<GraphEdge>();
+      for (const conceptId of around) {
+        for (const edge of view.snapshot.adjacency.get(view.snapshot.mergedInto.get(conceptId) ?? conceptId) ?? []) if (matches(edge)) out.add(edge);
+      }
+      edges = [...out];
+    }
+    return edges.map((edge) => view.presentEdge(edge, true));
   }
 }

@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import Fastify from "fastify";
-import { KNOWLEDGE_CHANGED_EVENT, KNOWLEDGE_CHANNEL, knowledgeRoutes, type KnowledgeConceptMergesResponse, type KnowledgeStatus } from "@orquester/api";
+import { KNOWLEDGE_CHANGED_EVENT, KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, knowledgeRoutes, type KnowledgeConceptMergesResponse, type KnowledgeStatus } from "@orquester/api";
 import { knowledgeConceptMergesPath, knowledgeGraphPluginDir } from "@orquester/config";
 
 import { FAKE_RUNTIME } from "./linking/testing.ts";
@@ -21,7 +21,7 @@ import { KnowledgeService, type KnowledgeLinking, type KnowledgeLinkingFactory }
 import { FakeKnowledgePlugins, FakeRuntime, fakeEmbedders } from "./test-fakes.ts";
 
 /** Linking whose start saves two entries and loads a graph over them, as a run's graph load would. */
-function graphLinking(): KnowledgeLinkingFactory {
+function graphLinking(built?: (linking: KnowledgeLinking) => void): KnowledgeLinkingFactory {
   return ({ store, graph }) => {
     const linking: KnowledgeLinking = {
       events: new EventEmitter<{ status: [] }>(),
@@ -48,11 +48,12 @@ function graphLinking(): KnowledgeLinkingFactory {
       workerNext: async () => ({ kind: "done", reason: "run-finished" }),
       workerSubmit: async () => ({ accepted: false, error: "x" })
     };
+    built?.(linking);
     return linking;
   };
 }
 
-async function harness(t: TestContext) {
+async function harness(t: TestContext, built?: (linking: KnowledgeLinking) => void) {
   const appdir = await mkdtemp(join(tmpdir(), "kg-service-concepts-"));
   await mkdir(knowledgeGraphPluginDir(appdir), { recursive: true });
   await writeFile(
@@ -75,7 +76,7 @@ async function harness(t: TestContext) {
     publisher: { publish: (channel: string, type: string, payload: unknown) => void events.push({ channel, type, payload }) },
     runtime,
     embedders: fakeEmbedders().factory,
-    linking: graphLinking(),
+    linking: graphLinking(built),
     logger: silentLogger()
   });
   const app = Fastify();
@@ -115,4 +116,24 @@ test("undoing a merge through the routes announces the graph change once and the
   assert.equal(graphChanges(h.events) - before, 1);
   assert.equal(h.knowledge.status().conceptMerges, 0);
   assert.equal(h.knowledge.status().concepts, 2);
+});
+
+test("an undo publishes the status (the merges count) and exactly one graph change; linking's next status adds none", async (t) => {
+  let linking!: KnowledgeLinking;
+  const h = await harness(t, (built) => (linking = built));
+  const before = graphChanges(h.events);
+  const statusesBefore = h.events.filter((e) => e.type === KNOWLEDGE_STATUS_EVENT).length;
+  assert.equal((await h.app.inject({ method: "DELETE", url: knowledgeRoutes.conceptMerge("cm_warmup") })).statusCode, 204);
+  await h.knowledge.settled();
+  // The status goes out on a microtask after the route's change.
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  const statuses = h.events.filter((e) => e.type === KNOWLEDGE_STATUS_EVENT).slice(statusesBefore);
+  assert.ok(statuses.length > 0, "a status after the undo");
+  assert.equal((statuses.at(-1)!.payload as KnowledgeStatus).conceptMerges, 0, "it counts the merge gone");
+  assert.equal(graphChanges(h.events) - before, 1);
+  // A linking status change later (a run's progress): the graph the undo announced is not announced again.
+  linking.events.emit("status");
+  linking.events.emit("status");
+  await h.knowledge.settled();
+  assert.equal(graphChanges(h.events) - before, 1);
 });

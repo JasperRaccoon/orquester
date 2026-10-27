@@ -12,7 +12,7 @@ import { KNOWLEDGE_DEFAULT_SETTINGS } from "@orquester/api";
 import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgeStatePath, parseKnowledgeLinkingState } from "@orquester/config";
 import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
 import type { KnowledgeEntryChange, KnowledgeGraphPort, KnowledgeRuntime, KnowledgeRuntimePort, KnowledgeSettingsPort, KnowledgeStorePort } from "../ports.ts";
-import { FAKE_THRESHOLDS, FakeVectorIndex, around } from "../search/fake-vector-index.ts";
+import { FAKE_THRESHOLDS, FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import { CONTEXT_HEADING, LINK_CONTEXT_VERSION, type KnowledgeLinkGraphView } from "./context.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
 import type { MykgProcessProbe, SpawnMykg } from "./runner.ts";
@@ -880,6 +880,49 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
   });
 });
 
+describe("KnowledgeLinkingService — pair-check chats a crashed daemon left", () => {
+  it("are interrupted, their tokens counted, closed and marked done at start; a run's own chats are left to its resume", async () => {
+    const h = await harness();
+    const worker = (sessionId: string, runId: string, state: "running" | "done") => ({ sessionId, accountId: "a1", runId, state, tasks: 1, startedAt: "2026-10-23T09:00:00.000Z", finishedAt: null });
+    await mkdir(dirname(knowledgeStatePath(h.appdir)), { recursive: true });
+    await writeFile(
+      knowledgeStatePath(h.appdir),
+      JSON.stringify({
+        version: 1,
+        workers: [worker("pair-1", "kp_aaaaaaaaaaaa", "running"), worker("pair-2", "kp_aaaaaaaaaaaa", "running"), worker("pair-old", "kp_000000000000", "done"), worker("run-1", "kr_bbbbbbbbbbbb", "running")],
+        tokens: { total: { in: 10, out: 1 }, byDay: {} }
+      })
+    );
+    h.port.foreignUsage.set("pair-1", { in: 700, out: 70 });
+    h.port.foreignUsage.set("pair-2", { in: 300, out: 30 });
+    await h.service.start();
+    await h.service.pairChecksIdle();
+    for (const id of ["pair-1", "pair-2"]) {
+      assert.deepEqual(
+        h.port.calls.filter((call) => call.endsWith(`:${id}`)),
+        [`interrupt:${id}`, `usage:${id}`, `stop:${id}`],
+        id
+      );
+    }
+    assert.ok(!h.port.calls.some((call) => call.endsWith(":run-1") || call.endsWith(":pair-old")));
+    const snapshot = h.service.snapshot();
+    assert.deepEqual(snapshot.tokens.total, { in: 1010, out: 101 });
+    assert.deepEqual(
+      snapshot.workers.map((w) => [w.sessionId, w.state]),
+      [
+        ["pair-1", "done"],
+        ["pair-2", "done"],
+        ["pair-old", "done"],
+        ["run-1", "running"]
+      ]
+    );
+    await h.service.stop();
+    const state = await readState(h);
+    assert.deepEqual(state.tokens.total, { in: 1010, out: 101 });
+    assert.ok(state.workers.filter((w) => w.sessionId.startsWith("pair-") && w.sessionId !== "pair-old").every((w) => w.state === "done" && w.finishedAt !== null));
+  });
+});
+
 describe("KnowledgeLinkingService — a state.json a newer Orquester wrote", () => {
   const SESSION = "2026-10-20T08-00-00";
   async function newerState(h: Harness, extra: Record<string, unknown>): Promise<string> {
@@ -1069,6 +1112,169 @@ describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context
     assert.ok(ids.every((id) => first.store.linkContexts.get(id) === LINK_CONTEXT_VERSION));
     assert.equal(second.service.snapshot().relink, null);
     await second.service.stop();
+  });
+
+  it("records the context version only for entries whose task was shown context; never re-links an entry without a vector", async () => {
+    const graph = fakeGraphView();
+    const h = await harness({ extra: { graphView: graph.view } });
+    await h.service.start();
+    const ids = [ID(1), ID(2), ID(3), ID(4)];
+    for (const id of ids) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    // 1 and 2 are close and have concepts; 3 has a vector but no neighbour close enough; 4 has none yet.
+    graph.ready([ID(1), ID(2)]);
+    graph.index.set(ID(3), axis(16, 15));
+    h.settings.set(true);
+    assert.deepEqual(h.service.snapshot().relink, { pending: 3, done: 0, total: 3 }, "no vector: not taken");
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(lastRun(h)!.entries, 3);
+    assert.equal(withContext(h), 2);
+    assert.deepEqual(
+      ids.map((id) => h.store.linkContexts.get(id) ?? null),
+      [LINK_CONTEXT_VERSION, LINK_CONTEXT_VERSION, null, null],
+      "3 was re-linked without a context block: no version"
+    );
+    const state = await readState(h);
+    assert.deepEqual(Object.keys(state.relink.attempts).sort(), [ID(1), ID(2), ID(3)]);
+    assert.equal(state.currentRun, null);
+    assert.equal(h.service.snapshot().relink, null, "3 is not taken again at this version and content");
+    await h.clock.advance(60_000);
+    await h.service.idle();
+    assert.equal(h.service.snapshot().recentRuns.length, 2, "no run re-links 3 again");
+    // Once 4 has a vector it is re-linked.
+    graph.ready([ID(1), ID(2), ID(4)]);
+    h.settings.set(true);
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 3));
+    assert.equal(lastRun(h)!.entries, 1);
+    assert.equal(h.store.linkContexts.get(ID(4)), LINK_CONTEXT_VERSION);
+    await h.service.stop();
+  });
+
+  it("a context version that cannot be saved never re-links the entry again and again", async () => {
+    const graph = fakeGraphView();
+    const appdir = await tempAppdir();
+    const store = new FailingContextStore(knowledgeMykgInputDir(appdir));
+    const h = await harness({ appdir, store, extra: { graphView: graph.view } });
+    await h.service.start();
+    const ids = [ID(1), ID(2)];
+    for (const id of ids) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    graph.ready(ids);
+    h.settings.set(true);
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(lastRun(h)!.entries, 2);
+    assert.equal(store.linkContexts.size, 0, "the version could not be saved");
+    assert.equal(h.service.snapshot().relink, null);
+    for (let i = 0; i < 3; i += 1) await h.clock.advance(60_000);
+    await h.service.idle();
+    assert.equal(h.service.snapshot().recentRuns.length, 2, "no second re-link of the same entries");
+    await h.service.stop();
+  });
+
+  it("a re-link that fails to extract an entry is retried twice, then given up on and reported", async () => {
+    const graph = fakeGraphView();
+    const h = await harness({ extra: { graphView: graph.view } });
+    await h.service.start();
+    const ids = [ID(1), ID(2)];
+    for (const id of ids) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    graph.ready(ids);
+    await writeFile(join(h.mykgDir, "fake-mykg.json"), JSON.stringify({ failFiles: [`${ID(1)}.md`] }));
+    h.settings.set(true);
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(h.store.linkStates.get(ID(1)), "failed", "its re-link failed: out of the graph");
+    assert.equal(h.store.linkContexts.get(ID(2)), LINK_CONTEXT_VERSION);
+    assert.deepEqual(h.service.snapshot().relink, { pending: 1, done: 2, total: 3 }, "due a retry");
+    // Two retries, each failing again.
+    for (const runs of [3, 4]) {
+      await h.clock.advance(20_000);
+      await h.until(ranOk(h, runs));
+      assert.equal(lastRun(h)!.entries, 1);
+      assert.equal(h.store.linkStates.get(ID(1)), "failed");
+    }
+    assert.equal(h.service.snapshot().relink, null, "given up on");
+    assert.match(h.service.snapshot().lastError?.message ?? "", new RegExp(`failed 3 times.*${ID(1)}`));
+    assert.equal((await readState(h)).relink.attempts[ID(1)]?.failures, 3);
+    for (let i = 0; i < 3; i += 1) await h.clock.advance(60_000);
+    await h.service.idle();
+    assert.equal(h.service.snapshot().recentRuns.length, 4, "no fourth try");
+    await h.service.stop();
+  });
+
+  it("a re-link that failed once is retried and, linked this time, is back in the graph", async () => {
+    const graph = fakeGraphView();
+    const h = await harness({ extra: { graphView: graph.view } });
+    await h.service.start();
+    h.service.entriesChanged(await h.store.put(ID(1), "body of 1"));
+    h.service.entriesChanged(await h.store.put(ID(2), "body of 2"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    graph.ready([ID(1), ID(2)]);
+    await writeFile(join(h.mykgDir, "fake-mykg.json"), JSON.stringify({ failFiles: [`${ID(1)}.md`] }));
+    h.settings.set(true);
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(h.store.linkStates.get(ID(1)), "failed");
+    await rm(join(h.mykgDir, "fake-mykg.json"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 3));
+    assert.equal(h.store.linkStates.get(ID(1)), "linked");
+    assert.equal(h.store.linkContexts.get(ID(1)), LINK_CONTEXT_VERSION);
+    assert.equal((await readState(h)).relink.attempts[ID(1)]?.failures, 0);
+    assert.equal(h.service.snapshot().relink, null);
+    await h.service.stop();
+  });
+});
+
+/** A store whose linking-context writes fail (a disk error, a file that does not read back). */
+class FailingContextStore extends FakeStore {
+  override async setLinkContext(): Promise<void> {
+    throw new Error("disk full");
+  }
+}
+
+async function tempAppdir(): Promise<string> {
+  const appdir = await mkdtemp(join(tmpdir(), "orq-linking-"));
+  roots.push(appdir);
+  return appdir;
+}
+
+describe("KnowledgeLinkingService — phase 2: link-gap scans", { timeout: 120_000 }, () => {
+  it("a graph load that changed nothing the scan reads (the vectors, the graph's content) is not scanned again", async () => {
+    const graph = fakeGraphView();
+    let revision = 1;
+    const view: KnowledgeLinkGraphView = { ...graph.view, graphRevision: () => revision };
+    const h = await harness({ extra: { graphView: view } });
+    const ids = [ID(1), ID(2), ID(3)];
+    graph.ready(ids);
+    graph.concepts.set(ID(3), [{ id: "tool-x", type: "Tool", name: "X" }]);
+    await h.service.start();
+    for (const id of ids) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    const pairs = async () => Object.keys((await readState(h)).relink.gapPairs).sort();
+    assert.deepEqual(await pairs(), [`${ID(1)} ${ID(3)}`, `${ID(2)} ${ID(3)}`]);
+    // What a scan would read now differs, but neither the vectors nor the graph's revision moved
+    // (so the scan is known to find what it found): the gap run's load scans nothing.
+    graph.concepts.set(ID(1), [{ id: "tool-y", type: "Tool", name: "Y" }]);
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(lastRun(h)!.entries, 3, "the gap run");
+    assert.deepEqual(await pairs(), [`${ID(1)} ${ID(3)}`, `${ID(2)} ${ID(3)}`], "not scanned again");
+    // The graph's content moves: the next load scans.
+    revision += 1;
+    h.service.entriesChanged(await h.store.put(ID(4), "body of 4"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 3));
+    assert.deepEqual(await pairs(), [`${ID(1)} ${ID(2)}`, `${ID(1)} ${ID(3)}`, `${ID(2)} ${ID(3)}`]);
+    await h.service.stop();
   });
 });
 

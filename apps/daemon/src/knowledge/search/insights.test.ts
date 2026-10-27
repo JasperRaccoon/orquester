@@ -247,3 +247,28 @@ test("without vectors or concepts: contradictions and checks still count, the re
   s.index.model = "fake/model";
   assert.deepEqual((await s.insights.list({}, s.seoOnly)).totals, { contradictions: 0, bridges: 0, singleSource: 0, gaps: 0 });
 });
+
+test("concept merges into a hidden concept never name it: insights, clusters, similar entries and novelty", async () => {
+  const s = await setup();
+  // Both kept concepts come from the hidden entry only; the visible ones are folded into them.
+  s.graph.setConceptMerges([
+    { id: "cm_solo", type: "tactic", into: "tactic-secret", merged: ["tactic-solo1"], similarity: 0.95, createdAt: "2026-10-27T10:00:00.000Z" },
+    { id: "cm_weekly", type: "tactic", into: "tactic-cs", merged: ["tactic-c2"], similarity: 0.95, createdAt: "2026-10-27T10:00:00.000Z" }
+  ]);
+  const leaks = /Secret claim|Hidden disagreement|tactic-secret|tactic-cs/;
+  const seo = await s.insights.list({}, s.seoOnly);
+  assert.doesNotMatch(JSON.stringify(seo), leaks);
+  // x2 (no provenance) is visible now that both its ends are; it shows the visible concept's name.
+  assert.deepEqual(seo.contradictions.find((c) => c.a.id === ke("q2"))?.pairs, [
+    { from: { id: "tactic-c1", name: "Daily posting", type: "tactic" }, to: { id: "tactic-c2", name: "Weekly posting", type: "tactic" } },
+    { from: { id: "tactic-c2", name: "Weekly posting", type: "tactic" }, to: { id: "tactic-c1", name: "Daily posting", type: "tactic" } }
+  ]);
+  assert.ok(JSON.stringify(seo.singleSource).includes("Solo tactic"));
+  assert.doesNotMatch(JSON.stringify(await s.similarity.graph({ limit: 2_000 }, s.seoOnly)), leaks);
+  assert.doesNotMatch(JSON.stringify(s.similarity.forEntry(ke("p1"), s.seoOnly)), leaks);
+  const novelty = s.similarity.novelty(ke("p1"), s.seoOnly);
+  assert.doesNotMatch(JSON.stringify(novelty), leaks);
+  assert.ok(novelty?.newConcepts.some((c) => c.id === "tactic-solo1" && c.name === "Solo tactic"));
+  // Everything visible: the kept concepts as they are.
+  assert.match(JSON.stringify(await s.insights.list({}, s.all)), /Hidden disagreement/);
+});

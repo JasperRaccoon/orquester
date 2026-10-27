@@ -46,11 +46,14 @@
  * Phase 2 (docs/superpowers/specs/2026-10-27-knowledge-phase2-cross-graph-design.md, section L),
  * all through `graphView` (search and the concept graph, injected; absent: none of it):
  * - Neighbour context: a run's broker shows Pass 2 tasks with the concepts of the entry's nearest
- *   neighbours (`context.ts`); entries a run links while context can be built record
- *   `LINK_CONTEXT_VERSION` (`KnowledgeStorePort.setLinkContext`).
- * - Automatic re-linking (`relink.ts`): with no save waiting, a run takes up to 25 entries linked
- *   with an older context version or queued by a link gap; their manifest keys and cached answers
- *   go first, so myKG extracts them again and the worker sees the context. Status `relink`.
+ *   neighbours (`context.ts`); the entries whose task was shown a block (`contextEntryIds`, persisted
+ *   with the run) record `LINK_CONTEXT_VERSION` when the run links them
+ *   (`KnowledgeStorePort.setLinkContext`).
+ * - Automatic re-linking (`relink.ts`): with no save waiting, a run takes up to 25 entries with a
+ *   vector linked with an older context version, queued by a link gap, or whose re-link failed (a
+ *   bounded retry); their manifest keys and cached answers go first, so myKG extracts them again and
+ *   the worker sees the context. Each re-link is recorded per version and content hash
+ *   (`relink.attempts`), so an entry is never re-linked twice for the same reason. Status `relink`.
  * - Link gaps: after each graph load linking does, `findLinkGaps` queues both entries of each new
  *   pair once per pair of content hashes ({@link KnowledgeLinkingService.gapQueued}).
  * - Pair checks (`pair-checks.ts`, {@link KnowledgeLinkingService.pairChecks}): after a graph load,
@@ -124,7 +127,17 @@ import {
   writePairCheckTask,
   type PairKey
 } from "./pair-checks.ts";
-import { pickRelinkBatch, prepareRelinkBatch, queueLinkGaps, relinkBacklog, relinkStatus, resetRelinkWave, settleRelink } from "./relink.ts";
+import {
+  pickRelinkBatch,
+  prepareRelinkBatch,
+  queueLinkGaps,
+  recordRelinkAttempts,
+  RELINK_RETRIES_MAX,
+  relinkBacklog,
+  relinkStatus,
+  resetRelinkWave,
+  settleRelink
+} from "./relink.ts";
 import { MykgRun, procMykgProbe, stopStaleMykg, type MykgProcessProbe, type MykgRunResult, type SpawnMykg } from "./runner.ts";
 import { LinkingStateFile } from "./state.ts";
 import { WorkerPool, type WorkerCandidate, type WorkerPoolEvent, type WorkerSessionPort } from "./workers.ts";
@@ -182,8 +195,6 @@ interface ActiveRun {
   /** Set when the run is stopped from here: what to record instead of the child's own result. */
   stopReason: { kind: "error"; message: string } | { kind: "cancel" } | { kind: "detach" } | null;
   finished: Promise<void>;
-  /** Neighbour context could be built when the run started: its linked entries record `LINK_CONTEXT_VERSION`. */
-  withContext: boolean;
 }
 
 /** A round of pair checks between linking runs (see the module header). */
@@ -244,8 +255,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private readonly pairInboxDir: string;
   private pairRound: PairRound | null = null;
   private pairStarting = false;
+  /** Pair-check chats a previous daemon left behind (it stopped without ending its round) being closed. */
+  private orphansClosing: Promise<void> = Promise.resolve();
   /** A graph load since the last pair-check round. */
   private pairRoundDue = false;
+  /** What the last link-gap scan read (the vectors' generation and model, the graph's content): an unchanged one is not scanned again. */
+  private lastGapScan: string | null = null;
 
   constructor(options: KnowledgeLinkingOptions) {
     this.opts = options;
@@ -279,6 +294,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         }
       : null;
     for (const change of this.early.splice(0)) this.entriesChanged(change);
+    // A pair-check round is never resumed: chats a crashed daemon left are closed, their tokens counted.
+    if (!this.newerNotice) {
+      this.orphansClosing = this.closeOrphanPairWorkers().catch((error: unknown) =>
+        this.opts.logger?.warn("knowledge linking: pair-check chats a previous daemon left could not be closed", { error: String(error) })
+      );
+    }
     this.offs.push(this.opts.settings.onChange(() => this.onEnvironmentChanged()));
     this.offs.push(this.opts.runtime.onChange(() => this.onEnvironmentChanged()));
     if (this.opts.graphView) {
@@ -332,6 +353,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       this.endPairRound(round, { interrupt: true });
       await round.ended;
     }
+    await this.orphansClosing;
     await this.stateFile.flush();
     await this.pairChecks.flush();
   }
@@ -492,8 +514,9 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     return new Set(this.state?.relink.gapQueue ?? []);
   }
 
-  /** Resolves once no pair-check round runs (tests, shutdown). */
+  /** Resolves once no pair-check round runs and a previous daemon's are closed (tests, shutdown). */
   async pairChecksIdle(): Promise<void> {
+    await this.orphansClosing;
     while (this.pairRound || this.pairStarting) {
       if (this.pairRound) await this.pairRound.ended;
       else await new Promise<void>((resolve) => setImmediate(resolve));
@@ -719,7 +742,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     const broker = new InboxBroker({
       clock: this.opts.clock,
       ...(this.opts.logger ? { logger: this.opts.logger } : {}),
-      ...(view ? { contextFor: linkContextProvider(this.opts.store, view) } : {})
+      ...(view ? { contextFor: linkContextProvider(this.opts.store, view, (entryId) => this.contextShown(record, entryId)) } : {})
     });
     let active!: ActiveRun;
     const pool = new WorkerPool<WorkerCandidate>({
@@ -746,8 +769,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       progress: null,
       poolPause: null,
       stopReason: null,
-      finished: new Promise<void>((resolve) => (resolveFinished = resolve)),
-      withContext: contextReady(view)
+      finished: new Promise<void>((resolve) => (resolveFinished = resolve))
     };
     this.active = active;
     this.timer?.cancel();
@@ -925,10 +947,29 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         await commitMykgManifest(paths).catch(() => undefined);
         if (linked.length > 0) await this.opts.store.setLinkState(linked, "linked");
         if (notLinked.length > 0) await this.opts.store.setLinkState(notLinked, "failed");
-        if (linked.length > 0 && active.withContext) {
-          await this.opts.store.setLinkContext(linked, LINK_CONTEXT_VERSION).catch((contextError: unknown) => {
+        // Only the entries whose task was shown neighbour context were linked with it.
+        const withContext = new Set(record.contextEntryIds ?? []);
+        const contextLinked = linked.filter((id) => withContext.has(id));
+        if (contextLinked.length > 0) {
+          await this.opts.store.setLinkContext(contextLinked, LINK_CONTEXT_VERSION).catch((contextError: unknown) => {
             this.opts.logger?.warn("knowledge linking: the linking-context version could not be recorded", { error: String(contextError) });
           });
+        }
+        // Each re-link is recorded at its version and content hash (never repeated for the same
+        // reason); one whose extraction failed is retried a bounded number of times.
+        const batch = new Set(record.relinkEntryIds ?? []);
+        const failedSet = new Set(notLinked);
+        const givenUp = recordRelinkAttempts(
+          state.relink,
+          inGraph.filter((id) => batch.has(id)).map((id) => ({ id, contentHash: record.entryHashes[id] ?? this.opts.store.getMeta(id)!.contentHash, failed: failedSet.has(id) }))
+        );
+        if (givenUp.length > 0) {
+          const names = givenUp.map((id) => `"${this.opts.store.getMeta(id)?.title ?? id}"`).join(", ");
+          state.lastError = {
+            message: `Re-linking with neighbour context failed ${RELINK_RETRIES_MAX + 1} times for ${givenUp.length === 1 ? "an entry" : `${givenUp.length} entries`} (${names}): ${givenUp.length === 1 ? "it is" : "they are"} left out of the graph until edited or rebuilt.`,
+            at: this.opts.clock.now().toISOString()
+          };
+          this.opts.logger?.warn("knowledge linking: re-linking gave up on entries", { entries: givenUp });
         }
         settleRelink(state.relink, inGraph, record.relinkEntryIds ?? [], (id) => this.opts.store.getMeta(id) !== null);
         const previous = state.session;
@@ -997,7 +1038,16 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     const state = this.state;
     const view = this.opts.graphView;
     if (!state || !view) return [];
-    return relinkBacklog(state.relink, this.opts.store, new Set(state.pendingEntryIds), contextReady(view));
+    const index = view.vectors();
+    return relinkBacklog(state.relink, this.opts.store, new Set(state.pendingEntryIds), contextReady(view), (id) => index.entryVector(id) !== null);
+  }
+
+  /** A task of the run was shown neighbour context for this entry (`linkContextProvider`): persisted with the run. */
+  private contextShown(record: KnowledgeCurrentRunRecord, entryId: string): void {
+    const ids = record.contextEntryIds ?? [];
+    if (ids.includes(entryId)) return;
+    record.contextEntryIds = [...ids, entryId];
+    this.persist();
   }
 
   /**
@@ -1007,9 +1057,18 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private async prepareRelink(paths: ReturnType<typeof mykgSessionPaths>, batch: readonly string[], runId: string): Promise<void> {
     const state = this.requireState();
     const prepared = new Set(state.relink.prepared);
-    const fresh = batch.filter((id) => !prepared.has(id));
-    const mirrors = await new EntryDocumentLocator(this.opts.store).mirrorsOf(fresh);
-    const cleared = await prepareRelinkBatch(paths, batch, mirrors);
+    const fresh = new Set(batch.filter((id) => !prepared.has(id)));
+    let owns: ((document: string) => boolean) | null = null;
+    if (fresh.size > 0) {
+      // Every mirror: a task's document belongs to the one entry it is exactly (`context.ts`).
+      const locator = new EntryDocumentLocator(this.opts.store);
+      await locator.load();
+      owns = (document) => {
+        const id = locator.locate(document);
+        return id !== null && fresh.has(id);
+      };
+    }
+    const cleared = await prepareRelinkBatch(paths, batch, owns);
     state.relink.prepared = [...new Set([...state.relink.prepared, ...batch])];
     await this.stateFile.save(state);
     this.opts.logger?.info?.("knowledge linking: re-linking entries with neighbour context", { runId, entries: batch.length, answersCleared: cleared.length });
@@ -1034,6 +1093,11 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     const index = view.vectors();
     const thresholds = index.thresholds();
     if (!thresholds) return;
+    // Nothing the scan reads moved since the last one (the vectors and the graph's content): it
+    // would find the same pairs, all recorded already. A new scan runs after either moves.
+    const graphRevision = view.graphRevision?.() ?? null;
+    const key = graphRevision === null ? null : JSON.stringify([index.modelId(), index.generation(), thresholds.strong, graphRevision]);
+    if (key !== null && key === this.lastGapScan) return;
     const store = this.opts.store;
     const ids = store.listMeta().filter((meta) => meta.linkState === "linked").map((meta) => meta.id);
     const added = await queueLinkGaps(state.relink, {
@@ -1044,6 +1108,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       minimum: thresholds.strong
     });
     if (added.length > 0) this.opts.logger?.info?.("knowledge linking: link gaps queued for re-linking", { entries: added.length });
+    this.lastGapScan = key;
     this.persist();
   }
 
@@ -1067,6 +1132,32 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       state.pause === null &&
       this.relinkBacklog().length === 0
     );
+  }
+
+  /**
+   * The chats of a pair-check round a previous daemon process left running (it crashed: a clean
+   * stop ends the round): each is interrupted, its usage counted, and closed; their records are
+   * marked done. In the background, so a start never waits on a chat.
+   */
+  private async closeOrphanPairWorkers(): Promise<void> {
+    const state = this.requireState();
+    const orphans = state.workers.filter((worker) => worker.runId.startsWith("kp_") && worker.state === "running");
+    if (orphans.length === 0) return;
+    const port = this.opts.workers;
+    await Promise.all(
+      orphans.map(async (worker) => {
+        await port.interrupt(worker.sessionId).catch(() => undefined);
+        const tokens = await port.usage(worker.sessionId).catch(() => ({ in: 0, out: 0 }));
+        await port.stop(worker.sessionId, { interrupt: false }).catch(() => undefined);
+        if (tokens.in > 0 || tokens.out > 0) addTokens(state, this.opts.clock.now(), tokens.in, tokens.out);
+      })
+    );
+    const closed = new Set(orphans.map((worker) => worker.sessionId));
+    const at = this.opts.clock.now().toISOString();
+    state.workers = state.workers.map((worker) => (closed.has(worker.sessionId) && worker.state === "running" ? { ...worker, state: "done", finishedAt: at } : worker));
+    this.opts.logger?.info?.("knowledge linking: closed pair-check chats a previous daemon left", { chats: orphans.length });
+    this.persist();
+    this.emitStatus();
   }
 
   /** Starts a round of pair checks when one is due and linking is idle (see the module header). */

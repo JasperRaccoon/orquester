@@ -9,16 +9,20 @@ import { FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import { COMMITTED_MANIFEST_FILE, MYKG_MANIFEST_FILE, mykgSessionPaths } from "./mykg-files.ts";
 import {
   LINK_CONTEXT_VERSION,
+  LINK_GAPS_MAX,
   pickRelinkBatch,
   prepareRelinkBatch,
   queueLinkGaps,
+  recordRelinkAttempts,
   RELINK_BATCH_MAX,
+  RELINK_RETRIES_MAX,
   relinkBacklog,
   relinkStatus,
   resetRelinkWave,
   settleRelink,
   type RelinkStore
 } from "./relink.ts";
+import { EntryDocumentLocator } from "./context.ts";
 import { mykgTaskId } from "./testing.ts";
 
 const roots: string[] = [];
@@ -78,6 +82,34 @@ describe("the re-link backlog", () => {
     assert.deepEqual(relinkBacklog(relink, s, new Set(), false), [ID(8)], "without context only the batch in flux stays");
   });
 
+  it("never takes an entry without a vector, nor one already re-linked at this version and content; retries a failed re-link twice", () => {
+    const s = store([{ id: ID(1) }, { id: ID(2) }, { id: ID(3) }, { id: ID(4), linkState: "failed" }, { id: ID(5), linkState: "failed" }]);
+    const relink = emptyKnowledgeRelinkState();
+    const hasVector = (id: string) => id !== ID(3);
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(1), ID(2)], "3 has no vector; failed entries were never re-linked");
+    // 1 linked (its version not saved), 4 failed to extract, 5 failed long ago, not on a re-link.
+    assert.deepEqual(
+      recordRelinkAttempts(relink, [
+        { id: ID(1), contentHash: `hash-${ID(1)}`, failed: false },
+        { id: ID(4), contentHash: `hash-${ID(4)}`, failed: true }
+      ]),
+      []
+    );
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(4), ID(2)], "the failed re-link first; 1 is not taken again");
+    assert.deepEqual(recordRelinkAttempts(relink, [{ id: ID(4), contentHash: `hash-${ID(4)}`, failed: true }]), []);
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(4), ID(2)], "second retry");
+    assert.deepEqual(recordRelinkAttempts(relink, [{ id: ID(4), contentHash: `hash-${ID(4)}`, failed: true }]), [ID(4)], "given up on after the third failure");
+    assert.equal(relink.attempts[ID(4)]?.failures, RELINK_RETRIES_MAX + 1);
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(2)]);
+    // An edit (a new content hash) makes both worth a try again.
+    s.metas.set(ID(1), { ...s.metas.get(ID(1))!, contentHash: "edited" });
+    s.metas.set(ID(4), { ...s.metas.get(ID(4))!, contentHash: "edited", linkState: "linked" });
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(1), ID(2), ID(4)]);
+    // A deleted entry's record goes when a run settles.
+    settleRelink(relink, [], [], (id) => id !== ID(4));
+    assert.deepEqual(Object.keys(relink.attempts), [ID(1)]);
+  });
+
   it("a run takes at most 25, the batch in flux first; a save's run carries only the batch in flux", () => {
     const relink = { ...emptyKnowledgeRelinkState(), prepared: [ID(99)] };
     const backlog = [ID(99), ...Array.from({ length: 40 }, (_, i) => ID(i + 1))];
@@ -129,6 +161,34 @@ describe("link gaps", () => {
     assert.deepEqual(await queueLinkGaps(relink, options), [ID(1), ID(2)]);
     assert.equal(relink.gapPairs[`${ID(1)} ${ID(2)}`], "h1 h2b");
   });
+
+  it(`keeps growing past the first ${LINK_GAPS_MAX} pairs: recorded pairs never take up the limit`, async () => {
+    // Pairs of entries close to each other only (one axis per pair), none sharing a concept:
+    // LINK_GAPS_MAX + 30 gaps, closer the lower the pair number.
+    const pairs = LINK_GAPS_MAX + 30;
+    const index = new FakeVectorIndex();
+    const dims = pairs + 1;
+    const hashes: Record<string, string> = {};
+    const ids: string[] = [];
+    for (let p = 0; p < pairs; p += 1) {
+      const [x, y] = [ID(2 * p + 1), ID(2 * p + 2)];
+      index.set(x, axis(dims, p));
+      index.set(y, around(dims, p, pairs, 0.99 - p * 0.0005));
+      hashes[x] = `h${x}`;
+      hashes[y] = `h${y}`;
+      ids.push(x, y);
+    }
+    const relink = emptyKnowledgeRelinkState();
+    const options = { ids, index, conceptsOf: (id: string) => [`c-${id}`], hashOf: (id: string) => hashes[id] ?? null, minimum: 0.85 };
+    assert.equal((await queueLinkGaps(relink, options)).length, 2 * LINK_GAPS_MAX);
+    // Re-linked meanwhile (the queue emptied), the gaps still there: the next scan queues the rest.
+    relink.gapQueue = [];
+    const next = await queueLinkGaps(relink, options);
+    assert.equal(next.length, 2 * 30);
+    assert.equal(Object.keys(relink.gapPairs).length, pairs);
+    relink.gapQueue = [];
+    assert.deepEqual(await queueLinkGaps(relink, options), []);
+  });
 });
 
 describe("prepareRelinkBatch", () => {
@@ -143,7 +203,15 @@ describe("prepareRelinkBatch", () => {
     const manifest = { [`${ID(1)}.md`]: { sha256: "a" }, [`input/${ID(2)}.md`]: { sha256: "b" }, [`${ID(3)}.md`]: { sha256: "c" } };
     await writeFile(join(paths.intermediate, MYKG_MANIFEST_FILE), JSON.stringify(manifest));
     await writeFile(join(paths.root, COMMITTED_MANIFEST_FILE), JSON.stringify(manifest));
-    const mirror = (n: number) => `Author: A\n\n# Entry ${n}\n\nBody ${n}.\n`;
+    // Entry 1 quotes entry 3 whole: entry 3's task is still entry 3's alone.
+    const plain = (n: number) => `Author: A\n\n# Entry ${n}\n\nBody ${n}.\n`;
+    const mirror = (n: number) => (n === 1 ? `Author: A\n\n# Entry 1\n\nBody 1, quoting entry 3:\n\n${plain(3)}` : plain(n));
+    const input = join(root, "input");
+    await mkdir(input, { recursive: true });
+    for (const n of [1, 2, 3]) await writeFile(join(input, `${ID(n)}.md`), mirror(n));
+    const locator = new EntryDocumentLocator({ mykgInputDir: input, listMeta: () => [1, 2, 3].map((n) => ({ id: ID(n) }) as KnowledgeEntryMeta) });
+    await locator.load();
+    const owns = (ids: string[]) => (document: string) => ids.includes(locator.locate(document) ?? "");
     const answer = async (step: string, user: string, label: string): Promise<string> => {
       const id = mykgTaskId("PASS2", user, label);
       await writeFile(join(inbox, `${id}.task.json`), JSON.stringify({ task_id: id, step, context_label: label, system: "PASS2", user }));
@@ -159,16 +227,16 @@ describe("prepareRelinkBatch", () => {
     const pass1 = await answer("pass1", "CORPUS", "pass1 batch 0/1");
 
     // Entry 2 was prepared by an earlier attempt: its answer (given WITH context) is kept.
-    const cleared = await prepareRelinkBatch(paths, [ID(1), ID(2)], new Map([[ID(1), mirror(1)]]));
+    const cleared = await prepareRelinkBatch(paths, [ID(1), ID(2)], owns([ID(1)]));
     assert.deepEqual(cleared.sort(), [one, oneRetry].sort());
     for (const file of [MYKG_MANIFEST_FILE, `../${COMMITTED_MANIFEST_FILE}`]) {
       const left = JSON.parse(await readFile(join(paths.intermediate, file), "utf8")) as Record<string, unknown>;
       assert.deepEqual(Object.keys(left), [`${ID(3)}.md`], `${file}: the batch is new to myKG again`);
     }
     const outs = await readdir(outbox);
-    for (const id of [two, three, pass1]) assert.ok(outs.includes(`${id}.done`), "other answers stay cached");
+    for (const id of [two, three, pass1]) assert.ok(outs.includes(`${id}.done`), "other answers stay cached (entry 3's too, though entry 1 quotes it)");
     for (const id of [one, oneRetry]) assert.ok(!outs.includes(`${id}.done`) && !outs.includes(`${id}.answer.json`));
     // Idempotent.
-    assert.deepEqual(await prepareRelinkBatch(paths, [ID(1), ID(2)], new Map([[ID(1), mirror(1)]])), []);
+    assert.deepEqual(await prepareRelinkBatch(paths, [ID(1), ID(2)], owns([ID(1)])), []);
   });
 });

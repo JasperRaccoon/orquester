@@ -125,7 +125,7 @@ export type KnowledgeClusterRef = { label: string | null; size: number };
 
 export interface KnowledgeSimilarityOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
-  graph: Pick<KnowledgeGraph, "relatedEntries" | "conceptsOfEntry" | "revision" | "visibleEntriesOf" | "visibleEdgesOfType" | "conceptRef">;
+  graph: Pick<KnowledgeGraph, "relatedEntries" | "conceptsOfEntry" | "conceptIdsOfEntry" | "revision" | "visibleEntriesOf" | "visibleEdgesOfType" | "conceptRef">;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
   /** An entry as the read views show it (snippet, visible collections, link count, citation). */
@@ -320,14 +320,14 @@ export class KnowledgeSimilarity {
     }
 
     // (b) Shared concepts, and the distinctive ones among them.
-    const ownConcepts = this.knowledgeGraph.conceptsOfEntry(id);
+    const ownConcepts = this.knowledgeGraph.conceptsOfEntry(id, scope);
     const related = this.knowledgeGraph.relatedEntries(id, scope, KNOWLEDGE_SIMILAR_MAX);
     const distinctive = related.length > 0 ? this.distinctiveTest(scope) : () => false;
     for (const { id: otherId, shared } of related) {
       if (otherId === id) continue;
       const otherMeta = this.visibleMeta(otherId, scope);
       if (!otherMeta) continue;
-      const theirs = new Set(this.knowledgeGraph.conceptsOfEntry(otherId).map((c) => c.id));
+      const theirs = new Set(this.knowledgeGraph.conceptsOfEntry(otherId, scope).map((c) => c.id));
       const common = ownConcepts.filter((c) => theirs.has(c.id));
       candidate(otherMeta).concepts = { refs: common.slice(0, SHARED_CONCEPTS_NAMED), shared, distinctive: common.filter((c) => distinctive(c.id)) };
     }
@@ -455,7 +455,7 @@ export class KnowledgeSimilarity {
       return CLAIM_CONCEPT_TYPES.has(key) ? 0 : NON_TOPIC_CONCEPT_TYPES.has(key) ? 2 : 1;
     };
     const newConcepts = this.knowledgeGraph
-      .conceptsOfEntry(id)
+      .conceptsOfEntry(id, scope)
       .filter((concept) => this.knowledgeGraph.visibleEntriesOf(concept.id, scope).every((other) => other === id))
       .map((concept, order) => ({ concept, order, rank: rankOf(concept.type) }))
       .sort((a, b) => a.rank - b.rank || a.order - b.order)
@@ -742,7 +742,7 @@ export class KnowledgeSimilarity {
       }
     }
     // Concepts each drawn entry links to (every one visible: the entry is).
-    const concepts = drawn.map((meta) => this.knowledgeGraph.conceptsOfEntry(meta.id));
+    const concepts = drawn.map((meta) => this.knowledgeGraph.conceptsOfEntry(meta.id, scope));
     const conceptSets = concepts.map((list) => new Set(list.map((concept) => concept.id)));
     const sharedConcepts = (x: number, y: number): number => {
       const [small, large] = conceptSets[x]!.size <= conceptSets[y]!.size ? [conceptSets[x]!, conceptSets[y]!] : [conceptSets[y]!, conceptSets[x]!];

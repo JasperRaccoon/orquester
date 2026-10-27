@@ -45,6 +45,7 @@ import type { KnowledgePairChecksPort, KnowledgeRuntimePort, KnowledgeSettingsPo
 import { registerKnowledgeDataRoutes } from "./routes-data.ts";
 import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLinkingRouteService, type KnowledgeStatusCounts } from "./routes-linking.ts";
 import { KnowledgeConceptMerges } from "./search/concept-merges.ts";
+import { findContradictions } from "./search/contradictions.ts";
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
 import { KnowledgeGraph } from "./search/graph.ts";
 import { KnowledgeSearch } from "./search/search.ts";
@@ -153,13 +154,21 @@ const NO_PAIR_CHECKS: KnowledgePairChecksPort = {
  * linking sees every entry).
  */
 export function linkGraphView(store: Pick<KnowledgeStore, "listCollections">, graph: KnowledgeGraph, search: Pick<KnowledgeSearch, "vectorIndex">): KnowledgeLinkGraphView {
+  const everything = () => knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
   return {
     vectors: () => search.vectorIndex(),
-    conceptsOf: (entryId) => graph.conceptsOfEntry(entryId),
+    graphRevision: () => graph.contentRevision(),
+    conceptsOf: (entryId) => graph.conceptsOfEntry(entryId, everything()),
+    // The graph's adjacency, not a concept detail (which also ranks similar concepts): read per concept of every linked entry.
     contradicting: (conceptId) => {
-      const scope = knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
-      const view = graph.concept(conceptId, scope);
-      return view ? view.neighbors.filter((neighbor) => neighbor.edge.type === "contradicts").map((neighbor) => neighbor.concept.id) : [];
+      const scope = everything();
+      const self = graph.canonicalConceptId(conceptId);
+      const out = new Set<string>();
+      for (const edge of graph.visibleEdgesOfType("contradicts", scope, [self])) {
+        const other = graph.conceptRef(edge.from === self ? edge.to : edge.from, scope);
+        if (other) out.add(other.id);
+      }
+      return [...out];
     }
   };
 }
@@ -240,6 +249,11 @@ export class KnowledgeService {
   private collectionsKey: string | null = null;
   /** The graph's revision last announced (`knowledge.changed {graph: true}` when it moves). */
   private graphRevision = 0;
+  /**
+   * The contradicting entry pairs (graph and pair checks, every entry) as last announced: a pair
+   * check that changes them announces `knowledge.changed {graph: true}` (insights, edges, panels).
+   */
+  private contradictionsKey: string | null = null;
   private profiles: { at: number; map: ProfilesByCollection } | null = null;
   private profilesRead: { generation: number; promise: Promise<ProfilesByCollection> } | null = null;
   /** Bumped by every profile event: a read started before it is not cached. */
@@ -443,8 +457,37 @@ export class KnowledgeService {
       connectSearch();
     }
     this.linkingMoved();
+    // Pair checks a round records (or an edit drops) may change which entries contradict: views
+    // refetch insights, edges and panels then. Read after start: the checks on disk are loaded.
+    this.contradictionsKey = this.contradictionsNow();
+    const off = opening.linking.pairChecks.onChange(() => this.pairChecksMoved());
+    opening.unsubscribe.push(off);
     // The collection views read it; profile events then keep it current.
     void this.readProfiles().catch(() => undefined);
+    this.publishStatus();
+  }
+
+  /** Every contradicting entry pair now (the graph's and the pair checks'), as a comparable key. */
+  private contradictionsNow(): string | null {
+    const opening = this.opening;
+    if (!opening) return null;
+    const scope = knowledgeScope({ kind: "all" }, opening.store.listCollections().map((collection) => collection.id));
+    const found = findContradictions({ graph: opening.graph, scope, pairChecks: opening.linking.pairChecks, accept: () => true });
+    return [...found.keys()].sort().join("\n");
+  }
+
+  /** Pair checks moved: announce the graph when the set of contradicting pairs did. */
+  private pairChecksMoved(): void {
+    let key: string | null;
+    try {
+      key = this.contradictionsNow();
+    } catch (error) {
+      this.logger.warn("knowledge: reading contradictions after a pair check failed", error);
+      return;
+    }
+    if (key === this.contradictionsKey) return;
+    this.contradictionsKey = key;
+    this.publishChanged({ graph: true });
     this.publishStatus();
   }
 
@@ -544,10 +587,16 @@ export class KnowledgeService {
   private linkingMoved(): void {
     const revision = this.opening?.graph.revision() ?? this.graphRevision;
     if (revision !== this.graphRevision) {
-      this.graphRevision = revision;
+      this.graphAnnounced(revision);
       this.publishChanged({ graph: true });
     }
     this.publishStatus();
+  }
+
+  /** `knowledge.changed {graph: true}` goes out for this graph revision: later pair checks compare with its contradictions. */
+  private graphAnnounced(revision: number): void {
+    this.graphRevision = revision;
+    if (this.contradictionsKey !== null) this.contradictionsKey = this.contradictionsNow();
   }
 
   private publishChanged(event: KnowledgeChangedEvent): void {
@@ -670,7 +719,7 @@ export class KnowledgeService {
         publish: (channel, type, payload) => {
           // A route that moved the graph (a concept merge undone) announced it: not again; the status counts it.
           const graphMoved = type === KNOWLEDGE_CHANGED_EVENT && (payload as KnowledgeChangedEvent | null)?.graph === true;
-          if (graphMoved) this.graphRevision = this.opening?.graph.revision() ?? this.graphRevision;
+          if (graphMoved) this.graphAnnounced(this.opening?.graph.revision() ?? this.graphRevision);
           this.options.publisher.publish(channel, type, payload);
           if (graphMoved) this.publishStatus();
           if (type === KNOWLEDGE_CHANGED_EVENT && (payload as KnowledgeChangedEvent | null)?.collections === true) this.collectionsMaybeChanged();

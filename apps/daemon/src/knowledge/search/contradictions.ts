@@ -29,7 +29,7 @@ export interface KnowledgeContradictionFound {
   note: string | null;
 }
 
-export type ContradictionGraph = Pick<KnowledgeGraph, "visibleEdgesOfType" | "visibleEntriesOf" | "conceptRef" | "conceptsOfEntry">;
+export type ContradictionGraph = Pick<KnowledgeGraph, "visibleEdgesOfType" | "visibleEntriesOf" | "conceptRef" | "conceptIdsOfEntry">;
 
 export interface FindContradictionsOptions {
   graph: ContradictionGraph;
@@ -50,8 +50,8 @@ function contextOf(edge: GraphEdge): string | null {
   return text.length > 0 ? text : null;
 }
 
-function refOf(graph: ContradictionGraph, id: string): KnowledgeConceptRef | null {
-  const ref = graph.conceptRef(id);
+function refOf(graph: ContradictionGraph, id: string, scope: KnowledgeScope): KnowledgeConceptRef | null {
+  const ref = graph.conceptRef(id, scope);
   return ref ? { id: ref.id, name: ref.name, type: ref.type } : null;
 }
 
@@ -76,8 +76,8 @@ export function findContradictions(options: FindContradictionsOptions): Map<stri
     if (item.edges.has(edge.id)) return;
     item.edges.add(edge.id);
     if (item.pairs.length >= CONTRADICTION_PAIRS_MAX) return;
-    const from = refOf(graph, edge.from);
-    const to = refOf(graph, edge.to);
+    const from = refOf(graph, edge.from, scope);
+    const to = refOf(graph, edge.to, scope);
     if (!from || !to) return;
     item.pairs.push({ from, to });
     item.note ??= contextOf(edge);
@@ -85,7 +85,7 @@ export function findContradictions(options: FindContradictionsOptions): Map<stri
 
   if (entryId !== undefined) {
     if (accept(entryId)) {
-      const own = new Set(graph.conceptsOfEntry(entryId).map((concept) => concept.id));
+      const own = new Set(graph.conceptIdsOfEntry(entryId));
       for (const edge of graph.visibleEdgesOfType(CONTRADICTS_RELATION, scope, own)) {
         if (own.has(edge.from)) for (const other of visibleEntries(edge.to)) add(entryId, other, edge);
         if (own.has(edge.to)) for (const other of visibleEntries(edge.from)) add(entryId, other, edge);
