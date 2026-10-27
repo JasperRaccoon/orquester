@@ -5,7 +5,8 @@ import { knowledgeCitation, type KnowledgeEntryMeta, type KnowledgeSimilarEntry,
 import { FakeVectorIndex, around, axis } from "./fake-vector-index.ts";
 import { KnowledgeGraph } from "./graph.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
-import { FakeStore, loadGraph, node, silentLogger } from "./test-fakes.ts";
+import type { KnowledgePairCheck } from "../ports.ts";
+import { FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 import { knowledgeScope, visibleCollections } from "./visibility.ts";
 
 // Thresholds of the fake index: minimum 0.3, good 0.5, strong 0.7, duplicate 0.9.
@@ -19,6 +20,9 @@ function setup() {
   const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
   const index = new FakeVectorIndex();
   let indexOn = true;
+  /** Linking's pair checks; `checksChanged` moves their revision. */
+  const pairChecks: KnowledgePairCheck[] = [];
+  let checksRevision = 0;
   const similarity = new KnowledgeSimilarity({
     store,
     graph,
@@ -29,7 +33,9 @@ function setup() {
       snippet: "",
       linkCount: graph.linkCount(meta.id),
       citation: knowledgeCitation(meta)
-    })
+    }),
+    pairChecks: () => ({ all: () => pairChecks, get: (a, b) => pairChecks.find((c) => c.a === a && c.b === b) ?? null, onChange: () => () => undefined }),
+    pairChecksRevision: () => checksRevision
   });
   const scope = (visibility: KnowledgeVisibility, narrow?: string[]) => knowledgeScope(visibility, store.collections.map((c) => c.id), narrow);
   const put = (name: string, collections: string[], extra: Partial<KnowledgeEntryMeta> = {}) => store.put(ke(name), `body ${name}`, collections, { title: name, ...extra }, true);
@@ -42,6 +48,10 @@ function setup() {
     all: scope({ kind: "all" }),
     seoOnly: scope({ kind: "collections", ids: ["kc_seo"] }),
     scope,
+    pairChecks,
+    checksChanged: () => {
+      checksRevision += 1;
+    },
     noIndex: () => {
       indexOn = false;
     }
@@ -85,7 +95,8 @@ test("similar: meaning, concepts and author reasons together, ordered by similar
   assert.deepEqual(by.get(ke("b"))!.reasons, [{ kind: "meaning", similarity: 0.95 }]);
   assert.equal(by.get(ke("b"))!.similarity, 0.95);
   assert.ok(!by.has(ke("x")), "below `good` with no other reason");
-  // Here by concepts: a similarity below `good` orders it but gives no meaning reason; four shared concepts, three named.
+  // Here by concepts: a similarity below `good` orders it but gives no meaning reason; four shared
+  // concepts, three named; three of them on no other entry (distinctive: ≤ max(2, 3% of 9) entries).
   assert.equal(by.get(ke("e"))!.similarity, 0.2);
   assert.deepEqual(by.get(ke("e"))!.reasons, [
     {
@@ -95,7 +106,12 @@ test("similar: meaning, concepts and author reasons together, ordered by similar
         { id: "tool-stripe", name: "Stripe", type: "tool" },
         { id: "topic-pricing", name: "Pricing", type: "topic" }
       ],
-      shared: 4
+      shared: 4,
+      distinctive: [
+        { id: "tactic-comparison", name: "Comparison pages", type: "tactic" },
+        { id: "tool-stripe", name: "Stripe", type: "tool" },
+        { id: "topic-seo", name: "SEO", type: "topic" }
+      ]
     }
   ]);
   // No vectors: similarity null, after every entry that has one; more shared concepts first.
@@ -453,4 +469,258 @@ test("graph: two clusters never share a label when another one fits", async () =
   assert.deepEqual(labelsByTopic(g, s.members), { pricing: "Budgets", tiktok: "tiktok note", seo: "Growth" });
   const labels = g.clusters.map((c) => c.label);
   assert.equal(new Set(labels).size, labels.length);
+});
+
+// ---------------------------------------------------------------------------
+// Crossed with the concept graph (phase 2 spec, "Cross-graph derivations")
+// ---------------------------------------------------------------------------
+
+/** A pair check of two entries, ids sorted as the port gives them. */
+function pairCheck(x: string, y: string, verdict: KnowledgePairCheck["verdict"], note: string | null = null): KnowledgePairCheck {
+  const [a, b] = x < y ? [x, y] : [y, x];
+  return { a, b, verdict, note, checkedAt: "2026-10-27T00:00:00.000Z" };
+}
+
+const contradicts = (id: string, from: string, to: string) => edge(id, from, to, null, "contradicts");
+
+test("similar: each distinctive shared concept adds a small capped bonus; meaning still dominates; a common concept adds none", async () => {
+  const s = setup();
+  for (const name of ["a", "b", "c", "d", "e", "f", "x", "y"]) s.put(name, ["kc_seo"]);
+  s.index.set(ke("a"), axis(DIMS, 0));
+  s.index.set(ke("d"), around(DIMS, 0, 1, 0.95));
+  s.index.set(ke("b"), around(DIMS, 0, 2, 0.8));
+  s.index.set(ke("e"), around(DIMS, 0, 3, 0.79));
+  s.index.set(ke("c"), around(DIMS, 0, 4, 0.78));
+  s.index.set(ke("f"), around(DIMS, 0, 5, 0.7));
+  await loadGraph(s.graph, [
+    node("tactic-c1", "Annual plans", files([ke("a"), ke("c")])),
+    node("tactic-c2", "Price anchoring", files([ke("a"), ke("c")])),
+    ...[1, 2, 3, 4, 5].map((i) => node(`tactic-f${i}`, `Tactic ${i}`, files([ke("a"), ke("f")]))),
+    // On half of the entries: shared, never distinctive (at most max(2, 3% of 8) entries are).
+    node("topic-seo", "SEO", files([ke("a"), ke("e"), ke("x"), ke("y")]))
+  ]);
+  const { similar } = s.similarity.forEntry(ke("a"), s.all);
+  // By meaning alone: d .95, b .80, e .79, c .78, f .70. With the fake model's band (good .5,
+  // strong .7) a distinctive concept adds .05, at most three of them: c .88, f .85 pass b; d stays first.
+  assert.deepEqual(ids(similar), ["d", "c", "f", "b", "e", "y", "x"].map(ke));
+  const reason = (name: string) => similar.find((item) => item.entry.id === ke(name))!.reasons.find((r) => r.kind === "concepts");
+  assert.deepEqual(reason("c"), {
+    kind: "concepts",
+    concepts: [
+      { id: "tactic-c1", name: "Annual plans", type: "tactic" },
+      { id: "tactic-c2", name: "Price anchoring", type: "tactic" }
+    ],
+    shared: 2,
+    distinctive: [
+      { id: "tactic-c1", name: "Annual plans", type: "tactic" },
+      { id: "tactic-c2", name: "Price anchoring", type: "tactic" }
+    ]
+  });
+  assert.equal((reason("f") as { distinctive?: unknown[] }).distinctive?.length, 3, "named up to three");
+  assert.deepEqual(reason("e"), { kind: "concepts", concepts: [{ id: "topic-seo", name: "SEO", type: "topic" }], shared: 1 }, "no `distinctive` when none is");
+  assert.equal(similar[0]!.similarity, 0.95, "the bonus orders; `similarity` stays the cosine");
+});
+
+/** A (SEO) with tactic-short; Z (SEO) and H (Ads) hold the concepts that contradict it; N1..N10 close in meaning. */
+async function contradictionFixture() {
+  const s = setup();
+  s.put("a", ["kc_seo"]);
+  s.put("z", ["kc_seo"]);
+  s.put("h", ["kc_ads"]);
+  s.index.set(ke("a"), axis(DIMS, 0));
+  s.index.set(ke("z"), around(DIMS, 0, 1, 0.1));
+  s.index.set(ke("h"), around(DIMS, 0, 2, 0.2));
+  for (let i = 1; i <= 10; i += 1) {
+    s.put(`n${i}`, ["kc_seo"]);
+    s.index.set(ke(`n${i}`), around(DIMS, 0, 2 + i, 0.99 - i * 0.01));
+  }
+  await loadGraph(
+    s.graph,
+    [
+      node("tactic-short", "3-day trials", files([ke("a")])),
+      node("tactic-long", "14-day trials", files([ke("z")])),
+      node("tactic-secret", "Hidden pricing claim", files([ke("h")]))
+    ],
+    [contradicts("c1", "tactic-short", "tactic-long"), contradicts("c2", "tactic-secret", "tactic-short")]
+  );
+  return s;
+}
+
+const shortRef = { id: "tactic-short", name: "3-day trials", type: "tactic" };
+const longRef = { id: "tactic-long", name: "14-day trials", type: "tactic" };
+
+test("similar: entries that contradict it (graph, either direction) are listed even below the meaning bar, among the 8", async () => {
+  const s = await contradictionFixture();
+  const { similar } = s.similarity.forEntry(ke("a"), s.all);
+  assert.equal(similar.length, 8);
+  assert.deepEqual(ids(similar), [...["n1", "n2", "n3", "n4", "n5", "n6"].map(ke), ke("h"), ke("z")], "the closest six, then the two that disagree");
+  const z = similar.find((item) => item.entry.id === ke("z"))!;
+  assert.equal(z.similarity, 0.1);
+  assert.deepEqual(z.reasons, [{ kind: "contradicts", source: "graph", pairs: [{ from: shortRef, to: longRef }], note: null }]);
+  const h = similar.find((item) => item.entry.id === ke("h"))!;
+  assert.deepEqual(h.reasons, [
+    { kind: "contradicts", source: "graph", pairs: [{ from: { id: "tactic-secret", name: "Hidden pricing claim", type: "tactic" }, to: shortRef }], note: null }
+  ]);
+});
+
+test("similar: a hidden entry or its concepts never show through a contradiction", async () => {
+  const s = await contradictionFixture();
+  s.pairChecks.push(pairCheck(ke("a"), ke("h"), "contradicts", "the hidden one disagrees"));
+  const { similar } = s.similarity.forEntry(ke("a"), s.seoOnly);
+  assert.ok(!ids(similar).includes(ke("h")));
+  assert.ok(!JSON.stringify(similar).includes("Hidden pricing claim"));
+  assert.ok(!JSON.stringify(similar).includes("the hidden one disagrees"));
+  assert.ok(ids(similar).includes(ke("z")));
+});
+
+test("similar: a contradiction only a hidden entry recorded (the edge's provenance) is not shown", async () => {
+  const s = await contradictionFixture();
+  await loadGraph(
+    s.graph,
+    [node("tactic-short", "3-day trials", files([ke("a")])), node("tactic-long", "14-day trials", files([ke("z")])), node("tactic-other", "Other", files([ke("h")]))],
+    [edge("c1", "tactic-short", "tactic-long", files([ke("h")]), "contradicts")]
+  );
+  assert.ok(!s.similarity.forEntry(ke("a"), s.seoOnly).similar.some((item) => item.reasons.some((r) => r.kind === "contradicts")));
+  assert.ok(s.similarity.forEntry(ke("a"), s.all).similar.some((item) => item.entry.id === ke("z") && item.reasons[0]!.kind === "contradicts"));
+});
+
+test("similar: a `contradicts` pair check confirms (its note first) or adds a pair; `consistent` overrides the graph", async () => {
+  const s = await contradictionFixture();
+  s.pairChecks.push(
+    pairCheck(ke("a"), ke("z"), "contradicts", "Z recommends 14 days"),
+    pairCheck(ke("a"), ke("n10"), "contradicts", "N10 says the opposite"),
+    pairCheck(ke("a"), ke("h"), "consistent", "they agree")
+  );
+  const { similar } = s.similarity.forEntry(ke("a"), s.all);
+  const by = new Map(similar.map((item) => [item.entry.id, item]));
+  assert.deepEqual(by.get(ke("z"))!.reasons, [{ kind: "contradicts", source: "checked", pairs: [{ from: shortRef, to: longRef }], note: "Z recommends 14 days" }]);
+  assert.deepEqual(by.get(ke("n10"))!.reasons, [
+    { kind: "contradicts", source: "checked", pairs: [], note: "N10 says the opposite" },
+    { kind: "meaning", similarity: 0.89 }
+  ]);
+  assert.ok(!by.has(ke("h")), "the checker found them consistent");
+});
+
+test("graph: edges carry shared concepts; contradicting drawn entries get an edge marked `contradicts`, added outside the forest when absent", async () => {
+  const s = graphFixture();
+  await loadGraph(
+    s.graph,
+    [
+      node("tactic-x", "Comparison tables", files([ke("p1"), ke("p2")])),
+      node("topic-y", "Pages", files([ke("p1"), ke("p2"), ke("p3")])),
+      node("tactic-z", "Sourdough", files([ke("r")])),
+      node("tactic-secret", "Ads claim", files([ke("hidden")]))
+    ],
+    [contradicts("c1", "tactic-x", "tactic-z"), contradicts("c2", "tactic-secret", "tactic-x")]
+  );
+  const g = await s.similarity.graph({ k: 1 }, s.seoOnly);
+  const find = (x: string, y: string) => g.edges.find((e) => (e.from === ke(x) && e.to === ke(y)) || (e.from === ke(y) && e.to === ke(x)));
+  assert.equal(find("p1", "p2")!.sharedConcepts, 2);
+  assert.equal(find("p1", "p3")!.sharedConcepts, 1);
+  assert.ok(!("sharedConcepts" in find("q1", "q2")!), "absent when they share none");
+  for (const [x, y] of [
+    ["p1", "r"],
+    ["p2", "r"]
+  ] as const) {
+    assert.deepEqual({ ...find(x, y)!, from: "", to: "" }, { from: "", to: "", similarity: 0, tree: false, contradicts: true });
+  }
+  assert.equal(g.edges.filter((e) => e.contradicts).length, 2, "the hidden entry's contradiction is not drawn");
+  assert.equal(g.nodes.find((n) => n.id === ke("r"))!.degree, 2);
+  assert.ok(!find("p1", "p3")!.contradicts);
+
+  // A new pair check (its revision moves) redraws: the existing p1–p3 edge is marked.
+  s.pairChecks.push(pairCheck(ke("p1"), ke("p3"), "contradicts", "they disagree"));
+  s.checksChanged();
+  const redrawn = await s.similarity.graph({ k: 1 }, s.seoOnly);
+  const p1p3 = redrawn.edges.find((e) => [e.from, e.to].sort().join() === [ke("p1"), ke("p3")].sort().join())!;
+  assert.deepEqual({ tree: p1p3.tree, contradicts: p1p3.contradicts, similarity: p1p3.similarity }, { tree: true, contradicts: true, similarity: 0.8 });
+});
+
+test("graph: cluster concepts are the label's scoring, best first with the label's own concept leading; never a person or organization", async () => {
+  const s = cone({ pricing: 5, tiktok: 5, seo: 5 });
+  const all = Object.values(s.members).flat();
+  await loadGraph(s.graph, [
+    node("person-claude", "Claude (research)", files(all), { type: "Person" }),
+    node("channel-tiktok", "TikTok", files(all), { type: "Channel" }),
+    node("organization-apple", "Apple", files(s.members.pricing!), { type: "Organization" }),
+    node("topic-paywalls", "Paywalls", files(s.members.pricing!.slice(0, 4)), { type: "Topic" }),
+    node("tactic-us", "US accounts", files(s.members.tiktok!.slice(0, 4)), { type: "Tactic" }),
+    node("tactic-alternatives", "Alternatives pages", files(s.members.seo!.slice(0, 3)), { type: "Tactic" }),
+    node("tool-ahrefs", "Ahrefs", files(s.members.seo!.slice(0, 1)), { type: "Tool" })
+  ]);
+  const g = await s.similarity.graph({}, s.all);
+  const byTopic = (topic: string) => g.clusters[g.nodes.find((n) => n.id === s.members[topic]![0])!.cluster]!;
+  assert.deepEqual(byTopic("pricing").concepts, [
+    { id: "topic-paywalls", name: "Paywalls", type: "Topic" },
+    { id: "channel-tiktok", name: "TikTok", type: "Channel" }
+  ]);
+  assert.deepEqual(byTopic("tiktok").concepts!.map((c) => c.name), ["US accounts", "TikTok"]);
+  assert.deepEqual(byTopic("seo").concepts!.map((c) => c.name), ["Alternatives pages", "TikTok"]);
+  for (const cluster of g.clusters) assert.equal(cluster.concepts![0]!.name, cluster.label);
+});
+
+test("graph: a cluster labelled by its second-best concept or by title words still lists its concepts, the label's first when it is one", async () => {
+  const s = cone({ pricing: 5, tiktok: 5, seo: 5 });
+  await loadGraph(s.graph, [
+    node("topic-growth", "Growth", files(Object.values(s.members).flat())),
+    node("topic-budgets", "Budgets", files(s.members.pricing!.slice(0, 3)))
+  ]);
+  const g = await s.similarity.graph({}, s.all);
+  const byTopic = (topic: string) => g.clusters[g.nodes.find((n) => n.id === s.members[topic]![0])!.cluster]!;
+  assert.deepEqual(byTopic("pricing").concepts!.map((c) => c.name), ["Budgets", "Growth"]);
+  assert.deepEqual(byTopic("seo").concepts!.map((c) => c.name), ["Growth"]);
+  assert.equal(byTopic("tiktok").label, "tiktok note");
+  assert.deepEqual(byTopic("tiktok").concepts!.map((c) => c.name), ["Growth"]);
+});
+
+test("novelty: concepts no other visible entry has (claims first, people last), and its cluster from the graph already drawn", async () => {
+  const s = graphFixture();
+  await loadGraph(s.graph, [
+    node("person-om", "Om", files([ke("p1")]), { type: "Person" }),
+    node("topic-shared", "Comparison pages", files([ke("p1"), ke("p2")])),
+    node("tactic-hiddenshare", "Shared with a hidden entry", files([ke("p1"), ke("hidden")])),
+    node("tactic-unique", "Only here", files([ke("p1")]))
+  ]);
+  const unique = { id: "tactic-unique", name: "Only here", type: "tactic" };
+  const om = { id: "person-om", name: "Om", type: "Person" };
+  const hiddenShare = { id: "tactic-hiddenshare", name: "Shared with a hidden entry", type: "tactic" };
+  // Nothing drawn yet: no cluster (it never waits for a graph).
+  assert.deepEqual(s.similarity.novelty(ke("p1"), s.all), { newConcepts: [unique, om], cluster: null });
+  // Among what an SEO chat sees, the concept it shares with a hidden entry is new; the hidden entry is never named.
+  assert.deepEqual(s.similarity.novelty(ke("p1"), s.seoOnly)!.newConcepts, [hiddenShare, unique, om]);
+
+  await s.similarity.graph({}, s.seoOnly);
+  assert.deepEqual(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster, { label: "Comparison pages", size: 3 });
+  assert.equal(s.similarity.novelty(ke("r"), s.seoOnly)!.cluster, null, "a singleton");
+  assert.equal(s.similarity.novelty(ke("p1"), s.all)!.cluster, null, "no graph drawn for this scope");
+  assert.equal(s.similarity.novelty(ke("plain"), s.seoOnly), null, "no vectors yet");
+  // An entry embedded after the graph was drawn: the cluster of its nearest drawn neighbours.
+  s.put("late", ["kc_seo"]);
+  s.index.set(ke("late"), around(DIMS, 0, 9, 0.97));
+  assert.deepEqual(s.similarity.novelty(ke("late"), s.seoOnly), { newConcepts: [], cluster: { label: "Comparison pages", size: 3 } });
+  // A drawn entry moved out of the caller's view: the old graph is not used.
+  s.store.put(ke("p2"), "body p2", ["kc_ads"], { title: "Comparison pages that convert", savedAt: s.store.getMeta(ke("p2"))!.savedAt }, true);
+  assert.equal(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster, null);
+});
+
+test("clustersForSaved: the cluster of the saved entry's nearest drawn neighbours, from the graph already drawn, never other entries of the save", async () => {
+  const s = graphFixture();
+  s.put("s1", ["kc_seo"]);
+  s.put("s2", ["kc_seo"]);
+  s.put("s3", ["kc_seo"]);
+  const saved = [ke("s1"), ke("s2"), ke("s3")];
+  const before = s.similarity.clustersForSaved(saved, s.seoOnly);
+  assert.ok(before instanceof Map, "answered at once");
+  assert.deepEqual([...before.values()], [null, null, null], "no graph drawn yet");
+
+  // The graph drawn before the save's entries were embedded (they are not among its nodes).
+  await s.similarity.graph({}, s.seoOnly);
+  s.index.set(ke("s1"), around(DIMS, 0, 10, 0.97)); // beside P1..P3
+  s.index.set(ke("s2"), around(DIMS, 10, 11, 0.99)); // beside S1 only
+  const after = s.similarity.clustersForSaved(saved, s.seoOnly);
+  assert.deepEqual(after.get(ke("s1")), { label: "comparison pages", size: 3 });
+  assert.equal(after.get(ke("s2")), null, "its only close neighbour is in the same save");
+  assert.equal(after.get(ke("s3")), null, "not embedded");
+  s.noIndex();
+  assert.deepEqual([...s.similarity.clustersForSaved(saved, s.seoOnly).values()], [null, null, null]);
 });

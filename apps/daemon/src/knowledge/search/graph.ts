@@ -493,4 +493,19 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   visibleEntriesOf(conceptId: string, scope: KnowledgeScope): string[] {
     return this.view(scope).entriesOf(conceptId);
   }
+
+  /**
+   * Visible edges of one relation type, compared without case (`contradicts` for the phase 2
+   * spec's "Contradictions"), as held in memory with whatever attributes the snapshot keeps;
+   * `around`: only those touching one of these concepts.
+   */
+  visibleEdgesOfType(type: string, scope: KnowledgeScope, around?: Iterable<string>): GraphEdge[] {
+    const view = this.view(scope);
+    const wanted = type.toLowerCase();
+    const matches = (edge: GraphEdge): boolean => edge.type.toLowerCase() === wanted && view.edge(edge);
+    if (!around) return view.snapshot.edges.filter(matches);
+    const out = new Set<GraphEdge>();
+    for (const conceptId of around) for (const edge of view.snapshot.adjacency.get(conceptId) ?? []) if (matches(edge)) out.add(edge);
+    return [...out];
+  }
 }
