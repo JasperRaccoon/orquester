@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { copyFile, readFile, rename, rm, stat } from "node:fs/promises";
+import { copyFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 export const MYKG_SESSIONS_DIR = "mykg_sessions";
@@ -83,6 +83,30 @@ export async function guardMykgManifest(paths: MykgSessionPaths): Promise<void> 
 /** A run succeeded: its manifest is the good one now. */
 export async function commitMykgManifest(paths: MykgSessionPaths): Promise<void> {
   await rm(join(paths.root, COMMITTED_MANIFEST_FILE), { force: true });
+}
+
+/**
+ * Drops entries from myKG's manifest AND the daemon's committed copy (phase 2 spec, "Automatic
+ * re-linking"): myKG's next `--update` then sees them as new files, evicts their shards (per-file and
+ * `pass2_raw_batches`) and extracts them again. Both, because `guardMykgManifest` puts the committed
+ * copy back before every update after a run that did not succeed. Run after `guardMykgManifest` and
+ * before the child is spawned; idempotent. Answers how many keys went.
+ */
+export async function dropManifestEntries(paths: MykgSessionPaths, entryIds: readonly string[]): Promise<number> {
+  const files = new Set(entryIds.map((id) => `${id}.md`));
+  let dropped = 0;
+  for (const path of [join(paths.intermediate, MYKG_MANIFEST_FILE), join(paths.root, COMMITTED_MANIFEST_FILE)]) {
+    const value = await readJson(path);
+    if (!isRecord(value)) continue;
+    const kept = Object.fromEntries(Object.entries(value).filter(([key]) => !files.has(basename(key))));
+    const removed = Object.keys(value).length - Object.keys(kept).length;
+    if (removed === 0) continue;
+    const tmp = `${path}.${randomUUID()}.tmp`;
+    await writeFile(tmp, JSON.stringify(kept, null, 2), { mode: 0o600 });
+    await rename(tmp, path);
+    dropped += removed;
+  }
+  return dropped;
 }
 
 /** Entry ids in myKG's manifest (`<id>.md` keys), or null when it does not read. */

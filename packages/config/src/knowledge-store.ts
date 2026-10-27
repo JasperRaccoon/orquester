@@ -167,6 +167,19 @@ export const knowledgeEntryFrontmatterSchema = z
 
 export type KnowledgeEntryFrontmatterConfig = z.infer<typeof knowledgeEntryFrontmatterSchema>;
 
+/**
+ * `linkContext` (phase 2 spec, "Context version"): the linking-context version the entry was last
+ * linked with. Optional, and kept with the entry's other extra keys (written back verbatim on every
+ * rewrite); a file without it, or with a value that is not a non-negative integer, reads as null
+ * (linked before neighbour context existed).
+ */
+export const KNOWLEDGE_ENTRY_LINK_CONTEXT_KEY = "linkContext";
+
+export function readKnowledgeLinkContext(extra: Readonly<Record<string, unknown>>): number | null {
+  const value = extra[KNOWLEDGE_ENTRY_LINK_CONTEXT_KEY];
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
 /** The frontmatter keys this build understands (every other key is preserved verbatim). */
 export const KNOWLEDGE_ENTRY_FRONTMATTER_KEYS = [
   "id",

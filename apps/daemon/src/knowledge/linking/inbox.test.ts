@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
-import { clearUnansweredTasks, InboxBroker, nodeInboxFiles, parseWorkerAnswer, type InboxFiles } from "./inbox.ts";
+import { clearAnsweredTasks, clearUnansweredTasks, InboxBroker, nodeInboxFiles, parseWorkerAnswer, type InboxBrokerOptions, type InboxFiles } from "./inbox.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -27,7 +27,14 @@ interface Harness {
   addTask(system: string, user: string, step?: string, createdAt?: string): Promise<string>;
 }
 
-async function harness(options: { budget?: { tasks: number; tokens: number }; nextWaitMs?: number } = {}): Promise<Harness> {
+async function harness(
+  options: {
+    budget?: { tasks: number; tokens: number };
+    nextWaitMs?: number;
+    contextFor?: InboxBrokerOptions["contextFor"];
+    validate?: InboxBrokerOptions["validate"];
+  } = {}
+): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "orq-inbox-"));
   roots.push(dir);
   const inbox = join(dir, "agent_inbox");
@@ -324,6 +331,92 @@ describe("InboxBroker", () => {
     assert.equal(h.broker.demand(), 1);
     assert.equal(h.broker.engaged("w1"), true);
     assert.equal(h.broker.engaged("w9"), false);
+  });
+});
+
+describe("InboxBroker — what a worker is shown (phase 2 neighbour context)", () => {
+  it("adds the context after myKG's prompt for the tasks it is given for; the task file, its id and the answer's path stay myKG's", async () => {
+    const asked: string[] = [];
+    const block = "KNOWN CONCEPTS FROM SIMILAR ENTRIES\n===================================\n- Tactic: Alternatives pages";
+    const h = await harness({
+      contextFor: async (envelope) => {
+        asked.push(envelope.step);
+        return envelope.step === "pass2" ? block : null;
+      }
+    });
+    const user = "SCHEMA\n======\n...\n\nDOCUMENT\n========\nAlternatives pages convert well.";
+    const pass2 = await h.addTask("PASS2", user, "pass2");
+    const pass1 = await h.addTask("PASS1", "corpus", "pass1");
+    assert.equal(pass2, taskId("PASS2", user, "pass2 0"), "myKG's task id (prompt + label)");
+    const taskFile = await readFile(join(h.inbox, `${pass2}.task.json`), "utf8");
+
+    const first = await h.broker.next("w1");
+    assert.ok(first.kind === "task" && first.task.taskId === pass2);
+    assert.equal(first.task.input, `${user}\n\n${block}`, "the block comes after the document");
+    const held = await h.broker.next("w1");
+    assert.ok(held.kind === "task" && held.task.input === first.task.input, "a held task shows the same view");
+    const second = await h.broker.submit("w1", pass2, '{"nodes":[],"edges":[]}');
+    assert.ok(second.accepted && second.next.kind === "task" && second.next.task.taskId === pass1);
+    assert.equal(second.next.task.input, "corpus", "no block for another step");
+    assert.deepEqual(asked, ["pass2", "pass1"], "the context is built once per task");
+
+    assert.equal(await readFile(join(h.inbox, `${pass2}.task.json`), "utf8"), taskFile, "the task file is untouched");
+    const answer = JSON.parse(await readFile(join(h.outbox, `${pass2}.answer.json`), "utf8")) as { task_id: string };
+    assert.equal(answer.task_id, pass2, "answered under myKG's id: its cache key is unchanged");
+    await readFile(join(h.outbox, `${pass2}.done`), "utf8");
+    await finishing(h, h.broker.submit("w1", pass1, "{}"));
+  });
+
+  it("a context that fails costs only the context", async () => {
+    const h = await harness({
+      contextFor: async () => {
+        throw new Error("index gone");
+      }
+    });
+    const id = await h.addTask("S", "u");
+    const reply = await h.broker.next("w1");
+    assert.ok(reply.kind === "task" && reply.task.taskId === id && reply.task.input === "u");
+  });
+
+  it("a step's own check refuses JSON that does not fit it, like an answer that does not parse", async () => {
+    const h = await harness({
+      validate: (step, value) => (step === "pair-check" && !(value !== null && typeof value === "object" && "verdict" in value) ? '"verdict" is missing.' : null)
+    });
+    const id = await h.addTask("S", "u", "pair-check");
+    await h.broker.next("w1");
+    const refused = await h.broker.submit("w1", id, '{"x":1}');
+    assert.equal(refused.accepted, false);
+    assert.match(!refused.accepted ? refused.error : "", /"verdict" is missing\./);
+    assert.deepEqual(await readdir(h.outbox), [], "nothing written for a refused answer");
+    const answered: { step: string; answer: string }[] = [];
+    h.broker.events.on("answered", (event) => answered.push({ step: event.step, answer: event.answer }));
+    const ok = await finishing(h, h.broker.submit("w1", id, '{"verdict":"consistent","note":"same"}'));
+    assert.equal(ok.accepted, true);
+    assert.deepEqual(answered, [{ step: "pair-check", answer: '{"verdict":"consistent","note":"same"}' }], "the answer travels with the event");
+  });
+});
+
+describe("clearAnsweredTasks", () => {
+  it("removes the matching answered tasks (.done first, then answer and task), and nothing else", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "orq-inbox-clear-"));
+    roots.push(dir);
+    const inbox = join(dir, "agent_inbox");
+    const outbox = join(dir, "agent_outbox");
+    await mkdir(inbox, { recursive: true });
+    await mkdir(outbox, { recursive: true });
+    const mine = taskId("S", "DOCUMENT mine", "pass2 chunk 1");
+    const other = taskId("S", "DOCUMENT other", "pass2 chunk 2");
+    for (const [id, user] of [[mine, "DOCUMENT mine"], [other, "DOCUMENT other"]] as const) {
+      await writeFile(join(inbox, `${id}.task.json`), JSON.stringify({ task_id: id, step: "pass2", system: "S", user }));
+      await writeFile(join(outbox, `${id}.answer.json`), JSON.stringify({ task_id: id, answer: "{}" }));
+      await writeFile(join(outbox, `${id}.done`), "");
+    }
+    await writeFile(join(inbox, "not-a-task.json"), "x");
+    const removed = await clearAnsweredTasks(dir, (envelope) => envelope.user.endsWith("mine"));
+    assert.deepEqual(removed, [mine]);
+    assert.deepEqual((await readdir(inbox)).sort(), [`${other}.task.json`, "not-a-task.json"].sort());
+    assert.deepEqual((await readdir(outbox)).sort(), [`${other}.answer.json`, `${other}.done`].sort());
+    assert.deepEqual(await clearAnsweredTasks(join(dir, "missing"), () => true), []);
   });
 });
 

@@ -156,14 +156,18 @@ describe("WorkerPool", () => {
     }
   });
 
-  it("stop() and a limit also count the chat's tokens before closing it", async () => {
-    const h = await harness({ concurrency: 1, accounts: ["a1", "a2"], behaviour: { a1: { limitAfter: 1 } } });
-    await h.addTasks(3);
-    await untilAnswered(h, 2);
-    await flushAsync(10); // the second chat records its answer once its submit returns
+  it("stop() also counts a working chat's tokens before closing it", async () => {
+    const h = await harness({ mode: "manual", concurrency: 1 });
+    await h.addTasks(1);
+    await flushAsync();
+    const chat = h.port.sessions[0]!;
+    chat.answered.push("earlier-task"); // its turn has used tokens
     await h.pool.stop();
-    const counted = h.events.filter((e) => e.kind === "tokens").map((e) => e.kind === "tokens" && e.sessionId);
-    assert.deepEqual(counted, ["w1", "w2"], "the limited chat and the one stop() ended both count");
+    assert.deepEqual(
+      h.events.filter((e) => e.kind === "tokens").map((e) => e.kind === "tokens" && [e.sessionId, e.in, e.out]),
+      [[chat.id, 1000, 100]]
+    );
+    assert.ok(h.port.calls.indexOf(`usage:${chat.id}`) < h.port.calls.indexOf(`stop:${chat.id}`));
   });
 
   it("a usage limit cools the account down and fails over to another account", async () => {

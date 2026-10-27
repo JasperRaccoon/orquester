@@ -75,7 +75,8 @@ export function buildKnowledgeStatus(snapshot: KnowledgeLinkingSnapshot, counts:
     workers: snapshot.workers,
     tokens: snapshot.tokens,
     lastError: snapshot.lastError,
-    ...(counts.embeddingModelReady !== undefined ? { embeddingModelReady: counts.embeddingModelReady } : {})
+    ...(counts.embeddingModelReady !== undefined ? { embeddingModelReady: counts.embeddingModelReady } : {}),
+    ...(snapshot.relink !== undefined ? { relink: snapshot.relink } : {})
   };
 }
 

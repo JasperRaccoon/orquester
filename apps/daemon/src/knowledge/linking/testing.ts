@@ -31,14 +31,17 @@ export interface FakeWorkerSession {
   answered: string[];
   refused: number;
   seenInstructions: (string | null)[];
+  /** Every task's `input` as the chat was shown it (`step` first), in order. */
+  inputs: { step: string; input: string }[];
   stopped: { interrupt: boolean } | null;
   end(outcome: WorkerOutcome): void;
 }
 
 export type AnswerFor = (task: KnowledgeWorkerTask) => string;
 
-/** A plausible myKG answer: Pass 2 extractions name the entry file of the task input. */
+/** A plausible myKG answer: Pass 2 extractions name the entry file of the task input; a pair check is consistent. */
 export const defaultAnswer: AnswerFor = (task) => {
+  if (task.step === "pair-check") return JSON.stringify({ verdict: "consistent", note: "Both say the same." });
   const file = /^FILE (\S+)/m.exec(task.input)?.[1];
   if (task.step === "pass2" && file) {
     const stem = file.replace(/\.md$/, "");
@@ -98,6 +101,7 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
       answered: [],
       refused: 0,
       seenInstructions: [],
+      inputs: [],
       stopped: null,
       end: (outcome) => {
         this.running.delete(id);
@@ -125,6 +129,7 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
         answered: [],
         refused: 0,
         seenInstructions: [],
+        inputs: [],
         stopped: null,
         end: (outcome) => {
           this.running.delete(sessionId);
@@ -192,6 +197,7 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
       if (session.stopped) return;
       const task = reply.task;
       session.seenInstructions.push(task.instructions);
+      session.inputs.push({ step: task.step, input: task.input });
       if (behaviour.limitAfter !== undefined && session.answered.length >= behaviour.limitAfter) {
         session.end({ kind: "limit", reason: "usage_limit", ...(behaviour.resetsAt ? { resetsAt: behaviour.resetsAt } : {}), message: "You've hit your limit" });
         return;

@@ -38,6 +38,7 @@ import { profileKnowledgeCollections, profilesForCollection } from "../session-p
 import type { SessionProfileStore } from "../session-profiles/store.ts";
 import type { ManifestKnowledge } from "../session-tools/manifest.ts";
 import { KnowledgeRuntimeTracker, type KnowledgeRuntimeTrackerOptions } from "./install/runtime.ts";
+import type { KnowledgeLinkGraphView } from "./linking/context.ts";
 import type { KnowledgeLinkingService, KnowledgeLinkingSnapshot } from "./linking/service.ts";
 import type { KnowledgeRuntimePort, KnowledgeSettingsPort } from "./ports.ts";
 import { registerKnowledgeDataRoutes } from "./routes-data.ts";
@@ -45,6 +46,7 @@ import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLin
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
 import { KnowledgeGraph } from "./search/graph.ts";
 import { KnowledgeSearch } from "./search/search.ts";
+import { knowledgeScope } from "./search/visibility.ts";
 import { registerKnowledgeSettingsRoutes } from "./settings-routes.ts";
 import { KnowledgeSettingsService, type KnowledgeSettingsAccounts, type KnowledgeSettingsPlugins } from "./settings.ts";
 import { KnowledgeError } from "./store/errors.ts";
@@ -70,6 +72,8 @@ export type KnowledgeLinkingFactory = (ports: {
   graph: KnowledgeGraph;
   runtime: KnowledgeRuntimePort;
   settings: KnowledgeSettingsPort;
+  /** Search and the concept graph as phase 2 linking reads them (`linkGraphView`). */
+  graphView: KnowledgeLinkGraphView;
 }) => KnowledgeLinking;
 
 /** An embedder source over a runtime (the gated one: null while the plugin is off). */
@@ -126,6 +130,23 @@ interface Opening {
 type ProfilesByCollection = Map<string, { id: string; name: string }[]>;
 
 const NO_TOKENS: KnowledgeStatus["tokens"] = { week: { in: 0, out: 0 }, total: { in: 0, out: 0 } };
+
+/**
+ * What phase 2 linking reads of search and the concept graph (`linking/context.ts`): the vector
+ * index of the moment, an entry's concepts, and the concepts a `contradicts` edge joins (unscoped:
+ * linking sees every entry).
+ */
+export function linkGraphView(store: Pick<KnowledgeStore, "listCollections">, graph: KnowledgeGraph, search: Pick<KnowledgeSearch, "vectorIndex">): KnowledgeLinkGraphView {
+  return {
+    vectors: () => search.vectorIndex(),
+    conceptsOf: (entryId) => graph.conceptsOfEntry(entryId),
+    contradicting: (conceptId) => {
+      const scope = knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
+      const view = graph.concept(conceptId, scope);
+      return view ? view.neighbors.filter((neighbor) => neighbor.edge.type === "contradicts").map((neighbor) => neighbor.concept.id) : [];
+    }
+  };
+}
 
 /** Linking when none is built (tests) or building it failed: paused, with the reason; ignores changes. */
 class NoLinking implements KnowledgeLinking {
@@ -328,7 +349,7 @@ export class KnowledgeService {
     const search = new KnowledgeSearch({ store, graph, embedders, indexDir: knowledgeIndexDir(appdir), logger: this.logger });
     // Text indexing runs in the background; queries wait for it.
     void search.start().catch((error) => this.logger.warn("knowledge: indexing the entries failed", error));
-    const linking = this.buildLinking(store, graph);
+    const linking = this.buildLinking(store, graph, search);
     const opening: Opening = { store, graph, search, embedders, linking, unsubscribe: [] };
     opening.unsubscribe.push(
       store.onChange((change) => {
@@ -368,11 +389,11 @@ export class KnowledgeService {
     this.publishStatus();
   }
 
-  private buildLinking(store: KnowledgeStore, graph: KnowledgeGraph): KnowledgeLinking {
+  private buildLinking(store: KnowledgeStore, graph: KnowledgeGraph, search: KnowledgeSearch): KnowledgeLinking {
     const factory = this.options.linking;
     if (!factory) return new NoLinking(this.settings, "Graph linking is not available in this build.");
     try {
-      return factory({ store, graph, runtime: this.runtime, settings: this.settings });
+      return factory({ store, graph, runtime: this.runtime, settings: this.settings, graphView: linkGraphView(store, graph, search) });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`knowledge: the linking module could not be built (${message})`);

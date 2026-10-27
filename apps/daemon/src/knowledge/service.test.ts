@@ -20,8 +20,10 @@ import { knowledgeEntriesDir, knowledgeGraphPluginDir } from "@orquester/config"
 
 import { FAKE_RUNTIME } from "./linking/testing.ts";
 import type { KnowledgeEntryChange } from "./ports.ts";
-import { loadGraph, silentLogger } from "./search/test-fakes.ts";
-import { KnowledgeService, type KnowledgeLinking, type KnowledgeLinkingFactory, type KnowledgeServiceOptions } from "./service.ts";
+import { FakeVectorIndex } from "./search/fake-vector-index.ts";
+import { KnowledgeGraph } from "./search/graph.ts";
+import { FakeStore as SearchFakeStore, edge, loadGraph, node, silentLogger } from "./search/test-fakes.ts";
+import { KnowledgeService, linkGraphView, type KnowledgeLinking, type KnowledgeLinkingFactory, type KnowledgeServiceOptions } from "./service.ts";
 import { FakeKnowledgePlugins, FakeRuntime, fakeEmbedders } from "./test-fakes.ts";
 
 async function harness(t: TestContext, options: { enabled?: boolean; over?: Partial<KnowledgeServiceOptions>; mode?: "local" | "remote" } = {}) {
@@ -348,4 +350,28 @@ test("a profile ticking or unticking a collection (or renamed while it ticks one
   listeners[0]!("p1");
   await h.knowledge.settled();
   assert.equal(collectionEvents(), 2, "an edit that moves nothing the views show");
+});
+
+test("linking's graph view: the vector index of the moment, an entry's concepts, and `contradicts` neighbours either way", async () => {
+  const store = new SearchFakeStore();
+  const filed = "kc_aaaaaaaaaa";
+  store.collection(filed, "SEO");
+  store.put("ke_aaaaaaaaaaaa", "wait 48 hours", [filed], {}, true);
+  store.put("ke_bbbbbbbbbbbb", "wait 72 hours", [], {}, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  await loadGraph(
+    graph,
+    [node("tactic-48h", "Wait 48 hours", ["ke_aaaaaaaaaaaa.md"]), node("tactic-72h", "Wait 72 hours", ["ke_bbbbbbbbbbbb.md"]), node("tool-x", "X", ["ke_bbbbbbbbbbbb.md"])],
+    [edge("e1", "tactic-48h", "tactic-72h", null, "contradicts"), edge("e2", "tactic-72h", "tool-x", null, "uses")]
+  );
+  let index = new FakeVectorIndex();
+  const view = linkGraphView({ listCollections: () => store.listCollections() }, graph, { vectorIndex: () => index });
+  assert.equal(view.vectors(), index);
+  index = new FakeVectorIndex();
+  assert.equal(view.vectors(), index, "read per call: a model change swaps the index");
+  assert.deepEqual(view.conceptsOf("ke_bbbbbbbbbbbb").map((c) => c.id).sort(), ["tactic-72h", "tool-x"]);
+  assert.deepEqual(view.contradicting("tactic-48h"), ["tactic-72h"]);
+  assert.deepEqual(view.contradicting("tactic-72h"), ["tactic-48h"], "an unfiled entry's concept counts too");
+  assert.deepEqual(view.contradicting("tool-x"), []);
+  assert.deepEqual(view.contradicting("nope"), []);
 });
