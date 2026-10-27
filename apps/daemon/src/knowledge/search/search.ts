@@ -27,6 +27,7 @@ import {
 } from "@orquester/api";
 import { isKnowledgeEntryId } from "@orquester/config";
 import type { KnowledgeEntryChange, KnowledgeStorePort, KnowledgeVectorHit, KnowledgeVectorIndex, KnowledgeVectorThresholds } from "../ports.ts";
+import type { KnowledgePairChecksPort } from "../ports.ts";
 import { KnowledgeError, type KnowledgeLogger } from "../store/errors.ts";
 import { Bm25Index } from "./bm25.ts";
 import type { KnowledgeEmbedderSource } from "./embedder.ts";
@@ -34,6 +35,7 @@ import { type KnowledgeEntryFilter, entryMatchesFilter, filterKey, parseKnowledg
 import type { KnowledgeGraph } from "./graph.ts";
 import { computeKnowledgeFacets } from "./facets.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
+import { KnowledgeInsights } from "./insights.ts";
 import { type TextSpan, bestSnippet, tokenize } from "./text.ts";
 import { InProcessVectorIndex } from "./vector-index.ts";
 import { type KnowledgeScope, UNFILED, entryInScope, knowledgeScope, scopeCollectionIds, visibleCollections } from "./visibility.ts";
@@ -120,6 +122,15 @@ export class KnowledgeSearch {
   private readonly indexing = new Map<string, Promise<void>>();
   /** Similar entries, possible duplicates, near-duplicates on save and the similarity graph. */
   readonly similarity: KnowledgeSimilarity;
+  /** Contradictions, bridges, single-source concepts and link gaps (phase 2 spec, "Insights"). */
+  readonly insights: KnowledgeInsights;
+  /** What {@link connectLinking} wired in; `revision` moves whenever the pair checks change. */
+  private linkingPorts: {
+    pairChecks: KnowledgePairChecksPort | null;
+    linkGapQueued: ((a: string, b: string) => boolean) | null;
+    revision: number;
+    unsubscribe: (() => void) | null;
+  } = { pairChecks: null, linkGapQueued: null, revision: 0, unsubscribe: null };
 
   constructor(options: KnowledgeSearchOptions) {
     this.store = options.store;
@@ -134,8 +145,41 @@ export class KnowledgeSearch {
       store: this.store,
       graph: this.graph,
       index: () => this.vectorIndex(),
-      summary: (meta, scope) => this.summary(meta, scope)
+      summary: (meta, scope) => this.summary(meta, scope),
+      pairChecks: () => this.linkingPorts.pairChecks,
+      pairChecksRevision: () => this.linkingPorts.revision
     });
+    this.insights = new KnowledgeInsights({
+      store: this.store,
+      graph: this.graph,
+      similarity: this.similarity,
+      index: () => this.vectorIndex(),
+      summary: (meta, scope) => this.summary(meta, scope),
+      pairChecks: () => this.linkingPorts.pairChecks,
+      pairChecksRevision: () => this.linkingPorts.revision,
+      linkGapQueued: (a, b) => this.linkingPorts.linkGapQueued?.(a, b) ?? false
+    });
+  }
+
+  /**
+   * Connects linking's side of the phase 2 cross-graph views (spec "Shared seams"): its LLM pair
+   * checks (contradictions in similar entries, the similarity graph and insights) and whether the
+   * re-linker has queued both entries of a link gap (insights' `queued`). Until called, there are
+   * no pair checks and no gap is queued. Calling again replaces both; `stop` disconnects.
+   */
+  connectLinking(ports: { pairChecks?: KnowledgePairChecksPort | null; linkGapQueued?: ((a: string, b: string) => boolean) | null }): void {
+    this.linkingPorts.unsubscribe?.();
+    const pairChecks = ports.pairChecks ?? null;
+    this.linkingPorts = {
+      pairChecks,
+      linkGapQueued: ports.linkGapQueued ?? null,
+      revision: this.linkingPorts.revision + 1,
+      unsubscribe: null
+    };
+    const connected = this.linkingPorts;
+    connected.unsubscribe = pairChecks?.onChange(() => {
+      connected.revision += 1;
+    }) ?? null;
   }
 
   /** Subscribe to the store and index every entry's text (in the background; queries wait for it). */
@@ -149,6 +193,7 @@ export class KnowledgeSearch {
 
   async stop(): Promise<void> {
     for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
+    this.connectLinking({});
     const stopping = this.vectors.stop();
     await this.ready?.catch(() => undefined);
     await this.textChain.catch(() => undefined);
@@ -575,12 +620,14 @@ export class KnowledgeSearch {
       .filter((m): m is KnowledgeEntryMeta => m !== null)
       .map((m) => this.summary(m, scope));
     const { similar, possibleDuplicates } = this.similarity.forEntry(id, scope);
+    const novelty = this.similarity.novelty(id, scope);
     return {
       entry: { ...entry, savedFrom: { ...entry.savedFrom }, collections: visibleCollections(entry, scope) },
       concepts: this.graph.conceptsOfEntry(id),
       related,
       similar,
       possibleDuplicates,
+      ...(novelty ? { novelty } : {}),
       citation: knowledgeCitation(meta)
     };
   }
