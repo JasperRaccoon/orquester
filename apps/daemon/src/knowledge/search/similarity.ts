@@ -583,14 +583,16 @@ export class KnowledgeSimilarity {
       return CLAIM_CONCEPT_TYPES.has(key) ? 0 : NON_TOPIC_CONCEPT_TYPES.has(key) ? 2 : 1;
     };
     const onlyHere = (conceptId: string): boolean => this.knowledgeGraph.visibleEntriesOf(conceptId, scope).every((other) => other === id);
-    const newConcepts = this.knowledgeGraph
+    const newConcepts: KnowledgeConceptRef[] = [];
+    for (const { concept } of this.knowledgeGraph
       .conceptsOfEntry(id, scope)
-      // Nor said in other words by another entry (a concept that backs it).
-      .filter((concept) => onlyHere(concept.id) && this.knowledgeGraph.backingConcepts(concept.id).every(onlyHere))
+      .filter((concept) => onlyHere(concept.id))
       .map((concept, order) => ({ concept, order, rank: rankOf(concept.type) }))
-      .sort((a, b) => a.rank - b.rank || a.order - b.order)
-      .slice(0, NOVELTY_CONCEPTS_MAX)
-      .map(({ concept }) => ({ ...concept }));
+      .sort((a, b) => a.rank - b.rank || a.order - b.order)) {
+      if (newConcepts.length >= NOVELTY_CONCEPTS_MAX) break;
+      // Nor said in other words by another entry (a concept that backs it); asked in rank order, only as far as listed.
+      if (this.knowledgeGraph.backingConcepts(concept.id).every(onlyHere)) newConcepts.push({ ...concept });
+    }
     const structure = this.latestStructure(scope, vectors.index);
     if (!structure) this.drawInBackground(scope, vectors.index);
     return { newConcepts, cluster: structure ? this.clusterRef(structure, clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, new Set()), scope) : null };
