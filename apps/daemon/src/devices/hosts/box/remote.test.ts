@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { BOX_TOOLS_LOCK } from "../../toolchain/npm-tools.ts";
 import { DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
 import { localBoxConnection } from "../../../boxes/testing.ts";
 import {
@@ -71,8 +72,11 @@ describe("box device host remote commands", () => {
   });
 
   it("installs exactly the pinned tools", () => {
-    for (const [name, version] of Object.entries(DEVICE_TOOL_VERSIONS)) assert.ok(INSTALL_TOOLS_SCRIPT.includes(`'${name}@${version}'`));
+    // From the shipped lockfile only, with no lifecycle script (writeBoxToolLocks puts it there).
     assert.ok(INSTALL_TOOLS_SCRIPT.includes('cd "$TOOLS"'));
+    assert.ok(INSTALL_TOOLS_SCRIPT.includes("npm ci --ignore-scripts"));
+    assert.ok(!/npm install/.test(INSTALL_TOOLS_SCRIPT));
+    for (const [name, version] of Object.entries(DEVICE_TOOL_VERSIONS)) assert.ok(BOX_TOOLS_LOCK!.packageLock.includes(`"node_modules/${name}": {\n      "version": "${version}"`));
     assert.equal(installedToolVersion('{"name":"agent-device","version":"0.21.31"}'), "0.21.31");
     assert.equal(installedToolVersion("nope"), null);
   });

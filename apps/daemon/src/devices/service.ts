@@ -282,7 +282,8 @@ export class DeviceService implements DeviceToolsPort {
   }
 
   /** Stop: cancel setups and opens, stop the factories (devices keep running), flush the stores. */
-  async stop(): Promise<void> {
+  /** `teardown`: the plugin was turned off (factories stop what their hosts run); absent: shutdown (devices keep running). */
+  async stop(options: { teardown?: boolean } = {}): Promise<void> {
     this.stopping = true;
     this.running = false;
     if (this.sweepTimer) clearInterval(this.sweepTimer);
@@ -296,7 +297,7 @@ export class DeviceService implements DeviceToolsPort {
     this.waitingOpens.clear();
     for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
     for (const factory of this.deps.factories) {
-      await factory.stop().catch((error) => this.logger.warn(`[devices] the ${factory.kind} host factory failed to stop`, errorText(error)));
+      await factory.stop(options).catch((error) => this.logger.warn(`[devices] the ${factory.kind} host factory failed to stop`, errorText(error)));
     }
     this.hosts.clear();
     await this.flush();

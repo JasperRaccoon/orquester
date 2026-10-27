@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { deviceProfile } from "@orquester/api";
 
-import { AVD_HARDWARE, avdConfigHash, avdHardware, avdName, avdScreen, hasAvdPlaceholders, parseIni, patchAvdConfig } from "./avd-config.ts";
+import { AVD_HARDWARE, avdConfigHash, avdHardware, avdName, avdScreen, cutoutSpecInDp, hasAvdPlaceholders, parseIni, patchAvdConfig } from "./avd-config.ts";
 
 // What avdmanager 22 writes for pixel_fold (abridged), placeholders included.
 const FOLD = `PlayStore.enabled=no
@@ -87,7 +87,26 @@ test("hardware: every Android profile has a tuned framebuffer of its real aspect
   const flip = AVD_HARDWARE["galaxy-z-flip8"]!;
   assert.ok(Math.abs(flip.height / flip.width - 2520 / 1080) < 0.01);
   assert.equal(avdName("galaxy-z-fold8"), "orq-galaxy-z-fold8");
-  assert.deepEqual(avdScreen(AVD_HARDWARE["pixel-9"]!), { width: 360, height: 640, scale: 2 });
+  assert.deepEqual(avdScreen(AVD_HARDWARE["pixel-9"]!), { width: 411, height: 923, scale: 1.75 });
+  // The real aspect and dp size: Pixel 9 1080×2424 @420, Pixel Tablet 2560×1600 @320 (landscape-native).
+  const p9 = AVD_HARDWARE["pixel-9"]!;
+  assert.ok(Math.abs(p9.height / p9.width - 2424 / 1080) < 0.002);
+  assert.ok(Math.abs(p9.width / (p9.density / 160) - 1080 / (420 / 160)) < 1);
+  const tablet = AVD_HARDWARE["pixel-tablet"]!;
+  assert.equal(tablet.width / tablet.height, 2560 / 1600);
+  assert.equal(tablet.width / (tablet.density / 160), 2560 / 2);
   assert.deepEqual(avdHardware({ id: "unknown", avdDevice: "pixel_7" }), { device: "pixel_7", width: 720, height: 1280, density: 320 });
   assert.notEqual(avdConfigHash("pixel-9", AVD_HARDWARE["pixel-9"]!, "a"), avdConfigHash("pixel-9", { ...AVD_HARDWARE["pixel-9"]!, density: 300 }, "a"));
+});
+
+test("cutout: the system image's pixel spec becomes dp (lengths only; arc flags and markers kept)", () => {
+  // Pixel 9's emulation overlay (real panel 1080 px @420): the hole centred at x 539.5, y 86.5, r 42.
+  const dp = cutoutSpecInDp("m 581.5,86.5 a 42,42 0 0 0 -84,0 42,42 0 0 0 84,0 z @left", 420)!;
+  assert.equal(dp, "m 221.524 32.952 a 16 16 0 0 0 -32 0 16 16 0 0 0 32 0 z @left @dp");
+  // At 720 px @280 (×1.75) the hole's centre is 205.5 dp × 1.75 ≈ 360 px: the middle of 720.
+  assert.ok(Math.abs((221.524 - 16) * 1.75 - 360) < 1);
+  // Pixel Fold's large-arc flag 1 is kept.
+  assert.equal(cutoutSpecInDp("M 505,61 a 35,35 0 1 0 70,0 35,35 0 1 0 -70,0 Z @left", 420), "M 192.381 23.238 a 13.333 13.333 0 1 0 26.667 0 13.333 13.333 0 1 0 -26.667 0 Z @left @dp");
+  assert.equal(cutoutSpecInDp("M 0,0 L 1,1 @dp", 420), null);
+  assert.equal(cutoutSpecInDp("", 420), null);
 });

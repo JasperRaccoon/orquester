@@ -18,14 +18,11 @@
  * (0600), where this reads it. It is never in argv, logs, or anything returned to a client.
  */
 
-import { spawn } from "node:child_process";
-import { closeSync, openSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { isPortFree, pickFreePort } from "./emulator.ts";
-import { delay, descendantsOf, isProcessAlive, listProcStats, processMatches, readEstablishedOnPort, signalGroup, waitForExit } from "./procs.ts";
+import { type DeviceExecutor, LOCAL_EXECUTOR } from "./executor.ts";
+import { delay, descendantsOf, establishedOnPort, isProcessAlive, processMatches, waitForExit } from "./procs.ts";
 import type { HubRecord } from "./state.ts";
 
 export const HUB_LAUNCHER = fileURLToPath(new URL("./hub-launcher.mjs", import.meta.url));
@@ -54,6 +51,21 @@ export interface HubDeps {
   logger: Pick<Console, "info" | "warn" | "error">;
   /** Tests: time and polling. */
   now?: () => number;
+  /** Where the hub runs (absent: this machine). Paths above are its paths. */
+  executor?: DeviceExecutor;
+  /** The launcher script where it runs (absent: {@link HUB_LAUNCHER}; a box host uploads it). */
+  launcher?: string;
+  /**
+   * How this daemon reaches the hub's port (absent: `http://127.0.0.1:<port>`); a box host forwards
+   * it over the box link. `close` ends the forward when the hub goes.
+   */
+  endpoint?: (port: number) => Promise<HubEndpoint>;
+}
+
+/** The hub's port as this daemon reaches it. */
+export interface HubEndpoint {
+  origin: string;
+  close(): Promise<void>;
 }
 
 /** The hub's arguments after the CLI path. */
@@ -103,9 +115,15 @@ export class HubSupervisor {
   private openViewers: number | null = null;
   private lastViewerLeftAt: number | null = null;
   private readonly now: () => number;
+  private readonly x: DeviceExecutor;
+  private readonly launcher: string;
+  /** The way to the hub's port (forwarded for a box). */
+  private endpointValue: (HubEndpoint & { port: number }) | null = null;
 
   constructor(private readonly deps: HubDeps) {
     this.now = deps.now ?? Date.now;
+    this.x = deps.executor ?? LOCAL_EXECUTOR;
+    this.launcher = deps.launcher ?? HUB_LAUNCHER;
   }
 
   status(): HubStatus {
@@ -117,7 +135,12 @@ export class HubSupervisor {
   }
 
   origin(): string | null {
-    return this.statusValue === "running" && this.record ? `http://127.0.0.1:${this.record.port}` : null;
+    return this.statusValue === "running" && this.record && this.endpointValue?.port === this.record.port ? this.endpointValue.origin : null;
+  }
+
+  /** The recorded hub (pid, port), while one is known. */
+  current(): HubRecord | null {
+    return this.record;
   }
 
   token(): string | null {
@@ -144,7 +167,7 @@ export class HubSupervisor {
 
   /** Reattach to a recorded hub that is still ours and healthy; false when it is not. */
   async attach(record: HubRecord): Promise<boolean> {
-    if (!(await processMatches(record.pid, this.deps.marker, [HUB_LAUNCHER]))) return false;
+    if (!(await processMatches(record.pid, this.deps.marker, [this.launcher], this.x))) return false;
     const token = await this.readToken(record);
     if (!token || !(await this.healthy(record.port))) return false;
     this.record = record;
@@ -159,7 +182,7 @@ export class HubSupervisor {
   /** Start (or keep) the hub; resolves once it answers. */
   start(): Promise<void> {
     return this.serialize(async () => {
-      if (this.statusValue === "running" && this.record && (await isProcessAlive(this.record.pid))) {
+      if (this.statusValue === "running" && this.record && (await isProcessAlive(this.record.pid, this.x))) {
         this.supervise();
         return;
       }
@@ -184,6 +207,20 @@ export class HubSupervisor {
     this.supervising = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+  }
+
+  /**
+   * Forget the hub without stopping it (a box link dropped: it keeps running there and `attach`
+   * finds it again); the way to its port closes.
+   */
+  async forget(): Promise<void> {
+    this.detach();
+    await this.serialize(async () => {
+      this.record = null;
+      this.sessionToken = null;
+      await this.closeEndpoint();
+      this.setStatus("stopped", null);
+    });
   }
 
   private serialize(fn: () => Promise<void>): Promise<void> {
@@ -217,7 +254,7 @@ export class HubSupervisor {
     let next = HUB_TICK_MS;
     try {
       if (this.statusValue === "running" && this.record) {
-        const alive = await isProcessAlive(this.record.pid);
+        const alive = await isProcessAlive(this.record.pid, this.x);
         if (!alive || !(await this.healthy(this.record.port))) {
           this.deps.logger.warn(`[devices] the device hub ${alive ? "stopped answering" : "exited"}; restarting it`);
           if (alive) await this.kill();
@@ -247,8 +284,8 @@ export class HubSupervisor {
 
   private async maybeRecycle(): Promise<void> {
     const record = this.record!;
-    const captureChildren = descendantsOf(record.pid, await listProcStats()).length;
-    const connections = await readEstablishedOnPort(record.port);
+    const captureChildren = descendantsOf(record.pid, await this.x.procStats()).length;
+    const connections = establishedOnPort(await this.x.tcpRows(), record.port);
     const now = this.now();
     if (captureChildren === 0 || connections > 0) this.idleSince = null;
     else this.idleSince ??= now;
@@ -269,18 +306,11 @@ export class HubSupervisor {
       throw new Error("expo-device-hub is not installed.");
     }
     this.setStatus("starting", null);
-    const port = preferredPort !== undefined && (await isPortFree(preferredPort)) ? preferredPort : await pickFreePort();
-    const log = openSync(this.deps.logPath, "a", 0o600);
-    let pid: number | undefined;
+    const port = preferredPort !== undefined && (await this.x.isPortFree(preferredPort)) ? preferredPort : await this.x.pickFreePort();
+    let pid: number;
     try {
-      const child = spawn(this.deps.nodePath, [HUB_LAUNCHER, cli, ...hubArgs(port)], { env: this.deps.env, cwd: this.deps.env.HOME, detached: true, stdio: ["ignore", log, log] });
-      child.on("error", () => undefined);
-      child.unref();
-      pid = child.pid;
-    } finally {
-      closeSync(log);
-    }
-    if (pid === undefined) {
+      pid = await this.x.spawnDetached(this.deps.nodePath, [this.launcher, cli, ...hubArgs(port)], { env: this.deps.env, logPath: this.deps.logPath });
+    } catch {
       this.fail("The device hub did not start.");
       throw new Error("The device hub did not start.");
     }
@@ -288,7 +318,7 @@ export class HubSupervisor {
     await this.deps.persist(record);
     const deadline = Date.now() + HUB_READY_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      if (!(await isProcessAlive(pid))) break;
+      if (!(await isProcessAlive(pid, this.x))) break;
       const token = await this.readToken(record);
       if (token && (await this.healthy(port))) {
         this.record = record;
@@ -304,7 +334,8 @@ export class HubSupervisor {
       }
       await delay(250);
     }
-    signalGroup(pid, pid, "SIGKILL");
+    await this.x.signal(pid, pid, "SIGKILL").catch(() => false);
+    await this.closeEndpoint();
     await this.deps.persist(null).catch(() => undefined);
     const message = `The device hub did not start (see ${this.deps.logPath}).`;
     this.fail(message);
@@ -316,28 +347,47 @@ export class HubSupervisor {
     this.record = null;
     this.sessionToken = null;
     if (!record) return;
-    if (await processMatches(record.pid, this.deps.marker)) {
-      signalGroup(record.pid, record.pid, "SIGTERM");
-      if (!(await waitForExit(record.pid, 10_000))) {
-        signalGroup(record.pid, record.pid, "SIGKILL");
-        await waitForExit(record.pid, 5_000);
+    if (await processMatches(record.pid, this.deps.marker, [], this.x)) {
+      await this.x.signal(record.pid, record.pid, "SIGTERM");
+      if (!(await waitForExit(record.pid, 10_000, 200, this.x))) {
+        await this.x.signal(record.pid, record.pid, "SIGKILL");
+        await waitForExit(record.pid, 5_000, 200, this.x);
       }
     }
+    await this.closeEndpoint();
     await this.deps.persist(null).catch(() => undefined);
   }
 
   private async readToken(record: HubRecord): Promise<string | null> {
     try {
-      const state = JSON.parse(await readFile(join(this.deps.hubStateDir, `server-${record.port}.json`), "utf8")) as { pid?: unknown; token?: unknown };
+      const text = await this.x.readText(join(this.deps.hubStateDir, `server-${record.port}.json`));
+      if (text === null) return null;
+      const state = JSON.parse(text) as { pid?: unknown; token?: unknown };
       return state.pid === record.pid && typeof state.token === "string" && state.token.length > 0 ? state.token : null;
     } catch {
       return null;
     }
   }
 
+  /** The way to `port` (opened once per port; a box forwards it). */
+  private async endpointFor(port: number): Promise<string> {
+    if (this.endpointValue?.port === port) return this.endpointValue.origin;
+    await this.closeEndpoint();
+    const opened = this.deps.endpoint ? await this.deps.endpoint(port) : { origin: `http://127.0.0.1:${port}`, close: async () => undefined };
+    this.endpointValue = { ...opened, port };
+    return opened.origin;
+  }
+
+  private async closeEndpoint(): Promise<void> {
+    const endpoint = this.endpointValue;
+    this.endpointValue = null;
+    await endpoint?.close().catch(() => undefined);
+  }
+
   private async healthy(port: number): Promise<boolean> {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(2_000) });
+      const origin = await this.endpointFor(port);
+      const response = await fetch(`${origin}/healthz`, { signal: AbortSignal.timeout(2_000) });
       await response.arrayBuffer().catch(() => undefined);
       return response.ok;
     } catch {

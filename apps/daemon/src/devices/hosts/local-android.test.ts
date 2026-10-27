@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 
-import { ANDROID_SYSTEM_IMAGE, DEFAULT_DEVICES_SETTINGS, type DevicesSettings } from "@orquester/api";
+import { ANDROID_SYSTEM_IMAGE, DEFAULT_DEVICES_SETTINGS, deviceProfile, type DevicesSettings } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
 import type { ExecFn } from "../android/exec.ts";
@@ -186,6 +186,33 @@ test("restart: reattach to an emulator a live lease holds, reap one no lease hol
       assert.equal(host.capacity().used, 0);
     } finally {
       for (const child of [kept, orphan, stray, foreign]) child.kill("SIGKILL");
+    }
+  });
+});
+
+test("teardown (plugin off): every emulator stops, then the hub, agent-device and the adb server; no boot starts after", async () => {
+  await withHost({}, async ({ appDir, host, leases, emulators, exec }) => {
+    const avd = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null }).layout;
+    const kept = await fakeEmulator(appDir, avd.avd);
+    emulators.set("emulator-5586", kept);
+    try {
+      await mkdir(dirname(avd.stateFile), { recursive: true });
+      await writeHostState(avd.stateFile, {
+        version: 1,
+        hub: null,
+        emulators: [{ serial: "emulator-5586", pid: kept.pid!, pgid: kept.pid!, consolePort: 5586, grpcPort: 8570, profile: "pixel-9", avd: "orq-pixel-9", leaseId: "live", golden: false, startedAt: "", logPath: "" }],
+        extra: {}
+      });
+      leases.push(lease("live", "emulator-5586"));
+      await host.reattach();
+      assert.equal(host.capacity().used, 1);
+      await host.teardown();
+      assert.equal(await waitForExit(kept.pid!, 5_000), true, "the leased emulator was stopped too");
+      assert.ok(exec.some((call) => call[0] === "adb" && call[1] === "kill-server"), "the adb server stops");
+      assert.deepEqual((await readHostState(avd.stateFile)).emulators, []);
+      await assert.rejects(host.boot({ leaseId: "late", profile: deviceProfile("pixel-9")!, fresh: true }, new AbortController().signal), /being turned off/);
+    } finally {
+      kept.kill("SIGKILL");
     }
   });
 });

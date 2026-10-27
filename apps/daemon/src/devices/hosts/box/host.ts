@@ -79,6 +79,7 @@ import {
   parseProbe,
   remoteEnv,
   remoteLayout,
+  writeBoxToolLocks,
   type RemoteLayout,
   type RemoteProbe,
   type RemoteResult
@@ -427,6 +428,7 @@ export class BoxDeviceHost implements DeviceHost {
         this.step("tool:expo-device-hub", "Installing the device tools", "running", 15);
         this.setDetail("Installing the device tools…");
         const env = { ...remoteEnv(probe), TOOLS: layout.tools };
+        await writeBoxToolLocks(link, layout.tools);
         const result = await execRemote(
           link,
           { command: "/bin/sh", args: ["-c", INSTALL_TOOLS_SCRIPT], env },

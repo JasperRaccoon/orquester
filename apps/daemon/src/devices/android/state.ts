@@ -23,6 +23,8 @@ export interface EmulatorRecord {
   pid: number;
   /** The launcher's process group. */
   pgid: number | null;
+  /** The QEMU process's start time (`/proc/<pid>/stat` field 22): a reused pid never matches it. Absent in older records. */
+  startTicks?: number;
   consolePort: number;
   grpcPort: number;
   profile: string;
@@ -58,6 +60,7 @@ function readEmulator(value: unknown): EmulatorRecord | null {
     serial: value.serial,
     pid: value.pid,
     pgid: posInt(value.pgid) ? value.pgid : null,
+    ...(posInt(value.startTicks) ? { startTicks: value.startTicks } : {}),
     consolePort: value.consolePort,
     grpcPort: value.grpcPort,
     profile: value.profile,

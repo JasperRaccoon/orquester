@@ -45,3 +45,8 @@ test("processMatches: a live process is ours only with the appdir marker in its 
   assert.equal(await waitForExit(child.pid!, 5_000), true);
   assert.equal(await isProcessAlive(child.pid!), false);
 });
+
+test("stat: the start time (field 22) when the line has it", () => {
+  const line = "4242 (qemu-system-x86) S 4240 4240 4240 0 -1 4194560 1 0 0 0 1500 250 0 0 20 0 9 0 123456 8000000 900";
+  assert.equal(parseProcStat(line)?.startTicks, 123456);
+});

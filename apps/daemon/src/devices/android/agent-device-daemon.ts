@@ -13,6 +13,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { type ExecFn, lastLine } from "./exec.ts";
+import { type DeviceExecutor, LOCAL_EXECUTOR } from "./executor.ts";
 
 export interface AgentDeviceEndpoint {
   baseUrl: string;
@@ -25,9 +26,18 @@ export interface AgentDeviceDaemonDeps {
   /** The installed agent-device entry module, or null. */
   entry: () => string | null;
   env: NodeJS.ProcessEnv;
+  /** Its state dir where it runs (`daemon.json`). */
   stateDir: string;
+  /** The `--config` file on this machine (always local: the agent-device CLI runs here). */
   configPath: string;
   logger: Pick<Console, "info" | "warn" | "error">;
+  /** Where the agent-device daemon runs (absent: this machine); `exec` must run there too. */
+  executor?: DeviceExecutor;
+  /**
+   * How this daemon reaches the agent-device daemon's port (absent: `http://127.0.0.1:<port>`); a
+   * box host forwards it. Called again when the port changes.
+   */
+  endpoint?: (port: number) => Promise<string>;
 }
 
 /** `daemon.json` → the endpoint (HTTP mode: `httpPort`). */
@@ -51,8 +61,13 @@ export class AgentDeviceDaemon {
   private endpoint: AgentDeviceEndpoint | null = null;
   private starting: Promise<void> | null = null;
   private lastError: string | null = null;
+  private readonly x: DeviceExecutor;
+  /** The reached base URL of the daemon's port. */
+  private reached: { port: number; baseUrl: string } | null = null;
 
-  constructor(private readonly deps: AgentDeviceDaemonDeps) {}
+  constructor(private readonly deps: AgentDeviceDaemonDeps) {
+    this.x = deps.executor ?? LOCAL_EXECUTOR;
+  }
 
   /** The config file while the daemon is known to run. */
   configPath(): string | null {
@@ -79,9 +94,16 @@ export class AgentDeviceDaemon {
     return false;
   }
 
+  /** Forget the daemon without stopping it (a box link dropped; the next `ensure` finds it again). */
+  forget(): void {
+    this.endpoint = null;
+    this.reached = null;
+  }
+
   /** `agent-device daemon stop` for this state dir; the config file goes. */
   async stop(): Promise<void> {
     this.endpoint = null;
+    this.reached = null;
     const entry = this.deps.entry();
     if (entry) {
       await this.deps
@@ -102,7 +124,7 @@ export class AgentDeviceDaemon {
       this.lastError = "agent-device is not installed.";
       throw new Error(this.lastError);
     }
-    await mkdir(this.deps.stateDir, { recursive: true, mode: 0o700 });
+    await this.x.mkdir(this.deps.stateDir, { mode: 0o700 });
     const result = await this.deps.exec(this.deps.nodePath, [entry, "devices", "--json"], {
       env: this.deps.env,
       timeoutMs: 90_000,
@@ -131,8 +153,13 @@ export class AgentDeviceDaemon {
     this.lastError = null;
   }
 
+  /** `daemon.json` where it runs, its port mapped to how this daemon reaches it. */
   private async readInfo(): Promise<AgentDeviceEndpoint | null> {
-    return parseDaemonInfo(await readFile(join(this.deps.stateDir, "daemon.json"), "utf8").catch(() => ""));
+    const info = parseDaemonInfo((await this.x.readText(join(this.deps.stateDir, "daemon.json"))) ?? "");
+    if (!info || !this.deps.endpoint) return info;
+    const port = Number(new URL(info.baseUrl).port);
+    if (this.reached?.port !== port) this.reached = { port, baseUrl: await this.deps.endpoint(port) };
+    return { baseUrl: this.reached.baseUrl, token: info.token };
   }
 
   private async healthy(endpoint: AgentDeviceEndpoint): Promise<boolean> {

@@ -58,7 +58,7 @@ function fakeSdk(sdk: string, log: { command: string; args: string[]; options?: 
     if (name === "avdmanager") {
       const path = args[args.indexOf("--path") + 1]!;
       const avdName = args[args.indexOf("--name") + 1]!;
-      await touch(join(path, "config.ini"), "avd.id=<build>\navd.name=<build>\ndisk.dataPartition.path=<temp>\nhw.lcd.width=1080\nhw.lcd.height=2424\nhw.gpu.mode=auto\n");
+      await touch(join(path, "config.ini"), "avd.id=<build>\navd.name=<build>\ndisk.dataPartition.path=<temp>\nhw.lcd.width=1080\nhw.lcd.height=2424\nhw.lcd.density=420\nhw.gpu.mode=auto\n");
       await touch(join(dirname(path), `${avdName}.ini`), `path=${path}\n`);
       return { exitCode: 0, stdout: "", stderr: "" };
     }
@@ -139,6 +139,13 @@ test("android: an AVD is created per profile, its config patched; the private en
     await toolchain.ensureAvd("galaxy-s26", new AbortController().signal, { force: true });
     assert.equal(log.length, before + 1);
     await assert.rejects(toolchain.ensureAvd("iphone-17-pro", new AbortController().signal), /not an Android profile/);
+    // The device definition's density is kept (the system image's cutout is in its pixels).
+    const markerPath = join(toolchain.layout.avd, "orq-galaxy-s26.avd", "orq-avd.json");
+    const marker = JSON.parse(await readFile(markerPath, "utf8")) as { configHash: string; deviceDensity?: number };
+    assert.equal(marker.deviceDensity, 420);
+    // Made for an older config: outdated (made again on the next open), not missing.
+    await writeFile(markerPath, JSON.stringify({ ...marker, configHash: "old" }));
+    assert.deepEqual(await toolchain.avdStatus("galaxy-s26"), { created: false, snapshot: false, outdated: true });
   });
 });
 
