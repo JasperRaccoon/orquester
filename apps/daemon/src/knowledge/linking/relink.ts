@@ -8,10 +8,17 @@
  * - Only while no save waits: a run with pending entries links those (plus the batch in flux, below);
  *   a run with none takes up to {@link RELINK_BATCH_MAX} backlog entries (`update` mode). Re-linked
  *   entries are not new content: they never count toward schema growth.
- * - Only while neighbour context can be built (an embedder is loaded): re-linking without it would
- *   buy nothing.
- * - The order: the batch in flux (`prepared`), then gap-queued entries, then outdated ones, oldest
- *   save first.
+ * - Only while neighbour context can be built (an embedder is loaded), and only entries with a
+ *   vector (no vector, no neighbours: re-linking it would buy nothing — a model install or a backfill
+ *   in progress never spends tokens on context-less re-links).
+ * - Once per entry, linking-context version and content hash (`relink.attempts`): an entry re-linked
+ *   at the current version and hash is not taken again even if its version could not be recorded
+ *   (no context block for it, a write that failed, a file that does not read), so nothing loops.
+ * - A re-link that failed to extract the entry (myKG's `failed_chunks.json`: it is out of the graph
+ *   now) is tried again up to {@link RELINK_RETRIES_MAX} more times at that version and hash, then
+ *   given up on (the run's `lastError` names it; an edit tries again).
+ * - The order: the batch in flux (`prepared`), then failed re-links due a retry, then gap-queued
+ *   entries, then outdated ones, oldest save first.
  *
  * myKG would not re-extract an unchanged entry, and would answer it from its cache if it did, so
  * before the child of a run with a batch is spawned ({@link prepareRelinkBatch}):
@@ -32,7 +39,7 @@
  */
 
 import type { KnowledgeEntryMeta } from "@orquester/api";
-import type { KnowledgeRelinkStateRecord } from "@orquester/config";
+import type { KnowledgeRelinkAttemptRecord, KnowledgeRelinkStateRecord } from "@orquester/config";
 import type { KnowledgeVectorIndex } from "../ports.ts";
 import { findLinkGaps } from "../search/gaps.ts";
 import { documentOf, LINK_CONTEXT_VERSION } from "./context.ts";
@@ -45,6 +52,8 @@ export { LINK_CONTEXT_VERSION };
 export const RELINK_BATCH_MAX = 25;
 /** Link-gap pairs considered after a graph load, closest first. */
 export const LINK_GAPS_MAX = 200;
+/** Re-links of an entry whose re-link failed to extract it, at one version and content hash, after the first. */
+export const RELINK_RETRIES_MAX = 2;
 
 export interface RelinkStore {
   listMeta(): readonly KnowledgeEntryMeta[];
@@ -57,25 +66,63 @@ export function isOutdated(store: RelinkStore, meta: KnowledgeEntryMeta): boolea
   return meta.linkState === "linked" && (store.linkContext(meta.id) ?? 0) < LINK_CONTEXT_VERSION;
 }
 
+/** The entry's last re-link, when it was at the current linking-context version and its current content. */
+function attemptNow(relink: KnowledgeRelinkStateRecord, meta: Pick<KnowledgeEntryMeta, "id" | "contentHash">): KnowledgeRelinkAttemptRecord | null {
+  const attempt = Object.prototype.hasOwnProperty.call(relink.attempts, meta.id) ? relink.attempts[meta.id]! : null;
+  return attempt && attempt.version === LINK_CONTEXT_VERSION && attempt.contentHash === meta.contentHash ? attempt : null;
+}
+
+/** A failed entry whose re-link (at this version and content) failed to extract it and is due another try. */
+export function relinkRetryDue(relink: KnowledgeRelinkStateRecord, meta: KnowledgeEntryMeta): boolean {
+  const attempt = attemptNow(relink, meta);
+  return meta.linkState === "failed" && attempt !== null && attempt.failures > 0 && attempt.failures <= RELINK_RETRIES_MAX;
+}
+
 /**
  * Entries still to re-link, in the order they are taken (see the module header). `exclude`: the
  * pending entries (a save's run links them anyway). `candidates`: whether new entries may join
- * (false while context cannot be built: only the batch in flux is kept).
+ * (false while context cannot be built: only the batch in flux is kept). `hasVector`: whether the
+ * entry has a vector from the current model (one without is never taken).
  */
-export function relinkBacklog(relink: KnowledgeRelinkStateRecord, store: RelinkStore, exclude: ReadonlySet<string>, candidates: boolean): string[] {
+export function relinkBacklog(
+  relink: KnowledgeRelinkStateRecord,
+  store: RelinkStore,
+  exclude: ReadonlySet<string>,
+  candidates: boolean,
+  hasVector: (id: string) => boolean = () => true
+): string[] {
   const out = new Set<string>();
   for (const id of relink.prepared) if (store.getMeta(id) && !exclude.has(id)) out.add(id);
   if (!candidates) return [...out];
+  const bySave = (a: KnowledgeEntryMeta, b: KnowledgeEntryMeta): number => (a.savedAt < b.savedAt ? -1 : a.savedAt > b.savedAt ? 1 : a.id < b.id ? -1 : 1);
+  const metas = store.listMeta().filter((meta) => !exclude.has(meta.id) && hasVector(meta.id));
+  for (const meta of metas.filter((m) => relinkRetryDue(relink, m)).sort(bySave)) out.add(meta.id);
   for (const id of relink.gapQueue) {
     const meta = store.getMeta(id);
-    if (meta && meta.linkState === "linked" && !exclude.has(id)) out.add(id);
+    if (meta && meta.linkState === "linked" && !exclude.has(id) && hasVector(id)) out.add(id);
   }
-  const outdated = store
-    .listMeta()
-    .filter((meta) => !exclude.has(meta.id) && isOutdated(store, meta))
-    .sort((a, b) => (a.savedAt < b.savedAt ? -1 : a.savedAt > b.savedAt ? 1 : a.id < b.id ? -1 : 1));
-  for (const meta of outdated) out.add(meta.id);
+  // Re-linked at this version and content already: its version could not be recorded (no context
+  // block for it, or the write failed); taking it again would only loop.
+  for (const meta of metas.filter((m) => isOutdated(store, m) && attemptNow(relink, m) === null).sort(bySave)) out.add(meta.id);
   return [...out];
+}
+
+/**
+ * Records the re-link of each of a successful run's batch entries that got a verdict (`failed`: its
+ * extraction failed) at the current version and its content hash then. Answers the entries given up
+ * on now (failed past {@link RELINK_RETRIES_MAX} retries).
+ */
+export function recordRelinkAttempts(relink: KnowledgeRelinkStateRecord, settled: readonly { id: string; contentHash: string; failed: boolean }[]): string[] {
+  const givenUp: string[] = [];
+  for (const { id, contentHash, failed } of settled) {
+    const before = attemptNow(relink, { id, contentHash });
+    const failures = failed ? (before?.failures ?? 0) + 1 : 0;
+    const record: KnowledgeRelinkAttemptRecord = { version: LINK_CONTEXT_VERSION, contentHash, failures };
+    // `defineProperty`, not assignment: an id such as `__proto__` stays an own key.
+    Object.defineProperty(relink.attempts, id, { value: record, enumerable: true, writable: true, configurable: true });
+    if (failures === RELINK_RETRIES_MAX + 1) givenUp.push(id);
+  }
+  return givenUp;
 }
 
 /** The next run's batch: everything in flux, then the backlog up to {@link RELINK_BATCH_MAX}. */
@@ -107,6 +154,7 @@ export function settleRelink(relink: KnowledgeRelinkStateRecord, settled: readon
     const [a, b] = key.split(" ");
     if (!a || !b || !exists(a) || !exists(b)) delete relink.gapPairs[key];
   }
+  for (const id of Object.keys(relink.attempts)) if (!exists(id)) delete relink.attempts[id];
 }
 
 /** Nothing is left: the next wave counts from zero. */

@@ -263,17 +263,24 @@ export class EntryDocumentLocator {
   }
 }
 
-/** The broker's `contextFor` for one run: the block for Pass 2 tasks whose entry is found, else null. */
+/**
+ * The broker's `contextFor` for one run: the block for Pass 2 tasks whose entry is found, else null.
+ * `onContext`: called with each entry a task was shown a block for (only those record
+ * {@link LINK_CONTEXT_VERSION} when the run links them).
+ */
 export function linkContextProvider(
   store: Pick<KnowledgeStorePort, "listMeta" | "mykgInputDir">,
-  view: KnowledgeLinkGraphView
+  view: KnowledgeLinkGraphView,
+  onContext?: (entryId: string) => void
 ): (envelope: InboxTaskEnvelope) => Promise<string | null> {
   const locator = new EntryDocumentLocator(store);
   // Once per task: a task handed out again (a released lease) gets the same block.
   const blocks = new Map<string, Promise<string | null>>();
   const blockFor = async (envelope: InboxTaskEnvelope): Promise<string | null> => {
     const entryId = await locator.entryOf(envelope.user);
-    return entryId ? neighbourContextBlock(entryId, view) : null;
+    const block = entryId ? neighbourContextBlock(entryId, view) : null;
+    if (entryId && block !== null) onContext?.(entryId);
+    return block;
   };
   return (envelope) => {
     if (!CONTEXT_STEPS.has(envelope.step) || !contextReady(view)) return Promise.resolve(null);

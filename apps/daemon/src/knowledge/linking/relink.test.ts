@@ -13,7 +13,9 @@ import {
   pickRelinkBatch,
   prepareRelinkBatch,
   queueLinkGaps,
+  recordRelinkAttempts,
   RELINK_BATCH_MAX,
+  RELINK_RETRIES_MAX,
   relinkBacklog,
   relinkStatus,
   resetRelinkWave,
@@ -78,6 +80,34 @@ describe("the re-link backlog", () => {
     const relink = { ...emptyKnowledgeRelinkState(), prepared: [ID(8), "ke_gone0000000"], gapQueue: [ID(7), ID(6)] };
     assert.deepEqual(relinkBacklog(relink, s, new Set([ID(1)]), true), [ID(8), ID(7), ID(2), ID(4)]);
     assert.deepEqual(relinkBacklog(relink, s, new Set(), false), [ID(8)], "without context only the batch in flux stays");
+  });
+
+  it("never takes an entry without a vector, nor one already re-linked at this version and content; retries a failed re-link twice", () => {
+    const s = store([{ id: ID(1) }, { id: ID(2) }, { id: ID(3) }, { id: ID(4), linkState: "failed" }, { id: ID(5), linkState: "failed" }]);
+    const relink = emptyKnowledgeRelinkState();
+    const hasVector = (id: string) => id !== ID(3);
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(1), ID(2)], "3 has no vector; failed entries were never re-linked");
+    // 1 linked (its version not saved), 4 failed to extract, 5 failed long ago, not on a re-link.
+    assert.deepEqual(
+      recordRelinkAttempts(relink, [
+        { id: ID(1), contentHash: `hash-${ID(1)}`, failed: false },
+        { id: ID(4), contentHash: `hash-${ID(4)}`, failed: true }
+      ]),
+      []
+    );
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(4), ID(2)], "the failed re-link first; 1 is not taken again");
+    assert.deepEqual(recordRelinkAttempts(relink, [{ id: ID(4), contentHash: `hash-${ID(4)}`, failed: true }]), []);
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(4), ID(2)], "second retry");
+    assert.deepEqual(recordRelinkAttempts(relink, [{ id: ID(4), contentHash: `hash-${ID(4)}`, failed: true }]), [ID(4)], "given up on after the third failure");
+    assert.equal(relink.attempts[ID(4)]?.failures, RELINK_RETRIES_MAX + 1);
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(2)]);
+    // An edit (a new content hash) makes both worth a try again.
+    s.metas.set(ID(1), { ...s.metas.get(ID(1))!, contentHash: "edited" });
+    s.metas.set(ID(4), { ...s.metas.get(ID(4))!, contentHash: "edited", linkState: "linked" });
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true, hasVector), [ID(1), ID(2), ID(4)]);
+    // A deleted entry's record goes when a run settles.
+    settleRelink(relink, [], [], (id) => id !== ID(4));
+    assert.deepEqual(Object.keys(relink.attempts), [ID(1)]);
   });
 
   it("a run takes at most 25, the batch in flux first; a save's run carries only the batch in flux", () => {

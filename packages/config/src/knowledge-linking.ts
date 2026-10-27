@@ -109,7 +109,13 @@ export const knowledgeCurrentRunSchema = z
      * in `entryIds`: not new content, so they never count toward schema growth, and a run that does
      * not succeed leaves them to the re-linker rather than the pending set. Absent: none.
      */
-    relinkEntryIds: z.array(z.string()).optional().catch(undefined)
+    relinkEntryIds: z.array(z.string()).optional().catch(undefined),
+    /**
+     * Entries whose Pass 2 task this run showed with neighbour context (phase 2 spec, "Neighbour
+     * context"), recorded as the tasks are handed out: only these record the linking-context version
+     * when the run links them. Absent: none yet.
+     */
+    contextEntryIds: z.array(z.string()).optional().catch(undefined)
   })
   .passthrough();
 export type KnowledgeCurrentRunRecord = z.infer<typeof knowledgeCurrentRunSchema>;
@@ -124,6 +130,32 @@ export const knowledgePauseRecordSchema = z
   })
   .passthrough();
 export type KnowledgePauseRecord = z.infer<typeof knowledgePauseRecordSchema>;
+
+/**
+ * One entry's last re-link (phase 2 spec, "Automatic re-linking"): at which linking-context version
+ * and content hash, and how many re-links in a row at those failed to extract it.
+ */
+export const knowledgeRelinkAttemptSchema = z
+  .object({
+    version: z.number().int().nonnegative(),
+    contentHash: z.string().min(1),
+    failures: count
+  })
+  .passthrough();
+export type KnowledgeRelinkAttemptRecord = z.infer<typeof knowledgeRelinkAttemptSchema>;
+
+/** Entry id → its last re-link; an entry whose record does not read is dropped (it may be re-linked once more). */
+const relinkAttemptsSchema = z
+  .unknown()
+  .transform((value) => {
+    const out: Record<string, KnowledgeRelinkAttemptRecord> = {};
+    for (const [id, item] of isPlainObject(value) ? Object.entries(value) : []) {
+      const parsed = knowledgeRelinkAttemptSchema.safeParse(item);
+      // `defineProperty`, not assignment: an id such as `__proto__` stays an own key.
+      if (parsed.success) Object.defineProperty(out, id, { value: parsed.data, enumerable: true, writable: true, configurable: true });
+    }
+    return out;
+  });
 
 /**
  * Automatic re-linking (phase 2 spec): what outlives a restart. Which entries still need it is read
@@ -142,13 +174,19 @@ export const knowledgeRelinkStateSchema = z
      * every later update run carries them (myKG re-extracts them anyway) and their answers are never
      * cleared twice, so a resumed or retried run keeps what it already paid for.
      */
-    prepared: z.array(z.string()).catch([])
+    prepared: z.array(z.string()).catch([]),
+    /**
+     * Each re-linked entry's last re-link (absent from older files: none): an entry already re-linked
+     * at the current version and content hash is not taken again (a version that could not be saved
+     * never loops), and one whose re-link failed to extract is retried a bounded number of times.
+     */
+    attempts: relinkAttemptsSchema.default({})
   })
   .passthrough();
 export type KnowledgeRelinkStateRecord = z.infer<typeof knowledgeRelinkStateSchema>;
 
 export function emptyKnowledgeRelinkState(): KnowledgeRelinkStateRecord {
-  return { done: 0, gapQueue: [], gapPairs: {}, prepared: [] };
+  return { done: 0, gapQueue: [], gapPairs: {}, prepared: [], attempts: {} };
 }
 
 export const knowledgeLinkingStateSchema = z
