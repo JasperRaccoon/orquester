@@ -104,6 +104,10 @@ cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx src/devices/android/inte
   Open, or `open_device`'s spend card: one per host).
 - Every unnamed open queues in the pool (`pool-actor.ts`); the lease is recorded only after a
   synchronous capacity re-check on the placed host (no over-placement).
+- The panel's Open (`POST` leases, `openQueued`) never blocks on that queue: while placement waits
+  it answers a stand-in lease (`starting`, `hostId: "pool"`, the wait as its progress, memory
+  only) that becomes the placed lease (same id) or `lost` with the reason; Release withdraws it.
+  `open_device` keeps waiting (`beginOpen`).
 - Leases whose device vanished from the host's `listDevices` (two lists in a row; on host changes
   and every 5 min) become `lost`.
 - Secrets (hub and agent-device tokens) stay in host-side files; never in summaries, events,

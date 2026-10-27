@@ -7,7 +7,7 @@
 import React from "react";
 import { Ban, Flame, HardDrive, Laptop, Loader2, Play, Server, Trash2 } from "lucide-react";
 
-import type { DeviceHostSummary } from "@orquester/api";
+import { DEVICE_QUEUED_HOST_ID, type DeviceHostSummary } from "@orquester/api";
 
 import { formatCountdown, formatHourlyRate, formatUsd } from "../../lib/boxes/format";
 import { cn } from "../../lib/cn";
@@ -163,12 +163,19 @@ export const HostCard: React.FC<HostCardProps> = ({ host, leaseCount, now, api }
   );
 };
 
-/** The header of a group whose host the list does not know (a lease that outlived it). */
+/**
+ * The header of a group whose host the list does not know: devices still waiting for a host (a
+ * panel Open in the pool's queue), or a lease that outlived its host.
+ */
 export const UnknownHostCard: React.FC<{ hostId: string }> = ({ hostId }) => (
-  <div className="flex items-center gap-2 rounded-xl border border-dashed border-neutral-800 px-3 py-2.5 text-xs text-neutral-500">
+  <div className="flex items-center gap-2 rounded-xl border border-dashed border-neutral-800 px-3 py-2.5 text-xs text-neutral-500" data-unknown-host={hostId}>
     <Server size={14} aria-hidden className="shrink-0" />
-    <span className="truncate">
-      Host <span className="font-mono text-neutral-400">{hostId}</span> is no longer listed
-    </span>
+    {hostId === DEVICE_QUEUED_HOST_ID ? (
+      <span className="truncate">Waiting for a device host</span>
+    ) : (
+      <span className="truncate">
+        Host <span className="font-mono text-neutral-400">{hostId}</span> is no longer listed
+      </span>
+    )}
   </div>
 );

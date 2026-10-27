@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { DEFAULT_DEVICES_SETTINGS, DEVICES_POOL_EVENT, type DevicePoolSummary } from "@orquester/api";
+import { DEFAULT_DEVICES_SETTINGS, DEVICE_QUEUED_HOST_ID, DEVICES_LEASE_CLOSED_EVENT, DEVICES_LEASE_EVENT, DEVICES_POOL_EVENT, type DeviceLeaseSummary, type DevicePoolSummary } from "@orquester/api";
 
 import { DeviceError } from "./errors.ts";
 import { DeviceHostRegistry, type DeviceRentalQuote } from "./host.ts";
@@ -87,6 +87,105 @@ test("a full host queues the next open (published with its reason); a release ha
     const opened = await second;
     assert.equal(opened.lease.hostId, "local");
     assert.equal(lastPool(t).queue, 0);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+const panelOpen = (threadId: string) => ({ threadId, platform: "android" as const, openedBy: "user" as const, rentalApproved: true });
+const leaseEvents = (t: TestDeviceService, id: string) =>
+  t.events.filter((event) => event.type === DEVICES_LEASE_EVENT && (event.payload as { lease: DeviceLeaseSummary }).lease.id === id).map((event) => (event.payload as { lease: DeviceLeaseSummary }).lease);
+
+test("the panel's Open answers at once while queued: a stand-in lease (hostId pool) with the wait as progress, then the placed lease with the same id", async () => {
+  const { t } = await start({ pool: { capacityWaitSeconds: 600 } });
+  try {
+    await t.service.toolOpen("t1", { platform: "android" }, signal());
+    // The panel's request does not wait for the queue.
+    const lease = await t.service.openQueued(panelOpen("t2"));
+    assert.equal(lease.state, "starting");
+    assert.equal(lease.hostId, DEVICE_QUEUED_HOST_ID);
+    assert.deepEqual([lease.progress?.step, lease.progress?.label], ["queue", "Waiting for a free Android device"]);
+    assert.equal(lastPool(t).queue, 1);
+    assert.deepEqual(t.service.leaseSummaries({ threadId: "t2" }).map((entry) => entry.id), [lease.id]);
+    assert.equal(t.service.lease(lease.id)?.hostId, DEVICE_QUEUED_HOST_ID);
+    assert.equal(leaseEvents(t, lease.id)[0]?.hostId, DEVICE_QUEUED_HOST_ID, "published for the panel");
+    // A release frees the slot: the stand-in becomes the placed lease (same id) and boots.
+    const ready = t.nextEvent((type, payload) => type === DEVICES_LEASE_EVENT && (payload as { lease: DeviceLeaseSummary }).lease.id === lease.id && (payload as { lease: DeviceLeaseSummary }).lease.state === "ready");
+    await t.service.toolClose("t1", {});
+    await ready;
+    const placed = t.service.lease(lease.id)!;
+    assert.deepEqual([placed.hostId, placed.state, placed.openedBy], ["local", "ready", "user"]);
+    assert.deepEqual(t.service.leaseSummaries({ threadId: "t2" }).map((entry) => entry.id), [lease.id], "no stand-in left");
+    // A placement that needs no wait answers the lease itself.
+    await t.service.toolClose("t2", {}).catch(() => undefined);
+    await t.service.releaseLease(lease.id, "user");
+    const direct = await t.service.openQueued(panelOpen("t3"));
+    assert.equal(direct.hostId, "local");
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a waiting panel Open: Release withdraws it from the queue; a deadline turns it lost with the reason; refusals with no wait still answer as errors", async () => {
+  const clock = { now: T0 };
+  const { t } = await start({ clock, pool: { capacityWaitSeconds: 30 } });
+  try {
+    await t.service.toolOpen("t1", { platform: "android" }, signal());
+    const released = await t.service.openQueued(panelOpen("t2"));
+    assert.equal(lastPool(t).queue, 1);
+    const gone = await t.service.releaseLease(released.id, "user");
+    assert.equal(gone?.state, "released");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(lastPool(t).queue, 0, "its pool request is withdrawn");
+    assert.equal(t.service.lease(released.id), undefined);
+    assert.ok(t.events.some((event) => event.type === DEVICES_LEASE_CLOSED_EVENT && (event.payload as { leaseId: string }).leaseId === released.id));
+
+    const failing = await t.service.openQueued(panelOpen("t3"));
+    const lost = t.nextEvent((type, payload) => type === DEVICES_LEASE_EVENT && (payload as { lease: DeviceLeaseSummary }).lease.id === failing.id && (payload as { lease: DeviceLeaseSummary }).lease.state === "lost");
+    clock.now += 31_000;
+    t.service.pool.tick();
+    const event = (await lost) as { lease: DeviceLeaseSummary };
+    assert.match(event.lease.error ?? "", /in use: /);
+    assert.equal(event.lease.progress, undefined);
+    assert.equal(t.service.lease(failing.id)?.state, "lost", "kept for the panel until released");
+    assert.equal((await t.service.releaseLease(failing.id, "user"))?.state, "released");
+    assert.equal(t.service.lease(failing.id), undefined);
+
+    // The chat's limit refuses at once (no stand-in).
+    await t.service.updateSettings({ maxLeasesPerChat: 1 });
+    await assert.rejects(t.service.openQueued(panelOpen("t1")), (error: DeviceError) => error.code === "DEVICE_LEASE_LIMIT");
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a waiting panel Open shows the rental's own progress, and closing its chat ends the wait", async () => {
+  const box = boxFactory();
+  let finishRental: () => void = () => undefined;
+  box.factory.provision = async (request) => {
+    request.onProgress?.({ step: "rent-host", label: "Renting a Blacksmith Linux host", state: "running" });
+    await new Promise<void>((resolve) => {
+      finishRental = resolve;
+    });
+    const host = box.makeBox("box:r1");
+    box.factory.ctx?.addHost(host);
+    return host;
+  };
+  const { t } = await start({ box, pool: { rentWithoutAsking: true, capacityWaitSeconds: 600 } });
+  try {
+    await t.service.toolOpen("t1", { platform: "android" }, signal());
+    const lease = await t.service.openQueued(panelOpen("t2"));
+    assert.equal(lease.hostId, DEVICE_QUEUED_HOST_ID);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const labels = leaseEvents(t, lease.id).map((entry) => entry.progress?.label);
+    assert.match(labels[0] ?? "", /^Renting a host for Android/, "the queue's own words first");
+    assert.equal(labels.at(-1), "Renting a Blacksmith Linux host", "then the rental's");
+    assert.equal(t.service.lease(lease.id)?.progress?.label, "Renting a Blacksmith Linux host");
+    await t.service.releaseThread("t2");
+    assert.equal(t.service.lease(lease.id), undefined);
+    finishRental();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(t.service.leaseSummaries({ threadId: "t2" }).length, 0, "no lease after the wait ended");
   } finally {
     await t.cleanup();
   }

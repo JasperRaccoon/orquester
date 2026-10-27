@@ -48,7 +48,7 @@ import {
 import type { DevicePoolCacheState } from "@orquester/config";
 
 import { DeviceError, isDeviceError } from "./errors.ts";
-import type { DeviceHost, DeviceHostFactory, DeviceHostRegistry, DeviceRentalCaps, DeviceRentalQuote } from "./host.ts";
+import type { DeviceHost, DeviceHostFactory, DeviceHostProgress, DeviceHostRegistry, DeviceRentalCaps, DeviceRentalQuote } from "./host.ts";
 import {
   decidePool,
   hostCap,
@@ -103,6 +103,14 @@ export interface PoolAcquireRequest {
   rentalApproved: boolean;
 }
 
+/** What a queued request hears while it waits (the panel's booting steps). */
+export interface PoolWaitHooks {
+  /** It waits in the queue (called again when its reason, host or estimate changes). */
+  onQueued?(queued: PoolQueued): void;
+  /** A host the pool rents for it reports progress (`rent-host`, `prepare-host`, …). */
+  onProgress?(progress: DeviceHostProgress): void;
+}
+
 /** A placed request: its host, and the slot held until the lease exists. */
 export interface PoolAcquired {
   host: DeviceHost;
@@ -144,6 +152,7 @@ interface Waiter {
   queued: PoolQueued | null;
   signal: AbortSignal;
   onAbort: () => void;
+  hooks: PoolWaitHooks;
 }
 
 interface PendingRental {
@@ -255,7 +264,7 @@ export class DevicePool {
    * Queue a lease request: resolves once a host has a slot for it (reserved until `done()`), or
    * rejects with a {@link PoolRefusal}.
    */
-  acquire(input: PoolAcquireRequest, signal: AbortSignal): Promise<PoolAcquired> {
+  acquire(input: PoolAcquireRequest, signal: AbortSignal, hooks: PoolWaitHooks = {}): Promise<PoolAcquired> {
     if (!this.started || this.stopped) return Promise.reject(new PoolRefusal("stopped", input.platform));
     if (signal.aborted) return Promise.reject(new PoolRefusal("cancelled", input.platform));
     const request: PoolRequest = { id: this.newId(), requestedAt: this.deps.now(), ...input };
@@ -266,6 +275,7 @@ export class DevicePool {
         reject,
         queued: null,
         signal,
+        hooks,
         onAbort: () => {
           if (!this.waiters.has(request.id)) return;
           this.finish(waiter, new PoolRefusal("cancelled", request.platform));
@@ -731,7 +741,10 @@ export class DevicePool {
     }
     for (const queued of decision.queue) {
       const waiter = this.waiters.get(queued.requestId);
-      if (waiter) waiter.queued = queued;
+      if (!waiter) continue;
+      const before = waiter.queued;
+      waiter.queued = queued;
+      if (before?.reason !== queued.reason || before.hostId !== queued.hostId || before.etaSeconds !== queued.etaSeconds) waiter.hooks.onQueued?.(queued);
     }
     for (const up of decision.scaleUp) {
       // Right after a failed rental, nothing is rented ahead of demand.
@@ -755,8 +768,12 @@ export class DevicePool {
     this.pending.set(rental.id, rental);
     const threadId = requestIds.map((id) => this.waiters.get(id)?.request.threadId).find((id) => id !== undefined) ?? "";
     this.deps.logger.info(`[devices] renting a ${DEVICE_PLATFORM_LABELS[platform]} pool host (${offer.provider} ${offer.size})`);
+    // The rental's progress reaches the requests it is for (their booting steps).
+    const onProgress = (progress: DeviceHostProgress) => {
+      for (const id of requestIds) this.waiters.get(id)?.hooks.onProgress?.(progress);
+    };
     factory
-      .provision({ platform, approved: true, threadId }, this.abort.signal)
+      .provision({ platform, approved: true, threadId, onProgress }, this.abort.signal)
       .then((host) => {
         const state = this.deps.store.state();
         // A factory renting one at a time may answer an earlier rental's host: recorded once.

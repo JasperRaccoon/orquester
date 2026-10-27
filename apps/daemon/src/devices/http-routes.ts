@@ -142,16 +142,16 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
     })
   );
 
-  // The panel's picker: the lease exists (`starting`) when this answers; the boot goes on and its
-  // outcome arrives as `devices.lease` / `devices.lease.closed` events.
+  // The panel's picker: answers with the lease `starting` — placed, or still waiting for a host
+  // (`hostId: "pool"`, never blocking on the pool's queue); the wait, the boot and their outcome
+  // arrive as `devices.lease` / `devices.lease.closed` events.
   app.post(
     deviceRoutes.leases,
     withService(async (service, request, reply) => {
       const parsed = parseDeviceOpenRequest(request.body);
       if (!parsed.ok) throw new DeviceError("INVALID_ARGUMENT", parsed.message);
-      const opening = await service.beginOpen({ ...parsed.value, openedBy: "user", rentalApproved: true }, new AbortController().signal);
-      opening.done.catch(() => undefined);
-      return reply.code(201).send({ lease: opening.lease } satisfies DeviceLeaseResponse);
+      const lease = await service.openQueued({ ...parsed.value, openedBy: "user", rentalApproved: true });
+      return reply.code(201).send({ lease } satisfies DeviceLeaseResponse);
     })
   );
 

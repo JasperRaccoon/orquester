@@ -331,12 +331,20 @@ export interface DeviceLeaseProgress {
   startedAt: string;
 }
 
+/**
+ * The `hostId` of a panel Open still waiting for a host (the pool's queue, a host being rented or
+ * started, a setup): the lease is `starting` with the wait as its progress, and becomes the placed
+ * lease (same id) — or `lost` with the reason when it cannot be placed.
+ */
+export const DEVICE_QUEUED_HOST_ID = "pool";
+
 export interface DeviceLeaseSummary {
   id: string;
   /** `<hostId>/<deviceId>`; null while the host has not assigned the device yet (`starting`). */
   key: string | null;
   /** The chat that holds it (`sessionId`). */
   threadId: string;
+  /** Its host; {@link DEVICE_QUEUED_HOST_ID} while a panel Open waits for one. */
   hostId: string;
   /** Null while `starting` (see `key`). */
   deviceId: string | null;
