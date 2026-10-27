@@ -67,6 +67,12 @@ export interface KnowledgeLinkGraphView {
    * unknown (every link-gap scan runs).
    */
   graphRevision?(): number;
+  /**
+   * Resolves once the vector index has loaded its cache and finished embedding (a start, or a new
+   * embedder): linking looks again then, since re-linking and pair checks need entry vectors.
+   * Absent: linking only looks again on its own changes.
+   */
+  vectorsSettled?(): Promise<void>;
 }
 
 /** Whether neighbour context can be built: an embedder is loaded. */

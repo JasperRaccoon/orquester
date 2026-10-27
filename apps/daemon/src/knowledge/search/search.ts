@@ -242,6 +242,12 @@ export class KnowledgeSearch {
   }
 
   /** Resolves once queued text indexing and embedding have finished (tests, shutdown). */
+  /** Resolves once the entries are loaded and their vectors attached or embedded (linking waits on it). */
+  async vectorsIdle(): Promise<void> {
+    await this.whenReady();
+    await this.vectors.idle();
+  }
+
   async idle(): Promise<void> {
     await this.whenReady();
     await this.textChain.catch(() => undefined);

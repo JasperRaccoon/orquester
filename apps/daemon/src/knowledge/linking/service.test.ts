@@ -1076,6 +1076,40 @@ describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context
     await h.service.stop();
   });
 
+  it("after a restart, re-linking starts once the entry vectors have loaded: no entry change or setting change is needed", async () => {
+    const graph = fakeGraphView();
+    const first = await harness({ extra: { graphView: graph.view } });
+    const ids = [ID(1), ID(2), ID(3)];
+    // Linked before phase 2 (no context version), then the daemon stops.
+    await first.service.start();
+    for (const id of ids) first.service.entriesChanged(await first.store.put(id, `body of ${id}`));
+    await first.clock.advance(20_000);
+    await first.until(ranOk(first, 1));
+    await first.service.stop();
+
+    // The next start: the embedder is there, but the vectors are still loading.
+    let settle!: () => void;
+    const loaded = new Promise<void>((resolve) => (settle = resolve));
+    graph.index.limits = FAKE_THRESHOLDS;
+    const view: KnowledgeLinkGraphView = { ...graph.view, vectorsSettled: () => loaded };
+    const second = await harness({ appdir: first.appdir, store: first.store, extra: { graphView: view } });
+    await second.service.start();
+    assert.equal(second.service.snapshot().relink, null, "no vectors yet: nothing to re-link");
+    await second.clock.advance(60_000);
+    assert.equal(second.service.snapshot().recentRuns.length, 1, "no run while the vectors load");
+
+    // They load (nothing else happens): linking looks again and re-links.
+    graph.ready(ids);
+    settle();
+    await second.until(() => second.service.snapshot().relink !== null);
+    assert.deepEqual(second.service.snapshot().relink, { pending: 3, done: 0, total: 3 });
+    await second.clock.advance(20_000);
+    await second.until(ranOk(second, 2));
+    assert.equal(lastRun(second)!.entries, 3);
+    assert.equal(withContext(second), 3);
+    await second.service.stop();
+  });
+
   it("a waiting save goes first; the plugin switched off pauses re-linking; a restart resumes the batch without asking again what it already answered", async () => {
     const graph = fakeGraphView();
     const first = await harness({ accounts: ["a1"], extra: { graphView: graph.view } });

@@ -159,10 +159,15 @@ const NO_PAIR_CHECKS: KnowledgePairChecksPort = {
  * index of the moment, an entry's concepts, and the concepts a `contradicts` edge joins (unscoped:
  * linking sees every entry).
  */
-export function linkGraphView(store: Pick<KnowledgeStore, "listCollections">, graph: KnowledgeGraph, search: Pick<KnowledgeSearch, "vectorIndex">): KnowledgeLinkGraphView {
+export function linkGraphView(
+  store: Pick<KnowledgeStore, "listCollections">,
+  graph: KnowledgeGraph,
+  search: Pick<KnowledgeSearch, "vectorIndex" | "vectorsIdle">
+): KnowledgeLinkGraphView {
   const everything = () => knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
   return {
     vectors: () => search.vectorIndex(),
+    vectorsSettled: () => search.vectorsIdle(),
     graphRevision: () => graph.contentRevision(),
     conceptsOf: (entryId) => graph.conceptsOfEntry(entryId, everything()),
     // The graph's adjacency, not a concept detail (which also ranks similar concepts): read per concept of every linked entry.

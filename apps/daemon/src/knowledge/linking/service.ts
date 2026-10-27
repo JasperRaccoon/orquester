@@ -290,6 +290,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private orphansClosing: Promise<void> = Promise.resolve();
   /** A graph load since the last pair-check round. */
   private pairRoundDue = false;
+  /** {@link lookAgainOnceVectorsSettle} in flight. */
+  private vectorsWait: Promise<void> | null = null;
   /** What the last link-gap scan read (the vectors' generation and model, the graph's content): an unchanged one is not scanned again. */
   private lastGapScan: string | null = null;
 
@@ -365,7 +367,25 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     } else {
       this.schedule();
     }
+    if (!this.newerNotice) this.lookAgainOnceVectorsSettle();
     this.emitStatus();
+  }
+
+  /**
+   * At a start (and after an embedder change) entry vectors are still loading: re-linking and pair
+   * checks see none and would wait for the next entry change. Look again once they have settled.
+   */
+  private lookAgainOnceVectorsSettle(): void {
+    const settled = this.opts.graphView?.vectorsSettled;
+    if (!settled || this.vectorsWait) return;
+    this.vectorsWait = settled()
+      .catch((error: unknown) => this.opts.logger?.warn("knowledge linking: waiting for entry vectors failed", { error: String(error) }))
+      .then(() => {
+        this.vectorsWait = null;
+        if (this.stopped || this.newerNotice) return;
+        this.schedule();
+        this.emitStatus();
+      });
   }
 
   /**
@@ -598,6 +618,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       return;
     }
     this.schedule();
+    // A new embedder backfills its vectors in the background: look again once they are in.
+    this.lookAgainOnceVectorsSettle();
     this.emitStatus();
   }
 

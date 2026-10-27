@@ -411,7 +411,7 @@ test("linking's graph view: the vector index of the moment, an entry's concepts,
     [edge("e1", "tactic-48h", "tactic-72h", null, "contradicts"), edge("e2", "tactic-72h", "tool-x", null, "uses")]
   );
   let index = new FakeVectorIndex();
-  const view = linkGraphView({ listCollections: () => store.listCollections() }, graph, { vectorIndex: () => index });
+  const view = linkGraphView({ listCollections: () => store.listCollections() }, graph, { vectorIndex: () => index, vectorsIdle: async () => {} });
   assert.equal(view.vectors(), index);
   index = new FakeVectorIndex();
   assert.equal(view.vectors(), index, "read per call: a model change swaps the index");
@@ -433,7 +433,7 @@ test("linking's graph view follows the concept-merge overlay: a merged concept's
     [node("tactic-48h", "Wait 48 hours", ["ke_aaaaaaaaaaaa.md"]), node("tactic-72h", "Wait 72 hours", ["ke_bbbbbbbbbbbb.md"]), node("tactic-3d", "Wait three days", ["ke_cccccccccccc.md"])],
     [edge("e1", "tactic-48h", "tactic-3d", null, "contradicts")]
   );
-  const view = linkGraphView({ listCollections: () => store.listCollections() }, graph, { vectorIndex: () => new FakeVectorIndex() });
+  const view = linkGraphView({ listCollections: () => store.listCollections() }, graph, { vectorIndex: () => new FakeVectorIndex(), vectorsIdle: async () => {} });
   assert.deepEqual(view.conceptsOf("ke_cccccccccccc").map((c) => c.id), ["tactic-3d"]);
   assert.deepEqual(view.contradicting("tactic-72h"), []);
   const merge: ConceptMergeOverlay = { id: "cm_wait", type: "tactic", into: "tactic-72h", merged: ["tactic-3d"], similarity: 0.95, createdAt: "2026-10-27T10:00:00.000Z" };
@@ -460,7 +460,7 @@ test("linking's `contradicting` reads the graph's adjacency, never a concept det
     similarCalls += 1;
     return [];
   });
-  const view = linkGraphView({ listCollections: () => store.listCollections() }, graph, { vectorIndex: () => new FakeVectorIndex() });
+  const view = linkGraphView({ listCollections: () => store.listCollections() }, graph, { vectorIndex: () => new FakeVectorIndex(), vectorsIdle: async () => {} });
   assert.deepEqual(view.contradicting("tactic-48h"), ["tactic-72h"], "two edges, one concept");
   assert.deepEqual(view.contradicting("tactic-72h"), ["tactic-48h"]);
   assert.equal(similarCalls, 0);
