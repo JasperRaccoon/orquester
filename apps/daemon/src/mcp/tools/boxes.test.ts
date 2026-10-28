@@ -540,6 +540,21 @@ test("box_forward_port returns the host loopback URL; without the box backend ev
   }
 });
 
+test("box_forward_port in a box project: url is the project box's, browser_url the host Browser tab's", async () => {
+  const { api } = fakeApi();
+  Object.assign(api, {
+    boxForwardPort: async (_boxId: string, port: number) => ({
+      ok: true,
+      value: { url: "http://127.0.0.1:21000/", browserUrl: "http://127.0.0.1:41234/", hostPort: 41234, boxPort: port, projectBoxPort: 21000 }
+    })
+  });
+  const forward = await call(api, "box_forward_port", { box_id: "tmp-1", port: 5173 });
+  assert.ok(forward.ok);
+  assert.equal(forward.value.url, "http://127.0.0.1:21000/");
+  assert.equal(forward.value.browser_url, "http://127.0.0.1:41234/");
+  assert.equal(forward.value.project_box_port, 21000);
+});
+
 test("create_box on one of the owner's own machines: a 'Use your machine' card (free, names the machine), pinned to that machine", async () => {
   const { api, created } = fakeApi();
   const machine = { id: "m4c0ffee1234", label: "Mac mini (macOS, arm64)", vcpu: 0, ramGb: 0, diskGb: null, gpu: null, hourlyUsd: 0, regions: [] };

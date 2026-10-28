@@ -288,6 +288,43 @@ describe("box hub authentication", () => {
     await box.closed;
   });
 
+  test("setForwards listens now and resolves with each listen's outcome; a reconnect gets the list in its welcome, not replayed", async () => {
+    records.add("box-fwd-00001");
+    const token = await hub.issueBootstrapToken("box-fwd-00001", 60_000);
+    const box = await FakeBox.connect(url);
+    box.hello({ kind: "bootstrap", token });
+    const credential = expectT(await box.next(), "welcome").credential!;
+    const connection = await hub.waitConnected("box-fwd-00001", { timeoutMs: 5_000 });
+    const list = [
+      { boxPort: 4100, target: "fwd-a" },
+      { boxPort: 4101, target: "fwd-b" }
+    ];
+    const set = hub.setForwards("box-fwd-00001", list);
+    for (let answered = 0; answered < 2; answered += 1) {
+      const req = expectT(await box.next(), "req");
+      assert.equal(req.method, "forward.listen");
+      const taken = (req.params as { boxPort: number }).boxPort === 4101;
+      box.send(taken ? { t: "res", id: req.id, ok: false, error: { code: "EADDRINUSE", message: "address already in use" } } : { t: "res", id: req.id, ok: true, result: null });
+    }
+    assert.deepEqual(
+      (await set).map((outcome) => [outcome.boxPort, outcome.error?.code ?? null]),
+      [
+        [4100, null],
+        [4101, "EADDRINUSE"]
+      ]
+    );
+
+    const again = await FakeBox.connect(url);
+    again.hello({ kind: "credential", boxId: "box-fwd-00001", credential });
+    assert.deepEqual(expectT(await again.next(), "welcome").config.forwards, list);
+    await hub.waitConnected("box-fwd-00001", { timeoutMs: 5_000 });
+    // The next request the box sees is this one: nothing re-sent the forwards on top of the welcome.
+    void connection.request("proc.list", {}).catch(() => undefined);
+    assert.equal(expectT(await again.next(), "req").method, "proc.list");
+    again.close();
+    await again.closed;
+  });
+
   test("a box revoked while its GitHub OIDC check is pending is refused, not linked", async () => {
     records.add("box-oidc-rev01", { provider: "blacksmith", providerRef: { repository: "org/control", runId: 77 } });
     const gate = gateOidc();

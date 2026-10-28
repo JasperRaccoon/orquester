@@ -596,7 +596,10 @@ const boxDownload = defineTool({
 const boxForwardPort = defineTool({
   name: "box_forward_port",
   title: "Forward a box port",
-  description: "Expose a port of one of this chat's boxes (a dev server) on a host loopback URL the Browser tab can open. Closed when the box is destroyed.",
+  description:
+    "Expose a port of one of this chat's boxes (a dev server) where this chat can reach it. `url` works from where this chat runs: your shell, curl and the Browser tab. " +
+    "In a project that runs in a box of its own, `url` is that box's loopback (127.0.0.1 there, not the host's); when the result also has `browser_url`, the Browser tab runs on the host: open browser_url there instead. " +
+    "Closed when the box is destroyed or this chat closes.",
   input: { box_id: boxIdField, port: z.number().int().min(1).max(65_535) },
   audiences: ["chat"],
   toolset: "boxes",
@@ -608,7 +611,18 @@ const boxForwardPort = defineTool({
     threadCaller(caller, "box_forward_port");
     if (!api.boxForwardPort) unwired();
     const forward = unwrap(await api.boxForwardPort!(args.box_id, args.port, { signal }));
-    return { url: forward.url, host_port: forward.hostPort, box_port: forward.boxPort };
+    if (forward.projectBoxPort === undefined) return { url: forward.url, host_port: forward.hostPort, box_port: forward.boxPort };
+    return {
+      url: forward.url,
+      ...(forward.browserUrl !== undefined ? { browser_url: forward.browserUrl } : {}),
+      box_port: forward.boxPort,
+      project_box_port: forward.projectBoxPort,
+      ...(forward.hostPort !== undefined ? { host_port: forward.hostPort } : {}),
+      note:
+        forward.browserUrl !== undefined
+          ? "This project runs in its own box: use url from your shell and curl there. The Browser tab runs on the host: open browser_url in it."
+          : "This project runs in its own box, and so do your shell, curl and the Browser tab: use url for all of them."
+    };
   }
 });
 

@@ -11,6 +11,7 @@ import type { BoxAgentConfig, BoxKind, BoxProviderCredentialField, BoxProviderId
 
 import type {
   BoxConnection,
+  BoxForwardOutcome,
   BoxHub,
   BoxProviderAdapter,
   BuildBootstrap,
@@ -207,7 +208,9 @@ export class FakeHub implements BoxHub {
     this.revoked.push(boxId);
   }
 
-  setForwards(_boxId: string, _forwards: BoxAgentConfig["forwards"]): void {}
+  async setForwards(_boxId: string, _forwards: BoxAgentConfig["forwards"]): Promise<BoxForwardOutcome[]> {
+    return [];
+  }
   handle(): void {}
   handleRaw(): void {}
   handleChannel(): void {}

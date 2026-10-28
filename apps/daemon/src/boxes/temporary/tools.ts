@@ -15,6 +15,9 @@
  *   either): its config or hooks would run on the host.
  * - **Background jobs** run detached in the box (they survive link drops; the output is followed
  *   again from the offset last seen when the box reconnects) and their output tail is kept here.
+ * - **Port forwards reach where the chat runs**: a host loopback port for a host project; for a box
+ *   project, a listener in its own box (`./project-forwards.ts`), plus a host port while its
+ *   Browser tab runs on the host. A forward that could not be reached is refused, not returned.
  * - **Lifetime.** A closed chat's boxes are destroyed (`chat-closed`, {@link chatClosed}); a
  *   destroyed box's port forwards close and its jobs are forgotten.
  *
@@ -57,6 +60,7 @@ import type {
   BoxTransferResult,
   TemporaryBoxes
 } from "./contract.ts";
+import { ProjectBoxForwardError, type ProjectBoxForward, type ProjectBoxForwards } from "./project-forwards.ts";
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -163,6 +167,10 @@ export interface TemporaryBoxesConnection {
   hub: Pick<BoxHub, "get">;
   /** Tells a box project's host stub apart (its files live in its own box, not on this host). */
   registry?: Pick<BoxRegistry, "locate">;
+  /** Forwards listening in a box project's own box (`./project-forwards.ts`); without it a box project's chat cannot forward. */
+  projectForwards?: Pick<ProjectBoxForwards, "open">;
+  /** Whether a box project's Browser tab runs its Chromium in the project box (`BoxBrowsers.runsInBox`); else it runs on the host. */
+  browserRunsInBox?: (projectPath: string) => boolean;
 }
 
 /** Call options of the operations: who acts (forced by `withPrincipal`), and the call's abort. */
@@ -351,6 +359,8 @@ export class TemporaryBoxTools {
   private readonly availability = new Set<() => void>();
   private readonly jobs = new Map<string, Job>();
   private readonly forwards = new Map<string, Map<number, Promise<{ hostPort: number; boxPort: number; close(): Promise<void> }>>>();
+  /** Per temporary box and port: the listener in the calling chat's project box (box projects). */
+  private readonly projectForwards = new Map<string, Map<number, Promise<ProjectBoxForward>>>();
   /** Box cleanups in flight (a destroy and its change event both ask for one). */
   private readonly closing = new Map<string, Promise<void>>();
   private readonly clock: TemporaryBoxClock;
@@ -732,10 +742,71 @@ export class TemporaryBoxTools {
     }
   }
 
-  /** Expose an owned box's port on a host loopback port (reused for the same port); closed when the box goes. */
+  /**
+   * Expose an owned box's port where the calling chat can reach it (reused for the same port;
+   * closed when the box goes): on a host loopback port, or — for a box project's chat — on its
+   * project box's loopback, plus a host loopback port while its Browser tab runs on the host.
+   * Refused rather than answered with a URL the chat could not open.
+   */
   async forwardPort(boxId: string, port: number, options: BoxCallOptions = {}): Promise<BoxOutcome<BoxForwardResult>> {
-    const ready = this.readyConnection(options.principal ?? { kind: "user" }, boxId);
+    const principal = options.principal ?? { kind: "user" };
+    const ready = this.readyConnection(principal, boxId);
     if (!ready.ok) return ready;
+    const projectPath = principal.kind === "agent" ? principal.projectPath : "";
+    const location = projectPath !== "" ? this.connection?.registry?.locate(projectPath) : undefined;
+    if (location?.kind !== "box") {
+      const host = await this.hostForward(boxId, ready.value, port);
+      return host.ok ? done({ url: loopbackUrl(host.value.hostPort), hostPort: host.value.hostPort, boxPort: host.value.boxPort }) : host;
+    }
+    const inProjectBox = await this.projectBoxForward(boxId, ready.value, port, location.boxId);
+    if (!inProjectBox.ok) return inProjectBox;
+    const result: BoxForwardResult = { url: loopbackUrl(inProjectBox.value.boxPort), boxPort: port, projectBoxPort: inProjectBox.value.boxPort };
+    if (this.connection?.browserRunsInBox?.(projectPath) === true) return done(result);
+    // The Browser tab of this project runs on the host: it needs a host loopback port too.
+    const host = await this.hostForward(boxId, ready.value, port);
+    return host.ok ? done({ ...result, browserUrl: loopbackUrl(host.value.hostPort), hostPort: host.value.hostPort }) : host;
+  }
+
+  /** The listener in the project box `projectBoxId` piping to the temporary box's `port` (made on first use). */
+  private async projectBoxForward(boxId: string, connection: BoxConnection, port: number, projectBoxId: string): Promise<BoxOutcome<ProjectBoxForward>> {
+    const owner = this.connection?.projectForwards;
+    if (!owner) return refuse(400, "BOX_UNSUPPORTED", "This chat's project runs in a box of its own, and forwarding into it is not available here: a host URL would not be reachable from it.");
+    const known = this.projectForwards.get(boxId)?.get(port);
+    // One that ended with its project box (destroyed, or another box now) is made again.
+    const settled = known ? await known.catch(() => null) : null;
+    if (settled && (!settled.active() || settled.projectBoxId !== projectBoxId)) {
+      const ports = this.projectForwards.get(boxId);
+      if (ports && ports.get(port) === known) ports.delete(port);
+      void settled.close().catch(() => undefined);
+    }
+    let perBox = this.projectForwards.get(boxId);
+    if (!perBox) {
+      perBox = new Map();
+      this.projectForwards.set(boxId, perBox);
+    }
+    let forward = perBox.get(port);
+    if (!forward) {
+      if (perBox.size >= MAX_FORWARDS_PER_BOX) return refuse(409, "FORWARD_LIMIT", `This box already has ${MAX_FORWARDS_PER_BOX} forwarded ports.`);
+      forward = owner.open(projectBoxId, port, () => connection.openTcp(port));
+      perBox.set(port, forward);
+      const ports = perBox;
+      // A failed forward is not remembered.
+      forward.catch(() => {
+        if (ports.get(port) === forward) ports.delete(port);
+      });
+    }
+    try {
+      return done(await forward);
+    } catch (error) {
+      if (error instanceof ProjectBoxForwardError && error.code === "PROJECT_BOX_NOT_CONNECTED") {
+        return refuse(409, "BOX_NOT_READY", "This chat's project runs in a box of its own, which is not connected right now (reconnecting…): the port could not be forwarded into it. Try again shortly.");
+      }
+      return refuse(502, "BOX_FORWARD_FAILED", `The port could not be opened in this chat's project box: ${clip(transferMessage(error), 300)}`);
+    }
+  }
+
+  /** A host loopback port piping to the box's `port` (made on first use). */
+  private async hostForward(boxId: string, connection: BoxConnection, port: number): Promise<BoxOutcome<{ hostPort: number; boxPort: number }>> {
     let perBox = this.forwards.get(boxId);
     if (!perBox) {
       perBox = new Map();
@@ -744,7 +815,7 @@ export class TemporaryBoxTools {
     let forward = perBox.get(port);
     if (!forward) {
       if (perBox.size >= MAX_FORWARDS_PER_BOX) return refuse(409, "FORWARD_LIMIT", `This box already has ${MAX_FORWARDS_PER_BOX} forwarded ports.`);
-      forward = ready.value.forwardToHost(port);
+      forward = connection.forwardToHost(port);
       perBox.set(port, forward);
       // A failed forward is not remembered.
       forward.catch(() => {
@@ -753,7 +824,7 @@ export class TemporaryBoxTools {
     }
     try {
       const open = await forward;
-      return done({ url: `http://127.0.0.1:${open.hostPort}/`, hostPort: open.hostPort, boxPort: open.boxPort });
+      return done({ hostPort: open.hostPort, boxPort: open.boxPort });
     } catch (error) {
       return refuse(502, "BOX_FORWARD_FAILED", `The port could not be forwarded: ${clip(transferMessage(error), 300)}`);
     }
@@ -1121,11 +1192,12 @@ export class TemporaryBoxTools {
       wake(job);
       this.jobs.delete(jobId);
     }
-    const perBox = this.forwards.get(boxId);
-    if (!perBox) return;
+    const perBox = this.forwards.get(boxId) ?? new Map();
     this.forwards.delete(boxId);
+    const inProjectBoxes = this.projectForwards.get(boxId) ?? new Map();
+    this.projectForwards.delete(boxId);
     await Promise.all(
-      [...perBox.values()].map(async (forward) => {
+      [...perBox.values(), ...inProjectBoxes.values()].map(async (forward: Promise<{ close(): Promise<void> }>) => {
         try {
           await (await forward).close();
         } catch {
@@ -1136,7 +1208,7 @@ export class TemporaryBoxTools {
   }
 
   private async closeEverything(): Promise<void> {
-    const boxIds = new Set([...this.forwards.keys(), ...[...this.jobs.values()].map((job) => job.boxId)]);
+    const boxIds = new Set([...this.forwards.keys(), ...this.projectForwards.keys(), ...[...this.jobs.values()].map((job) => job.boxId)]);
     for (const job of this.jobs.values()) job.detach();
     this.jobs.clear();
     await Promise.all([...boxIds].map((boxId) => this.boxGone(boxId)));
@@ -1274,6 +1346,11 @@ function processExit(child: ReturnType<typeof spawn>): Promise<{ code: number | 
   // Awaited later, after the stream it feeds: a spawn failure meanwhile must not be an unhandled rejection.
   exited.catch(() => undefined);
   return exited;
+}
+
+/** The URL of a loopback port (the host's or a box's, depending on where it is opened). */
+function loopbackUrl(port: number): string {
+  return `http://127.0.0.1:${port}/`;
 }
 
 /** A transfer error's message (the box's or a stream's), without anything that is not text. */

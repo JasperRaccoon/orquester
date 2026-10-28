@@ -1,11 +1,15 @@
 /**
  * Test doubles for the temporary-box backend: an in-memory {@link TemporaryBoxes} (records and
- * change events, no provider), a manual clock whose timers fire only when a test says so, and a
- * box summary builder.
+ * change events, no provider), a manual clock whose timers fire only when a test says so, a box
+ * summary builder, and a hub that plays a project box's forwards on this machine.
  */
 
-import type { BoxDestroyedReason, BoxSummary } from "@orquester/api";
+import { createConnection, createServer, type AddressInfo, type Server, type Socket } from "node:net";
 
+import type { BoxChannelSpec, BoxDestroyedReason, BoxForwardSpec, BoxSummary } from "@orquester/api";
+import type { StoredBox } from "@orquester/config";
+
+import type { BoxChannelHandler, BoxConnection, BoxForwardOutcome, BoxHub } from "../contracts.ts";
 import type { CreateTemporaryBoxInput, TemporaryBoxes } from "./contract.ts";
 import type { TemporaryBoxClock } from "./tools.ts";
 
@@ -163,5 +167,93 @@ export class ManualClock implements TemporaryBoxClock {
       }
     }
     return fired;
+  }
+}
+
+/**
+ * The hub as a box project's forwards see it, with the project box played on this machine:
+ * `setForwards` listens for real on 127.0.0.1 as orq-agent does in the box (a port already listened
+ * on is retargeted; a taken one answers `EADDRINUSE`), and each accepted connection goes to the
+ * registered `host-tcp` handler as the box's channel would. While `connection` is disconnected the
+ * list is only kept (no outcomes).
+ */
+export class FakeForwardingHub implements Pick<BoxHub, "get" | "setForwards" | "handleChannel"> {
+  /** Every list set, in order. */
+  readonly lists: BoxForwardSpec[][] = [];
+  private handler: BoxChannelHandler | null = null;
+  private readonly listening = new Map<number, { server: Server; target: string }>();
+
+  constructor(
+    readonly projectBoxId: string,
+    readonly connection: BoxConnection
+  ) {}
+
+  get(boxId: string): BoxConnection | undefined {
+    return boxId === this.projectBoxId ? this.connection : undefined;
+  }
+
+  handleChannel(kind: "host-tcp" | "ssh-agent" | "mcp-bridge", handler: BoxChannelHandler): void {
+    if (kind === "host-tcp") this.handler = handler;
+  }
+
+  async setForwards(_boxId: string, next: BoxForwardSpec[]): Promise<BoxForwardOutcome[]> {
+    this.lists.push(next.map((spec) => ({ ...spec })));
+    if (!this.connection.connected) return [];
+    for (const [port, listener] of [...this.listening]) {
+      if (next.some((spec) => spec.boxPort === port)) continue;
+      // Unlistened at once; connections already accepted go on (as a closed Go listener's do).
+      this.listening.delete(port);
+      listener.server.close();
+    }
+    const outcomes: BoxForwardOutcome[] = [];
+    for (const spec of next) {
+      const existing = this.listening.get(spec.boxPort);
+      if (existing?.target === spec.target) continue;
+      if (existing) {
+        existing.target = spec.target;
+        outcomes.push({ boxPort: spec.boxPort, error: null });
+        continue;
+      }
+      const listener: { server: Server; target: string } = {
+        server: createServer((socket) => this.channel(this.projectBoxId, { kind: "host-tcp", target: listener.target, boxPort: spec.boxPort }, socket)),
+        target: spec.target
+      };
+      const error = await new Promise<(Error & { code?: string }) | null>((resolve) => {
+        listener.server.once("error", resolve);
+        listener.server.listen(spec.boxPort, "127.0.0.1", () => resolve(null));
+      });
+      if (error === null) this.listening.set(spec.boxPort, listener);
+      outcomes.push({ boxPort: spec.boxPort, error });
+    }
+    return outcomes;
+  }
+
+  /** A `host-tcp` channel opened by box `boxId` (any box, any target): the socket the box side reads and writes. */
+  async openAs(boxId: string, spec: { target: string; boxPort: number }): Promise<Socket> {
+    const server = createServer((socket) => {
+      server.close();
+      this.channel(boxId, { kind: "host-tcp", ...spec }, socket);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return createConnection((server.address() as AddressInfo).port, "127.0.0.1");
+  }
+
+  /** Ports listened on now. */
+  ports(): number[] {
+    return [...this.listening.keys()];
+  }
+
+  /** Stop every listener. */
+  close(): void {
+    for (const listener of this.listening.values()) listener.server.close();
+    this.listening.clear();
+  }
+
+  private channel(boxId: string, spec: BoxChannelSpec, socket: Socket): void {
+    if (!this.handler) {
+      socket.destroy();
+      return;
+    }
+    this.handler({ boxId, record: { id: boxId } as StoredBox }, spec, socket);
   }
 }
