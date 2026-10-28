@@ -47,6 +47,7 @@ import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLin
 import { KnowledgeClusterLabels, type ClusterDescription } from "./search/cluster-labels.ts";
 import { ConceptMergeCheckSource } from "./search/concept-merge-checks.ts";
 import { KnowledgeConceptMerges, conceptThresholdsFor } from "./search/concept-merges.ts";
+import { KnowledgeConceptFamilies } from "./search/concept-families.ts";
 import { KnowledgeConceptSummaries } from "./search/concept-summaries.ts";
 import { findContradictions } from "./search/contradictions.ts";
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
@@ -487,6 +488,16 @@ export class KnowledgeService {
       vectorsDir: join(knowledgeIndexDir(appdir), "concepts"),
       logger: this.logger
     });
+    // Concept families (concepts of one type answering one question), after every planning pass over
+    // complete vectors; read through the graph (novelty, single-source claims, contradictions, search).
+    const conceptFamilies = new KnowledgeConceptFamilies({
+      concepts: () => graph.currentConcepts(),
+      canonical: (id) => graph.canonicalConceptId(id),
+      revision: () => graph.revision(),
+      vectors: () => conceptMerges.vectors.current(),
+      logger: this.logger
+    });
+    graph.setConceptFamilies(conceptFamilies);
     // LLM quality work answered in linking's idle rounds: concept pairs the name guards refused, and
     // topic names for the similarity clusters (read by the similarity graph).
     const everything = () => knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
@@ -532,6 +543,13 @@ export class KnowledgeService {
     opening.unsubscribe.push(() => search.connectConceptSummaries(null));
     // A new concept summary changes concept details.
     opening.unsubscribe.push(conceptSummaries.onChange(() => this.publishChanged({ graph: true })));
+    // Families follow every planning pass over complete vectors; a change of them changes concept details.
+    opening.unsubscribe.push(conceptMerges.onPlanned(() => conceptFamilies.update()));
+    opening.unsubscribe.push(conceptFamilies.onChange(() => this.publishChanged({ graph: true })));
+    opening.unsubscribe.push(() => {
+      graph.setConceptFamilies(null);
+      void conceptFamilies.stop();
+    });
     // A new cluster name redraws the similarity layer.
     opening.unsubscribe.push(clusterLabels.onChange(() => this.publishChanged({ graph: true })));
     // Insights and similar entries read linking's pair checks and queued link gaps (phase 2 spec,

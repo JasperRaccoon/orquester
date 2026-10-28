@@ -14,6 +14,7 @@ import { isKnowledgeEntryId } from "@orquester/config";
 import type { KnowledgeGraphPort, KnowledgeStorePort } from "../ports.ts";
 import type { KnowledgeLogger } from "../store/errors.ts";
 import { Bm25Index } from "./bm25.ts";
+import type { KnowledgeConceptFamiliesPort } from "./concept-families.ts";
 import { isSurveyEntry } from "./contradictions.ts";
 import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibility.ts";
@@ -717,6 +718,7 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   private similarProvider: SimilarConceptsProvider | null = null;
   private backingProvider: ((conceptId: string) => readonly string[]) | null = null;
   private vectorsReady: (() => boolean) | null = null;
+  private families: Pick<KnowledgeConceptFamiliesPort, "familyOf" | "revision"> | null = null;
   private backingRev = 0;
   private readonly loadListeners = new Set<() => void>();
   /** Numbers loads in the order they start; `appliedLoad` is the current base graph's. */
@@ -840,6 +842,25 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     this.backingProvider = provider;
     this.vectorsReady = provider ? (ready ?? null) : null;
     this.backingMoved();
+  }
+
+  /** Where {@link conceptFamily} reads concept families from (`concept-families.ts`; null: none). */
+  setConceptFamilies(families: Pick<KnowledgeConceptFamiliesPort, "familyOf" | "revision"> | null): void {
+    this.families = families;
+  }
+
+  /**
+   * The member concept ids (the graph's, itself included) of the family `conceptId` belongs to:
+   * concepts of its type answering the same question (`concept-families.ts`); unscoped. Null when
+   * it has none, or before families are computed.
+   */
+  conceptFamily(conceptId: string): readonly string[] | null {
+    return this.families?.familyOf(this.canonicalConceptId(conceptId)) ?? null;
+  }
+
+  /** Moves whenever the families change (a cache key next to {@link revision}). */
+  familiesRevision(): number {
+    return this.families?.revision() ?? 0;
   }
 
   /** Whether concept vectors from a calibrated model are complete ({@link setBackingConcepts}'s `ready`). */
