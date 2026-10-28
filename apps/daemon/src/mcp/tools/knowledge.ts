@@ -585,11 +585,12 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
   const attributes = Object.entries(concept.attributes).slice(0, listMax);
   if (attributes.length > 0) lines.push(`Attributes: ${attributes.map(([key, attribute]) => `${label(key)}: ${clipText(oneLine(attribute.value), DESCRIPTION_CHARS)}`).join("; ")}`);
   if (detail.entries.length > 0) {
-    // Every visible entry counts (`entryIds`; absent from an older daemon): the newest are shown in
-    // full, the others by id, so none goes missing from the list.
+    // Every visible entry counts (`entryIds`; absent from an older daemon): the first (the newest; a
+    // Person's own entries first) are shown in full, the others by id, so none goes missing from the list.
     const all = detail.entryIds ?? detail.entries.map((entry) => entry.id);
     const shown = detail.entries.slice(0, listMax);
-    lines.push(all.length > shown.length ? `Entries (${all.length}; the newest ${shown.length} in full):` : "Entries:");
+    const first = concept.type.toLowerCase() === "person" ? "their own first, the first" : "the newest";
+    lines.push(all.length > shown.length ? `Entries (${all.length}; ${first} ${shown.length} in full):` : "Entries:");
     for (const entry of shown) {
       const [head, ...rest] = entryBlock(entry, names, "  ");
       lines.push(`- ${head}`, ...rest);

@@ -486,6 +486,32 @@ test("a concept detail lists every visible entry id behind it, merged sources in
   assert.deepEqual((await search.conceptDetail("tactic-small", ALL))!.entryIds, [BILLING, CLOUDFLARE]);
 });
 
+test("a Person's concept detail lists the entries that person wrote first, then the rest newest first", async (t) => {
+  const own = "ke_jasonpost001";
+  const alias = "ke_jasonpost002";
+  const notes = ["ke_claudenote01", "ke_claudenote02", "ke_claudenote03"];
+  const { search, graph } = await setup(t, {
+    embedder: null,
+    more: (store) => {
+      store.put(own, "heres how to make any phone hit a US audience", [SEO], { title: "Make any phone hit a US audience", kind: "post", author: "jason", handle: "jasonugc" }, true);
+      // Saved later, under one of the person's aliases and no handle.
+      store.put(alias, "48 hours of warm-up", [SEO], { title: "Warm-up thread", kind: "thread", author: "Jason UGC" }, true);
+      // Research notes citing him, all newer than his posts.
+      for (const id of notes) store.put(id, "jason recommends an ISP proxy", [SEO], { title: `Synthesis ${id}`, kind: "synthesis", author: "Claude (research)" }, true);
+    }
+  });
+  await loadGraph(graph, [
+    node("person-jason", "jason", [own, alias, ...notes].map((id) => `${id}.md`), { type: "Person", aliases: ["Jason UGC"], attributes: { handle: { value: "jasonugc", confidence: 1 } } }),
+    node("tactic-proxy", "ISP proxy", [own, ...notes].map((id) => `${id}.md`))
+  ]);
+  await search.idle();
+  const person = (await search.conceptDetail("person-jason", ALL))!;
+  assert.deepEqual(person.entries.map((e) => e.id), [alias, own, ...[...notes].reverse()]);
+  assert.deepEqual(person.entryIds, [alias, own, ...[...notes].reverse()]);
+  // Any other concept: newest first, whoever wrote them.
+  assert.deepEqual((await search.conceptDetail("tactic-proxy", ALL))!.entryIds, [...[...notes].reverse(), own]);
+});
+
 test("query by example ranks toward positive and away from negative examples, excluding both", async (t) => {
   const like = "ke_likeseedaaaa";
   const unlike = "ke_zunlikeseed1";

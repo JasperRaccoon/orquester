@@ -1364,6 +1364,11 @@ test("knowledge_get: a concept with more entries than it shows lists every other
   assert.ok(out.includes("- also: ke_444444444444, ke_555555555555, ke_bk4lk3nknmiw"), out);
   const alone = textOf(await run(api, "knowledge_get", { id: "channel-tiktok" }));
   assert.ok(alone.includes("Entries (7; the newest 6 in full):") && alone.includes("- also: ke_bk4lk3nknmiw"), alone);
+  // A Person's entries come their own first (the daemon's order): the list says so, in that order.
+  const person = { ...body, concept: { ...body.concept, concept: { ...body.concept.concept, id: "person-jason", name: "jason", type: "Person" } } };
+  const people = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item("person-jason"), { status: 200, body: person });
+  const page = textOf(await run(people, "knowledge_get", { id: "person-jason" }));
+  assert.ok(page.includes("Entries (7; their own first, the first 6 in full):\n- ke_000000000000 "), page);
 });
 
 test("knowledge_get: a concept shows what was merged into it and its similar concepts; an older daemon's concept renders as before", async () => {

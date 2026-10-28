@@ -295,6 +295,51 @@ test("a person's links that only surveys make are not its own position: left out
   assert.deepEqual(graph.concept("person-jason", seoOnly)!.neighbors.map((n) => n.edge.id), []);
 });
 
+test("a survey-only link stays when the person's own entry backs it: behind its other end, or the survey is the person's own", async () => {
+  const store = new FakeStore();
+  store.collection(A, "TikTok");
+  store.collection(B, "SEO");
+  const post = "ke_pppppppppppp";
+  const other = "ke_oooooooooooo";
+  const synthesis = "ke_ssssssssssss";
+  store.put(post, "warm up for 48 hours", [A], { title: "Make any phone hit a US audience", kind: "post", author: "jason", handle: "jasonugc" }, true);
+  // Another account under the same display name is someone else.
+  store.put(other, "warm up for a week", [A], { title: "Another jason", kind: "post", author: "jason", handle: "otherjason" }, true);
+  store.put(synthesis, "blend", [B], { title: "US TikTok setup across guides", kind: "synthesis", author: "Claude (research)" }, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  const handle = (value: string) => ({ attributes: { handle: { value, confidence: 1 } } });
+  await loadGraph(
+    graph,
+    [
+      node("person-jason", "jason", [`${post}.md`, `${synthesis}.md`], { type: "Person", ...handle("jasonugc") }),
+      node("person-claude", "Claude (research)", [`${synthesis}.md`], { type: "Person" }),
+      node("tactic-warm-48", "Warm up the account for 48 hours before posting", [`${post}.md`, `${synthesis}.md`]),
+      node("tactic-warm-week", "Warm up for a week", [`${other}.md`, `${synthesis}.md`]),
+      node("tactic-setup", "US TikTok account setup (organic)", [`${synthesis}.md`])
+    ],
+    [
+      edge("e1", "person-jason", "tactic-warm-48", [`${synthesis}.md`], "recommends"), // his own post is behind it: kept
+      edge("e2", "person-jason", "tactic-setup", [`${synthesis}.md`], "recommends"), // a synthesis only: left out
+      edge("e3", "person-jason", "tactic-warm-week", [`${synthesis}.md`], "recommends"), // another jason's post: left out
+      edge("e4", "person-claude", "tactic-setup", [`${synthesis}.md`], "recommends") // Claude wrote the synthesis: its own
+    ]
+  );
+  const all = knowledgeScope({ kind: "all" }, [A, B]);
+  const ids = (id: string, scope = all) => graph.concept(id, scope)!.neighbors.map((n) => n.edge.id).sort();
+  assert.deepEqual(ids("person-jason"), ["e1"]);
+  assert.deepEqual(ids("tactic-warm-48"), ["e1"], "both ends");
+  assert.deepEqual(ids("person-claude"), ["e4"]);
+  assert.deepEqual(ids("tactic-setup"), ["e4"]);
+  // Only visible entries count: a caller who cannot see his post sees the synthesis's word alone.
+  assert.deepEqual(ids("person-jason", knowledgeScope({ kind: "collections", ids: [B] }, [A, B])), []);
+  // Authorship: by handle, or by name when the entry has no other handle.
+  const jason = graph.personAuthorship("person-jason")!;
+  assert.equal(jason({ author: "someone", handle: "@JasonUGC" }), true);
+  assert.equal(jason({ author: "Jason", handle: null }), true);
+  assert.equal(jason({ author: "jason", handle: "otherjason" }), false);
+  assert.equal(graph.personAuthorship("tactic-setup"), null, "not a Person");
+});
+
 test("a concept's collections leave out surveys when another entry has it: an all-collection synthesis does not tag it everywhere", async () => {
   const store = new FakeStore();
   store.collection(A, "TikTok");
