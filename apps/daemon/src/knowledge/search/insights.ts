@@ -347,7 +347,7 @@ export class KnowledgeInsights {
     // `found` (X against O) joins a kept pair (S against O) on S's side only when X does not
     // disagree with S too: an entry that disagrees with both sides joins neither (its own
     // disagreements are shown as they are). A pair check that found X and S consistent says they
-    // agree: then fewer note words in common make the same point ({@link samePoint}'s `agreed`).
+    // agree: then it is the same point when X's note is mostly in S's ({@link samePoint}'s `agreed`).
     const disagree = new Set(contradictions.map((found) => pairKeyOf(found.a, found.b)));
     const agreed = (x: string, y: string): boolean => pairChecks?.get(x, y)?.verdict === "consistent";
     const shown: ((typeof contradictions)[number] & { joins: { a: string[]; b: string[] } })[] = [];
