@@ -181,6 +181,7 @@ export function linkGraphView(
         }
       : {}),
     conceptsOf: (entryId) => graph.conceptsOfEntry(entryId, everything()),
+    sameQuestion: (a, b) => graph.sameQuestion(a, b),
     // The graph's adjacency, not a concept detail (which also ranks similar concepts): read per concept of every linked entry.
     contradicting: (conceptId) => {
       const scope = everything();

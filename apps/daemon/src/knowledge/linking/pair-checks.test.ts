@@ -80,6 +80,10 @@ describe("pair-check answers", () => {
     assert.match(PAIR_CHECK_SYSTEM, /Tension inside one entry[^\n]*is not a contradiction between the two entries/);
     assert.match(PAIR_CHECK_SYSTEM, /research note that qualifies, refines[^\n]*is consistent with it, unless it states that the post's claim is wrong/);
     assert.match(PAIR_CHECK_SYSTEM, /one or two complete sentences of at most 400 characters that state each side's claim/);
+    // Version 5: only the points that conflict; a difference of choice is none.
+    assert.match(PAIR_CHECK_SYSTEM, /A difference of choice is not a disagreement[^\n]*neither argues against the other's choice/);
+    assert.match(PAIR_CHECK_SYSTEM, /It is one when an entry says the other's choice is wrong, risky or worse, or to use only its own/);
+    assert.match(PAIR_CHECK_SYSTEM, /The note states only the points that conflict[^\n]*leaves out where the entries merely differ in choice or detail/);
     assert.equal(validatePairCheckAnswer({ verdict: "contradicts", note: "x".repeat(400) }), null);
     assert.match(validatePairCheckAnswer({ verdict: "contradicts", note: "x".repeat(401) }) ?? "", /at most 400 characters/);
   });
@@ -438,10 +442,14 @@ describe("re-asking checks judged on cut text", () => {
     assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "unrelated", inputVersion: PAIR_CHECK_INPUT_VERSION }, long), false);
   });
 
-  it("every contradicts verdict asked before version 4 is asked again once under the current prompt; consistent and unrelated version-2 verdicts stand", async () => {
-    assert.equal(PAIR_CHECK_INPUT_VERSION, 4);
+  it("every contradicts verdict asked before version 5 is asked again once under the current prompt; consistent and unrelated version-2 verdicts stand", async () => {
+    assert.equal(PAIR_CHECK_INPUT_VERSION, 5);
     const short = () => false;
-    for (const inputVersion of [undefined, 1, 2, 3]) {
+    assert.equal(pairCheckNeedsRecheck({ a: "ke_a", b: "ke_b", verdict: "contradicts", inputVersion: 5 }, short), false, "the current version stands");
+    for (const verdict of ["consistent", "unrelated"] as const) {
+      assert.equal(pairCheckNeedsRecheck({ a: "ke_a", b: "ke_b", verdict, inputVersion: 4 }, short, "numbers"), false, `a version-4 ${verdict} verdict stands, even for its numbers`);
+    }
+    for (const inputVersion of [undefined, 1, 2, 3, 4]) {
       assert.equal(pairCheckNeedsRecheck({ a: "ke_a", b: "ke_b", verdict: "contradicts", ...(inputVersion ? { inputVersion } : {}) }, short), true, `contradicts on ${inputVersion ?? "no"} version`);
     }
     for (const verdict of ["consistent", "unrelated"] as const) assert.equal(pairCheckNeedsRecheck({ a: "ke_a", b: "ke_b", verdict, inputVersion: 2 }, short), false, verdict);
@@ -621,12 +629,12 @@ describe("input version 4: notes name each side", () => {
     assert.equal(validatePairCheckAnswer({ verdict: "consistent", note: "Both run A/B tests on the paywall. A residential IP helps both." }), null, "A/B and an article are no sides");
   });
 
-  it("every stored contradicts verdict below version 4 is asked again once, whatever tier finds the pair, or none, ranked with the contradicts tier", async () => {
+  it("every stored contradicts verdict below version 5 is asked again once, whatever tier finds the pair, or none, ranked with the contradicts tier", async () => {
     const root = await dir();
     const path = join(root, "pair-checks.json");
     const hashOf = (id: string) => `h-${id}`;
     const record = (a: string, b: string, verdict: string, inputVersion: number) => ({ a, b, hashA: hashOf(a), hashB: hashOf(b), verdict, note: "A says x. B says y.", checkedAt: "t", inputVersion });
-    await writeFile(path, JSON.stringify({ version: 1, checks: [record("ke_a", "ke_b", "contradicts", 3), record("ke_a", "ke_c", "contradicts", 4), record("ke_b", "ke_c", "consistent", 3)] }));
+    await writeFile(path, JSON.stringify({ version: 1, checks: [record("ke_a", "ke_b", "contradicts", 4), record("ke_a", "ke_c", "contradicts", 5), record("ke_b", "ke_c", "consistent", 3)] }));
     const checks = new KnowledgePairChecks({ path, hashOf, now: () => NOW });
     await checks.load();
     assert.deepEqual(checks.recheckPairs().map((p) => [p.a, p.b]), [["ke_a", "ke_b"]]);
@@ -719,5 +727,49 @@ describe("the numbers tier", () => {
     const { conceptVector: _none, ...withoutVectors } = view;
     const plain = await pairCheckCandidates({ ids, view: withoutVectors, hashOf: (id) => `h-${id}`, isChecked: () => false, limit: 30, entryOf });
     assert.deepEqual(plain.map((c) => c.reason), ["shared"], "without concept vectors: no numbers tier");
+  });
+
+  it("claims that answer the same question with different figures are candidates though their names differ, whatever their concept vectors; never the same figures or one author", async () => {
+    const index = new FakeVectorIndex(); // good = 0.5
+    for (const [i, id] of ["ke_jason", "ke_evgeniy", "ke_yanme", "ke_jason2", "ke_alex"].entries()) index.set(id, axis(16, i));
+    const concepts: Record<string, KnowledgeConceptRef[]> = {
+      ke_jason: [{ id: "t-48h", type: "Tactic", name: "Warm up the account for 48 hours before posting" }],
+      ke_evgeniy: [{ id: "t-35d", type: "Tactic", name: "3-5 days of warming up" }],
+      ke_yanme: [{ id: "t-3d", type: "Tactic", name: "3 days of warming up" }], // within 3-5: no different figure
+      ke_jason2: [{ id: "t-2d", type: "Tactic", name: "Two days of warming up" }], // jason again
+      ke_alex: [{ id: "t-posts", type: "Tactic", name: "2 posts per day" }] // another question
+    };
+    // Far apart by concept vector: only the same-question rule pairs them.
+    const conceptVectors: Record<string, Float32Array> = Object.fromEntries(["t-48h", "t-35d", "t-3d", "t-2d", "t-posts"].map((id, i) => [id, Float32Array.from(axis(8, i))]));
+    const warmUp = new Set(["t-48h", "t-35d", "t-3d", "t-2d"]);
+    const asked: string[] = [];
+    const view: KnowledgeLinkGraphView = {
+      vectors: () => index,
+      conceptsOf: (id) => concepts[id] ?? [],
+      contradicting: () => [],
+      conceptVector: (id) => conceptVectors[id] ?? null,
+      sameQuestion: (a, b) => {
+        asked.push(`${a.id} ${b.id}`);
+        return warmUp.has(a.id) && warmUp.has(b.id);
+      }
+    };
+    const authors: Record<string, string> = { ke_jason: "jason", ke_evgeniy: "Evgeniy", ke_yanme: "yanme", ke_jason2: "jason", ke_alex: "Alex" };
+    const entryOf = (id: string): PairCheckEntryInfo => ({ kind: "post", author: authors[id]!, handle: null });
+    const ids = [...index.embeddedIds()];
+    const found = await pairCheckCandidates({ ids, view, hashOf: (id) => `h-${id}`, isChecked: () => false, limit: 30, entryOf });
+    assert.deepEqual(
+      found.map((c) => [c.a, c.b, c.reason]).sort(),
+      [
+        ["ke_evgeniy", "ke_jason", "numbers"],
+        ["ke_evgeniy", "ke_jason2", "numbers"],
+        ["ke_jason", "ke_yanme", "numbers"],
+        ["ke_jason2", "ke_yanme", "numbers"]
+      ],
+      "not jason with jason (one author), not 3 within 3-5, not the posts (another question)"
+    );
+    assert.deepEqual(found.find((c) => c.b === "ke_jason")!.focus.map((c) => c.id).sort(), ["t-35d", "t-48h"]);
+    assert.ok(!asked.includes("t-35d t-3d") && !asked.includes("t-3d t-35d"), "the same figures are never asked about");
+    const { sameQuestion: _rule, ...withoutRule } = view;
+    assert.deepEqual(await pairCheckCandidates({ ids, view: withoutRule, hashOf: (id) => `h-${id}`, isChecked: () => false, limit: 30, entryOf }), [], "without the rule: names that differ beyond their numbers are no candidates");
   });
 });
