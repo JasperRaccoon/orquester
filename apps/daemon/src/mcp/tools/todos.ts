@@ -44,7 +44,7 @@ async function selectorOf(args: { workspace?: string; project?: string }, ctx: S
   }
   if (given !== 1) throw new ToolError("INVALID_ARGUMENT", "Pass exactly one of workspace or project.");
   if (args.project === undefined) return { workspace: args.workspace! };
-  const ref = await resolveProject(ctx.api, args.project);
+  const ref = await resolveProject(ctx.api, args.project, ctx.caller);
   // resolveProject only returns a `<workspace>/<project>` directory; the guard narrows the types.
   if (!ref.workspace || !ref.name) throw new ToolError("PROJECT_NOT_FOUND", "Todo lists need a project inside a workspace.");
   return { workspace: ref.workspace, project: ref.name };

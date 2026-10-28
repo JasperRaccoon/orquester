@@ -57,7 +57,7 @@ interface Target {
 
 /** The project a status call reads: the named one, else the chat caller's own; an external caller must name one. */
 async function statusTarget(project: string | undefined, ctx: Pick<ScopeContext, "api" | "caller">): Promise<Target & { path: string }> {
-  if (project !== undefined) return named(await resolveProject(ctx.api, project));
+  if (project !== undefined) return named(await resolveProject(ctx.api, project, ctx.caller));
   const own = ownProjectName(ctx.caller);
   if (own) return named(await resolveProject(ctx.api, own));
   throw new ToolError(

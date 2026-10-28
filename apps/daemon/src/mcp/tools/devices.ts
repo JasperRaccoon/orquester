@@ -18,7 +18,6 @@
  * Everything goes through `DaemonApi` (D-1): this module imports types and pure contracts only.
  */
 
-import { isAbsolute, resolve } from "node:path";
 
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -39,6 +38,7 @@ import {
 } from "@orquester/api";
 
 import type { DeviceToolList } from "../../devices/tools-port.ts";
+import { callerHostPath } from "../addressing.ts";
 import { defineTool, DESTRUCTIVE, type AnyOrquesterTool, type ApprovalPreview, type ScopeClaim, type ScopeContext, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi, DaemonOutcome } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
@@ -393,10 +393,10 @@ const deviceAction = defineTool({
 // device_install / close_device
 // ---------------------------------------------------------------------------
 
-/** A host path the agent gave: relative ones are taken from its cwd (else its project root). */
+/** A host path the agent gave (`callerHostPath`): relative ones are taken from its cwd (else its project root). */
 function hostPath(caller: ThreadCaller, path: string): string {
   if (caller.projectPath === "") throw new ToolError("NO_PROJECT", "This chat has no project, so there is no build to install.");
-  return isAbsolute(path) ? path : resolve(caller.cwd || caller.projectPath, path);
+  return callerHostPath(caller, path, caller.cwd || caller.projectPath);
 }
 
 const deviceInstall = defineTool({

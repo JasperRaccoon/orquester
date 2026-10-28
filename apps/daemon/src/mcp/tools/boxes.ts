@@ -24,8 +24,6 @@
  * Everything goes through `DaemonApi` (D-1): this module imports types and pure contracts only.
  */
 
-import { isAbsolute, resolve } from "node:path";
-
 import { z } from "zod";
 import {
   BOX_KIND_LABELS,
@@ -53,6 +51,7 @@ import {
 } from "@orquester/api";
 
 import type { BoxExecResult, BoxJobOutput, BoxOutputTail } from "../../boxes/temporary/contract.ts";
+import { callerHostPath } from "../addressing.ts";
 import { defineTool, DESTRUCTIVE, MUTATING, type AnyOrquesterTool, type ApprovalPreview, type ScopeClaim, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
 import type { DaemonApi, DaemonOutcome } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
@@ -124,10 +123,10 @@ function transferScope(args: { local_path: string }, ctx: ScopeContext, reads: S
   return ctx.caller.kind === "thread" ? { ...scope, paths: [hostPath(ctx.caller, args.local_path)] } : scope;
 }
 
-/** A host path the agent gave: relative ones are taken from its cwd (else its project root). */
+/** A host path the agent gave (`callerHostPath`): relative ones are taken from its cwd (else its project root). */
 function hostPath(caller: ThreadCaller, path: string): string {
   if (caller.projectPath === "") throw new ToolError("NO_PROJECT", "This chat has no project, so there is nowhere on the host to move files from or to.");
-  return isAbsolute(path) ? path : resolve(caller.cwd || caller.projectPath, path);
+  return callerHostPath(caller, path, caller.cwd || caller.projectPath);
 }
 
 function money(usd: number): string {

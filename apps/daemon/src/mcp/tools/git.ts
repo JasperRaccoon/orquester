@@ -3,8 +3,8 @@
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { GitBranchesResponse, GitDiffResponse, GitLogEntry, GitStatusResponse, GitWorkingDiffResponse } from "@orquester/api";
-import { resolveProject, type ProjectRef } from "../addressing.ts";
-import { defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeContext } from "../catalog/contract.ts";
+import { callerHostPath, resolveProject, type ProjectRef } from "../addressing.ts";
+import { defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeContext, type ToolCaller } from "../catalog/contract.ts";
 import { expectOk, ToolError } from "../errors.ts";
 import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 
@@ -21,14 +21,14 @@ const VIEWS = ["status", "branches", "log", "diff"] as const;
 
 /** The project a call reads: the named one, else the chat caller's own; an external caller must name one. */
 async function gitProject(project: string | undefined, ctx: Pick<ScopeContext, "api" | "caller">): Promise<ProjectRef> {
-  if (project !== undefined) return resolveProject(ctx.api, project);
+  if (project !== undefined) return resolveProject(ctx.api, project, ctx.caller);
   if (ctx.caller.kind === "thread" && ctx.caller.projectPath) return resolveProject(ctx.api, `${ctx.caller.workspace}/${basename(ctx.caller.projectPath)}`);
   throw new ToolError(ctx.caller.kind === "thread" ? "PROJECT_NOT_FOUND" : "INVALID_ARGUMENT", ctx.caller.kind === "thread" ? "This chat has no project: pass project (list_projects)." : "project is required: an absolute path or \"<workspace>/<project>\".");
 }
 
-/** `path` inside the project, as the repo-relative path the diff route takes; refused outside it. */
-function fileInProject(projectPath: string, path: string): { absolute: string; relative: string } {
-  const absolute = isAbsolute(path) ? resolve(path) : resolve(projectPath, path);
+/** `path` (as the caller spells it, `callerHostPath`) inside the project, as the repo-relative path the diff route takes; refused outside it. */
+function fileInProject(projectPath: string, path: string, caller: ToolCaller): { absolute: string; relative: string } {
+  const absolute = resolve(callerHostPath(caller, path, projectPath));
   const rel = relative(projectPath, absolute);
   if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     throw new ToolError("INVALID_ARGUMENT", `path "${clipText(path, MAX_ECHO_CHARS)}" is not a file inside the project.`);
@@ -70,7 +70,7 @@ const getGitState = defineTool({
   async scope(args, ctx) {
     assertArgs(args);
     const project = await gitProject(args.project, ctx);
-    const file = args.path !== undefined ? fileInProject(project.path, args.path) : null;
+    const file = args.path !== undefined ? fileInProject(project.path, args.path, ctx.caller) : null;
     return { projects: [project.path], sessions: [], reads: "content", writes: false, causesTurnIn: [], ...(file ? { paths: [file.absolute] } : {}) };
   },
   annotations: READ_ONLY,
@@ -101,7 +101,7 @@ const getGitState = defineTool({
       }
       case "diff": {
         if (args.path !== undefined) {
-          const file = fileInProject(project.path, args.path);
+          const file = fileInProject(project.path, args.path, ctx.caller);
           const res = expectOk<GitDiffResponse>(await api.request("GET", "/api/git/diff", { query: { ...where, file: file.relative, staged: String(args.staged) } }));
           return withDiff({ project: label, file: file.relative, staged: args.staged, binary: res.binary }, res.diff, false);
         }

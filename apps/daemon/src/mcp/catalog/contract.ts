@@ -9,7 +9,7 @@
 
 import type { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { AdminFamily, ApprovalFamily, ApprovalKind, ApprovalPreviewSection, SpendFamily, ToolApprovalGrantScope, ToolsetId, ToolTier } from "@orquester/api";
+import type { AdminFamily, ApprovalFamily, ApprovalKind, ApprovalPreviewSection, BoxPathMap, SpendFamily, ToolApprovalGrantScope, ToolsetId, ToolTier } from "@orquester/api";
 import type { AgentAdapterId, CausedBy, InteractionMode, RuntimeMode, ThreadMessageOrigin, ThreadReplyMode } from "@orquester/api/agent-chat";
 import type { AgentToolGrantQuery, AgentToolGrantRecord } from "@orquester/config";
 
@@ -48,6 +48,12 @@ export type ToolCaller =
       /** The project's workspace name; "" with no project. */
       workspace: string;
       cwd: string;
+      /**
+       * How the chat spells paths when its CLI runs in a box that maps host paths (a Windows project
+       * box: `C:\orq\…`); absent for a chat on the host or in a POSIX box. Path arguments go
+       * through `callerHostPath` (`../addressing.ts`).
+       */
+      boxPaths?: BoxPathMap;
       agentId: AgentAdapterId;
       /** Unique per call (the provider's tool-call id where it names one). */
       callId: string;

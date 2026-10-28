@@ -15,7 +15,9 @@ import test from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  boxPathMapFor,
   boxRoutes,
+  hostToBoxPath,
   temporaryBoxRoutes,
   type BoxKindsResponse,
   type BoxOffersResponse,
@@ -493,6 +495,24 @@ test("box_upload / box_download: relative host paths from the chat's cwd; refusa
   assert.ok(!down.ok && down.code === "ALREADY_EXISTS");
   const homeless = await call(api, "box_upload", { box_id: "tmp-1", local_path: "a", remote_path: "b" }, { caller: chat({ projectPath: "", workspace: "", cwd: "/tmp" }) });
   assert.ok(!homeless.ok && homeless.code === "NO_PROJECT");
+});
+
+test("box_upload / box_download from a chat in a Windows box: C:\\orq\\… and backslash-relative local paths are its project's host paths; another drive is refused", async () => {
+  const { api, ops } = fakeApi();
+  const boxPaths = boxPathMapFor("win32");
+  const caller = chat({ boxPaths });
+  const absolute = await call(api, "box_upload", { box_id: "tmp-1", local_path: hostToBoxPath(boxPaths, join(PROJECT, "build", "out.zip")), remote_path: "out.zip" }, { caller });
+  assert.ok(absolute.ok, absolute.ok ? "" : absolute.message);
+  assert.equal((ops.at(-1)!.args[1] as { localPath: string }).localPath, join(PROJECT, "build", "out.zip"));
+  await call(api, "box_download", { box_id: "tmp-1", remote_path: "out", local_path: "build\\out.zip" }, { caller });
+  assert.equal((ops.at(-1)!.args[1] as { localPath: string }).localPath, join(PROJECT, "sub", "build", "out.zip"));
+  const count = ops.length;
+  const elsewhere = await call(api, "box_upload", { box_id: "tmp-1", local_path: "D:\\build\\out.zip", remote_path: "out.zip" }, { caller });
+  assert.ok(!elsewhere.ok && elsewhere.code === "PERMISSION_DENIED");
+  assert.equal(ops.length, count, "refused before the daemon is asked");
+  // A chat on the host: a backslash is part of the file's name, as it always was.
+  await call(api, "box_upload", { box_id: "tmp-1", local_path: "build\\out.zip", remote_path: "out.zip" });
+  assert.equal((ops.at(-1)!.args[1] as { localPath: string }).localPath, join(PROJECT, "sub", "build\\out.zip"));
 });
 
 test("box_upload / box_download claim local_path: outside every project refused, another project a card below Full access", async () => {

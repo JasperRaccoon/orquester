@@ -1,8 +1,11 @@
 import { stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
+import { boxToHostPath, hostToBoxPath } from "@orquester/api";
 import { isValidName } from "@orquester/config";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
+import type { ToolCaller } from "./catalog/contract.ts";
 import { ToolError } from "./errors.ts";
+import { clipText, MAX_ECHO_CHARS } from "./result.ts";
 
 export interface ProjectRef { workspace: string | null; name: string | null; path: string }
 
@@ -29,13 +32,17 @@ async function isDirectory(path: string): Promise<boolean> {
 /**
  * Resolve a `project` argument: an absolute path inside the sandbox, or
  * `"<workspace>/<project>"`. The canonical path is the plain joined path (names)
- * or `path.resolve(input)` (path) — the exact string the GUI uses.
+ * or `path.resolve(input)` (path) — the exact string the GUI uses. A Windows box
+ * chat's own absolute spelling (`C:\orq\…`, `\orq\…`: never a name pair) is its
+ * host path first (`callerHostPath`).
  */
-export async function resolveProject(api: { fsRoot: string; workspacesDir: string }, input: string): Promise<ProjectRef> {
+export async function resolveProject(api: { fsRoot: string; workspacesDir: string }, input: string, caller?: ToolCaller): Promise<ProjectRef> {
   const raw = input.trim();
   if (!raw) throw new ToolError("PROJECT_NOT_FOUND", "project is required: an absolute path or \"<workspace>/<project>\".");
   let path: string;
-  if (isAbsolute(raw)) {
+  if (caller?.kind === "thread" && caller.boxPaths && !raw.startsWith("/") && win32.isAbsolute(raw)) {
+    path = callerHostPath(caller, raw, caller.cwd || "/");
+  } else if (isAbsolute(raw)) {
     path = resolve(raw);
   } else {
     const parts = raw.split("/");
@@ -129,6 +136,29 @@ export async function canonicalProject(api: { fsRoot: string; workspacesDir: str
 /** The workspace a project path lies in ("" when it is no project). */
 export async function workspaceOfProject(api: { fsRoot: string; workspacesDir: string }, projectPath: string): Promise<string> {
   return (await canonicalProject(api, projectPath))?.workspace ?? "";
+}
+
+/**
+ * The host path a caller means by a path argument; a relative one is taken from `base` (an absolute
+ * host path). A chat whose CLI runs in a Windows box (`boxPaths`) spells paths as the box does —
+ * `C:\orq\…`, `build\out.zip`, either slash, any drive-letter case, or Git Bash's `/c/orq/…` — and
+ * those are mapped back to the host path; any other POSIX absolute path stays a host path. One outside the box's view of the host
+ * (another drive, `C:\Users\…`, a share) is refused, never re-read as something else. Without a
+ * map: POSIX, as always (a backslash is a filename character, an absolute path is returned as
+ * given). Containment stays the caller's check, after realpath.
+ */
+export function callerHostPath(caller: ToolCaller, path: string, base: string): string {
+  const map = caller.kind === "thread" ? caller.boxPaths : undefined;
+  if (map === undefined || map.kind === "identity") return isAbsolute(path) ? path : resolve(base, path);
+  // Git Bash (the Windows CLIs' shell) and Cygwin spell `C:\orq\…` as `/c/orq/…` and `/cygdrive/c/orq/…`.
+  const msys = /^\/(?:cygdrive\/)?([a-zA-Z])(?=\/|$)(.*)$/.exec(path);
+  if (msys === null && path.startsWith("/")) return path;
+  const boxPath = msys === null ? path : `${msys[1]}:${msys[2] || "\\"}`;
+  const host = boxToHostPath(map, win32.resolve(hostToBoxPath(map, posix.resolve(base)), boxPath));
+  if (host === null) {
+    throw new ToolError("PERMISSION_DENIED", `"${clipText(path, MAX_ECHO_CHARS)}" is outside ${map.prefix}, where this box sees the host's files: paths must lie inside a project.`);
+  }
+  return posix.normalize(host);
 }
 
 /**

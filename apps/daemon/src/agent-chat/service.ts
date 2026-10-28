@@ -22,7 +22,7 @@ import type {
   RegistryEntry,
   SessionSummary, AgentAccount,
   ThreadLineage } from "@orquester/api";
-import { SYSTEM_ACCOUNT_ID, isSessionProfileAgentId, type SessionProfileAgentId } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, boxPathMapFor, isSessionProfileAgentId, type BoxPathMap, type SessionProfileAgentId } from "@orquester/api";
 import {
   agentAdapterLabel,
   continuationTitle,
@@ -935,15 +935,33 @@ export class AgentChatService {
 
   /**
    * What a session-tool call's context says about its thread, from the
-   * thread's own chat tab (never from the call): its project, its cwd and the
-   * adapter it runs on. Null for a thread with no chat tab.
+   * thread's own chat tab (never from the call): its project, its cwd, the
+   * adapter it runs on, and — for a chat whose CLI runs in a Windows project
+   * box — that box's path map (how the agent spells paths). Null for a thread
+   * with no chat tab.
    */
-  sessionToolThread(threadId: string): { projectPath: string; cwd: string; agentId: AgentAdapterId; ownerKind?: string } | null {
+  sessionToolThread(threadId: string): { projectPath: string; cwd: string; boxPaths?: BoxPathMap; agentId: AgentAdapterId; ownerKind?: string } | null {
     const summary = this.chat.get(threadId);
     if (!summary) return null;
     const agentId = this.opts.registryEntry(summary.refId)?.chat?.adapter;
     if (agentId === undefined || !isAgentAdapterId(agentId)) return null;
-    return { projectPath: summary.projectPath, cwd: summary.cwd, agentId, ...(summary.owner ? { ownerKind: summary.owner.kind } : {}) };
+    const boxPaths = this.boxPathsOf(summary.projectPath);
+    return { projectPath: summary.projectPath, cwd: summary.cwd, ...(boxPaths ? { boxPaths } : {}), agentId, ...(summary.owner ? { ownerKind: summary.owner.kind } : {}) };
+  }
+
+  /**
+   * The path map a chat in `projectPath` runs its CLI with ({@link boxLaunchFor}: the box connection's), or none
+   * for a host project or a POSIX box (identity). A box not connected now answers from its record: the OS it
+   * reported at its last connect, else its kind.
+   */
+  private boxPathsOf(projectPath: string): BoxPathMap | undefined {
+    const boxes = this.boxes ?? this.opts.boxes ?? null;
+    if (boxes === null || projectPath.length === 0) return undefined;
+    const location = boxes.registry.locate(projectPath);
+    if (location.kind !== "box") return undefined;
+    const os = location.record.os ?? (location.record.kind?.startsWith("windows") ? "win32" : null);
+    const paths = location.connection?.paths ?? (os === "win32" ? boxPathMapFor(os) : undefined);
+    return paths?.kind === "identity" ? undefined : paths;
   }
 
   routeDeps(): AgentChatRouteDeps {

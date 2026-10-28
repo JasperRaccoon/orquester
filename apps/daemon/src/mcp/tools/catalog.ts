@@ -266,7 +266,7 @@ function fitConversations<T>(rows: readonly T[]): { conversations: T[]; truncate
 
 /** list_conversations' project: the named one, else the chat caller's own; an external caller must name one. */
 async function conversationsProject(project: string | undefined, ctx: Pick<ScopeContext, "api" | "caller">): Promise<{ path: string }> {
-  if (project !== undefined) return resolveProject(ctx.api, project);
+  if (project !== undefined) return resolveProject(ctx.api, project, ctx.caller);
   // The plain `<workspacesDir>/<ws>/<name>` the GUI records conversations under (the caller's own path is canonical).
   if (ctx.caller.kind === "thread" && ctx.caller.projectPath) return resolveProject(ctx.api, `${ctx.caller.workspace}/${basename(ctx.caller.projectPath)}`);
   throw new ToolError(ctx.caller.kind === "thread" ? "PROJECT_NOT_FOUND" : "INVALID_ARGUMENT", ctx.caller.kind === "thread" ? "This chat has no project: pass project (list_projects)." : "project is required: an absolute path or \"<workspace>/<project>\".");

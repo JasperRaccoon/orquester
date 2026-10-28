@@ -5,6 +5,8 @@ import { Readable } from "node:stream";
 import { z } from "zod";
 import { MAX_TURN_ATTACHMENTS, MAX_TURN_FILE_BYTES, MAX_TURN_IMAGE_BYTES, SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES, type AttachmentRef } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
+import { callerHostPath } from "./addressing.ts";
+import type { ToolCaller } from "./catalog/contract.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError, daemonError } from "./errors.ts";
 
@@ -31,11 +33,13 @@ function guessMime(name: string): string | undefined {
 /** A validated attachment: its upload meta, and its bytes as a stream made only when it is sent. */
 interface Prepared { name: string; type: string | undefined; body: () => Readable; handle?: FileHandle }
 
-async function preparePath(api: DaemonApi, path: string, index: number): Promise<Prepared> {
+async function preparePath(api: DaemonApi, path: string, index: number, caller: ToolCaller | undefined): Promise<Prepared> {
   let real: string;
-  // A relative path is taken under the sandbox root, as read_file's is — never under the daemon's cwd. The check realpaths
-  // the deepest EXISTING ancestor, so it never signals a missing file: open() below does.
-  try { real = await assertInsideFsRoot(api.fsRoot, resolve(api.fsRoot, path)); } catch (error) {
+  // A relative path is taken under the sandbox root, as read_file's is — never under the daemon's cwd — and a Windows box
+  // chat's spelling mapped first (`callerHostPath`). The check realpaths the deepest EXISTING ancestor, so it never
+  // signals a missing file: open() below does.
+  const target = resolve(api.fsRoot, caller ? callerHostPath(caller, path, api.fsRoot) : path);
+  try { real = await assertInsideFsRoot(api.fsRoot, target); } catch (error) {
     throw error instanceof FsSandboxError ? new ToolError("PATH_NOT_ALLOWED", `attachments[${index}]: path is not allowed (outside the sandbox).`) : error;
   }
   // Opened while validating: that proves it readable, and fstat sizes the very file that will be sent. O_NONBLOCK keeps
@@ -46,7 +50,7 @@ async function preparePath(api: DaemonApi, path: string, index: number): Promise
   try {
     const st = await handle.stat();
     if (!st.isFile()) throw new ToolError("INVALID_ARGUMENT", `attachments[${index}]: not a regular file.`);
-    const name = basename(path);
+    const name = basename(target);
     checkSize(name, undefined, st.size, index);
     const size = st.size;
     // Exactly the validated bytes, even if the file grew since (`end` is inclusive, so an empty file needs its own
@@ -88,12 +92,12 @@ function atIndex(index: number, error: ToolError): ToolError {
  * the way out, whether the call succeeds, fails validation or is refused by the host. Every refusal starts with
  * `attachments[<i>]` — a send-phase one too — so a caller batching several lists (answer_question) can point back.
  */
-export async function uploadInlineAttachments(api: DaemonApi, sessionId: string, inputs: readonly AttachmentInput[], opts?: { max?: number }): Promise<AttachmentRef[]> {
+export async function uploadInlineAttachments(api: DaemonApi, sessionId: string, inputs: readonly AttachmentInput[], opts?: { max?: number; caller?: ToolCaller }): Promise<AttachmentRef[]> {
   const max = opts?.max ?? MAX_ATTACHMENTS;
   if (inputs.length > max) throw new ToolError("INVALID_ARGUMENT", `At most ${max} attachments per message.`);
   const prepared: Prepared[] = [];
   try {
-    for (const [index, input] of inputs.entries()) prepared.push("path" in input ? await preparePath(api, input.path, index) : prepareInline(input, index));
+    for (const [index, input] of inputs.entries()) prepared.push("path" in input ? await preparePath(api, input.path, index, opts?.caller) : prepareInline(input, index));
     const refs: AttachmentRef[] = [];
     for (const [index, p] of prepared.entries()) {
       let res: Awaited<ReturnType<DaemonApi["uploadAttachment"]>>;
