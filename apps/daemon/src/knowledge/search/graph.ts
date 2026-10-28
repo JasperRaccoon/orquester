@@ -14,7 +14,7 @@ import { isKnowledgeEntryId } from "@orquester/config";
 import type { KnowledgeGraphPort, KnowledgeStorePort } from "../ports.ts";
 import type { KnowledgeLogger } from "../store/errors.ts";
 import { Bm25Index } from "./bm25.ts";
-import type { KnowledgeConceptFamiliesPort } from "./concept-families.ts";
+import { type KnowledgeConceptFamiliesPort, familyWords } from "./concept-families.ts";
 import { isSurveyEntry } from "./contradictions.ts";
 import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibility.ts";
@@ -137,6 +137,16 @@ const SHORT_NAME_WORDS = 3;
  * Reddit ~ Google 0.957); 3 at 0.985 or more (GBRAID ~ WBRAID 0.994).
  */
 const SHORT_NAME_SIMILAR_MIN = 0.985;
+/**
+ * Two longer names that are not related ({@link namesRelated}) are listed as similar only at or above
+ * this. Live graph of 2026-10-28 (2,979 concepts after merges, 6,274 pairs at `similar`): 717 pairs of
+ * longer names were listed; 123 of them share no topic word, nearly all look-alikes ("Remove
+ * entitlements you don't actively use" ~ "Use an erased iPhone" 0.931, "Use a US phone number" ~
+ * "Use Outlook or Proton" 0.941, "Pick one niche and commit to it" ~ "Create a fresh account and do
+ * not sync contacts" 0.937); one at 0.96 or more ("Battery level and charging state" ~ "Low power
+ * mode on/off" 0.963), none at 0.97.
+ */
+const SIMILAR_UNRELATED_MIN = 0.97;
 
 /** `ke_xxx.md`, `input/ke_xxx.md`, `session_a/ke_xxx.md`, `ke_xxx.md::3` → `ke_xxx`. */
 function entryIdOfSourceFile(sourceFile: string): string | null {
@@ -668,15 +678,21 @@ class View {
   }
 }
 
-/** Name and alias words of a concept ({@link tokenize}), numbers aside ("4.0 – Design" and "Guideline 4.3" share no word). */
+/**
+ * Topic words of a concept's name and aliases (`familyWords`: numbers and generic words such as
+ * "use", "one", "remove" aside: "4.0 – Design" and "Guideline 4.3" share no word, nor "Use an erased
+ * iPhone" and "Remove entitlements you don't actively use").
+ */
 function nameWords(concept: KnowledgeConcept): Set<string> {
-  return new Set(tokenize([concept.name, ...concept.aliases].join(" ")).filter((token) => !/^\p{N}+$/u.test(token)));
+  const out = new Set<string>();
+  for (const name of [concept.name, ...concept.aliases]) for (const word of familyWords(name)) out.add(word);
+  return out;
 }
 
 /** A name compared without case, accents, spaces or punctuation. */
 const squashed = (name: string): string => name.normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 
-/** Whether two concepts' names are related: a shared content word (names and aliases), or one name containing the other. */
+/** Whether two concepts' names are related: a shared topic word (names and aliases), or one name containing the other. */
 export function namesRelated(a: KnowledgeConcept, b: KnowledgeConcept): boolean {
   const x = squashed(a.name);
   const y = squashed(b.name);
@@ -708,7 +724,8 @@ export interface KnowledgeConceptView {
   mergedFrom: KnowledgeConceptRef[];
   /**
    * Visible concepts close in meaning (not merged with it), best first, up to 5; with a short name on
-   * either side, only related names or a very high similarity (`SHORT_NAME_SIMILAR_MIN`).
+   * either side, only related names (a shared topic word) or a very high similarity (`SHORT_NAME_SIMILAR_MIN`);
+   * with longer names, related ones or `SIMILAR_UNRELATED_MIN`.
    */
   similarConcepts: { concept: KnowledgeConceptRef; similarity: number }[];
 }
@@ -1030,7 +1047,8 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
       const other = view.snapshot.mergedInto.get(hit.id) ?? hit.id;
       if (other === id || !view.concept(other)) continue;
       const theirs = view.present(other)!;
-      if ((isShortName(shown.name) || isShortName(theirs.name)) && hit.similarity < SHORT_NAME_SIMILAR_MIN && !namesRelated(shown, theirs)) continue;
+      const short = isShortName(shown.name) || isShortName(theirs.name);
+      if (hit.similarity < (short ? SHORT_NAME_SIMILAR_MIN : SIMILAR_UNRELATED_MIN) && !namesRelated(shown, theirs)) continue;
       const ref = view.ref(other);
       if (similarConcepts.some((s) => s.concept.id === ref.id)) continue;
       similarConcepts.push({ concept: ref, similarity: hit.similarity });

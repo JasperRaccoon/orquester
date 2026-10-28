@@ -245,11 +245,31 @@ test("a short name's similar concepts: only related names (a shared word, one na
     graph.concept("channel-tiktok", scope)!.similarConcepts.map((s) => s.concept.name),
     ["TikTok Ads", "Musical.ly", "Douyin", "TikTokShop"]
   );
-  // Two long names: meaning alone decides, as before.
-  assert.deepEqual(
-    graph.concept("tactic-long", scope)!.similarConcepts.map((s) => s.concept.name),
-    ["Post three times a day on Reels", "Answer every comment within the hour"]
-  );
+  // Two long names: a shared topic word, or 0.97 and more ("Answer every comment within the hour"
+  // shares none with "Post three times a day on TikTok").
+  assert.deepEqual(graph.concept("tactic-long", scope)!.similarConcepts.map((s) => s.concept.name), ["Post three times a day on Reels"]);
+  graph.setSimilarConcepts(() => [{ id: "tactic-other", similarity: 0.97 }]);
+  assert.deepEqual(graph.concept("tactic-long", scope)!.similarConcepts.map((s) => s.concept.name), ["Answer every comment within the hour"]);
+});
+
+test("similar concepts of longer names: a generic word in common is no relation (the live look-alike)", async () => {
+  const store = new FakeStore();
+  store.collection(A, "A");
+  store.put(eA, "a", [A], {}, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  const on = [`${eA}.md`];
+  await loadGraph(graph, [
+    node("tactic-use-an-erased-iphone", "Use an erased iPhone", on),
+    node("tactic-remove-entitlements", "Remove entitlements you don't actively use", on),
+    node("tactic-factory-reset-the-iphone", "Factory reset the iPhone", on)
+  ]);
+  const scope = knowledgeScope({ kind: "all" }, [A]);
+  graph.setSimilarConcepts(() => [
+    { id: "tactic-remove-entitlements", similarity: 0.931 },
+    { id: "tactic-factory-reset-the-iphone", similarity: 0.93 }
+  ]);
+  // "use" is generic; "iPhone" a topic word ("erased" and "reset" one too).
+  assert.deepEqual(graph.concept("tactic-use-an-erased-iphone", scope)!.similarConcepts.map((s) => s.concept.name), ["Factory reset the iPhone"]);
 });
 
 // A merge must never show a scope what only hidden entries say (the review's reproduction): the
