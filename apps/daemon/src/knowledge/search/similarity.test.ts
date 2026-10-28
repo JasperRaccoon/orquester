@@ -27,6 +27,8 @@ function setup() {
   /** Linking's pair checks; `checksChanged` moves their revision. */
   const pairChecks: KnowledgePairCheck[] = [];
   let checksRevision = 0;
+  /** Phrase → the entries whose text names it (`naming`). */
+  const named = new Map<string, string[]>();
   const similarity = new KnowledgeSimilarity({
     store,
     graph,
@@ -39,6 +41,7 @@ function setup() {
       citation: knowledgeCitation(meta)
     }),
     body: (id) => store.entries.get(id)?.body ?? null,
+    naming: (phrase) => named.get(phrase) ?? [],
     pairChecks: () => ({ all: () => pairChecks, get: (a, b) => pairChecks.find((c) => c.a === a && c.b === b) ?? null, onChange: () => () => undefined }),
     pairChecksRevision: () => checksRevision,
     now: () => nowMs
@@ -57,6 +60,7 @@ function setup() {
     seoOnly: scope({ kind: "collections", ids: ["kc_seo"] }),
     scope,
     pairChecks,
+    named,
     checksChanged: () => {
       checksRevision += 1;
     },
@@ -931,4 +935,55 @@ test("clustersForSaved: the cluster of the saved entry's nearest drawn neighbour
   assert.equal(after.get(ke("s3")), null, "not embedded");
   s.noIndex();
   assert.deepEqual([...s.similarity.clustersForSaved(saved, s.seoOnly).values()], [null, null, null]);
+});
+
+test("similar: an entry close in meaning alone, sharing no concept though both are linked, is listed only at the two entries' usual closeness", async () => {
+  const s = setup();
+  const unit = (entries: [number, number][]) => {
+    const v = new Array<number>(DIMS).fill(0);
+    for (const [at, x] of entries) v[at] = x;
+    return v;
+  };
+  // A hub: ten entries sit around it (0.97), so its usual closeness is high; it is 0.85 from A.
+  const hub = unit([[0, 0.85], [1, Math.sqrt(1 - 0.85 ** 2)]]);
+  const files = (...names: string[]) => names.map((name) => `${ke(name)}.md`);
+  for (const name of ["a", "hub", "k", "n1", "n2", "s"]) s.put(name, ["kc_seo"]);
+  s.index.set(ke("a"), axis(DIMS, 0));
+  s.index.set(ke("hub"), hub);
+  for (let j = 0; j < 10; j += 1) {
+    s.put(`m${j}`, ["kc_seo"]);
+    s.index.set(ke(`m${j}`), hub.map((x, d) => 0.97 * x + (d === 2 + j ? Math.sqrt(1 - 0.97 ** 2) : 0)));
+  }
+  s.index.set(ke("k"), around(DIMS, 0, 12, 0.88)); // close to A, near nothing else: above both usual closenesses
+  s.index.set(ke("n1"), around(DIMS, 0, 13, 0.89));
+  s.index.set(ke("n2"), around(DIMS, 0, 14, 0.89));
+  s.index.set(ke("s"), around(DIMS, 0, 15, 0.85)); // as close as the hub, but shares a concept
+  await loadGraph(s.graph, [
+    node("tactic-a", "Warm up the account", files("a", "s")),
+    node("tactic-hub", "Earn third-party coverage", files("hub")),
+    node("tactic-k", "Self-host a VPN", files("k"))
+  ]);
+  const listed = () => ids(s.similarity.forEntry(ke("a"), s.all).similar);
+  assert.ok(!listed().includes(ke("hub")), listed().join(" "));
+  assert.ok(listed().includes(ke("k")) && listed().includes(ke("s")), listed().join(" "));
+  assert.ok(listed().includes(ke("n1")), "an unlinked entry is no sign of another topic");
+  // Unlinked, the hub is listed as before.
+  await loadGraph(s.graph, [node("tactic-a", "Warm up the account", files("a", "s")), node("tactic-k", "Self-host a VPN", files("k"))]);
+  assert.ok(listed().includes(ke("hub")), listed().join(" "));
+});
+
+test("novelty: a tool another visible entry names in its text is not new; one only a hidden entry names is", async () => {
+  const s = graphFixture();
+  await loadGraph(s.graph, [
+    node("tool-findmy", "Find My iPhone", [`${ke("p1")}.md`], { type: "Tool" }),
+    node("tactic-findmy", "Find My iPhone off", [`${ke("p1")}.md`])
+  ]);
+  const names = () => s.similarity.novelty(ke("p1"), s.seoOnly)!.newConcepts.map((c) => c.name);
+  assert.deepEqual(names(), ["Find My iPhone off", "Find My iPhone"]);
+  s.named.set("Find My iPhone", [ke("p1"), ke("hidden")]);
+  assert.deepEqual(names(), ["Find My iPhone off", "Find My iPhone"], "a hidden entry names nothing; the entry itself does not count");
+  s.named.set("Find My iPhone", [ke("p1"), ke("p2")]);
+  assert.deepEqual(names(), ["Find My iPhone off"], "a tool, not a claim, is backed by a mention");
+  s.named.set("Find My iPhone off", [ke("p2")]);
+  assert.deepEqual(names(), ["Find My iPhone off"]);
 });

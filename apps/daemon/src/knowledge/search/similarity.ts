@@ -121,6 +121,16 @@ const DISTINCTIVE_MIN_ENTRIES = 2;
  */
 const DISTINCTIVE_BONUS = 0.25;
 const DISTINCTIVE_BONUS_CONCEPTS = 3;
+/**
+ * A similar entry by meaning alone, with no concept in common though both are linked, must be about
+ * as close as the two entries' own nearest neighbours are to them: 2·cos − r(a) − r(b) ≥
+ * −`UNSHARED_HUB_MARGIN`, r = the mean similarity to an entry's `UNSHARED_HUB_NEIGHBOURS` nearest
+ * (the hubness correction link gaps use, `gaps.ts`). A margin of 0: such a pair must reach the two
+ * entries' usual closeness on average (126 real entries: daniel's VPN post ~ "How ChatGPT Actually
+ * Picks Sources" 0.896, no concept shared, falls below it).
+ */
+const UNSHARED_HUB_NEIGHBOURS = 10;
+const UNSHARED_HUB_MARGIN = 0;
 /** Entries listed in `similar` because they contradict this one (even below the meaning bar). */
 const CONTRADICTIONS_SIMILAR_MAX = 3;
 /** Entries listed in an entry's `disagreements` (every one counted in `disagreementsTotal`). */
@@ -164,6 +174,11 @@ export interface KnowledgeSimilarityOptions {
   summary: (meta: KnowledgeEntryMeta, scope: KnowledgeScope) => KnowledgeEntrySummary;
   /** An entry's body as indexed (the near-copy check of duplicates); null when unknown. */
   body: (id: string) => string | null;
+  /**
+   * The entries whose text names a phrase (`KnowledgeSearch.entriesNaming`), unscoped: a Tool
+   * another visible entry names is not new on an entry's page. Absent: none.
+   */
+  naming?: (phrase: string) => readonly string[];
   /** Linking's LLM pair checks, read per call; absent or null: none. */
   pairChecks?: () => KnowledgePairChecksPort | null;
   /** Moves whenever the pair checks change (part of the graph's cache key); absent: never. */
@@ -229,6 +244,48 @@ export function dot(a: Float32Array, b: Float32Array): number {
 }
 
 export const round = (value: number): number => Math.round(value * 1e4) / 1e4;
+
+/** The best `size` similarities offered, and their mean (an entry's usual closeness: the `r` of CSLS). */
+class TopSimilarities {
+  private readonly best: number[] = [];
+  constructor(private readonly size: number) {}
+
+  offer(similarity: number): void {
+    const best = this.best;
+    if (best.length === this.size) {
+      if (similarity <= best[best.length - 1]!) return;
+      best.pop();
+    }
+    let at = best.length;
+    while (at > 0 && best[at - 1]! < similarity) at -= 1;
+    best.splice(at, 0, similarity);
+  }
+
+  mean(): number {
+    return this.best.length === 0 ? 0 : this.best.reduce((sum, value) => sum + value, 0) / this.best.length;
+  }
+}
+
+/**
+ * Each target's usual closeness ({@link UNSHARED_HUB_NEIGHBOURS} nearest among `scanned`, itself
+ * aside, and the entry they are compared with at `toOwner`), in one pass over `scanned`; 0 for a
+ * target without a vector.
+ */
+function usualCloseness(targets: readonly { id: string; vector: Float32Array | null; toOwner: number }[], scanned: readonly { id: string; vector: Float32Array }[]): number[] {
+  const tops = targets.map((target) => {
+    const top = new TopSimilarities(UNSHARED_HUB_NEIGHBOURS);
+    top.offer(target.toOwner);
+    return top;
+  });
+  if (targets.length === 0) return [];
+  for (const { id, vector } of scanned) {
+    for (let t = 0; t < targets.length; t += 1) {
+      const target = targets[t]!;
+      if (target.vector && target.id !== id) tops[t]!.offer(dot(target.vector, vector));
+    }
+  }
+  return targets.map((target, t) => (target.vector ? tops[t]!.mean() : 0));
+}
 
 function clamp(value: number | undefined, fallback: number, min: number, max: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
@@ -297,6 +354,7 @@ export class KnowledgeSimilarity {
   private readonly index: () => KnowledgeVectorIndex | null;
   private readonly summary: KnowledgeSimilarityOptions["summary"];
   private readonly body: KnowledgeSimilarityOptions["body"];
+  private readonly naming: NonNullable<KnowledgeSimilarityOptions["naming"]>;
   /** Entry id → its shingles, keyed by a hash of the body they were made from; least recently used first. */
   private readonly shingleCache = new Map<string, { hash: string; shingles: Set<string> }>();
   /** Similarity graphs drawn in the background (novelty, a save's cluster), by scope and model. */
@@ -323,6 +381,7 @@ export class KnowledgeSimilarity {
     this.index = options.index;
     this.summary = options.summary;
     this.body = options.body;
+    this.naming = options.naming ?? (() => []);
     this.pairChecks = options.pairChecks ?? (() => null);
     this.pairChecksRevision = options.pairChecksRevision ?? (() => 0);
     this.now = options.now ?? Date.now;
@@ -362,7 +421,9 @@ export class KnowledgeSimilarity {
    * The entry's `similar` and `possibleDuplicates` (spec R5): the union of its nearest entries by
    * meaning (cosine ≥ `good`, up to 8), the entries sharing concepts with it, the 2 most recent
    * by the same author or handle, and up to 3 entries that contradict it ({@link findContradictions},
-   * always kept among the 8, even below `good`); each with every reason that applies; ordered by
+   * always kept among the 8, even below `good`); one close in meaning alone, sharing no concept
+   * though both are linked, only at its two entries' usual closeness ({@link UNSHARED_HUB_MARGIN});
+   * each with every reason that applies; ordered by
    * similarity plus the distinctive-concept bonus ({@link DISTINCTIVE_BONUS}; none last), shared
    * concepts, then newest; at most 8. A candidate sharing a visible concept with it has the
    * `concepts` reason whichever way it was found. Duplicates: up to 3 at cosine ≥ `duplicate` whose
@@ -390,6 +451,9 @@ export class KnowledgeSimilarity {
 
     // (a) Nearest by meaning.
     let neighbours: { meta: KnowledgeEntryMeta; similarity: number }[] = [];
+    /** Every other visible entry's vector (read again for the usual closeness of candidates sharing no concept). */
+    const scanned: { id: string; vector: Float32Array }[] = [];
+    const ownTop = new TopSimilarities(UNSHARED_HUB_NEIGHBOURS);
     if (vectors && own) {
       for (const other of vectors.index.embeddedIds()) {
         if (other === id) continue;
@@ -397,6 +461,8 @@ export class KnowledgeSimilarity {
         const vector = otherMeta ? vectors.index.entryVector(other) : null;
         if (!otherMeta || !vector) continue;
         const similarity = dot(own, vector);
+        scanned.push({ id: other, vector });
+        ownTop.offer(similarity);
         if (similarity >= vectors.thresholds.good) neighbours.push({ meta: otherMeta, similarity });
       }
       neighbours = neighbours.sort((a, b) => b.similarity - a.similarity || newestFirst(a.meta, b.meta));
@@ -457,6 +523,29 @@ export class KnowledgeSimilarity {
         const named = [...telling, ...common.filter((c) => !telling.includes(c))];
         found.concepts = { refs: named.slice(0, SHARED_CONCEPTS_NAMED), shared: common.length, distinctive: telling };
       }
+    }
+
+    // Close in meaning alone, sharing no concept although both are linked: listed only when as close
+    // as the two entries' own nearest neighbours are to them (hubness, as link gaps read it), so a
+    // long article near everything ("How ChatGPT Actually Picks Sources" ~ daniel's VPN post, 0.90,
+    // no concept in common) is no similar entry. A possible duplicate is kept whatever its concepts.
+    if (vectors && own && ownConcepts.length > 0) {
+      const tested = [...candidates.values()].filter(
+        (found) =>
+          found.concepts === null &&
+          found.contradiction === null &&
+          found.author === null &&
+          found.similarity !== null &&
+          found.similarity < vectors.thresholds.duplicate &&
+          this.knowledgeGraph.conceptIdsOfEntry(found.meta.id).length > 0
+      );
+      const usual = usualCloseness(
+        tested.map((found) => ({ id: found.meta.id, vector: vectors.index.entryVector(found.meta.id), toOwner: found.similarity! })),
+        scanned
+      );
+      tested.forEach((found, i) => {
+        if (2 * found.similarity! - ownTop.mean() - usual[i]! < -UNSHARED_HUB_MARGIN) candidates.delete(found.meta.id);
+      });
     }
 
     // Every candidate's similarity, when both have vectors (it orders them even below `good`).
@@ -568,8 +657,9 @@ export class KnowledgeSimilarity {
   // -------------------------------------------------------------------------
 
   /**
-   * What the entry adds: its concepts no other visible entry has, in these words or in others (`backingConcepts`; claims first, people and
-   * organizations last, up to 8), and the cluster it sits in by the latest similarity graph drawn
+   * What the entry adds: its concepts no other visible entry has, in these words or in others
+   * (`backingConcepts`), nor, for a Tool, names in its text (`naming`: "Find My iPhone" in jason's
+   * steps); claims first, people and organizations last, up to 8; and the cluster it sits in by the latest similarity graph drawn
    * for `scope` (any `k` and `limit`: the layer's, insights'). Null when none is drawn yet: it never
    * waits for one, it starts drawing one in the background for the next read. Null while the entry
    * has no vectors.
@@ -591,7 +681,10 @@ export class KnowledgeSimilarity {
       .sort((a, b) => a.rank - b.rank || a.order - b.order)) {
       if (newConcepts.length >= NOVELTY_CONCEPTS_MAX) break;
       // Nor said in other words by another entry (a concept that backs it); asked in rank order, only as far as listed.
-      if (this.knowledgeGraph.backingConcepts(concept.id).every(onlyHere)) newConcepts.push({ ...concept });
+      if (!this.knowledgeGraph.backingConcepts(concept.id).every(onlyHere)) continue;
+      // A tool another visible entry names in its text ("Find My iPhone" in jason's step 4) is not new here.
+      if (concept.type.toLowerCase() === "tool" && this.naming(concept.name).some((other) => other !== id && this.visibleMeta(other, scope) !== null)) continue;
+      newConcepts.push({ ...concept });
     }
     const structure = this.latestStructure(scope, vectors.index);
     if (!structure) this.drawInBackground(scope, vectors.index);

@@ -38,7 +38,8 @@ import type { KnowledgeConceptSummariesPort } from "./concept-summaries.ts";
 import { findContradictions, isSurveyEntry } from "./contradictions.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
 import { KnowledgeInsights } from "./insights.ts";
-import { type TextSpan, bestSnippet, tokenize } from "./text.ts";
+import { claimFigure, namesPhrase, statesClaimNumber } from "./mentions.ts";
+import { DURATION, type TextSpan, bestSnippet, tokenize } from "./text.ts";
 import { InProcessVectorIndex } from "./vector-index.ts";
 import { type KnowledgeScope, UNFILED, entryInScope, knowledgeScope, scopeCollectionIds, visibleCollections } from "./visibility.ts";
 
@@ -74,6 +75,8 @@ const MMR_LAMBDA = 0.7;
 const OTHER_SIDE_WINDOW = 10;
 /** How far down the ranked list another side is found (it matched the query). */
 const OTHER_SIDE_REACH = 40;
+/** The share of the query (its words by BM25 idf) a disagreement's note must hold for its other side to be brought up. */
+const OTHER_SIDE_NOTED = 0.5;
 /** Other sides one hit brings up. */
 const OTHER_SIDE_MAX = 2;
 /** A survey's share of its score when entries are ranked by relevance, unless the query asks for one. */
@@ -84,6 +87,14 @@ const SURVEY_QUERY_WORDS: ReadonlySet<string> = new Set(
 );
 /** What holding every query token adds to a chunk's cosine when the passage to show is chosen ({@link queryPassage}). */
 const PASSAGE_TERMS_WEIGHT = 0.1;
+/** A query that asks for a duration ("how long to warm up a new TikTok account"). */
+const DURATION_QUESTION = /\bhow\s+long\b/i;
+/**
+ * The words a duration is said in, searched by keyword beside the words of a query that asks how
+ * long: "48 hours" holds no word of "how long to warm up a new TikTok account", while Erikas's "as
+ * long as you have a new device" held the most.
+ */
+const DURATION_TERMS: readonly string[] = tokenize("hours days weeks");
 /** Recency half-life of the `recent` sort, in days. */
 const RECENCY_HALF_LIFE_DAYS = 90;
 /** Body words of an example entry its keyword fallback searches with (beside its title). */
@@ -167,6 +178,7 @@ export class KnowledgeSearch {
       index: () => this.vectorIndex(),
       summary: (meta, scope) => this.summary(meta, scope),
       body: (id) => this.bodies.get(id) ?? null,
+      naming: (phrase) => this.entriesNaming(phrase),
       pairChecks: () => this.linkingPorts.pairChecks,
       pairChecksRevision: () => this.linkingPorts.revision
     });
@@ -176,6 +188,7 @@ export class KnowledgeSearch {
       similarity: this.similarity,
       index: () => this.vectorIndex(),
       summary: (meta, scope) => this.summary(meta, scope),
+      stating: (claim) => this.entriesStating(claim),
       pairChecks: () => this.linkingPorts.pairChecks,
       pairChecksRevision: () => this.linkingPorts.revision,
       linkGapQueued: (a, b) => this.linkingPorts.linkGapQueued?.(a, b) ?? false
@@ -225,6 +238,20 @@ export class KnowledgeSearch {
     await this.ready?.catch(() => undefined);
     await this.textChain.catch(() => undefined);
     await stopping;
+  }
+
+  /** Entries whose title or body names `phrase` (`mentions.ts` {@link namesPhrase}), read through the keyword index; unscoped. */
+  entriesNaming(phrase: string): string[] {
+    return this.bm25.keysWithAll(tokenize(phrase)).filter((id) => this.store.getMeta(id) !== null && namesPhrase(`${this.store.getMeta(id)!.title}\n${this.bodies.get(id) ?? ""}`, phrase));
+  }
+
+  /** Entries whose title or body states a claim's figure (`mentions.ts` {@link statesClaimNumber}), read through the keyword index; unscoped. */
+  entriesStating(claim: string): string[] {
+    const numbers = claimFigure(claim).numbers;
+    if (numbers.length === 0) return [];
+    return this.bm25
+      .keysWithAll(numbers.flatMap((n) => tokenize(n)))
+      .filter((id) => this.store.getMeta(id) !== null && statesClaimNumber(`${this.store.getMeta(id)!.title}\n${this.bodies.get(id) ?? ""}`, claim));
   }
 
   /** The vector index search, similarity and facets share (retrieval spec, "The vector index port"). */
@@ -334,8 +361,11 @@ export class KnowledgeSearch {
     // --- Signals ------------------------------------------------------------
     this.vectors.backfill();
     const thresholds = this.vectors.thresholds();
-    const terms = tokenize(query);
-    const keyword = query ? this.bm25.search(terms, accept, CANDIDATES).map((hit) => hit.key) : [];
+    // "How long …" asks for a duration: "long" is the question, not a word to match ("as long as"); a
+    // duration is said in hours, days or weeks, which the keyword signal searches beside the query's words.
+    const duration = DURATION_QUESTION.test(query);
+    const terms = duration ? tokenize(query).filter((token) => token !== "long") : tokenize(query);
+    const keyword = query ? this.bm25.search(duration ? [...terms, ...DURATION_TERMS] : terms, accept, CANDIDATES).map((hit) => hit.key) : [];
     const meaningHits = query ? await this.meaningSearch(query, accept) : [];
     const meaningById = new Map(meaningHits.map((hit) => [hit.entryId, hit]));
     const meaning = meaningHits.map((hit) => hit.entryId);
@@ -417,7 +447,8 @@ export class KnowledgeSearch {
     // --- Page -------------------------------------------------------------------
     const signals = {
       terms,
-      words: queryWords(query),
+      words: queryWords(query).filter((word) => !duration || word.word !== "long"),
+      duration,
       keyword: new Set(keyword),
       meaning: meaningById,
       similar: similarHits.hits,
@@ -519,11 +550,18 @@ export class KnowledgeSearch {
 
   /**
    * Both sides of a disagreement the query finds: each of the first {@link OTHER_SIDE_WINDOW} hits
-   * that an LLM pair check found to contradict an entry further down (within
-   * {@link OTHER_SIDE_REACH} places: the query found it too) brings it up to just after itself, at
-   * most {@link OTHER_SIDE_MAX} of them, those whose note is most about the query first (its query
-   * words, by their BM25 idf), then the higher placed. An entry brought up brings no other;
-   * the same results always come in the same order, so pages stay stable.
+   * (by its own place, whether or not another hit brought it up) that an LLM pair check found to
+   * contradict an entry further down (within {@link OTHER_SIDE_REACH} places: the query found it
+   * too), with a note about the query ({@link OTHER_SIDE_NOTED} of its words by idf), brings it up
+   * to just after itself, at most {@link OTHER_SIDE_MAX} of them: those whose note
+   * is most about the query first (its query words, by their BM25 idf), then those that would
+   * otherwise fall past the window, then the higher placed. A side brought up from past the window
+   * brings no other. The same results always come in the same order, so pages stay stable.
+   *
+   * Before, a hit another hit brought up brought none of its own, and a hit already placed was
+   * skipped: on the live base "VPN or proxy for a US TikTok account" placed jason first, who brought
+   * up daniel (#2) and Alex (#3), so neither brought up Ema's NordVPN post (daniel's checked
+   * disagreement, #9) or Ema's "VPN matters less" (Alex's, #7).
    */
   private withOtherSides(ranked: readonly Ranked[], scope: KnowledgeScope, terms: readonly string[]): Ranked[] {
     const checks = this.linkingPorts.pairChecks;
@@ -532,10 +570,16 @@ export class KnowledgeSearch {
     const found = findContradictions({ graph: this.graph, scope, pairChecks: checks, accept: (id) => place.has(id), entryMeta: (id) => this.store.getMeta(id) });
     const sides = new Map<string, { id: string; at: number; noted: number }[]>();
     const wanted = new Set(terms);
+    const whole = [...wanted].reduce((sum, token) => sum + this.bm25.idf(token), 0);
     for (const { a, b, source, note } of found.values()) {
-      if (source !== "checked") continue;
-      // How much of the query the note is about: its query words, rare ones weighing more.
-      const noted = note === null ? 0 : [...new Set(tokenize(note))].reduce((sum, token) => sum + (wanted.has(token) ? this.bm25.idf(token) : 0), 0);
+      if (source !== "checked" || note === null) continue;
+      // How much of the query the note is about: its query words, rare ones weighing more. A
+      // disagreement about the query holds at least half of it ({@link OTHER_SIDE_NOTED}); one whose
+      // note holds only the words every result has ("TikTok account") is about something else
+      // (daniel's VPN disagreements, for "how long to warm up a new TikTok account"): its other side
+      // stays where the query put it.
+      const noted = [...new Set(tokenize(note))].reduce((sum, token) => sum + (wanted.has(token) ? this.bm25.idf(token) : 0), 0);
+      if (noted <= 0 || noted < OTHER_SIDE_NOTED * whole) continue;
       for (const [x, y] of [
         [a, b],
         [b, a]
@@ -548,23 +592,19 @@ export class KnowledgeSearch {
     if (sides.size === 0) return [...ranked];
     const out: Ranked[] = [];
     const placed = new Set<string>();
-    const pulled = new Set<string>();
     const byId = new Map(ranked.map((item) => [item.id, item]));
-    for (const item of ranked) {
-      if (placed.has(item.id)) continue;
+    const emit = (item: Ranked): void => {
       out.push(item);
       placed.add(item.id);
-      if (out.length > OTHER_SIDE_WINDOW || pulled.has(item.id)) continue;
+      const at = place.get(item.id);
+      if (at === undefined || at >= OTHER_SIDE_WINDOW) return;
       const others = (sides.get(item.id) ?? [])
-        .filter((side) => !placed.has(side.id) && side.at > place.get(item.id)!)
-        .sort((x, y) => y.noted - x.noted || x.at - y.at)
+        .filter((side) => !placed.has(side.id) && side.at > at)
+        .sort((x, y) => y.noted - x.noted || Number(x.at < OTHER_SIDE_WINDOW) - Number(y.at < OTHER_SIDE_WINDOW) || x.at - y.at)
         .slice(0, OTHER_SIDE_MAX);
-      for (const side of others) {
-        out.push(byId.get(side.id)!);
-        placed.add(side.id);
-        pulled.add(side.id);
-      }
-    }
+      for (const side of others) if (!placed.has(side.id)) emit(byId.get(side.id)!);
+    };
+    for (const item of ranked) if (!placed.has(item.id)) emit(item);
     return out;
   }
 
@@ -618,6 +658,8 @@ export class KnowledgeSearch {
       expansion: ReadonlySet<string>;
       expansionSeeds: ReadonlyMap<string, string[]>;
       thresholds: KnowledgeVectorThresholds | null;
+      /** The query asks how long: a passage stating a duration is preferred. */
+      duration: boolean;
     }
   ): KnowledgeSearchHit {
     const id = meta.id;
@@ -633,7 +675,7 @@ export class KnowledgeSearch {
     const coverage = distinct.length > 0 ? distinct.filter((token) => this.bm25.contains(id, token)).length / distinct.length : 0;
     const similarity = Math.max(meaningHit?.score ?? -Infinity, similarHit?.score ?? -Infinity);
     const body = this.bodies.get(id) ?? "";
-    const passage = meaningHit ? queryPassage(meaningHit, body, distinct) : null;
+    const passage = meaningHit ? queryPassage(meaningHit, body, distinct, signals.duration) : null;
     const match: KnowledgeEntryMatch = {
       band: matchBand(Number.isFinite(similarity) ? similarity : null, coverage, via, signals.thresholds),
       via,
@@ -645,7 +687,7 @@ export class KnowledgeSearch {
         .map(({ id: conceptId, name, type }): KnowledgeConceptRef => ({ id: conceptId, name, type }))
     };
     const span: TextSpan | undefined = passage?.span ?? similarHit?.span;
-    const snippet = bestSnippet(body, signals.terms, span);
+    const snippet = bestSnippet(body, signals.terms, span, signals.duration);
     return { kind: "entry", score, entry: this.summary(meta, scope, snippet), match };
   }
 
@@ -988,15 +1030,17 @@ function matchBand(
  * best by cosine on a tie). Cosine alone picks, in a long survey, whichever chunk sits nearest the
  * query's topic; the query's own words say which one answers it.
  */
-function queryPassage(hit: KnowledgeVectorHit, body: string, tokens: readonly string[]): { chunk: number; span: TextSpan } {
+function queryPassage(hit: KnowledgeVectorHit, body: string, tokens: readonly string[], duration = false): { chunk: number; span: TextSpan } {
   const chunks = hit.chunkScores;
   if (!chunks || chunks.length < 2 || tokens.length === 0) return { chunk: hit.chunk, span: hit.span };
   const wanted = new Set(tokens);
   let best = { chunk: hit.chunk, span: hit.span };
   let bestScore = -Infinity;
   chunks.forEach(({ score, span }, chunk) => {
-    const held = new Set(tokenize(body.slice(span.start, span.end)).filter((token) => wanted.has(token))).size;
-    const total = score + (PASSAGE_TERMS_WEIGHT * held) / wanted.size;
+    const text = body.slice(span.start, span.end);
+    // A query asking how long counts a stated duration as one more word held.
+    const held = new Set(tokenize(text).filter((token) => wanted.has(token))).size + (duration && DURATION.test(text) ? 1 : 0);
+    const total = score + (PASSAGE_TERMS_WEIGHT * held) / (wanted.size + (duration ? 1 : 0));
     if (total > bestScore + 1e-9 || (Math.abs(total - bestScore) <= 1e-9 && chunk === hit.chunk)) {
       bestScore = total;
       best = { chunk, span };
