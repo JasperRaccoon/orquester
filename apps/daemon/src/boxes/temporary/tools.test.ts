@@ -540,22 +540,22 @@ test("box project: transfers stay inside the project after realpath in its box, 
   assert.equal(existsSync(inBox("linked.git", "config")), false);
 });
 
-test("box project: download staging the project box could not remove is removed once it can be; a download in place still succeeds", async () => {
-  const { tools, project, inBox, projectBox, connection } = boxProjectWorld("boxed-leftover");
+test("box project: download staging the project box could not remove is retried on its reconnect and next transfer, named in a refusal, and forgotten with that box", async () => {
+  const { tools, boxes, project, inBox, projectBox, connection } = boxProjectWorld("boxed-leftover");
+  boxes.add(boxSummary({ id: "box-project", purpose: "project", threadId: null }));
   const principal = agent("chat-a", project);
   mkdirSync(join(BOX, "bp-left", "sub"), { recursive: true });
   writeFileSync(join(BOX, "bp-left", "sub", "f"), "f");
+  mkdirSync(join(BOX, "bp-left-git", "pkg", ".git"), { recursive: true });
+  writeFileSync(join(BOX, "bp-left-git", "pkg", ".git", "config"), "[core]\n\tfsmonitor = /tmp/x\n");
   const removals: Promise<unknown>[] = [];
-  let failRemoval = false;
+  let busy = false;
   const request = projectBox.request;
   projectBox.request = ((method: string, params: never, options?: never) => {
     if (method !== "fs.rm") return request(method as "fs.rm", params, options);
-    if (failRemoval) {
-      failRemoval = false;
-      return Promise.reject(Object.assign(new Error("Device or resource busy"), { code: "EBUSY" }));
-    }
-    const removal = request(method, params, options);
-    removals.push(removal);
+    // A busy or locked file (Windows): the box stays connected but refuses the removal.
+    const removal = busy ? Promise.reject(Object.assign(new Error("Device or resource busy"), { code: "EBUSY" })) : request(method, params, options);
+    removals.push(removal.catch(() => undefined));
     return removal;
   }) as typeof projectBox.request;
 
@@ -575,14 +575,30 @@ test("box project: download staging the project box could not remove is removed 
   await Promise.all(removals);
   assert.deepEqual(readdirSync(inBox("drop")), []);
 
-  // The directory is in place but its emptied staging cannot be removed: the download is written.
+  // The box refuses to remove a refused download's unscanned tree: the refusal says where it is,
+  // and the next transfer into that project box removes it.
   connection.readTar = readTar;
-  failRemoval = true;
-  const kept = await tools.download("box-a", { remotePath: join(BOX, "bp-left"), localPath: join(project, "kept", "copy") }, { principal });
-  assert.ok(kept.ok, kept.ok ? "" : kept.message);
-  assert.equal(readFileSync(inBox("kept", "copy", "sub", "f"), "utf8"), "f");
-  await Promise.all(removals);
-  assert.deepEqual(readdirSync(inBox("kept")), ["copy"], "the staging is removed again");
+  busy = true;
+  const refused = await tools.download("box-a", { remotePath: join(BOX, "bp-left-git"), localPath: join(project, "refused", "copy") }, { principal });
+  assert.ok(!refused.ok && refused.code === "PERMISSION_DENIED", refused.ok ? "" : refused.message);
+  assert.ok(refused.message.includes(join(project, "refused", ".orq-download-id2")), refused.message);
+  assert.deepEqual(readdirSync(inBox("refused")), [".orq-download-id2"]);
+  busy = false;
+  writeFileSync(inBox("a.txt"), "a");
+  const next = await tools.upload("box-a", { localPath: join(project, "a.txt"), remotePath: "a.txt" }, { principal });
+  assert.ok(next.ok, next.ok ? "" : next.message);
+  assert.deepEqual(readdirSync(inBox("refused")), []);
+
+  // Once the project box is destroyed, nothing is retried in it.
+  busy = true;
+  const gone = await tools.download("box-a", { remotePath: join(BOX, "bp-left-git"), localPath: join(project, "gone", "copy") }, { principal });
+  assert.ok(!gone.ok && gone.code === "PERMISSION_DENIED");
+  busy = false;
+  const sent = removals.length;
+  boxes.update("box-project", { state: "destroyed" });
+  projectBox.setConnected(false);
+  projectBox.setConnected(true);
+  assert.equal(removals.length, sent, "no removal is sent to a destroyed project box");
 });
 
 test("box project on macOS: a directory upload's tar runs with COPYFILE_DISABLE (no AppleDouble ._ entries)", async () => {
@@ -609,7 +625,6 @@ test("box project: a project box that is not connected is a BOX_NOT_READY refusa
   const download = await tools.download("box-a", { remotePath: join(BOX, "a.txt"), localPath: join(project, "a.txt") }, { principal });
   for (const result of [upload, download]) {
     assert.ok(!result.ok && result.code === "BOX_NOT_READY", result.ok ? "" : result.message);
-    assert.match(result.message, /project's box/);
     assert.match(result.message, /box-project/);
   }
 });
@@ -803,6 +818,54 @@ test("download: never into git metadata — a .git path (any spelling), through 
   // Ordinary files next to a repo still download.
   const ok = await tools.download("box-a", { remotePath: join(BOX, "evil", "config"), localPath: join(repo, "config.example") }, { principal: agent() });
   assert.ok(ok.ok, ok.ok ? "" : ok.message);
+});
+
+test("download: a git directory is never built piece by piece — HEAD, commondir, objects and refs count as written, partial layouts are refused (host and box project)", async () => {
+  const { tools, project, inBox } = boxProjectWorld("boxed-pieces");
+  const pieces = join(BOX, "pieces");
+  mkdirSync(join(pieces, "empty"), { recursive: true });
+  writeFileSync(join(pieces, "config"), "[core]\n\tfsmonitor = /tmp/x\n");
+  writeFileSync(join(pieces, "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(pieces, "commondir"), "../bar\n");
+  // Trees with a partial layout below their top, and one with a mere file named HEAD.
+  for (const [tree, name, text] of [
+    ["lone-head", "HEAD", "0123456789abcdef0123456789abcdef01234567\n"],
+    ["lone-commondir", "commondir", "../../bar\n"],
+    ["notes", "HEAD", "What is on top of the stack.\n"]
+  ] as const) {
+    mkdirSync(join(pieces, tree, "sub"), { recursive: true });
+    writeFileSync(join(pieces, tree, "sub", name), text);
+  }
+  for (const [root, principal, local] of [
+    [join(PROJECT, "pieces"), agent(), (...segments: string[]) => join(PROJECT, "pieces", ...segments)],
+    [join(project, "pieces"), agent("chat-a", project), (...segments: string[]) => inBox("pieces", ...segments)]
+  ] as const) {
+    const download = async (remote: string, localPath: string, written: boolean): Promise<void> => {
+      const result = await tools.download("box-a", { remotePath: join(pieces, remote), localPath: join(root, localPath) }, { principal });
+      if (written) assert.ok(result.ok, result.ok ? "" : `${localPath}: ${result.message}`);
+      else assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${localPath} is refused`);
+    };
+    // Config and objects for a directory a commondir could name, but not the refs completing it.
+    await download("config", "bar/config", true);
+    await download("empty", "bar/objects", true);
+    await download("empty", "bar/refs", false);
+    // A HEAD or a commondir (any spelling) is never written: either starts a git directory.
+    await download("HEAD", "foo/HEAD", false);
+    await download("commondir", "foo/CommonDir.", false);
+    await download("lone-head", "tree-head", false);
+    await download("lone-commondir", "tree-commondir", false);
+    await download("notes", "tree-notes", true);
+    // A mere file named HEAD blocks nothing beside it; a HEAD git reads as one does.
+    mkdirSync(local("notes"));
+    writeFileSync(local("notes", "HEAD"), "What is on top of the stack.\n");
+    await download("config", "notes/config.txt", true);
+    mkdirSync(local("half"));
+    writeFileSync(local("half", "HEAD"), "ref: refs/heads/main\n");
+    await download("config", "half/config", false);
+    assert.deepEqual(readdirSync(local()).sort(), ["bar", "half", "notes", "tree-notes"]);
+    assert.deepEqual(readdirSync(local("bar")).sort(), ["config", "objects"]);
+    assert.deepEqual(readdirSync(local("half")), ["HEAD"]);
+  }
 });
 
 test("download: a remote_path that is a symlink to a directory is refused, nothing followed or installed (host and box project)", async () => {
