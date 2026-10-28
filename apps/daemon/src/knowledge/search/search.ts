@@ -34,6 +34,7 @@ import type { KnowledgeEmbedderSource } from "./embedder.ts";
 import { type KnowledgeEntryFilter, entryMatchesFilter, filterKey, parseKnowledgeFilters, splitFilterList } from "./filters.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import { computeKnowledgeFacets } from "./facets.ts";
+import type { KnowledgeConceptFamilySummariesPort } from "./concept-family-summaries.ts";
 import type { KnowledgeConceptSummariesPort } from "./concept-summaries.ts";
 import { findContradictions, isSurveyEntry } from "./contradictions.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
@@ -179,6 +180,8 @@ export class KnowledgeSearch {
   } = { pairChecks: null, linkGapQueued: null, revision: 0, unsubscribe: null };
   /** Neutral concept summaries (`concept-summaries.ts`); null: none ({@link connectConceptSummaries}). */
   private conceptSummaries: KnowledgeConceptSummariesPort | null = null;
+  /** Concept families with their names and summaries; null: none ({@link connectConceptFamilies}). */
+  private conceptFamilies: KnowledgeConceptFamilySummariesPort | null = null;
 
   constructor(options: KnowledgeSearchOptions) {
     this.store = options.store;
@@ -236,6 +239,11 @@ export class KnowledgeSearch {
   /** Where concept details read their summaries from (null: none). */
   connectConceptSummaries(port: KnowledgeConceptSummariesPort | null): void {
     this.conceptSummaries = port;
+  }
+
+  /** Where concept details read their families from (`concept-family-summaries.ts`; null: none). */
+  connectConceptFamilies(port: KnowledgeConceptFamilySummariesPort | null): void {
+    this.conceptFamilies = port;
   }
 
   /** Subscribe to the store and index every entry's text (in the background; queries wait for it). */
@@ -883,12 +891,20 @@ export class KnowledgeSearch {
       .filter((m): m is KnowledgeEntryMeta => m !== null)
       .sort(newestFirst);
     // Served only to a caller who can see every entry it was written from (`concept-summaries.ts`).
-    const summary = this.conceptSummaries?.summaryFor(this.graph.canonicalConceptId(id), {
-      visible: (entryId) => {
-        const meta = this.store.getMeta(entryId);
-        return meta && entryInScope(meta, scope) ? meta : null;
+    const visible = (entryId: string): KnowledgeEntryMeta | null => {
+      const meta = this.store.getMeta(entryId);
+      return meta && entryInScope(meta, scope) ? meta : null;
+    };
+    const canonical = this.graph.canonicalConceptId(id);
+    const summary = this.conceptSummaries?.summaryFor(canonical, { visible, behind: new Set(view.entryIds) });
+    // Its visible family members; the name and summary as concept summaries (`concept-family-summaries.ts`).
+    const family = this.conceptFamilies?.familyFor(canonical, {
+      concept: (conceptId) => {
+        const ref = this.graph.conceptRef(conceptId, scope);
+        return ref ? { id: ref.id, name: ref.name, type: ref.type } : null;
       },
-      behind: new Set(view.entryIds)
+      visible,
+      behind: (conceptId) => this.graph.visibleEntriesOf(conceptId, scope)
     });
     return {
       concept: view.concept,
@@ -898,7 +914,8 @@ export class KnowledgeSearch {
       mergedFrom: view.mergedFrom,
       similarConcepts: view.similarConcepts,
       entryIds: newest.slice(0, CONCEPT_ENTRY_IDS_LIMIT).map((m) => m.id),
-      ...(summary ? { summary } : {})
+      ...(summary ? { summary } : {}),
+      ...(family ? { family } : {})
     };
   }
 

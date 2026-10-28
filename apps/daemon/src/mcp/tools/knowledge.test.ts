@@ -196,7 +196,7 @@ test("knowledge_get: a concept — description, entries, links; a hidden or unkn
   assert.deepEqual(errorOf(hidden), { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." });
 });
 
-test("knowledge_get: a concept's summary and each entry's position, attributed and cited; the extracted description says it may be one entry's", async () => {
+test("knowledge_get: a concept's summary and each entry's position, attributed and cited; with a summary, no one-sided extracted description", async () => {
   const concept = { id: "tactic-tiktok-account-warmup", name: "TikTok account warm-up", type: "Tactic", confidence: 0.9, description: "Scroll, then post the first video after 1–2 days.", aliases: [], attributes: {} };
   const detail = {
     concept,
@@ -217,13 +217,50 @@ test("knowledge_get: a concept's summary and each entry's position, attributed a
   // An entry the detail lists cites as it does; another by its id.
   assert.ok(out.includes(`- Om Patel ("Alternatives pages"): Post the first video after 1–2 days. ${meta().citation}`), out);
   assert.ok(out.includes(`- unknown author ("Don't use NordVPN"): Warm up for 3–5 days. [Don't use NordVPN](orquester-knowledge:entry/ke_bbbbbbbbbbbb)`), out);
-  assert.match(out, /\nExtracted description \(may be one entry's claim\): Scroll, then post the first video after 1–2 days\./);
-  assert.ok(out.indexOf("Summary:") < out.indexOf("Extracted description"));
+  // myKG's description (one entry's claim, stated as the concept's) is left out: that entry's position says it.
+  assert.ok(!out.includes("Scroll, then post the first video after 1–2 days.") && !out.includes("Extracted description"), out);
   // Without a summary (an older daemon, or not written yet): the description as before.
   const plain = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), { status: 200, body: { kind: "concept", concept: { ...detail, summary: undefined } } });
   const before = textOf(await run(plain, "knowledge_get", { id: concept.id }));
   assert.ok(!before.includes("Summary:") && !before.includes("Extracted description"));
   assert.match(before, /\nScroll, then post the first video after 1–2 days\./);
+});
+
+test("knowledge_get: a concept's family — the question, its summary, the other members and every member entry's position", async () => {
+  const concept = { id: "tactic-warm-3", name: "Warm up each account for 3 days", type: "Tactic", confidence: 0.9, description: null, aliases: [], attributes: {} };
+  const family = {
+    id: "family-0123456789ab",
+    name: "Warm-up length before the first post",
+    concepts: [
+      { id: "tactic-warm-48", name: "Warm up the account for 48 hours before posting", type: "Tactic" },
+      { id: "tactic-warm-3", name: "Warm up each account for 3 days", type: "Tactic" },
+      { id: "tactic-warm-57", name: "Warm up the TikTok account for 5-7 days", type: "Tactic" }
+    ],
+    summary: {
+      text: "How long a new account is used like a real user's before it posts.",
+      positions: [
+        { entryId: "ke_aaaaaaaaaaaa", title: "Alternatives pages", author: "jason", claim: "Warm up for 48 hours." },
+        { entryId: "ke_cccccccccccc", title: "US TikTok from Italy", author: "Emanuele Totaro", claim: "Warm up for 5–7 days." }
+      ]
+    }
+  };
+  const detail = { concept, collections: ["kc_seo0000000"], entries: [meta()], neighbors: [], family };
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), { status: 200, body: { kind: "concept", concept: detail } });
+  const out = textOf(await run(api, "knowledge_get", { id: concept.id }));
+  assert.ok(out.includes("\nFamily: Warm-up length before the first post — How long a new account is used like a real user's before it posts.\n"), out);
+  assert.ok(out.includes("\nFamily members: Warm up the account for 48 hours before posting (Tactic) [tactic-warm-48], Warm up the TikTok account for 5-7 days (Tactic) [tactic-warm-57]\n"), out);
+  assert.ok(out.includes(`\nFamily positions:\n- jason ("Alternatives pages"): Warm up for 48 hours. ${meta().citation}\n- Emanuele Totaro ("US TikTok from Italy"): Warm up for 5–7 days. [US TikTok from Italy · Emanuele Totaro](orquester-knowledge:entry/ke_cccccccccccc)`), out);
+  // Before it is written (or for a caller who may not read it): the family under its fallback name, no summary.
+  const unnamed = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), {
+    status: 200,
+    body: { kind: "concept", concept: { ...detail, family: { ...family, name: "Concepts answering the same question", summary: undefined } } }
+  });
+  const bare = textOf(await run(unnamed, "knowledge_get", { id: concept.id }));
+  assert.ok(bare.includes("\nFamily: Concepts answering the same question\nFamily members: "), bare);
+  assert.ok(!bare.includes("Family positions"));
+  // An older daemon: no family line.
+  const older = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), { status: 200, body: { kind: "concept", concept: { ...detail, family: undefined } } });
+  assert.ok(!textOf(await run(older, "knowledge_get", { id: concept.id })).includes("Family"));
 });
 
 test("knowledge_save: one call, many items, the session named, handles without @; no card, even while planning", async () => {
@@ -568,7 +605,7 @@ test("worker tools: a part of a task the chat does not hold, a part out of range
 test("worker tools: no result of any step exceeds the budget, whatever the task's size, characters or lines", async () => {
   const long = (bytes: number) => "Pass 2 document with no line break at all, 中文 and 😀 emoji, \"quoted\" \\ back\tslash. ".repeat(Math.ceil(bytes / 90));
   const inputs = [nameList(10_000), nameList(49_500), nameList(52_000), nameList(75_000), long(50_000), long(130_000), `${"\u0001".repeat(9_000)}\n${"😀".repeat(12_000)}`];
-  for (const step of ["pass1", "pass2", "normalize_names", "pair-check", "concept-check", "cluster-name", "concept-summary"]) {
+  for (const step of ["pass1", "pass2", "normalize_names", "pair-check", "concept-check", "cluster-name", "concept-summary", "family-summary"]) {
     for (const [i, input] of inputs.entries()) {
       for (const instructions of ["I".repeat(6_000), null]) {
         const task = workerTask({ step, input, instructions, sameInstructionsAs: instructions === null ? "t0" : null, taskId: `${step}-${i}`.padEnd(200, "0") });

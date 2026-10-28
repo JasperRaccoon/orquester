@@ -14,9 +14,10 @@ import { isKnowledgeEntryId } from "@orquester/config";
 import type { KnowledgeGraphPort, KnowledgeStorePort } from "../ports.ts";
 import type { KnowledgeLogger } from "../store/errors.ts";
 import { Bm25Index } from "./bm25.ts";
+import { type KnowledgeConceptFamiliesPort, familyWords } from "./concept-families.ts";
 import { commonNameWords } from "./concept-merges.ts";
 import { isSurveyEntry } from "./contradictions.ts";
-import { type SameQuestion, type SameQuestionConcept, sameQuestionByVectors } from "./same-question.ts";
+import { type SameQuestion, type SameQuestionConcept, sameQuestionByVectors, sameQuestionWithFamilies } from "./same-question.ts";
 import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibility.ts";
 
@@ -138,6 +139,16 @@ const SHORT_NAME_WORDS = 3;
  * Reddit ~ Google 0.957); 3 at 0.985 or more (GBRAID ~ WBRAID 0.994).
  */
 const SHORT_NAME_SIMILAR_MIN = 0.985;
+/**
+ * Two longer names that are not related ({@link namesRelated}) are listed as similar only at or above
+ * this. Live graph of 2026-10-28 (2,979 concepts after merges, 6,274 pairs at `similar`): 717 pairs of
+ * longer names were listed; 123 of them share no topic word, nearly all look-alikes ("Remove
+ * entitlements you don't actively use" ~ "Use an erased iPhone" 0.931, "Use a US phone number" ~
+ * "Use Outlook or Proton" 0.941, "Pick one niche and commit to it" ~ "Create a fresh account and do
+ * not sync contacts" 0.937); one at 0.96 or more ("Battery level and charging state" ~ "Low power
+ * mode on/off" 0.963), none at 0.97.
+ */
+const SIMILAR_UNRELATED_MIN = 0.97;
 
 /** `ke_xxx.md`, `input/ke_xxx.md`, `session_a/ke_xxx.md`, `ke_xxx.md::3` → `ke_xxx`. */
 function entryIdOfSourceFile(sourceFile: string): string | null {
@@ -202,7 +213,9 @@ function parseConcept(raw: unknown): GraphConcept | null {
     else attributes[key] = attribute;
   }
   if (typeof node.description === "string" && node.description.trim()) description = node.description.trim();
-  const aliases = Array.isArray(node.aliases) ? node.aliases.filter((a): a is string => typeof a === "string" && a.trim().length > 0) : [];
+  const aliases = Array.isArray(node.aliases)
+    ? node.aliases.filter((a): a is string => typeof a === "string" && a.trim().length > 0 && !isMachineSlug(a, node.type as string))
+    : [];
   return {
     id: node.id,
     name: name ?? node.id,
@@ -286,14 +299,23 @@ function unionIds(lists: readonly (readonly string[])[]): string[] {
   return [...out];
 }
 
-/** Names folded in become aliases of the kept concept: case-insensitively distinct, never its own name. */
-function unionAliases(name: string, lists: readonly (readonly string[])[]): string[] {
+/**
+ * Whether a name is a machine slug with the shape of a myKG id of this type ("person-personematotaro":
+ * the name of a Person myKG gave none, folded in by a merge): never shown as an alias.
+ */
+export function isMachineSlug(name: string, type: string): boolean {
+  const text = name.trim();
+  return text.startsWith(`${type.toLowerCase()}-`) && /^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(text);
+}
+
+/** Names folded in become aliases of the kept concept: case-insensitively distinct, never its own name nor a machine slug. */
+function unionAliases(name: string, type: string, lists: readonly (readonly string[])[]): string[] {
   const seen = new Set([name.trim().toLowerCase()]);
   const out: string[] = [];
   for (const list of lists) {
     for (const alias of list) {
       const key = alias.trim().toLowerCase();
-      if (key.length === 0 || seen.has(key)) continue;
+      if (key.length === 0 || seen.has(key) || isMachineSlug(alias, type)) continue;
       seen.add(key);
       out.push(alias);
     }
@@ -316,7 +338,7 @@ function combineSources(sources: readonly GraphConceptSource[]): KnowledgeConcep
     type: first.type,
     confidence: Math.max(...sources.map((s) => s.confidence)),
     description: sources.find((s) => s.description !== null)?.description ?? null,
-    aliases: unionAliases(first.name, [first.aliases, ...sources.slice(1).flatMap((s) => [[s.name], s.aliases])]),
+    aliases: unionAliases(first.name, first.type, [first.aliases, ...sources.slice(1).flatMap((s) => [[s.name], s.aliases])]),
     attributes
   };
 }
@@ -658,15 +680,21 @@ class View {
   }
 }
 
-/** Name and alias words of a concept ({@link tokenize}), numbers aside ("4.0 – Design" and "Guideline 4.3" share no word). */
+/**
+ * Topic words of a concept's name and aliases (`familyWords`: numbers and generic words such as
+ * "use", "one", "remove" aside: "4.0 – Design" and "Guideline 4.3" share no word, nor "Use an erased
+ * iPhone" and "Remove entitlements you don't actively use").
+ */
 function nameWords(concept: KnowledgeConcept): Set<string> {
-  return new Set(tokenize([concept.name, ...concept.aliases].join(" ")).filter((token) => !/^\p{N}+$/u.test(token)));
+  const out = new Set<string>();
+  for (const name of [concept.name, ...concept.aliases]) for (const word of familyWords(name)) out.add(word);
+  return out;
 }
 
 /** A name compared without case, accents, spaces or punctuation. */
 const squashed = (name: string): string => name.normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 
-/** Whether two concepts' names are related: a shared content word (names and aliases), or one name containing the other. */
+/** Whether two concepts' names are related: a shared topic word (names and aliases), or one name containing the other. */
 export function namesRelated(a: KnowledgeConcept, b: KnowledgeConcept): boolean {
   const x = squashed(a.name);
   const y = squashed(b.name);
@@ -698,7 +726,8 @@ export interface KnowledgeConceptView {
   mergedFrom: KnowledgeConceptRef[];
   /**
    * Visible concepts close in meaning (not merged with it), best first, up to 5; with a short name on
-   * either side, only related names or a very high similarity (`SHORT_NAME_SIMILAR_MIN`).
+   * either side, only related names (a shared topic word) or a very high similarity (`SHORT_NAME_SIMILAR_MIN`);
+   * with longer names, related ones or `SIMILAR_UNRELATED_MIN`.
    */
   similarConcepts: { concept: KnowledgeConceptRef; similarity: number }[];
 }
@@ -719,6 +748,7 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   private similarProvider: SimilarConceptsProvider | null = null;
   private backingProvider: ((conceptId: string) => readonly string[]) | null = null;
   private vectorsReady: (() => boolean) | null = null;
+  private families: Pick<KnowledgeConceptFamiliesPort, "familyOf" | "revision"> | null = null;
   private backingRev = 0;
   /** Two concepts' cosine from a calibrated model's concept vectors (concept merges); null: none. */
   private similarityProvider: ((a: string, b: string) => number | null) | null = null;
@@ -850,6 +880,28 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     this.backingMoved();
   }
 
+  /** Where {@link conceptFamily} reads concept families from (`concept-families.ts`; null: none). */
+  setConceptFamilies(families: Pick<KnowledgeConceptFamiliesPort, "familyOf" | "revision"> | null): void {
+    this.families = families;
+    // Concept families answer "same question" (novelty, single source, the numbers tier); a concept
+    // in no family falls back to the vector rule. Read live, so later family changes count too.
+    this.setSameQuestion(families ? sameQuestionWithFamilies((id) => this.conceptFamily(id), (a, b) => this.sameQuestionFallback(a, b)) : null);
+  }
+
+  /**
+   * The member concept ids (the graph's, itself included) of the family `conceptId` belongs to:
+   * concepts of its type answering the same question (`concept-families.ts`); unscoped. Null when
+   * it has none, or before families are computed.
+   */
+  conceptFamily(conceptId: string): readonly string[] | null {
+    return this.families?.familyOf(this.canonicalConceptId(conceptId)) ?? null;
+  }
+
+  /** Moves whenever the families change (a cache key next to {@link revision}). */
+  familiesRevision(): number {
+    return this.families?.revision() ?? 0;
+  }
+
   /** Whether concept vectors from a calibrated model are complete ({@link setBackingConcepts}'s `ready`). */
   conceptVectorsReady(): boolean {
     return this.vectorsReady?.() ?? false;
@@ -932,7 +984,8 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
 
   /** Moves with every change {@link backingMoved} announces (a cache key next to {@link revision}). */
   backingRevision(): number {
-    return this.backingRev;
+    // Families are recomputed in the background: a new grouping changes what backs a concept.
+    return this.backingRev * 1_000_003 + this.familiesRevision();
   }
 
   /**
@@ -1060,7 +1113,8 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
       const other = view.snapshot.mergedInto.get(hit.id) ?? hit.id;
       if (other === id || !view.concept(other)) continue;
       const theirs = view.present(other)!;
-      if ((isShortName(shown.name) || isShortName(theirs.name)) && hit.similarity < SHORT_NAME_SIMILAR_MIN && !namesRelated(shown, theirs)) continue;
+      const short = isShortName(shown.name) || isShortName(theirs.name);
+      if (hit.similarity < (short ? SHORT_NAME_SIMILAR_MIN : SIMILAR_UNRELATED_MIN) && !namesRelated(shown, theirs)) continue;
       const ref = view.ref(other);
       if (similarConcepts.some((s) => s.concept.id === ref.id)) continue;
       similarConcepts.push({ concept: ref, similarity: hit.similarity });

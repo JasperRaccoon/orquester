@@ -33,7 +33,7 @@ import {
   type KnowledgeStatus,
   type SessionOwner
 } from "@orquester/api";
-import { knowledgeClusterLabelsPath, knowledgeConceptMergesPath, knowledgeConceptSummariesPath, knowledgeIndexDir } from "@orquester/config";
+import { knowledgeClusterLabelsPath, knowledgeConceptFamiliesPath, knowledgeConceptMergesPath, knowledgeConceptSummariesPath, knowledgeIndexDir } from "@orquester/config";
 
 import { profileKnowledgeCollections, profilesForCollection } from "../session-profiles/knowledge.ts";
 import type { SessionProfileStore } from "../session-profiles/store.ts";
@@ -47,6 +47,9 @@ import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLin
 import { KnowledgeClusterLabels, type ClusterDescription } from "./search/cluster-labels.ts";
 import { ConceptMergeCheckSource } from "./search/concept-merge-checks.ts";
 import { KnowledgeConceptMerges, conceptThresholdsFor } from "./search/concept-merges.ts";
+import { conceptAttributions } from "./search/concept-attribution.ts";
+import { KnowledgeConceptFamilies } from "./search/concept-families.ts";
+import { KnowledgeConceptFamilySummaries } from "./search/concept-family-summaries.ts";
 import { KnowledgeConceptSummaries } from "./search/concept-summaries.ts";
 import { findContradictions } from "./search/contradictions.ts";
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
@@ -488,6 +491,16 @@ export class KnowledgeService {
       vectorsDir: join(knowledgeIndexDir(appdir), "concepts"),
       logger: this.logger
     });
+    // Concept families (concepts of one type answering one question), after every planning pass over
+    // complete vectors; read through the graph (novelty, single-source claims, contradictions, search).
+    const conceptFamilies = new KnowledgeConceptFamilies({
+      concepts: () => graph.currentConcepts(),
+      canonical: (id) => graph.canonicalConceptId(id),
+      revision: () => graph.revision(),
+      vectors: () => conceptMerges.vectors.current(),
+      logger: this.logger
+    });
+    graph.setConceptFamilies(conceptFamilies);
     // LLM quality work answered in linking's idle rounds: concept pairs the name guards refused, and
     // topic names for the similarity clusters (read by the similarity graph).
     const everything = () => knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
@@ -506,12 +519,23 @@ export class KnowledgeService {
         return entry ? { title: entry.title, body: entry.body } : null;
       }
     });
+    // A Person's own entry is a position source of what the graph links that Person as recommending
+    // (`concept-attribution.ts`); read once per round by the summaries below.
+    const attributed = () =>
+      conceptAttributions({
+        concepts: graph.currentConcepts(),
+        edges: graph.baseEdges(),
+        canonical: (id) => graph.canonicalConceptId(id),
+        entries: store.listMeta(),
+        conceptsOfEntry: (id) => graph.conceptIdsOfEntry(id)
+      });
     // Neutral, attributed summaries of concepts with several entries (read by concept details).
     const conceptSummaries = new KnowledgeConceptSummaries({
       path: knowledgeConceptSummariesPath(appdir),
       concepts: () => graph.currentConcepts(),
       meta: (id) => store.getMeta(id),
       body: async (id) => (await store.getEntry(id))?.body ?? null,
+      attributed,
       contradicting: () =>
         findContradictions({ graph, scope: everything(), pairChecks: this.pairChecks(), accept: () => true, entryMeta: (id) => store.getMeta(id) }).values(),
       onConceptsChange: (listener) => {
@@ -526,13 +550,36 @@ export class KnowledgeService {
     });
     await conceptSummaries.load();
     search.connectConceptSummaries(conceptSummaries);
-    const linking = this.buildLinking(store, graph, search, conceptMerges, [conceptChecks, clusterLabels, conceptSummaries]);
+    // Each family's question, neutral summary and every member entry's position (read by concept details).
+    const familySummaries = new KnowledgeConceptFamilySummaries({
+      path: knowledgeConceptFamiliesPath(appdir),
+      families: conceptFamilies,
+      concepts: () => graph.currentConcepts(),
+      meta: (id) => store.getMeta(id),
+      body: async (id) => (await store.getEntry(id))?.body ?? null,
+      attributed,
+      onFamiliesChange: (listener) => conceptFamilies.onChange(listener),
+      logger: this.logger
+    });
+    await familySummaries.load();
+    search.connectConceptFamilies(familySummaries);
+    const linking = this.buildLinking(store, graph, search, conceptMerges, [conceptChecks, clusterLabels, conceptSummaries, familySummaries]);
     await conceptMerges.start();
     const opening: Opening = { store, graph, search, embedders, linking, conceptMerges, clusterLabels, unsubscribe: [] };
     opening.unsubscribe.push(() => search.similarity.connectClusterLabels(null));
     opening.unsubscribe.push(() => search.connectConceptSummaries(null));
+    opening.unsubscribe.push(() => search.connectConceptFamilies(null));
+    // A newly named family changes concept details.
+    opening.unsubscribe.push(familySummaries.onChange(() => this.publishChanged({ graph: true })));
     // A new concept summary changes concept details.
     opening.unsubscribe.push(conceptSummaries.onChange(() => this.publishChanged({ graph: true })));
+    // Families follow every planning pass over complete vectors; a change of them changes concept details.
+    opening.unsubscribe.push(conceptMerges.onPlanned(() => conceptFamilies.update()));
+    opening.unsubscribe.push(conceptFamilies.onChange(() => this.publishChanged({ graph: true })));
+    opening.unsubscribe.push(() => {
+      graph.setConceptFamilies(null);
+      void conceptFamilies.stop();
+    });
     // A new cluster name redraws the similarity layer.
     opening.unsubscribe.push(clusterLabels.onChange(() => this.publishChanged({ graph: true })));
     // Insights and similar entries read linking's pair checks and queued link gaps (phase 2 spec,

@@ -23,6 +23,7 @@ import {
   type KnowledgeColor,
   type KnowledgeConcept,
   type KnowledgeConceptDetail,
+  type KnowledgeConceptFamily,
   type KnowledgeConceptSummary,
   type KnowledgeConceptRef,
   type KnowledgeDisagreement,
@@ -412,7 +413,21 @@ function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
   // The neutral summary (absent from an older daemon, or before it is written).
   const summary = parseConceptSummary(value.summary);
   if (summary) detail.summary = summary;
+  // Its family (absent from an older daemon, or for a concept with none).
+  const family = parseConceptFamily(value.family);
+  if (family) detail.family = family;
   return detail;
+}
+
+/** A concept family: an id, a name and two or more member concepts (each once) required; its summary as a concept summary's. */
+function parseConceptFamily(value: unknown): KnowledgeConceptFamily | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "" || typeof value.name !== "string" || value.name.trim() === "") return null;
+  const concepts = conceptRefs(value.concepts);
+  if (!concepts || concepts.length < 2) return null;
+  const family: KnowledgeConceptFamily = { id: value.id, name: value.name, concepts };
+  const summary = parseConceptSummary(value.summary);
+  if (summary) family.summary = summary;
+  return family;
 }
 
 /** A concept summary: text required; a malformed position (or a second one of an entry) is left out. */

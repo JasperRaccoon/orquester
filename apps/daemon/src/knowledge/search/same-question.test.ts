@@ -136,3 +136,32 @@ test("the graph answers with the injected rule, else the fallback over concept m
   graph.setSameQuestion(null);
   assert.equal(graph.sameQuestion(w48, w35), true, "the fallback again");
 });
+
+test("concept families drive the graph's rule: members of one family match, different families don't, others fall back; a regrouping moves the backing revision", async () => {
+  const store = new FakeStore();
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  await loadGraph(graph, [
+    node("tactic-w48", "Warm up the account for 48 hours before posting", ["ke_jason00000000.md"]),
+    node("tactic-erased", "Use an erased iPhone", ["ke_evgeniy000000.md"]),
+    node("tactic-reset", "Factory reset the iPhone", ["ke_alex0000000000.md"]),
+    node("tactic-w35", "3-5 days of warming up", ["ke_evgeniy000000.md"])
+  ]);
+  graph.setConceptSimilarity(() => 0.95);
+  const w48 = tactic("tactic-w48", "Warm up the account for 48 hours before posting");
+  const w35 = tactic("tactic-w35", "3-5 days of warming up");
+  const erased = tactic("tactic-erased", "Use an erased iPhone");
+  const reset = tactic("tactic-reset", "Factory reset the iPhone");
+  let revision = 1;
+  let groups: string[][] = [["tactic-erased", "tactic-reset"]];
+  graph.setConceptFamilies({ familyOf: (id) => groups.find((g) => g.includes(id)) ?? null, revision: () => revision });
+  assert.equal(graph.sameQuestion(erased, reset), true, "one family, though no telling word in common");
+  assert.equal(graph.sameQuestion(erased, w48), false, "a family member and a concept outside it");
+  assert.equal(graph.sameQuestion(w48, w35), true, "both outside any family: the vector fallback");
+  const before = graph.backingRevision();
+  groups = [["tactic-erased", "tactic-reset"], ["tactic-w48"], ["tactic-w35"]];
+  revision += 1;
+  assert.notEqual(graph.backingRevision(), before, "a regrouping invalidates insights' cache");
+  assert.equal(graph.sameQuestion(w48, w35), false, "two different families");
+  graph.setConceptFamilies(null);
+  assert.equal(graph.sameQuestion(w48, w35), true, "no families: the vector fallback again");
+});
