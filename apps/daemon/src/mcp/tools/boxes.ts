@@ -18,8 +18,8 @@
  * - **Ownership** is the daemon's: the temporary-box routes and the `DaemonApi` box operations reach
  *   only the calling chat's own boxes (`boxes/temporary/tools.ts`).
  * - **Nothing is copied into a box**: the agent moves what it needs with `box_upload` /
- *   `box_download` (streamed by the daemon, never through JSON, host paths inside the chat's
- *   project).
+ *   `box_download` (streamed by the daemon, never through JSON; paths inside the chat's project,
+ *   spelled as host paths, whose files are in the project's own box for a box project).
  *
  * Everything goes through `DaemonApi` (D-1): this module imports types and pure contracts only.
  */
