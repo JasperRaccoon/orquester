@@ -8,8 +8,10 @@
 
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import fsPromises from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { createServer, connect, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, delimiter, join } from "node:path";
@@ -500,10 +502,17 @@ test("box project: transfers stay inside the project after realpath in its box, 
   mkdirSync(inBox("mirror.git", "refs"));
   writeFileSync(inBox("mirror.git", "HEAD"), "ref: refs/heads/main\n");
   symlinkSync("repo/.git", inBox("meta-link"));
+  // Git follows symlinked objects/refs: still a git directory.
+  mkdirSync(inBox("linked.git", "o"), { recursive: true });
+  mkdirSync(inBox("linked.git", "r"));
+  writeFileSync(inBox("linked.git", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync("o", inBox("linked.git", "objects"));
+  symlinkSync("r", inBox("linked.git", "refs"));
   for (const localPath of [
     join(project, "repo", ".GIT", "hooks", "pre-commit"),
     join(project, "meta-link", "hooks", "pre-commit"),
-    join(project, "mirror.git", "hooks", "post-update")
+    join(project, "mirror.git", "hooks", "post-update"),
+    join(project, "linked.git", "config")
   ]) {
     const result = await tools.download("box-a", { remotePath: join(BOX, "bp-evil", "pre-commit"), localPath }, { principal });
     assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${localPath} is refused`);
@@ -517,12 +526,79 @@ test("box project: transfers stay inside the project after realpath in its box, 
   mkdirSync(join(BOX, "bp-bare", "objects"), { recursive: true });
   mkdirSync(join(BOX, "bp-bare", "refs"));
   writeFileSync(join(BOX, "bp-bare", "HEAD"), "ref: refs/heads/main\n");
+  mkdirSync(join(BOX, "bp-linked", "o"), { recursive: true });
+  mkdirSync(join(BOX, "bp-linked", "r"));
+  writeFileSync(join(BOX, "bp-linked", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync("o", join(BOX, "bp-linked", "objects"));
+  symlinkSync("r", join(BOX, "bp-linked", "refs"));
   mkdirSync(inBox("downloads"));
-  for (const remote of ["bp-nested", "bp-bare"]) {
+  for (const remote of ["bp-nested", "bp-bare", "bp-linked"]) {
     const result = await tools.download("box-a", { remotePath: join(BOX, remote), localPath: join(project, "downloads", remote) }, { principal });
     assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${remote} is refused`);
   }
   assert.deepEqual(readdirSync(inBox("downloads")), [], "nothing was moved in, no staging left");
+  assert.equal(existsSync(inBox("linked.git", "config")), false);
+});
+
+test("box project: download staging the project box could not remove is removed once it can be; a download in place still succeeds", async () => {
+  const { tools, project, inBox, projectBox, connection } = boxProjectWorld("boxed-leftover");
+  const principal = agent("chat-a", project);
+  mkdirSync(join(BOX, "bp-left", "sub"), { recursive: true });
+  writeFileSync(join(BOX, "bp-left", "sub", "f"), "f");
+  const removals: Promise<unknown>[] = [];
+  let failRemoval = false;
+  const request = projectBox.request;
+  projectBox.request = ((method: string, params: never, options?: never) => {
+    if (method !== "fs.rm") return request(method as "fs.rm", params, options);
+    if (failRemoval) {
+      failRemoval = false;
+      return Promise.reject(Object.assign(new Error("Device or resource busy"), { code: "EBUSY" }));
+    }
+    const removal = request(method, params, options);
+    removals.push(removal);
+    return removal;
+  }) as typeof projectBox.request;
+
+  // The project box's link drops mid-download: its staging cannot be removed then.
+  const readTar = connection.readTar;
+  connection.readTar = async () =>
+    Readable.from((async function* () {
+      projectBox.setConnected(false);
+      yield* [];
+      throw new Error("the link dropped");
+    })());
+  const dropped = await tools.download("box-a", { remotePath: join(BOX, "bp-left"), localPath: join(project, "drop", "copy") }, { principal });
+  assert.ok(!dropped.ok && dropped.code === "BOX_NOT_READY", dropped.ok ? "" : dropped.message);
+  assert.deepEqual(readdirSync(inBox("drop")), [".orq-download-id1"]);
+  projectBox.setConnected(true);
+  assert.equal(removals.length, 1, "the reconnect removes it");
+  await Promise.all(removals);
+  assert.deepEqual(readdirSync(inBox("drop")), []);
+
+  // The directory is in place but its emptied staging cannot be removed: the download is written.
+  connection.readTar = readTar;
+  failRemoval = true;
+  const kept = await tools.download("box-a", { remotePath: join(BOX, "bp-left"), localPath: join(project, "kept", "copy") }, { principal });
+  assert.ok(kept.ok, kept.ok ? "" : kept.message);
+  assert.equal(readFileSync(inBox("kept", "copy", "sub", "f"), "utf8"), "f");
+  await Promise.all(removals);
+  assert.deepEqual(readdirSync(inBox("kept")), ["copy"], "the staging is removed again");
+});
+
+test("box project on macOS: a directory upload's tar runs with COPYFILE_DISABLE (no AppleDouble ._ entries)", async () => {
+  const { tools, project, inBox, projectBox } = boxProjectWorld("boxed-mac");
+  Object.defineProperty(projectBox, "sys", { value: { ...projectBox.sys, os: "darwin" } });
+  mkdirSync(inBox("src"));
+  writeFileSync(inBox("src", "a.txt"), "A");
+  const envs: (Record<string, string> | undefined)[] = [];
+  const exec = projectBox.exec;
+  projectBox.exec = (options) => {
+    envs.push(options.env);
+    return exec(options);
+  };
+  const dir = await tools.upload("box-a", { localPath: join(project, "src"), remotePath: join(BOX, "mac-copy") }, { principal: agent("chat-a", project) });
+  assert.ok(dir.ok, dir.ok ? "" : dir.message);
+  assert.deepEqual(envs.map((env) => env?.COPYFILE_DISABLE), ["1"]);
 });
 
 test("box project: a project box that is not connected is a BOX_NOT_READY refusal about the project's box", async () => {
@@ -678,6 +754,12 @@ test("download: never into git metadata — a .git path (any spelling), through 
   mkdirSync(join(PROJECT, "mirror.git", "refs"), { recursive: true });
   writeFileSync(join(PROJECT, "mirror.git", "HEAD"), "ref: refs/heads/main\n");
   symlinkSync(join(repo, ".git"), join(PROJECT, "meta-link"));
+  // Git follows symlinked objects/refs: still a git directory.
+  mkdirSync(join(PROJECT, "linked.git", "o"), { recursive: true });
+  mkdirSync(join(PROJECT, "linked.git", "r"));
+  writeFileSync(join(PROJECT, "linked.git", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync("o", join(PROJECT, "linked.git", "objects"));
+  symlinkSync("r", join(PROJECT, "linked.git", "refs"));
   mkdirSync(join(BOX, "evil"), { recursive: true });
   writeFileSync(join(BOX, "evil", "pre-commit"), "#!/bin/sh\ntouch /tmp/pwned\n", { mode: 0o755 });
   writeFileSync(join(BOX, "evil", "config"), "[core]\n\tfsmonitor = /tmp/x\n");
@@ -691,7 +773,8 @@ test("download: never into git metadata — a .git path (any spelling), through 
     "repo/.git/hooks/pre-push",
     join(PROJECT, "meta-link", "hooks", "pre-commit"),
     join(PROJECT, "mirror.git", "config"),
-    join(PROJECT, "mirror.git", "hooks", "post-update")
+    join(PROJECT, "mirror.git", "hooks", "post-update"),
+    join(PROJECT, "linked.git", "config")
   ]) {
     const result = await tools.download("box-a", { remotePath: join(BOX, "evil", "pre-commit"), localPath: localPath.startsWith("/") ? localPath : join(PROJECT, localPath) }, { principal: agent() });
     assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${localPath} is refused`);
@@ -706,7 +789,12 @@ test("download: never into git metadata — a .git path (any spelling), through 
   mkdirSync(join(BOX, "bare", "objects"), { recursive: true });
   mkdirSync(join(BOX, "bare", "refs"), { recursive: true });
   writeFileSync(join(BOX, "bare", "HEAD"), "ref: refs/heads/main\n");
-  for (const remote of ["nested", "bare"]) {
+  mkdirSync(join(BOX, "linked", "o"), { recursive: true });
+  mkdirSync(join(BOX, "linked", "r"));
+  writeFileSync(join(BOX, "linked", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync("o", join(BOX, "linked", "objects"));
+  symlinkSync("r", join(BOX, "linked", "refs"));
+  for (const remote of ["nested", "bare", "linked"]) {
     const result = await tools.download("box-a", { remotePath: join(BOX, remote), localPath: join(PROJECT, "downloads", remote) }, { principal: agent() });
     assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${remote} is refused`);
   }
@@ -715,6 +803,44 @@ test("download: never into git metadata — a .git path (any spelling), through 
   // Ordinary files next to a repo still download.
   const ok = await tools.download("box-a", { remotePath: join(BOX, "evil", "config"), localPath: join(repo, "config.example") }, { principal: agent() });
   assert.ok(ok.ok, ok.ok ? "" : ok.message);
+});
+
+test("download: a remote_path that is a symlink to a directory is refused, nothing followed or installed (host and box project)", async () => {
+  const { tools, project, inBox, projectBox } = boxProjectWorld("boxed-dir-link");
+  mkdirSync(join(BOX, "real-dir"), { recursive: true });
+  writeFileSync(join(BOX, "real-dir", "f"), "f");
+  symlinkSync(join(BOX, "real-dir"), join(BOX, "dir-link"));
+  // The link's target exists in the project box too, so it could be walked and installed there.
+  mkdirSync(projectBox.local(join(BOX, "real-dir")), { recursive: true });
+  for (const [localPath, principal, local] of [
+    [join(PROJECT, "dir-link-copy"), agent(), join(PROJECT, "dir-link-copy")],
+    [join(project, "dir-link-copy"), agent("chat-a", project), inBox("dir-link-copy")]
+  ] as const) {
+    const result = await tools.download("box-a", { remotePath: join(BOX, "dir-link"), localPath }, { principal });
+    assert.ok(!result.ok && result.code === "INVALID_ARGUMENT", result.ok ? `${localPath} was written` : result.message);
+    assert.throws(() => lstatSync(local), { code: "ENOENT" });
+  }
+  assert.deepEqual(readdirSync(PROJECT).filter((name) => name.startsWith(".orq-download-")), []);
+  assert.deepEqual(readdirSync(inBox()), []);
+});
+
+test("download: a directory in place succeeds even when its emptied staging directory cannot be removed", async (t) => {
+  const { tools } = world();
+  mkdirSync(join(BOX, "kept", "sub"), { recursive: true });
+  writeFileSync(join(BOX, "kept", "sub", "f"), "f");
+  const rm = fsPromises.rm;
+  t.mock.method(fsPromises, "rm", async (path: string, options?: Parameters<typeof rm>[1]) => {
+    if (basename(String(path)).startsWith(".orq-download-")) throw Object.assign(new Error("Device or resource busy"), { code: "EBUSY" });
+    return rm(path, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const result = await tools.download("box-a", { remotePath: join(BOX, "kept"), localPath: join(PROJECT, "kept-dir", "copy") }, { principal: agent() });
+  assert.ok(result.ok, result.ok ? "" : result.message);
+  assert.equal(readFileSync(join(PROJECT, "kept-dir", "copy", "sub", "f"), "utf8"), "f");
 });
 
 // ---------------------------------------------------------------------------

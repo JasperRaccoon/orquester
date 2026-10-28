@@ -253,6 +253,7 @@ const GIT_METADATA_REFUSAL =
   "local_path is inside git metadata (a .git directory or a git directory): box_download never writes there. Choose a path in the project's working files.";
 const GIT_TREE_REFUSAL =
   "The directory holds git metadata (a .git entry or a git directory): box_download never copies that. Send a git bundle or a patch instead, or download the files without .git.";
+const NOT_A_DIRECTORY_REFUSAL = "remote_path is a symbolic link to a directory, not the directory itself: name the directory it points to.";
 
 /** A path segment git reads as `.git`: any case (case-insensitive file systems), trailing dots or spaces dropped (as Windows does). */
 export function isGitSegment(segment: string): boolean {
@@ -265,8 +266,8 @@ export function isGitSegment(segment: string): boolean {
  * follows a symlink.
  */
 export interface GitMetadataFs {
-  /** An entry's kind (null when nothing readable is there). */
-  kind(path: string): Promise<"file" | "dir" | "other" | null>;
+  /** An entry's kind, the entry itself (a symlink is `symlink`; null when nothing readable is there). */
+  kind(path: string): Promise<"file" | "dir" | "symlink" | "other" | null>;
   /** A directory's entries. */
   list(dir: string): Promise<{ name: string; dir: boolean }[]>;
 }
@@ -274,7 +275,7 @@ export interface GitMetadataFs {
 const HOST_GIT_METADATA_FS: GitMetadataFs = {
   kind: async (path) => {
     const stats = await lstat(path).catch(() => null);
-    return stats === null ? null : stats.isDirectory() ? "dir" : stats.isFile() ? "file" : "other";
+    return stats === null ? null : stats.isDirectory() ? "dir" : stats.isFile() ? "file" : stats.isSymbolicLink() ? "symlink" : "other";
   },
   list: async (dir) => (await readdir(dir, { withFileTypes: true })).map((entry) => ({ name: entry.name, dir: entry.isDirectory() }))
 };
@@ -286,7 +287,7 @@ function boxGitMetadataFs(fs: BoxProjectFs): GitMetadataFs {
     kind: async (path) => {
       try {
         const stats = await fs.stat(path, { followSymlinks: false });
-        return stats === null ? null : stats.kind === "dir" ? "dir" : stats.kind === "file" ? "file" : "other";
+        return stats === null ? null : stats.kind === "dir" || stats.kind === "file" || stats.kind === "symlink" ? stats.kind : "other";
       } catch (error) {
         // An unreadable entry reads as absent, like the host's lstat; a dropped link fails the transfer.
         if (error instanceof BoxFsUnavailableError) throw error;
@@ -308,13 +309,15 @@ function boxGitMetadataFs(fs: BoxProjectFs): GitMetadataFs {
 
 /**
  * Whether `dir` is laid out as a git directory (what git's discovery accepts as one: `HEAD` with
- * `objects`/`refs`/`commondir`, or `objects` and `refs` a `HEAD` would complete). Not followed
- * through symlinks.
+ * `objects`/`refs`/`commondir`, or `objects` and `refs` a `HEAD` would complete). Git follows
+ * symlinks there (`objects -> o` still makes one), so a symlink of one of those names counts as
+ * present wherever it points; nothing is followed here.
  */
 async function looksLikeGitDir(dir: string, fs: GitMetadataFs): Promise<boolean> {
   const [head, objects, refs, commondir] = await Promise.all(["HEAD", "objects", "refs", "commondir"].map((name) => fs.kind(join(dir, name))));
-  if (objects === "dir" && refs === "dir") return true;
-  return head === "file" && (objects === "dir" || refs === "dir" || commondir === "file");
+  const present = (kind: Awaited<ReturnType<GitMetadataFs["kind"]>>, wanted: "file" | "dir"): boolean => kind === wanted || kind === "symlink";
+  if (present(objects, "dir") && present(refs, "dir")) return true;
+  return present(head, "file") && (present(objects, "dir") || present(refs, "dir") || present(commondir, "file"));
 }
 
 /**
@@ -335,7 +338,7 @@ export async function insideGitMetadata(projectRoot: string, requested: string, 
 /** Directories of one tree level checked at once (a box project answers each over its link). */
 const GIT_SCAN_PARALLEL = 16;
 
-/** Whether an unpacked tree holds a `.git` entry anywhere or a directory laid out as a git directory (symlinks are not followed). */
+/** Whether an unpacked tree (`root` a real directory) holds a `.git` entry anywhere or a directory laid out as a git directory (symlinks are not followed). */
 export async function containsGitMetadata(root: string, fs: GitMetadataFs = HOST_GIT_METADATA_FS): Promise<boolean> {
   let level = [root];
   while (level.length > 0) {
@@ -428,6 +431,8 @@ export class TemporaryBoxTools {
   private readonly projectForwards = new Map<string, Map<number, Promise<ProjectBoxForward>>>();
   /** Box cleanups in flight (a destroy and its change event both ask for one). */
   private readonly closing = new Map<string, Promise<void>>();
+  /** Per project box: download staging paths it could not remove, removed when it reconnects ({@link leaveStaging}). */
+  private readonly leftStaging = new Map<string, { fs: BoxProjectFs; paths: Set<string>; unsubscribe: () => void }>();
   private readonly clock: TemporaryBoxClock;
 
   constructor(private readonly deps: TemporaryBoxToolsDeps = {}) {
@@ -791,14 +796,21 @@ export class TemporaryBoxTools {
       if (inputError !== null) throw inputError;
       if (code !== 0) throw new Error(`tar could not unpack the directory${stderr ? `: ${stderr}` : ""}`);
       const item = await this.unpackedItem(connection, remote, staging, options.signal);
+      if (item === null) return refuse(400, "INVALID_ARGUMENT", NOT_A_DIRECTORY_REFUSAL);
       // A directory that carries git metadata (a `.git`, or is itself a git directory) would bring
       // its config and hooks onto the host: refused whole, nothing is moved into the project.
       if (await containsGitMetadata(item)) {
         return refuse(403, "PERMISSION_DENIED", GIT_TREE_REFUSAL);
       }
       await rename(item, target.value);
-      if (item !== staging) await rm(staging, { recursive: true, force: true });
+      const emptied = staging;
       staging = null;
+      // The download is written: removing the emptied staging directory is best effort.
+      if (item !== emptied) {
+        await rm(emptied, { recursive: true, force: true }).catch((error: unknown) => {
+          this.deps.logger?.warn?.("boxes: a download's emptied staging directory could not be removed", errorName(error));
+        });
+      }
       return done({ kind: "directory", bytes: counter.bytes(), localPath: target.value, remotePath: remote });
     } catch (error) {
       if (options.signal?.aborted) return refuse(499, "CANCELLED", "The download was cancelled; nothing was written.");
@@ -955,7 +967,9 @@ export class TemporaryBoxTools {
    * Which path of an unpacked tar is the downloaded directory itself. A box may pack the directory
    * (one top entry, its own name) or its contents (its entries at the top): a single top entry with
    * the directory's name is the directory, unless the box's listing says that name is its only
-   * child — then two levels of that name mean the directory itself was packed.
+   * child — then two levels of that name mean the directory itself was packed. Null when the item
+   * is not a real directory (a remote_path that is a symlink to one is packed as the symlink):
+   * nothing is followed through it, scanned or moved into the project.
    */
   private async unpackedItem(
     connection: BoxConnection,
@@ -963,17 +977,21 @@ export class TemporaryBoxTools {
     staging: string,
     signal: AbortSignal | undefined,
     fs: GitMetadataFs = HOST_GIT_METADATA_FS
-  ): Promise<string> {
+  ): Promise<string | null> {
     const names = (await fs.list(staging)).map((entry) => entry.name);
     const name = boxBasename(remote);
     if (names.length !== 1 || names[0] !== name) return staging;
+    const top = join(staging, name);
+    const topIsDir = (await fs.kind(top)) === "dir";
     const listing = await connection.request("fs.readdir", { path: remote }, { ...(signal ? { signal } : {}) });
     const ownOnlyChild = listing.length === 1 && listing[0]!.name === name;
     if (ownOnlyChild) {
-      const inner = await fs.list(join(staging, name)).catch(() => []);
-      return inner.length === 1 && inner[0]!.name === name ? join(staging, name) : staging;
+      // A top entry that is no real directory is one of the contents, not the packed directory.
+      if (!topIsDir) return staging;
+      const inner = await fs.list(top).catch(() => []);
+      return inner.length === 1 && inner[0]!.name === name ? top : staging;
     }
-    return join(staging, name);
+    return topIsDir ? top : null;
   }
 
   /**
@@ -1004,7 +1022,14 @@ export class TemporaryBoxTools {
           return done({ kind: "file", bytes: counter.bytes(), localPath: local.value, remotePath: remote });
         }
         // The directory's CONTENTS (`tar -cf - .` in it, as on the host): unpacked into `remote`, which becomes the copy.
-        const tar = fs.exec({ command: fs.connection.sys.os === "win32" ? "tar.exe" : "tar", args: ["-cf", "-", "."], cwd: local.value });
+        // macOS's bsdtar would add AppleDouble `._*` entries for extended attributes unless told not to.
+        const os = fs.connection.sys.os;
+        const tar = fs.exec({
+          command: os === "win32" ? "tar.exe" : "tar",
+          args: ["-cf", "-", "."],
+          cwd: local.value,
+          ...(os === "darwin" ? { env: { COPYFILE_DISABLE: "1" } } : {})
+        });
         tar.stdin.end();
         const exited = boxProcessExit(tar);
         abortWith(signal, () => {
@@ -1038,7 +1063,8 @@ export class TemporaryBoxTools {
   /**
    * {@link download} into a box project, with the host's rules checked in the project box: a file
    * streamed into a staging sibling there, a directory unpacked there by its `writeTar`, then
-   * renamed into place (the staging is removed on every failure).
+   * renamed into place (the staging is removed on every failure; one the project box could not
+   * remove, its link down, is removed when it reconnects: {@link removeStaging}).
    */
   private async downloadIntoBoxProject(
     fs: BoxProjectFs,
@@ -1091,10 +1117,13 @@ export class TemporaryBoxTools {
       // members out of it, links cannot redirect writes into existing paths there).
       await relay(source, counter.stream, fs.connection.writeTar(fs.toBox(staging), counter.stream));
       const item = await this.unpackedItem(connection, remote, staging, signal, gitFs);
+      if (item === null) return refuse(400, "INVALID_ARGUMENT", NOT_A_DIRECTORY_REFUSAL);
       if (await containsGitMetadata(item, gitFs)) return refuse(403, "PERMISSION_DENIED", GIT_TREE_REFUSAL);
       await fs.rename(item, target.value);
-      if (item !== staging) await fs.rm(staging, { recursive: true, force: true });
+      const emptied = staging;
       staging = null;
+      // The download is written: removing the emptied staging directory is best effort.
+      if (item !== emptied) await this.removeStaging(fs, emptied);
       return done({ kind: "directory", bytes: counter.bytes(), localPath: target.value, remotePath: remote });
     } catch (error) {
       if (signal?.aborted) return refuse(499, "CANCELLED", "The download was cancelled; nothing was written.");
@@ -1103,7 +1132,57 @@ export class TemporaryBoxTools {
       if (!fs.connection.connected) return projectBoxRefusal(fs.notConnected());
       return refuse(502, "BOX_TRANSFER_FAILED", `The download failed: ${clip(transferMessage(error), 300)}`);
     } finally {
-      if (staging !== null) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      if (staging !== null) await this.removeStaging(fs, staging);
+    }
+  }
+
+  /**
+   * Remove a download's staging path in a project box. One it could not remove (its link dropped,
+   * which also ends the transfer) is remembered and removed when that box reconnects, so an
+   * unscanned tree is not left in the project. Like a host download's staging when the daemon exits
+   * mid-transfer, one still remembered when the daemon stops stays behind.
+   */
+  private async removeStaging(fs: BoxProjectFs, path: string): Promise<void> {
+    try {
+      await fs.rm(path, { recursive: true, force: true });
+    } catch {
+      this.leaveStaging(fs, path);
+    }
+  }
+
+  private leaveStaging(fs: BoxProjectFs, path: string): void {
+    let left = this.leftStaging.get(fs.boxId);
+    if (!left) {
+      const boxId = fs.boxId;
+      const entry = { fs, paths: new Set<string>(), unsubscribe: () => {} };
+      entry.unsubscribe = fs.connection.onStatus((connected) => {
+        if (connected) void this.removeLeftStaging(boxId);
+      });
+      this.leftStaging.set(boxId, entry);
+      left = entry;
+    }
+    left.paths.add(path);
+    // The link may have come back before this was remembered.
+    if (fs.connection.connected) void this.removeLeftStaging(fs.boxId);
+  }
+
+  /** The staging paths a project box could not remove, removed now (each starts at once); those failing again wait for the next reconnect. */
+  private async removeLeftStaging(boxId: string): Promise<void> {
+    const left = this.leftStaging.get(boxId);
+    if (!left) return;
+    await Promise.all(
+      [...left.paths].map(async (path) => {
+        try {
+          await left.fs.rm(path, { recursive: true, force: true });
+          left.paths.delete(path);
+        } catch (error) {
+          this.deps.logger?.warn?.("boxes: a project box's download staging could not be removed yet", errorName(error));
+        }
+      })
+    );
+    if (left.paths.size === 0 && this.leftStaging.get(boxId) === left) {
+      left.unsubscribe();
+      this.leftStaging.delete(boxId);
     }
   }
 
