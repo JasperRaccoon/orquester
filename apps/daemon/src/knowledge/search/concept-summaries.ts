@@ -29,6 +29,12 @@
  *   is asked for again only when its entries change (an edit, a new entry, a merge folding in
  *   another concept's), and served meanwhile while it still holds.
  *
+ * - Attributed entries (quality round 5, `concept-attribution.ts`): the own entry of a Person the graph
+ *   links as recommending the concept, though not behind it ("Use Gmail only" ← Alex's post), is read
+ *   as a source too (first among the non-surveys, marked {@link ATTRIBUTED_NOTE}) and counts towards
+ *   the entries a summary needs; it and the entries the link comes from are members, so a change
+ *   to them asks again and a caller must see them as well.
+ *
  * Visibility ({@link KnowledgeConceptSummaries.summaryFor}): the text and every claim were written
  * from all the entries the concept had (its name, aliases and description too), so a summary is
  * served only to a caller who can see every one of them; otherwise it is left out, whole. Its
@@ -49,6 +55,7 @@ import {
 import type { KnowledgeRoundTask, KnowledgeRoundTaskOptions, KnowledgeRoundTaskSource } from "../ports.ts";
 import type { KnowledgeLogger } from "../store/errors.ts";
 import { writeFileAtomic } from "../store/fs.ts";
+import type { ConceptAttribution } from "./concept-attribution.ts";
 import { conceptExcerpt } from "./concept-merge-checks.ts";
 import { isSurveyEntry } from "./contradictions.ts";
 import { relevantExcerpt } from "./excerpts.ts";
@@ -90,6 +97,8 @@ export interface ConceptSummaryEntry {
   handle: string | null;
   kind: string;
   text: string;
+  /** Linked through its author (`concept-attribution.ts`), not by the graph: it may not name the concept. */
+  attributed?: boolean;
 }
 
 /** The concept as the task shows it. */
@@ -101,6 +110,9 @@ export interface ConceptSummaryConcept {
 }
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+/** The line an attributed entry carries in a task (`concept-attribution.ts`). */
+export const ATTRIBUTED_NOTE = "Linked: through its author, whom another entry names as recommending this; it may use other words for it.";
 
 /** The task's user message. */
 export function conceptSummaryInput(concept: ConceptSummaryConcept, entries: readonly ConceptSummaryEntry[]): string {
@@ -125,6 +137,7 @@ export function conceptSummaryInput(concept: ConceptSummaryConcept, entries: rea
       `Title: ${oneLine(entry.title) || "(untitled)"}`,
       `By: ${by || "unknown"}`,
       `Kind: ${oneLine(entry.kind) || "note"}`,
+      ...(entry.attributed ? [ATTRIBUTED_NOTE] : []),
       "Text:",
       entry.text
     );
@@ -201,6 +214,8 @@ interface SummaryPayload {
   inputs: string[];
   /** The concept's name and aliases (numbers in them may appear in the text). */
   names: string[];
+  /** Of `inputs`, those attributed through an author (`concept-attribution.ts`). */
+  attributed: string[];
 }
 
 function readPayload(value: unknown): SummaryPayload | null {
@@ -212,7 +227,10 @@ function readPayload(value: unknown): SummaryPayload | null {
   );
   const inputs = v.inputs.filter((id): id is string => typeof id === "string");
   const names = Array.isArray(v.names) ? v.names.filter((n): n is string => typeof n === "string") : [];
-  return members.length > 0 && inputs.length > 0 ? { conceptId: v.conceptId, hash: v.hash, members: members.map(({ id, contentHash }) => ({ id, contentHash })), inputs, names } : null;
+  const attributed = Array.isArray(v.attributed) ? v.attributed.filter((id): id is string => typeof id === "string" && inputs.includes(id)) : [];
+  return members.length > 0 && inputs.length > 0
+    ? { conceptId: v.conceptId, hash: v.hash, members: members.map(({ id, contentHash }) => ({ id, contentHash })), inputs, names, attributed }
+    : null;
 }
 
 /** What concept details read (optional: absent, no concept has a summary). */
@@ -236,6 +254,11 @@ export interface KnowledgeConceptSummariesOptions {
   body(entryId: string): Promise<string | null>;
   /** Entry pairs that contradict each other (unscoped; a concept two of whose entries do is summarized sooner). */
   contradicting?(): Iterable<{ a: string; b: string }>;
+  /**
+   * Entries attributed to concepts through their authors (`concept-attribution.ts`; read once per
+   * round): position sources beside the concept's own entries, and their basis entries members.
+   */
+  attributed?(): ReadonlyMap<string, readonly ConceptAttribution[]>;
   /** Called when the concepts may have changed (graph loads, merges): new work. */
   onConceptsChange?(listener: () => void): () => void;
   limit?: number;
@@ -246,10 +269,34 @@ export interface KnowledgeConceptSummariesOptions {
 /** A concept due for a summary. */
 interface Due {
   concept: GraphConcept;
+  /** Every entry it is written from: its own, those attributed to it, and their basis. */
   members: { id: string; contentHash: string }[];
+  /** The entries attributed to it (`concept-attribution.ts`), not behind it in the graph. */
+  attributed: string[];
   hash: string;
   /** 2 for a claim-bearing type, +1 when two of its entries contradict each other: the higher first. */
   tier: number;
+}
+
+/**
+ * A concept's member entries: its own, those attributed to it and the entries the attribution comes
+ * from (only those that exist), with content hashes; and the attributed ones, of those.
+ */
+export function attributedMembers(
+  entryIds: readonly string[],
+  attributions: readonly ConceptAttribution[],
+  meta: (entryId: string) => KnowledgeEntryMeta | null
+): { members: { id: string; contentHash: string }[]; attributed: string[]; sources: number } {
+  const own = new Set(entryIds);
+  const attributed = [...new Set(attributions.map((a) => a.entryId))].filter((id) => !own.has(id) && meta(id) !== null);
+  const ids = new Set([...own, ...attributed, ...attributions.filter((a) => attributed.includes(a.entryId)).flatMap((a) => a.basis)]);
+  const members: { id: string; contentHash: string }[] = [];
+  for (const id of ids) {
+    const found = meta(id);
+    if (found) members.push({ id, contentHash: found.contentHash });
+  }
+  const sources = [...own].filter((id) => meta(id) !== null).length + attributed.length;
+  return { members, attributed, sources };
 }
 
 /** The summaries: the port concept details read and the round task source (see the module header). */
@@ -298,14 +345,17 @@ export class KnowledgeConceptSummaries implements KnowledgeConceptSummariesPort,
 
   summaryFor(conceptId: string, caller: { visible: (entryId: string) => KnowledgeEntryMeta | null; behind: ReadonlySet<string> }): KnowledgeConceptSummary | null {
     const record = this.byConcept.get(conceptId);
-    if (!record || caller.behind.size < CONCEPT_SUMMARY_MIN_ENTRIES) return null;
+    if (!record) return null;
+    // Its sources: the entries behind it, and those attributed to it through their authors.
+    const attributed = new Set((record.attributed ?? []).filter((id) => !caller.behind.has(id)));
+    if (caller.behind.size + attributed.size < CONCEPT_SUMMARY_MIN_ENTRIES) return null;
     // Written from every one of them: a caller who cannot see one of them reads none of it.
     for (const member of record.members) if (caller.visible(member.id) === null) return null;
     const hashes = new Map(record.members.map((member) => [member.id, member.contentHash]));
     const positions: KnowledgeConceptSummary["positions"] = [];
     for (const position of record.positions) {
       const meta = caller.visible(position.entryId);
-      if (!meta || !caller.behind.has(position.entryId) || meta.contentHash !== hashes.get(position.entryId)) continue;
+      if (!meta || !(caller.behind.has(position.entryId) || attributed.has(position.entryId)) || meta.contentHash !== hashes.get(position.entryId)) continue;
       positions.push({ entryId: meta.id, title: meta.title, author: meta.author ?? (meta.handle ? `@${meta.handle}` : null), claim: position.claim });
     }
     if (record.positions.length > 0 && positions.length === 0) return null;
@@ -346,6 +396,7 @@ export class KnowledgeConceptSummaries implements KnowledgeConceptSummariesPort,
         hash: task.hash,
         members: task.members,
         inputs: task.inputs,
+        ...(task.attributed.length > 0 ? { attributed: task.attributed } : {}),
         text: parsed.text,
         positions: parsed.positions,
         writtenAt: this.now().toISOString()
@@ -378,20 +429,18 @@ export class KnowledgeConceptSummaries implements KnowledgeConceptSummariesPort,
       if (!set) contested.set(a, (set = new Set()));
       set.add(b);
     }
+    const attributions = this.options.attributed?.() ?? new Map<string, readonly ConceptAttribution[]>();
+    const meta = (id: string) => this.options.meta(id);
     const out: Due[] = [];
     for (const concept of this.options.concepts()) {
       if (SKIP_TYPES.has(concept.type)) continue;
-      const members: { id: string; contentHash: string }[] = [];
-      for (const id of new Set(concept.entryIds)) {
-        const meta = this.options.meta(id);
-        if (meta) members.push({ id, contentHash: meta.contentHash });
-      }
-      if (members.length < CONCEPT_SUMMARY_MIN_ENTRIES) continue;
+      const { members, attributed, sources } = attributedMembers(concept.entryIds, attributions.get(concept.id) ?? [], meta);
+      if (sources < CONCEPT_SUMMARY_MIN_ENTRIES) continue;
       const hash = conceptMembersHash(members);
       if (this.byConcept.get(concept.id)?.hash === hash) continue;
       const ids = new Set(members.map((m) => m.id));
       const disagree = members.some((m) => [...(contested.get(m.id) ?? [])].some((other) => ids.has(other)));
-      out.push({ concept, members, hash, tier: (CLAIM_TYPES.has(concept.type) ? 2 : 0) + (disagree ? 1 : 0) });
+      out.push({ concept, members, attributed, hash, tier: (CLAIM_TYPES.has(concept.type) ? 2 : 0) + (disagree ? 1 : 0) });
     }
     return out.sort((x, y) => y.tier - x.tier || y.members.length - x.members.length || (x.concept.id < y.concept.id ? -1 : 1));
   }
@@ -399,18 +448,22 @@ export class KnowledgeConceptSummaries implements KnowledgeConceptSummariesPort,
   /** The task for a concept due; null when too few of its entries can be read. */
   private async task(due: Due): Promise<KnowledgeRoundTask | null> {
     const { concept } = due;
-    const read: { meta: KnowledgeEntryMeta; body: string; score: number; survey: boolean; note: boolean }[] = [];
-    for (const member of due.members) {
-      const meta = this.options.meta(member.id);
-      const body = meta ? await this.options.body(member.id).catch(() => null) : null;
+    const attributed = new Set(due.attributed);
+    const read: { meta: KnowledgeEntryMeta; body: string; score: number; survey: boolean; note: boolean; attributed: boolean }[] = [];
+    for (const id of new Set([...concept.entryIds, ...due.attributed])) {
+      const meta = this.options.meta(id);
+      const body = meta ? await this.options.body(id).catch(() => null) : null;
       if (!meta || body === null) continue;
-      read.push({ meta, body, score: conceptExcerpt(body, concept).score, survey: isSurveyEntry(meta), note: SECONDARY_KINDS.test(meta.kind) });
+      read.push({ meta, body, score: conceptExcerpt(body, concept).score, survey: isSurveyEntry(meta), note: SECONDARY_KINDS.test(meta.kind), attributed: attributed.has(id) });
     }
     if (read.length < CONCEPT_SUMMARY_MIN_ENTRIES) return null;
-    // A survey after the entries that state their own claims; naming it best first; a source before notes about sources; newest.
+    // A survey after the entries that state their own claims; an author's own post the graph links
+    // only through the author first (the reason it is read: it may not name the concept); naming it
+    // best first; a source before notes about sources; newest.
     read.sort(
       (x, y) =>
         Number(x.survey) - Number(y.survey) ||
+        Number(y.attributed) - Number(x.attributed) ||
         y.score - x.score ||
         Number(x.note) - Number(y.note) ||
         (y.meta.postedAt ?? y.meta.savedAt).localeCompare(x.meta.postedAt ?? x.meta.savedAt) ||
@@ -423,16 +476,24 @@ export class KnowledgeConceptSummaries implements KnowledgeConceptSummariesPort,
       focus: names
     };
     const shown = read.slice(0, CONCEPT_SUMMARY_MAX_ENTRIES);
-    const entries: ConceptSummaryEntry[] = shown.map(({ meta, body }) => ({
+    const entries: ConceptSummaryEntry[] = shown.map(({ meta, body, attributed: linked }) => ({
       id: meta.id,
       title: meta.title,
       author: meta.author,
       handle: meta.handle,
       kind: meta.kind,
-      text: relevantExcerpt(body, query, CONCEPT_SUMMARY_ENTRY_CHARS).text
+      text: relevantExcerpt(body, query, CONCEPT_SUMMARY_ENTRY_CHARS).text,
+      ...(linked ? { attributed: true } : {})
     }));
     const user = conceptSummaryInput({ type: concept.type, name: concept.name, aliases: concept.aliases, description: concept.description }, entries);
-    const payload: SummaryPayload = { conceptId: concept.id, hash: due.hash, members: due.members, inputs: entries.map((e) => e.id), names };
+    const payload: SummaryPayload = {
+      conceptId: concept.id,
+      hash: due.hash,
+      members: due.members,
+      inputs: entries.map((e) => e.id),
+      names,
+      attributed: entries.filter((e) => e.attributed).map((e) => e.id)
+    };
     return { label: `${CONCEPT_SUMMARY_STEP} ${concept.id}`, system: CONCEPT_SUMMARY_SYSTEM, user, payload };
   }
 

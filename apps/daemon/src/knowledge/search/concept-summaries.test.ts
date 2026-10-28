@@ -7,6 +7,7 @@ import { KNOWLEDGE_CONCEPT_SUMMARIES_VERSION } from "@orquester/config";
 import { GMAIL_PASSAGE, LONG_GUIDE } from "../linking/fixtures/tiktok-guides.ts";
 import type { KnowledgeRoundTask } from "../ports.ts";
 import {
+  ATTRIBUTED_NOTE,
   CONCEPT_SUMMARY_CLAIM_MAX,
   CONCEPT_SUMMARY_MAX_ENTRIES,
   CONCEPT_SUMMARY_STEP,
@@ -288,3 +289,40 @@ test("visibility: a summary is served only to a caller who can see every entry i
 function warmupOrder(task: KnowledgeRoundTask): string[] {
   return (task.payload as { inputs: string[] }).inputs;
 }
+
+test("attribution: an author's own entry the graph links only through the author is read, served as a position, and its basis must be visible", async (t) => {
+  const { store, graph, path, make } = await fixture(t);
+  // "Views" has one entry (Alex's); a note links dan as recommending it, and dan's thread is not behind it.
+  const summaries = make({ attributed: () => new Map([["metric-alone", [{ entryId: dan, personId: "person-dan", basis: [synth] }]]]) });
+  await summaries.load();
+  const due = summaries.due().find((d) => d.conceptId === "metric-alone");
+  assert.ok(due, "one own entry and one attributed: due");
+  assert.equal(due.entries, 3, "members: its entry, the attributed one and the basis");
+  const task = (await summaries.tasks()).find((item) => item.label.endsWith("metric-alone"))!;
+  const payload = task.payload as { inputs: string[]; attributed: string[]; members: { id: string }[] };
+  assert.deepEqual(payload.inputs, [dan, alex], "the attributed entry first: it may not name the concept");
+  assert.deepEqual(payload.attributed, [dan]);
+  assert.deepEqual(payload.members.map((m) => m.id).sort(), [alex, dan, synth].sort());
+  assert.ok(task.user.includes(`ENTRY ${dan}\nTitle: Don't use NordVPN\nBy: @danielhangan_\nKind: thread\n${ATTRIBUTED_NOTE}\nText:`));
+  assert.ok(!task.user.includes(`ENTRY ${synth}`), "the basis is not read: it is no position of its own here");
+  await summaries.record(task.payload, answer({ text: "How many people watched.", positions: [{ entryId: dan, claim: "Views matter less than replays." }] }));
+  const file = JSON.parse(await readFile(path, "utf8")) as { summaries: { conceptId: string; attributed?: string[] }[] };
+  assert.deepEqual(file.summaries.find((s) => s.conceptId === "metric-alone")?.attributed, [dan]);
+
+  const indexDir = join(await mkdtemp(join(tmpdir(), "kg-summaries-index-")), "index");
+  const search = new KnowledgeSearch({ store, graph, embedders: new FakeEmbedderSource(null), indexDir, logger: silentLogger() });
+  t.after(async () => {
+    await search.stop();
+    await rm(indexDir, { recursive: true, force: true });
+  });
+  await search.start();
+  search.connectConceptSummaries(summaries);
+  const all = await search.conceptDetail("metric-alone", { kind: "all" });
+  assert.deepEqual(all!.summary, { text: "How many people watched.", positions: [{ entryId: dan, title: "Don't use NordVPN", author: "@danielhangan_", claim: "Views matter less than replays." }] });
+  // The basis (the note naming dan's position) moved where a TikTok-only caller cannot see it: nothing of the summary.
+  store.put(synth, "Guides disagree on warm-up: 48h, 1–2, 3, 3–5 and 5–7 days.", [SEO], { title: "US TikTok setup across guides", author: "Claude (research)", kind: "synthesis" }, true);
+  const scoped = await search.conceptDetail("metric-alone", { kind: "collections", ids: [TIKTOK] });
+  assert.ok(scoped);
+  assert.equal(scoped.summary, undefined);
+  assert.ok(!JSON.stringify(scoped).includes("replays"));
+});

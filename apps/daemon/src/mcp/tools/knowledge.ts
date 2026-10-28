@@ -49,6 +49,7 @@ import {
   knowledgeWorkerTextSize,
   type KnowledgeCollectionsResponse,
   type KnowledgeConceptDetail,
+  type KnowledgeConceptSummary,
   type KnowledgeConceptRef,
   type KnowledgeDisagreement,
   type KnowledgeEntryDetail,
@@ -520,22 +521,33 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
     lines.push(`Similar concepts: ${similarConcepts.slice(0, 5).map(({ concept: other, similarity }) => `${conceptName(other)} [${other.id}] ${similarity.toFixed(2)}`).join(", ")}`);
   }
   // The neutral summary and each entry's own position (absent from an older daemon, or before it is
-  // written); myKG's description may then be one entry's claim, and says so.
+  // written). With one, myKG's description is left out: it is often one entry's claim stated as the
+  // concept's (that entry's position says it, attributed), and a reader here would take it as fact.
   const summary = detail.summary;
+  const citations = new Map(detail.entries.map((entry) => [entry.id, entry.citation]));
+  const positionLines = (positions: KnowledgeConceptSummary["positions"]): string[] => {
+    const out = positions.slice(0, listMax).map((position) => {
+      const cite = citations.get(position.entryId) ?? knowledgeCitation({ id: position.entryId, title: position.title, author: position.author, handle: null });
+      return `- ${label(position.author ?? "unknown author")} (${quotedTitle(position.title)}): ${clipText(oneLine(position.claim), NOTE_CHARS)} ${cite}`;
+    });
+    const more = positions.length - listMax;
+    return more > 0 ? [...out, `+${more} more`] : out;
+  };
   if (summary) {
     lines.push(`Summary: ${clipText(oneLine(summary.text), CONCEPT_DESCRIPTION_CHARS)}`);
-    if (summary.positions.length > 0) {
-      const citations = new Map(detail.entries.map((entry) => [entry.id, entry.citation]));
-      lines.push("Positions:");
-      for (const position of summary.positions.slice(0, listMax)) {
-        const cite = citations.get(position.entryId) ?? knowledgeCitation({ id: position.entryId, title: position.title, author: position.author, handle: null });
-        lines.push(`- ${label(position.author ?? "unknown author")} (${quotedTitle(position.title)}): ${clipText(oneLine(position.claim), NOTE_CHARS)} ${cite}`);
-      }
-      const more = summary.positions.length - listMax;
-      if (more > 0) lines.push(`+${more} more`);
+    if (summary.positions.length > 0) lines.push("Positions:", ...positionLines(summary.positions));
+  } else if (concept.description) lines.push(clipText(concept.description.trim(), CONCEPT_DESCRIPTION_CHARS));
+  // Its family: other concepts answering the same question, with every member entry's position (absent from an older daemon).
+  const family = detail.family;
+  if (family) {
+    lines.push(`Family: ${label(family.name)}${family.summary ? ` — ${clipText(oneLine(family.summary.text), CONCEPT_DESCRIPTION_CHARS)}` : ""}`);
+    const others = family.concepts.filter((member) => member.id !== concept.id);
+    if (others.length > 0) {
+      const more = others.length - listMax;
+      lines.push(`Family members: ${others.slice(0, listMax).map((member) => `${conceptName(member)} [${member.id}]`).join(", ")}${more > 0 ? `, +${more} more` : ""}`);
     }
+    if (family.summary && family.summary.positions.length > 0) lines.push("Family positions:", ...positionLines(family.summary.positions));
   }
-  if (concept.description) lines.push(`${summary ? "Extracted description (may be one entry's claim): " : ""}${clipText(concept.description.trim(), CONCEPT_DESCRIPTION_CHARS)}`);
   const attributes = Object.entries(concept.attributes).slice(0, listMax);
   if (attributes.length > 0) lines.push(`Attributes: ${attributes.map(([key, attribute]) => `${label(key)}: ${clipText(oneLine(attribute.value), DESCRIPTION_CHARS)}`).join("; ")}`);
   if (detail.entries.length > 0) {
