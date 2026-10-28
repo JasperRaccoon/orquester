@@ -22,7 +22,7 @@
 import type { KnowledgeEntryMeta } from "@orquester/api";
 import { familyVocabulary, familyWords, type FamilyVocabulary } from "./concept-families.ts";
 import { isSurveyEntry } from "./contradictions.ts";
-import { type GraphConcept, isMachineSlug } from "./graph.ts";
+import { type GraphConcept, authoredByPerson, personAuthorKeys } from "./graph.ts";
 
 /** Types an attributed entry is read for (concept summaries' `CLAIM_TYPES`). */
 const ATTRIBUTED_TYPES: ReadonlySet<string> = new Set(["Tactic", "Tool", "Metric", "Result", "Guideline"]);
@@ -52,49 +52,6 @@ export interface ConceptAttributionInput {
   vocabulary?: FamilyVocabulary;
 }
 
-/** A name as compared: no case, accents, spaces or punctuation, no leading "@". */
-function key(value: string | null | undefined): string | null {
-  if (typeof value !== "string") return null;
-  const out = value
-    .normalize("NFKD")
-    .replace(/\p{M}+/gu, "")
-    .toLowerCase()
-    .replace(/^@+/, "")
-    .replace(/[^\p{L}\p{N}]+/gu, "");
-  return out.length >= 2 ? out : null;
-}
-
-const HANDLE_SHAPE = /^@?[A-Za-z0-9_.-]{3,}$/;
-
-/** A Person's names and handles as compared (every source of a merge). */
-function personKeys(person: GraphConcept): { names: Set<string>; handles: Set<string> } {
-  const names = new Set<string>();
-  const handles = new Set<string>();
-  const sources = person.merge?.sources ?? [person];
-  for (const source of sources) {
-    const handle = key(source.attributes.handle?.value);
-    if (handle) handles.add(handle);
-    for (const name of [source.name, ...source.aliases]) {
-      if (name === source.id || isMachineSlug(name, person.type)) continue;
-      const k = key(name);
-      if (!k) continue;
-      names.add(k);
-      if (HANDLE_SHAPE.test(name.trim()) && !/\s/.test(name.trim())) handles.add(k);
-    }
-  }
-  return { names, handles };
-}
-
-/** Whether an entry is the Person's own (see the module header). */
-function authoredBy(meta: KnowledgeEntryMeta, keys: { names: Set<string>; handles: Set<string> }): boolean {
-  const handle = key(meta.handle);
-  if (handle && keys.handles.has(handle)) return true;
-  // A different account under the same display name is someone else.
-  if (handle && keys.handles.size > 0 && !keys.handles.has(handle)) return false;
-  const author = key(meta.author);
-  return author !== null && (keys.names.has(author) || keys.handles.has(author));
-}
-
 /** For every claim concept (the graph's ids) the entries attributed to it, in a stable order. */
 export function conceptAttributions(input: ConceptAttributionInput): Map<string, ConceptAttribution[]> {
   const byId = new Map(input.concepts.map((concept) => [concept.id, concept]));
@@ -114,9 +71,9 @@ export function conceptAttributions(input: ConceptAttributionInput): Map<string,
   const ownEntries = new Map<string, KnowledgeEntryMeta[]>();
   const persons = input.concepts.filter((concept) => concept.type === "Person");
   for (const person of persons) {
-    const keys = personKeys(person);
+    const keys = personAuthorKeys(person);
     if (keys.names.size === 0 && keys.handles.size === 0) continue;
-    const own = input.entries.filter((meta) => !isSurveyEntry(meta) && !RESEARCH_KINDS.test(meta.kind) && authoredBy(meta, keys));
+    const own = input.entries.filter((meta) => !isSurveyEntry(meta) && !RESEARCH_KINDS.test(meta.kind) && authoredByPerson(meta, keys));
     if (own.length > 0) ownEntries.set(person.id, own);
   }
   const out = new Map<string, ConceptAttribution[]>();

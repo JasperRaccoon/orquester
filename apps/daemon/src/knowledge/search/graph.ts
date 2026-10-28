@@ -308,6 +308,60 @@ export function isMachineSlug(name: string, type: string): boolean {
   return text.startsWith(`${type.toLowerCase()}-`) && /^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(text);
 }
 
+/** A name as a Person's names and entries' authors are compared: no case, accents, spaces or punctuation, no leading "@". */
+function personKey(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const out = value
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
+    .toLowerCase()
+    .replace(/^@+/, "")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+  return out.length >= 2 ? out : null;
+}
+
+const HANDLE_SHAPE = /^@?[A-Za-z0-9_.-]{3,}$/;
+
+/** What names a Person ({@link personAuthorKeys}): its names and handles as compared. */
+export interface PersonAuthorKeys {
+  names: ReadonlySet<string>;
+  handles: ReadonlySet<string>;
+}
+
+/**
+ * A Person's names and handles (every source of a merge): its `handle` attribute, a handle-shaped
+ * name or alias, and its names and aliases; machine slugs ("person-personematotaro") are no names.
+ */
+export function personAuthorKeys(person: Pick<GraphConcept, "id" | "name" | "type" | "aliases" | "attributes" | "merge">): PersonAuthorKeys {
+  const names = new Set<string>();
+  const handles = new Set<string>();
+  for (const source of person.merge?.sources ?? [person]) {
+    const handle = personKey(source.attributes.handle?.value);
+    if (handle) handles.add(handle);
+    for (const name of [source.name, ...source.aliases]) {
+      if (name === source.id || isMachineSlug(name, person.type)) continue;
+      const key = personKey(name);
+      if (!key) continue;
+      names.add(key);
+      if (HANDLE_SHAPE.test(name.trim()) && !/\s/.test(name.trim())) handles.add(key);
+    }
+  }
+  return { names, handles };
+}
+
+/**
+ * Whether a Person wrote an entry: its handle is one of the Person's handles, or its author one of
+ * the Person's names or handles unless the entry's handle is another one (a different account under
+ * the same display name is someone else).
+ */
+export function authoredByPerson(meta: Pick<KnowledgeEntryMeta, "author" | "handle">, keys: PersonAuthorKeys): boolean {
+  const handle = personKey(meta.handle);
+  if (handle && keys.handles.has(handle)) return true;
+  if (handle && keys.handles.size > 0 && !keys.handles.has(handle)) return false;
+  const author = personKey(meta.author);
+  return author !== null && (keys.names.has(author) || keys.handles.has(author));
+}
+
 /** Names folded in become aliases of the kept concept: case-insensitively distinct, never its own name nor a machine slug. */
 function unionAliases(name: string, type: string, lists: readonly (readonly string[])[]): string[] {
   const seen = new Set([name.trim().toLowerCase()]);
@@ -480,6 +534,8 @@ class View {
   private readonly sources = new Map<string, readonly GraphConceptSource[]>();
   private readonly presented = new Map<string, KnowledgeConcept>();
   private readonly surveys = new Map<string, boolean>();
+  /** A Person's names and handles by its id (null: not a Person). */
+  private readonly authors = new Map<string, PersonAuthorKeys | null>();
 
   constructor(
     readonly snapshot: Snapshot,
@@ -662,15 +718,32 @@ class View {
   /**
    * Whether a visible edge joins a Person to something only on the word of surveys: every visible
    * entry it comes from is a survey ({@link survey}), which attributes positions to the people it
-   * cites rather than stating their own. No provenance: no.
+   * cites rather than stating their own. No provenance: no. Nor when the Person's own entry
+   * ({@link authored}) backs it: one of the entries it comes from, or one behind its other end (the
+   * Person's post states the warm-up a synthesis attributes to them).
    */
   surveyAttributed(edge: GraphEdge): boolean {
     if (edge.entryIds === null) return false;
     const isPerson = (id: string): boolean => this.snapshot.concepts.get(id)?.type.toLowerCase() === "person";
-    const person = isPerson(edge.from) || isPerson(edge.to);
-    if (!person) return false;
+    const persons = [edge.from, edge.to].filter(isPerson);
+    if (persons.length === 0) return false;
     const visible = edge.entryIds.filter((entryId) => this.entry(entryId));
-    return visible.length > 0 && visible.every((entryId) => this.survey(entryId));
+    if (visible.length === 0 || !visible.every((entryId) => this.survey(entryId))) return false;
+    return !persons.some((person) => {
+      const other = person === edge.from ? edge.to : edge.from;
+      return visible.some((entryId) => this.authored(person, entryId)) || this.entriesOf(other).some((entryId) => this.authored(person, entryId));
+    });
+  }
+
+  /** Whether a Person (the graph's id) wrote an entry ({@link authoredByPerson}); false for any other concept. */
+  authored(personId: string, entryId: string): boolean {
+    let keys = this.authors.get(personId);
+    if (keys === undefined) {
+      const person = this.snapshot.concepts.get(personId);
+      this.authors.set(personId, (keys = person && person.type.toLowerCase() === "person" ? personAuthorKeys(person) : null));
+    }
+    const meta = keys ? this.getMeta(entryId) : null;
+    return meta !== null && keys !== null && authoredByPerson(meta, keys);
   }
 
   /** A visible edge on the wire: as this scope sees it ({@link presentEdge}). */
@@ -1166,6 +1239,17 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   /** A concept's type (unscoped: the same for every source of a merge); null when unknown. */
   conceptType(id: string): string | null {
     return this.snapshot.concepts.get(this.snapshot.mergedInto.get(id) ?? id)?.type ?? null;
+  }
+
+  /**
+   * For a Person (any id of it), whether it wrote an entry: the entry's handle or author is one of
+   * its handles, names or aliases ({@link authoredByPerson}); null for any other concept.
+   */
+  personAuthorship(id: string): ((meta: Pick<KnowledgeEntryMeta, "author" | "handle">) => boolean) | null {
+    const person = this.snapshot.concepts.get(this.snapshot.mergedInto.get(id) ?? id);
+    if (!person || person.type.toLowerCase() !== "person") return null;
+    const keys = personAuthorKeys(person);
+    return (meta) => authoredByPerson(meta, keys);
   }
 
   /**

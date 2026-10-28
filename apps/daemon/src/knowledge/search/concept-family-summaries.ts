@@ -28,7 +28,7 @@
  * entries attributing them), so they are served only to a caller who can see every one of them and
  * only while the family has the members they were written for; anyone else reads the family under
  * {@link FAMILY_FALLBACK_NAME}, without a summary. Positions are those of entries still behind a
- * member the caller can see (or attributed), unchanged since.
+ * member the caller can see (or attributed), unchanged since; those behind the concept asked for first.
  */
 
 import { createHash } from "node:crypto";
@@ -341,12 +341,17 @@ export class KnowledgeConceptFamilySummaries implements KnowledgeConceptFamilySu
     const hashes = new Map(record.members.map((member) => [member.id, member.contentHash]));
     const sources = new Set(record.attributed ?? []);
     for (const ref of refs) for (const id of caller.behind(ref.id)) sources.add(id);
+    // The positions of the entries behind the concept asked for first (each read on its own concept
+    // sees its own answer at the top), the others in the order they were written.
+    const own = new Set(caller.behind(conceptId));
     const positions: KnowledgeConceptSummary["positions"] = [];
+    const others: KnowledgeConceptSummary["positions"] = [];
     for (const position of record.positions) {
       const meta = caller.visible(position.entryId);
       if (!meta || !sources.has(position.entryId) || meta.contentHash !== hashes.get(position.entryId)) continue;
-      positions.push({ entryId: meta.id, title: meta.title, author: meta.author ?? (meta.handle ? `@${meta.handle}` : null), claim: position.claim });
+      (own.has(meta.id) ? positions : others).push({ entryId: meta.id, title: meta.title, author: meta.author ?? (meta.handle ? `@${meta.handle}` : null), claim: position.claim });
     }
+    positions.push(...others);
     const summary = record.positions.length > 0 && positions.length === 0 ? null : { text: record.text, positions };
     return { id: family.id, name: record.name, concepts: refs, ...(summary ? { summary } : {}) };
   }

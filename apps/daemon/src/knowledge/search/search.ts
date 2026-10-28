@@ -885,11 +885,14 @@ export class KnowledgeSearch {
     const scope = this.scope(visibility);
     const view = this.graph.concept(id, scope);
     if (!view) return null;
-    // Every visible entry behind it (a merged concept's: those of its visible sources), newest first.
-    const newest = view.entryIds
+    // Every visible entry behind it (a merged concept's: those of its visible sources), newest first;
+    // a Person's own entries (by author or handle) before those that cite or discuss them.
+    const sorted = view.entryIds
       .map((entryId) => this.store.getMeta(entryId))
       .filter((m): m is KnowledgeEntryMeta => m !== null)
       .sort(newestFirst);
+    const authored = this.graph.personAuthorship(view.concept.id);
+    const newest = authored ? [...sorted.filter((m) => authored(m)), ...sorted.filter((m) => !authored(m))] : sorted;
     // Served only to a caller who can see every entry it was written from (`concept-summaries.ts`).
     const visible = (entryId: string): KnowledgeEntryMeta | null => {
       const meta = this.store.getMeta(entryId);

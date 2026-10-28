@@ -256,10 +256,20 @@ test("visibility: the family on every member's detail; its name and summary only
   const all = (await search.conceptDetail("tactic-warm-3", { kind: "all" }))!.family!;
   assert.equal(all.id, conceptFamilyId("Tactic", MEMBERS));
   assert.equal(all.summary!.text, "How long a new account is used like a real user's before it posts.");
+  // The position of the entry behind the concept read first (yanme's), then the others as written.
+  const inputs = (task!.payload as { inputs: string[] }).inputs;
   assert.deepEqual(
     all.summary!.positions.map((p) => [p.entryId, p.author, p.claim]),
-    (task!.payload as { inputs: string[] }).inputs.map((id) => [id, store.getMeta(id)!.author, CLAIMS[id]])
+    [yanme, ...inputs.filter((id) => id !== yanme)].map((id) => [id, store.getMeta(id)!.author, CLAIMS[id]])
   );
+  // On every member: its own entries' positions first (Alex's and the synthesis's on the shared warm-up concept).
+  const behind: Record<string, string[]> = { "tactic-warm-48": [jason], "tactic-warm-3": [yanme], "tactic-warm-35": [evgeniy], "tactic-warm-57": [ema], "tactic-tiktok-warmup": [alex, synth] };
+  for (const [id, own] of Object.entries(behind)) {
+    const positions = (await search.conceptDetail(id, { kind: "all" }))!.family!.summary!.positions.map((p) => p.entryId);
+    assert.equal(positions.length, inputs.length, id);
+    assert.deepEqual(new Set(positions.slice(0, own.length)), new Set(own), id);
+    assert.deepEqual(positions.slice(own.length), inputs.filter((entryId) => !own.includes(entryId)), id);
+  }
   assert.equal((await search.conceptDetail("tactic-warm-swipe", { kind: "all" }))!.family, undefined, "no family");
 
   // Ema's guide moves to SEO: a TikTok-only caller cannot see her concept, nor one entry the family was written from.

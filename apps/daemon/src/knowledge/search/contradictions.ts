@@ -6,7 +6,8 @@
  *   after merges), A ≠ B, both visible, the edge itself visible; note = the edge's `context`;
  * - `checked`: an LLM pair check said `contradicts` (its note first; of the graph's pairs, those
  *   both of whose concepts the note speaks of: {@link noteInvolves}). A note from before pair-check
- *   input version 4 that calls the sides "A" and "B" names them by author ({@link nameNoteSides}).
+ *   input version 4 that calls the sides "A" and "B" names them by author ({@link nameNoteSides});
+ *   a sentence that only says what does not conflict is left out ({@link stripNonConflictSentences}).
  *
  * A pair check that found the two `consistent` or `unrelated` overrides the graph's guess: the
  * checker read both entries, the graph only their extracted concepts.
@@ -127,6 +128,34 @@ export function isResolvedNote(note: string): boolean {
     if (!NEGATED.test(before)) return true;
   }
   return false;
+}
+
+/**
+ * Phrases that comment on what does not conflict ("a difference of choice, not a conflict", "these
+ * do not conflict", "both can hold", "is compatible", "they otherwise agree").
+ */
+const NON_CONFLICT =
+  /\b(differences? (of|in) (choice|method|approach|detail|tools?|providers?)|not an? (real |true |genuine |actual |direct )?(conflict|contradiction|disagreement)|no (real |true |genuine |actual |direct )?(conflict|contradiction|disagreement)|(do|does|did)(n['’]t| not) (conflict|contradict|disagree)|both can (hold|be true|be right|work|apply)|(is|are) compatible|otherwise (agree|align|consistent|compatible)|neither argues against)\b/i;
+/** "The rest of their steps are compatible", "the rest … agree". */
+const REST_AGREES = /\bthe rest\b.*\b(compatible|consistent|agrees?)\b/i;
+/** Words with which a sentence states what a side claims ("says", "recommends", "warns", "backs"). */
+const CLAIM_VERB =
+  /\b(says?|said|recommends?|recommended|advises?|advised|argues?|argued|claims?|claimed|warns?|warned|tells?|told|reports?|reported|states?|stated|insists?|suggests?|backs?|urges?|calls? for)\b/i;
+/** Where a note's sentences break: after ".", "!" or "?" and a space, before a word (never after "e.g.", "i.e.", "vs."). */
+const SENTENCE_BREAK = /(?<!\b(?:e\.g|i\.e|vs|cf|etc)\.)(?<=[.!?]["”’)]?)\s+(?=["“‘(]?[\p{L}\p{N}])/u;
+
+/**
+ * A `contradicts` note without its sentences that only comment on what does not conflict ("The
+ * tool choices differ (ISP proxy versus NordVPN), but that is a difference of choice, not a
+ * conflict."): a sentence with such a phrase ({@link NON_CONFLICT}, "the rest … compatible") and no
+ * side's claim in it (no {@link CLAIM_VERB}: "X says …" always stays). A note of nothing else is
+ * returned as it is. Applied when a pair check is recorded and to every stored note read.
+ */
+export function stripNonConflictSentences(note: string): string {
+  const text = note.trim();
+  const sentences = text.split(SENTENCE_BREAK);
+  const kept = sentences.filter((sentence) => !((NON_CONFLICT.test(sentence) || REST_AGREES.test(sentence)) && !CLAIM_VERB.test(sentence)));
+  return kept.length === sentences.length || kept.length === 0 ? text : kept.join(" ");
 }
 
 export const pairKeyOf = (x: string, y: string): string => (x < y ? `${x}\u0000${y}` : `${y}\u0000${x}`);
@@ -301,7 +330,8 @@ export function findContradictions(options: FindContradictionsOptions): Map<stri
       continue;
     }
     const item = found.get(key);
-    const said = check.note?.replace(/\s+/g, " ").trim() || null;
+    // A stored note's sentences that only say what does not conflict are left out (recorded before the rule).
+    const said = check.note ? stripNonConflictSentences(check.note.replace(/\s+/g, " ")) || null : null;
     // A note that calls the sides "A" and "B" (before input version 4) names them: A is the check's `a`.
     const [sideA, sideB] = [options.entryMeta?.(check.a), options.entryMeta?.(check.b)];
     const note = said !== null && sideA && sideB ? nameNoteSides(said, sideA, sideB) : said;

@@ -113,6 +113,11 @@ const KNOWLEDGE_GET_MAX_IDS = 5;
 /** Lists inside one `knowledge_get` answer: reading one item, and each of several. */
 const GET_LIST_MAX = 12;
 const GET_LIST_MAX_SEVERAL = 4;
+/**
+ * A concept's summary positions and its family's, reading one item or several (a family's are
+ * written for up to 12 entries; a summary's for up to 8): every one, the reader's own first.
+ */
+const GET_POSITIONS_MAX = 20;
 /** Similar entries shown with an entry (the daemon sends up to 8): reading one, and each of several. */
 const GET_SIMILAR_MAX = 8;
 const GET_SIMILAR_MAX_SEVERAL = 4;
@@ -549,12 +554,17 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
   // concept's (that entry's position says it, attributed), and a reader here would take it as fact.
   const summary = detail.summary;
   const citations = new Map(detail.entries.map((entry) => [entry.id, entry.citation]));
+  // Every position (up to GET_POSITIONS_MAX), one line each, in the daemon's order (a family's: the
+  // entries behind this concept first). Reading several items: by entry id, the claim cut shorter.
+  const compact = listMax < GET_LIST_MAX;
   const positionLines = (positions: KnowledgeConceptSummary["positions"]): string[] => {
-    const out = positions.slice(0, listMax).map((position) => {
+    const out = positions.slice(0, GET_POSITIONS_MAX).map((position) => {
+      const who = label(position.author ?? "unknown author");
+      if (compact) return `- ${who} [${position.entryId}]: ${noteText(position.claim, COMPACT_NOTE_CHARS)}`;
       const cite = citations.get(position.entryId) ?? knowledgeCitation({ id: position.entryId, title: position.title, author: position.author, handle: null });
-      return `- ${label(position.author ?? "unknown author")} (${quotedTitle(position.title)}): ${clipText(oneLine(position.claim), NOTE_CHARS)} ${cite}`;
+      return `- ${who}: ${clipText(oneLine(position.claim), NOTE_CHARS)} ${cite}`;
     });
-    const more = positions.length - listMax;
+    const more = positions.length - out.length;
     return more > 0 ? [...out, `+${more} more`] : out;
   };
   if (summary) {
@@ -575,11 +585,12 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
   const attributes = Object.entries(concept.attributes).slice(0, listMax);
   if (attributes.length > 0) lines.push(`Attributes: ${attributes.map(([key, attribute]) => `${label(key)}: ${clipText(oneLine(attribute.value), DESCRIPTION_CHARS)}`).join("; ")}`);
   if (detail.entries.length > 0) {
-    // Every visible entry counts (`entryIds`; absent from an older daemon): the newest are shown in
-    // full, the others by id, so none goes missing from the list.
+    // Every visible entry counts (`entryIds`; absent from an older daemon): the first (the newest; a
+    // Person's own entries first) are shown in full, the others by id, so none goes missing from the list.
     const all = detail.entryIds ?? detail.entries.map((entry) => entry.id);
     const shown = detail.entries.slice(0, listMax);
-    lines.push(all.length > shown.length ? `Entries (${all.length}; the newest ${shown.length} in full):` : "Entries:");
+    const first = concept.type.toLowerCase() === "person" ? "their own first, the first" : "the newest";
+    lines.push(all.length > shown.length ? `Entries (${all.length}; ${first} ${shown.length} in full):` : "Entries:");
     for (const entry of shown) {
       const [head, ...rest] = entryBlock(entry, names, "  ");
       lines.push(`- ${head}`, ...rest);

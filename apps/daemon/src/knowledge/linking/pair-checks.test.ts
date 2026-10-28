@@ -72,6 +72,22 @@ describe("pair-check answers", () => {
     assert.equal(parsePairCheckAnswer('{"verdict":"no"}'), null);
   });
 
+  it("a `contradicts` note is recorded without its sentences that only say what does not conflict; other verdicts' notes as given", () => {
+    // jason ↔ Emanuele Totaro's stored note (input version 5): its second sentence states no claim.
+    const padded =
+      "jason says to warm up the account for 48 hours before posting, while Emanuele Totaro says to warm up for 5-7 days. The tool choices differ (ISP proxy with Shadowrocket versus NordVPN), but that is a difference of choice, not a conflict.";
+    assert.deepEqual(parsePairCheckAnswer(JSON.stringify({ verdict: "contradicts", note: padded })), {
+      verdict: "contradicts",
+      note: "jason says to warm up the account for 48 hours before posting, while Emanuele Totaro says to warm up for 5-7 days."
+    });
+    // A second sentence that states a side's claim stays (Alex Nguyen ↔ yanme's stored note).
+    const twoPoints =
+      "Alex Nguyen says to create only 2-3 TikTok accounts maximum per device, while yanme recommends 5 accounts on each iPhone. They also differ on warm-up: Alex Nguyen says to start posting after 1-2 days, yanme says to warm up for 3 days.";
+    assert.equal(parsePairCheckAnswer(JSON.stringify({ verdict: "contradicts", note: twoPoints }))!.note, twoPoints);
+    const consistent = "Both warm up before posting. Their VPN choices are a difference of choice, not a conflict.";
+    assert.equal(parsePairCheckAnswer(JSON.stringify({ verdict: "consistent", note: consistent }))!.note, consistent);
+  });
+
   it("the prompt counts only the claims each entry itself makes, and asks for whole notes of at most 400 characters", () => {
     // A live false positive: a research note that quotes and agrees with Alex's guide was judged to
     // contradict it over a tension inside the guide itself.
