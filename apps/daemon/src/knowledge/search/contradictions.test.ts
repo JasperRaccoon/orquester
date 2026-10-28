@@ -2,7 +2,17 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { KnowledgePairCheck, KnowledgePairChecksPort } from "../ports.ts";
-import { type ContradictionGraph, findContradictions, isFillerNote, isResolvedNote, isSurveyEntry } from "./contradictions.ts";
+import {
+  type ContradictionGraph,
+  findContradictions,
+  isFillerNote,
+  isResolvedNote,
+  isSurveyEntry,
+  nameNoteSides,
+  noteInvolves,
+  noteUsesSideLetters,
+  sideNames
+} from "./contradictions.ts";
 import type { GraphEdge } from "./graph.ts";
 import { knowledgeScope } from "./visibility.ts";
 
@@ -76,7 +86,7 @@ test("an edge without context has no note; an entry that is not accepted is neve
   assert.ok(![...findContradictions({ graph, scope, pairChecks: checked, accept: visible }).values()].some((c) => c.note === "secret"));
 });
 
-test("checked: a `contradicts` pair check adds the pair (or confirms the graph's, keeping its pairs); `consistent` and `unrelated` override the graph", () => {
+test("checked: a `contradicts` pair check adds the pair (or confirms the graph's, keeping the pairs its note speaks of); `consistent` and `unrelated` override the graph", () => {
   const graph = graphOf({ x: ["ke_a"], y: ["ke_b"], z: ["ke_c"] }, [
     { from: "x", to: "y", context: "graph says" },
     { from: "x", to: "z", context: "z refutes x outright" }
@@ -84,7 +94,7 @@ test("checked: a `contradicts` pair check adds the pair (or confirms the graph's
   const port = checks([check("ke_a", "ke_b", "contradicts", "the checker says"), check("ke_a", "ke_c", "consistent"), check("ke_b", "ke_d", "contradicts", "d")]);
   const found = findContradictions({ graph, scope, pairChecks: port, accept: (id) => id !== "ke_d" });
   assert.deepEqual([...found.values()], [
-    { a: "ke_a", b: "ke_b", source: "checked", pairs: [{ from: { id: "x", name: "X", type: "Tactic" }, to: { id: "y", name: "Y", type: "Tactic" } }], note: "the checker says" }
+    { a: "ke_a", b: "ke_b", source: "checked", pairs: [], note: "the checker says" }
   ]);
   const only = findContradictions({ graph, scope, pairChecks: checks([check("ke_b", "ke_c", "contradicts", null)]), accept: () => true, entryId: "ke_c" });
   assert.deepEqual([...only.values()], [
@@ -208,4 +218,57 @@ test("isSurveyEntry: synthesis entries, and notes titled as surveys", () => {
   assert.ok(!isSurveyEntry({ kind: "article", title: "A 10-step roadmap to market an app" }));
   assert.ok(!isSurveyEntry({ kind: "post", title: "Map out your funnel" }));
   assert.ok(!isSurveyEntry(null));
+});
+
+test("a checked contradiction keeps only the graph's concept pairs its note speaks of", () => {
+  const names: Record<string, string> = {
+    selfhost: "Self-host Outline VPN on Hetzner ($5/mo) instead of NordVPN",
+    appstore: "US App Store download and warm-up",
+    residential: "Residential IP for a US TikTok account"
+  };
+  const base = graphOf({ selfhost: ["ke_daniel"], appstore: ["ke_note"], residential: ["ke_note"] }, [
+    { from: "selfhost", to: "appstore" },
+    { from: "selfhost", to: "residential" }
+  ]);
+  const graph: ContradictionGraph = { ...base, conceptRef: (id, at) => (base.conceptRef(id, at) ? { id, name: names[id]!, type: "Tactic", description: null } : null) };
+  const note = "Claude says a residential IP beats a datacenter one for a US TikTok account; daniel recommends a self-hosted VPN on a Hetzner datacenter VPS.";
+  const [found] = [...findContradictions({ graph, scope, pairChecks: checks([check("ke_daniel", "ke_note", "contradicts", note)]), accept: () => true }).values()];
+  assert.deepEqual(found!.pairs.map((pair) => [pair.from.id, pair.to.id]), [["selfhost", "residential"]], "not the App Store download, which the note never mentions");
+  assert.equal(noteInvolves(note, names.selfhost!), true);
+  assert.equal(noteInvolves(note, names.appstore!), false);
+});
+
+test("a note from before input version 4 names its sides: A is the check's `a` entry, B its `b`; only notes using both letters as sides change", () => {
+  const jason = { title: "Make any phone hit a US audience on TikTok: 13 steps", author: "jason", handle: "jasonugc" };
+  const alex = { title: "Step-by-step iPhone setup", author: "Alex Nguyen", handle: null };
+  assert.equal(
+    nameNoteSides("A says to create the account with Outlook. B says to use only Gmail.", jason, alex),
+    "jason says to create the account with Outlook. Alex Nguyen says to use only Gmail."
+  );
+  assert.equal(
+    nameNoteSides("Both target the US, but A recommends an ISP proxy while B says shared proxies get flagged; A's proxy is checked on IPQS.", jason, alex),
+    "Both target the US, but jason recommends an ISP proxy while Alex Nguyen says shared proxies get flagged; jason's proxy is checked on IPQS."
+  );
+  assert.equal(nameNoteSides("B claims a VPS looks residential. A claims it is labelled datacenter.", jason, alex), "Alex Nguyen claims a VPS looks residential. jason claims it is labelled datacenter.");
+  for (const untouched of ["Both run A/B tests on the paywall.", "A residential IP beats a datacenter one; jason disagrees.", "jason says 48 hours; Alex Nguyen says 1-2 days."]) {
+    assert.equal(noteUsesSideLetters(untouched), false, untouched);
+    assert.equal(nameNoteSides(untouched, jason, alex), untouched);
+  }
+  assert.deepEqual(sideNames({ title: "x", author: null, handle: "@jasonugc" }, { title: "Super short guide: US TikTok", author: null, handle: null }), ["@jasonugc", "“Super short guide”"]);
+  assert.deepEqual(sideNames({ title: "TikTok's privacy policy names its region inputs (SIM region, …)", author: "Claude" }, { title: "Since Jan 2026 a separate US company runs TikTok's US feed and more", author: "claude" }), [
+    "“TikTok's privacy policy names its region…”",
+    "“Since Jan 2026 a separate US…”"
+  ], "one author on both sides: short titles");
+
+  // findContradictions names them from the entries' meta (A = the check's `a`), on every reader's path.
+  const graph = graphOf({}, []);
+  const meta: Record<string, { kind: string; title: string; author: string | null; handle: string | null }> = {
+    ke_a: { kind: "post", ...jason },
+    ke_b: { kind: "post", ...alex }
+  };
+  const port = checks([check("ke_a", "ke_b", "contradicts", "A says Outlook. B says Gmail.")]);
+  const [found] = [...findContradictions({ graph, scope, pairChecks: port, accept: () => true, entryMeta: (id) => meta[id] ?? null }).values()];
+  assert.equal(found!.note, "jason says Outlook. Alex Nguyen says Gmail.");
+  const [page] = [...findContradictions({ graph, scope, pairChecks: port, accept: () => true, entryId: "ke_b", entryMeta: (id) => meta[id] ?? null }).values()];
+  assert.equal(page!.note, "jason says Outlook. Alex Nguyen says Gmail.", "the same on either entry's page");
 });

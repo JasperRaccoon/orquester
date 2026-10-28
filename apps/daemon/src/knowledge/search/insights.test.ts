@@ -5,7 +5,7 @@ import { knowledgeCitation, type KnowledgeEntryMeta, type KnowledgeInsightsRespo
 import type { KnowledgePairCheck } from "../ports.ts";
 import { FakeVectorIndex, around } from "./fake-vector-index.ts";
 import { KnowledgeGraph } from "./graph.ts";
-import { KnowledgeInsights, conceptCentrality } from "./insights.ts";
+import { KnowledgeInsights, conceptCentrality, namesTitle, samePoint, statesNoClaim } from "./insights.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
 import { FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 import { type KnowledgeScope, knowledgeScope, visibleCollections } from "./visibility.ts";
@@ -27,6 +27,8 @@ async function setup() {
   const pairChecks: KnowledgePairCheck[] = [];
   let checksRevision = 0;
   const queued = new Set<string>();
+  /** Claim name → the entries whose text states its figure (`stating`). */
+  const stated = new Map<string, string[]>();
   const summary = (meta: KnowledgeEntryMeta, scope: KnowledgeScope) => ({
     ...meta,
     collections: visibleCollections(meta, scope),
@@ -52,7 +54,8 @@ async function setup() {
     summary,
     pairChecks: port,
     pairChecksRevision: () => checksRevision,
-    linkGapQueued: (a, b) => queued.has(`${a} ${b}`)
+    linkGapQueued: (a, b) => queued.has(`${a} ${b}`),
+    stating: (claim) => stated.get(claim) ?? []
   });
   const groups: [string, number, number][] = [
     ["p", 0, 3],
@@ -92,7 +95,7 @@ async function setup() {
       node("topic-ra", "Retention", files("r2", "r3")),
       node("tactic-solo1", "Solo tactic", files("p1")),
       node("rule-solo2", "Solo rule", files("p1"), { type: "rule" }),
-      node("metric-solo3", "Solo metric", files("r1"), { type: "metric" }),
+      node("metric-solo3", "Solo metric up 20%", files("r1"), { type: "metric" }),
       node("topic-solo", "Solo topic", files("q1")),
       node("tactic-secret", "Secret claim", files("h")),
       node("tactic-hidshare", "Shared with H", files("p2", "h")),
@@ -117,6 +120,7 @@ async function setup() {
     insights,
     pairChecks,
     queued,
+    stated,
     checksChanged: () => {
       checksRevision += 1;
     },
@@ -247,7 +251,7 @@ test("single-source: never a claim another visible entry backs in other words, n
       node("topic-ra", "Retention", files("r2", "r3")),
       node("tactic-solo1", "Solo tactic", files("p1")),
       node("rule-solo2", "Solo rule", files("p1"), { type: "rule" }),
-      node("metric-solo3", "Solo metric", files("r1"), { type: "metric" }),
+      node("metric-solo3", "Solo metric up 20%", files("r1"), { type: "metric" }),
       node("tactic-solo1-reworded", "Solo tactic, reworded", files("q1")),
       node("metric-solo3-hidden", "Solo metric, as H says it", files("h"))
     ],
@@ -400,4 +404,72 @@ test("conceptCentrality: the share of an entry's concepts that are the concept o
   const guide = new Set(["tactic-warm-up", ...Array.from({ length: 99 }, (_, i) => `topic-${i}`)]);
   assert.equal(conceptCentrality("tactic-warm-up", guide, neighbours), 1 / 100, "a side remark of a long guide");
   assert.equal(conceptCentrality("tactic-warm-up", new Set(), neighbours), 0);
+});
+
+test("bridges: a named example (a product, an app) ties nothing, nor one rule or a figureless result; advice or a result with a figure does", async () => {
+  const s = await setup();
+  const bridges = async () => (await s.insights.list({}, s.seoOnly)).bridges.map((b) => [b.entry.id, b.concepts.map((c) => c.id)]);
+  const reload = (extra: Record<string, unknown>[]) =>
+    loadGraph(s.graph, [node("topic-marketing", "Marketing", files("p1", "p2", "p3", "p4", "q1", "q2", "r1", "r2", "r3")), node("tactic-bq", "Bridge to Q", files("p1", "q1")), ...extra]);
+  for (const weak of [
+    node("product-app", "Penelope's pregnancy app", files("p1", "r1"), { type: "Product" }),
+    node("app-x", "Some tracker app", files("p1", "r1"), { type: "App" }),
+    node("rule-gating", "Custom review prompts / review gating prohibited", files("p1", "r1"), { type: "Rule" }),
+    node("result-views", "Views on a new IG account", files("p1", "r1"), { type: "Result" })
+  ]) {
+    await reload([weak]);
+    assert.deepEqual(await bridges(), [], String(weak.id));
+  }
+  await reload([node("result-figure", "1.3M views on a new IG account", files("p1", "r1"), { type: "Result" })]);
+  assert.deepEqual(await bridges(), [[ke("p1"), ["tactic-bq", "result-figure"]]]);
+  // Two weak ones together still tie a cluster.
+  await reload([node("rule-gating", "Review gating prohibited", files("p1", "r1"), { type: "Rule" }), node("tool-sdk", "Review SDK", files("p1", "r1"), { type: "Tool" })]);
+  assert.deepEqual(await bridges(), [[ke("p1"), ["tactic-bq", "rule-gating", "tool-sdk"]]]);
+});
+
+test("contradictions that make the same point against one entry are shown once, the others as `also`", async () => {
+  const s = await setup();
+  const at = "2026-10-27T00:00:00.000Z";
+  s.pairChecks.push({ a: ke("p1"), b: ke("q2"), verdict: "contradicts", note: "P1 claims a self-hosted Hetzner VPS makes TikTok see a normal home user. Q2 claims such an IP is labelled datacenter by IP vendors.", checkedAt: at });
+  s.pairChecks.push({ a: ke("p1"), b: ke("r3"), verdict: "contradicts", note: "R3 says a residential IP beats a datacenter one. P1 says a self-hosted Hetzner VPS makes TikTok see a normal home user.", checkedAt: at });
+  s.pairChecks.push({ a: ke("p1"), b: ke("q1"), verdict: "contradicts", note: "P1 says to post daily; Q1 says weekly is enough.", checkedAt: at });
+  s.checksChanged();
+  const seo = await s.insights.list({}, s.seoOnly);
+  const p1s = seo.contradictions.filter((item) => item.a.id === ke("p1") || item.b.id === ke("p1"));
+  assert.deepEqual(
+    p1s.map((item) => [pairOf(item), (item.also ?? []).map((entry) => entry.id)]),
+    [
+      [[ke("p1"), ke("q1")], []],
+      [[ke("p1"), ke("q2")], [ke("r3")]]
+    ]
+  );
+  assert.equal(seo.totals.contradictions, seo.contradictions.length, "counted once");
+  // Unit: one side in common, and the same note words or a concept pair in common.
+  const pair = { from: { id: "c1", name: "C1", type: "Tactic" }, to: { id: "c2", name: "C2", type: "Tactic" } };
+  const none = () => null;
+  assert.equal(samePoint({ a: "x", b: "y", pairs: [pair], note: null }, { a: "x", b: "z", pairs: [{ from: pair.to, to: pair.from }], note: null }, none), true, "the same concept pair, either way round");
+  assert.equal(samePoint({ a: "x", b: "y", pairs: [pair], note: null }, { a: "w", b: "z", pairs: [pair], note: null }, none), false, "no side in common");
+  assert.equal(samePoint({ a: "x", b: "y", pairs: [], note: "x says daily" }, { a: "x", b: "z", pairs: [], note: null }, none), false);
+});
+
+test("single-source: never the entry's own title restated, a metric that states nothing, or a figure another visible entry states", async () => {
+  const s = await setup();
+  const listed = async () => (await s.insights.list({}, s.seoOnly)).singleSource.map((item) => item.concept.id);
+  assert.deepEqual(await listed(), ["metric-solo3", "tactic-solo1"]);
+  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "The solo tactic, explained" }, true);
+  assert.deepEqual(await listed(), ["metric-solo3"], "Solo tactic restates P1's title");
+  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "P note 1" }, true);
+  s.stated.set("Solo metric up 20%", [ke("r1"), ke("q3")]);
+  assert.deepEqual(await listed(), ["tactic-solo1"], "Q3's text states the figure");
+  s.stated.set("Solo metric up 20%", [ke("r1"), ke("h")]);
+  s.checksChanged();
+  assert.deepEqual(await listed(), ["metric-solo3", "tactic-solo1"], "a hidden entry states nothing");
+
+  assert.equal(statesNoClaim({ name: "Payment conversion rate", type: "Metric" }), true);
+  assert.equal(statesNoClaim({ name: "Payment conversion up 20%", type: "Metric" }), false);
+  assert.equal(statesNoClaim({ name: "Churn lower on annual plans", type: "Metric" }), false);
+  assert.equal(statesNoClaim({ name: "Payment conversion rate", type: "Result" }), false, "metrics only");
+  assert.equal(namesTitle("Start an app from zero with $300 using used iPhones and TikTok accounts", "Starting an app from zero with $300: 3 used iPhones × 5 TikTok accounts"), true);
+  assert.equal(namesTitle("Making a US-based TikTok account", "How to create a US TikTok account and target only the US (7 steps)"), true);
+  assert.equal(namesTitle("Get keywords from 1-2 star reviews", "SEO playbook for mobile app founders"), false);
 });

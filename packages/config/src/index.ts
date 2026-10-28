@@ -229,6 +229,11 @@ export function knowledgeClusterLabelsPath(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "cluster-labels.json");
 }
 
+/** Neutral, attributed summaries an LLM wrote of concepts (`knowledge-concept-summaries.ts`). */
+export function knowledgeConceptSummariesPath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "concept-summaries.json");
+}
+
 /** The pair checks' own inbox (`agent_inbox/`, `agent_outbox/`), answered by worker chats between linking runs. */
 export function knowledgePairChecksInboxDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "pair-checks");
@@ -2909,4 +2914,5 @@ export * from "./box-mcp.ts";
 export * from "./knowledge-store.ts";
 export * from "./knowledge-concept-merges.ts";
 export * from "./knowledge-cluster-labels.ts";
+export * from "./knowledge-concept-summaries.ts";
 export * from "./devices.ts";

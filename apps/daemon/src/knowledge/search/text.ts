@@ -281,22 +281,28 @@ function passages(text: string): string[] {
   return out;
 }
 
+/** A duration as a text states one: "48 hours", "1–2 days", "3-5 days", "15-30 min", "7-day". */
+export const DURATION = /\b\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?[\s-]*(?:hrs?|hours?|days?|weeks?|wks?|mins?|minutes?|months?)\b/i;
+/** What a stated duration counts for, in query words, when the query asks how long: it is the answer. */
+const DURATION_WEIGHT = 2;
+
 /**
  * One or two lines from `body` (inside `span` when given): the passage sharing the most query
- * terms, followed by the next one while it fits; the span's opening otherwise.
+ * terms (a passage stating a duration counts {@link DURATION_WEIGHT} more when `duration`: the
+ * query asks how long), followed by the next one while it fits; the span's opening otherwise.
  */
-export function bestSnippet(body: string, queryTerms: readonly string[], span?: TextSpan): string {
+export function bestSnippet(body: string, queryTerms: readonly string[], span?: TextSpan, duration = false): string {
   const region = span ? body.slice(span.start, span.end) : body;
   const pieces = passages(region);
   if (pieces.length === 0) return "";
   const wanted = new Set(queryTerms);
   let best = 0;
   let bestScore = 0;
-  if (wanted.size > 0) {
+  if (wanted.size > 0 || duration) {
     pieces.forEach((piece, index) => {
-      const seen = new Set(tokenize(piece).filter((t) => wanted.has(t)));
-      if (seen.size > bestScore) {
-        bestScore = seen.size;
+      const seen = new Set(tokenize(piece).filter((t) => wanted.has(t))).size + (duration && DURATION.test(piece) ? DURATION_WEIGHT : 0);
+      if (seen > bestScore) {
+        bestScore = seen;
         best = index;
       }
     });

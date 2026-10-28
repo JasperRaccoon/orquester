@@ -33,7 +33,7 @@ import {
   type KnowledgeStatus,
   type SessionOwner
 } from "@orquester/api";
-import { knowledgeClusterLabelsPath, knowledgeConceptMergesPath, knowledgeIndexDir } from "@orquester/config";
+import { knowledgeClusterLabelsPath, knowledgeConceptMergesPath, knowledgeConceptSummariesPath, knowledgeIndexDir } from "@orquester/config";
 
 import { profileKnowledgeCollections, profilesForCollection } from "../session-profiles/knowledge.ts";
 import type { SessionProfileStore } from "../session-profiles/store.ts";
@@ -46,7 +46,8 @@ import { registerKnowledgeDataRoutes } from "./routes-data.ts";
 import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLinkingRouteService, type KnowledgeStatusCounts } from "./routes-linking.ts";
 import { KnowledgeClusterLabels, type ClusterDescription } from "./search/cluster-labels.ts";
 import { ConceptMergeCheckSource } from "./search/concept-merge-checks.ts";
-import { KnowledgeConceptMerges } from "./search/concept-merges.ts";
+import { KnowledgeConceptMerges, conceptThresholdsFor } from "./search/concept-merges.ts";
+import { KnowledgeConceptSummaries } from "./search/concept-summaries.ts";
 import { findContradictions } from "./search/contradictions.ts";
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
 import { KnowledgeGraph } from "./search/graph.ts";
@@ -85,7 +86,7 @@ export type KnowledgeLinkingFactory = (ports: {
   settings: KnowledgeSettingsPort;
   /** Search and the concept graph as phase 2 linking reads them (`linkGraphView`). */
   graphView: KnowledgeLinkGraphView;
-  /** LLM work for linking's idle rounds: concept merge checks and cluster names (`KnowledgeLinkingOptions.roundTasks`). */
+  /** LLM work for linking's idle rounds: concept merge checks, cluster names and concept summaries (`KnowledgeLinkingOptions.roundTasks`). */
   roundTasks: readonly KnowledgeRoundTaskSource[];
 }) => KnowledgeLinking;
 
@@ -162,13 +163,23 @@ const NO_PAIR_CHECKS: KnowledgePairChecksPort = {
 export function linkGraphView(
   store: Pick<KnowledgeStore, "listCollections">,
   graph: KnowledgeGraph,
-  search: Pick<KnowledgeSearch, "vectorIndex" | "vectorsIdle">
+  search: Pick<KnowledgeSearch, "vectorIndex" | "vectorsIdle">,
+  concepts?: Pick<KnowledgeConceptMerges, "vectors">
 ): KnowledgeLinkGraphView {
   const everything = () => knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
   return {
     vectors: () => search.vectorIndex(),
     vectorsSettled: () => search.vectorsIdle(),
     graphRevision: () => graph.contentRevision(),
+    // Concept vectors of a calibrated model only (what their closeness means is known).
+    ...(concepts
+      ? {
+          conceptVector: (conceptId: string) => {
+            const set = concepts.vectors.current();
+            return set && conceptThresholdsFor(set.modelId) ? (set.vectors.get(conceptId) ?? null) : null;
+          }
+        }
+      : {}),
     conceptsOf: (entryId) => graph.conceptsOfEntry(entryId, everything()),
     // The graph's adjacency, not a concept detail (which also ranks similar concepts): read per concept of every linked entry.
     contradicting: (conceptId) => {
@@ -494,10 +505,33 @@ export class KnowledgeService {
         return entry ? { title: entry.title, body: entry.body } : null;
       }
     });
-    const linking = this.buildLinking(store, graph, search, [conceptChecks, clusterLabels]);
+    // Neutral, attributed summaries of concepts with several entries (read by concept details).
+    const conceptSummaries = new KnowledgeConceptSummaries({
+      path: knowledgeConceptSummariesPath(appdir),
+      concepts: () => graph.currentConcepts(),
+      meta: (id) => store.getMeta(id),
+      body: async (id) => (await store.getEntry(id))?.body ?? null,
+      contradicting: () =>
+        findContradictions({ graph, scope: everything(), pairChecks: this.pairChecks(), accept: () => true, entryMeta: (id) => store.getMeta(id) }).values(),
+      onConceptsChange: (listener) => {
+        const offLoad = graph.onLoad(listener);
+        const offMerges = conceptMerges.onChange(listener);
+        return () => {
+          offLoad();
+          offMerges();
+        };
+      },
+      logger: this.logger
+    });
+    await conceptSummaries.load();
+    search.connectConceptSummaries(conceptSummaries);
+    const linking = this.buildLinking(store, graph, search, conceptMerges, [conceptChecks, clusterLabels, conceptSummaries]);
     await conceptMerges.start();
     const opening: Opening = { store, graph, search, embedders, linking, conceptMerges, clusterLabels, unsubscribe: [] };
     opening.unsubscribe.push(() => search.similarity.connectClusterLabels(null));
+    opening.unsubscribe.push(() => search.connectConceptSummaries(null));
+    // A new concept summary changes concept details.
+    opening.unsubscribe.push(conceptSummaries.onChange(() => this.publishChanged({ graph: true })));
     // A new cluster name redraws the similarity layer.
     opening.unsubscribe.push(clusterLabels.onChange(() => this.publishChanged({ graph: true })));
     // Insights and similar entries read linking's pair checks and queued link gaps (phase 2 spec,
@@ -587,11 +621,17 @@ export class KnowledgeService {
     this.publishStatus();
   }
 
-  private buildLinking(store: KnowledgeStore, graph: KnowledgeGraph, search: KnowledgeSearch, roundTasks: readonly KnowledgeRoundTaskSource[]): KnowledgeLinking {
+  private buildLinking(
+    store: KnowledgeStore,
+    graph: KnowledgeGraph,
+    search: KnowledgeSearch,
+    conceptMerges: KnowledgeConceptMerges,
+    roundTasks: readonly KnowledgeRoundTaskSource[]
+  ): KnowledgeLinking {
     const factory = this.options.linking;
     if (!factory) return new NoLinking(this.settings, "Graph linking is not available in this build.");
     try {
-      return factory({ store, graph, runtime: this.runtime, settings: this.settings, graphView: linkGraphView(store, graph, search), roundTasks });
+      return factory({ store, graph, runtime: this.runtime, settings: this.settings, graphView: linkGraphView(store, graph, search, conceptMerges), roundTasks });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`knowledge: the linking module could not be built (${message})`);

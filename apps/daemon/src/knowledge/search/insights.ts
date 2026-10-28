@@ -5,17 +5,20 @@
  *
  * - Contradictions: {@link findContradictions} over every visible pair; checked ones first, then
  *   by closeness in meaning plus {@link CENTRALITY_WEIGHT} × how central the contradicting
- *   concepts are to both entries ({@link conceptCentrality}).
+ *   concepts are to both entries ({@link conceptCentrality}). One that makes the same point against
+ *   the same entry as one ranked above it ({@link samePoint}) is folded into it as `also`.
  * - Bridges: entries (never a survey: {@link isSurveyEntry}) whose distinctive concepts
- *   ({@link distinctiveLimit}, by id and by name in any type; never a person or an organization)
- *   are shared with non-survey entries in at least 2 other clusters of two or more, each cluster
- *   tied by a claim or a thing named in two words or more ({@link bridgeStrong}), or else by two
- *   concepts; most clusters first, then most such concepts, then newest. 126 real entries: 36
- *   bridges, the first eight surveys or hubs, many tied by "iOS" or "CAC" alone; 6 after.
+ *   ({@link distinctiveLimit}, by id and by name in any type; never a person, an organization, a
+ *   product or an app: a named example) are shared with non-survey entries in at least 2 other
+ *   clusters of two or more, each cluster tied by a strong claim ({@link bridgeStrong}: advice, or
+ *   a result with a figure), or else by two concepts; most clusters first, then most such concepts,
+ *   then newest. 126 real entries: 36 bridges, the first eight surveys or hubs, many tied by "iOS"
+ *   or "CAC" alone; 6 after.
  * - Single-source claims worth verifying: claims ({@link SINGLE_SOURCE_TYPES}) linked to exactly
  *   one visible entry (not a survey: {@link isSurveyEntry}) that sits in a cluster of 3 or more,
- *   that no other visible entry backs in other words (`KnowledgeGraph.backingConcepts`), and
- *   whose topic other entries of that cluster discuss: at least
+ *   that no other visible entry backs in other words (`KnowledgeGraph.backingConcepts`) or states
+ *   the figure of (`stating`), that are not the entry's own title ({@link namesTitle}) nor a metric
+ *   that states nothing ({@link statesNoClaim}), and whose topic other entries of that cluster discuss: at least
  *   {@link SINGLE_SOURCE_MIN_PEERS} and {@link SINGLE_SOURCE_MIN_SHARE} of its other (non-survey)
  *   entries link to a concept the claim is linked to (never a person or an organization, nor a concept on most entries). Peers that
  *   discuss the topic and do not back the claim are what makes it worth checking. Ranked by what
@@ -47,11 +50,10 @@ import {
   type KnowledgeSingleSource
 } from "@orquester/api";
 import type { KnowledgePairChecksPort, KnowledgeStorePort, KnowledgeVectorIndex } from "../ports.ts";
-import { findContradictions, isSurveyEntry, type ContradictionGraph } from "./contradictions.ts";
+import { type ContradictionGraph, type KnowledgeContradictionFound, findContradictions, isSurveyEntry } from "./contradictions.ts";
 import { type KnowledgeLinkGapPair, findLinkGaps, linkGapConceptKey } from "./gaps.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import {
-  CLAIM_CONCEPT_TYPES,
   type KnowledgeClusterRef,
   type KnowledgeSimilarity,
   NON_TOPIC_CONCEPT_TYPES,
@@ -62,6 +64,7 @@ import {
   scopeKey,
   yielder
 } from "./similarity.ts";
+import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope } from "./visibility.ts";
 
 export const KNOWLEDGE_INSIGHTS_DEFAULT_LIMIT = 20;
@@ -74,6 +77,8 @@ const INSIGHTS_CACHE_SIZE = 8;
 const BRIDGE_MIN_CLUSTERS = 2;
 /** Concepts named per bridge. */
 const BRIDGE_CONCEPTS_MAX = 5;
+/** Concept types that name an example (a product or an app a post is about) rather than a topic: they tie no bridge. */
+const BRIDGE_EXAMPLE_TYPES: ReadonlySet<string> = new Set(["product", "app"]);
 /**
  * Claims whose single source is worth checking: what someone did and what it gave. Not rules or
  * guidelines: those restate a platform's policy, one reference note per rule by design (126 real
@@ -126,6 +131,11 @@ export interface KnowledgeInsightsOptions {
   pairChecksRevision?: () => number;
   /** Whether the re-linker has queued both entries of a link gap (read per response); absent: never. */
   linkGapQueued?: (a: string, b: string) => boolean;
+  /**
+   * The entries whose text states a claim's figure (`KnowledgeSearch.entriesStating`), unscoped: a
+   * figure another visible entry states is no single source. Absent: none.
+   */
+  stating?: (claim: string) => readonly string[];
 }
 
 type Computed = Omit<KnowledgeInsightsResponse, "gaps"> & { gaps: (Omit<KnowledgeLinkGap, "queued"> & { pair: KnowledgeLinkGapPair })[] };
@@ -300,6 +310,13 @@ export class KnowledgeInsights {
         y.rank - x.rank ||
         (x.a < y.a ? -1 : x.a > y.a ? 1 : x.b < y.b ? -1 : x.b > y.b ? 1 : 0)
     );
+    // The same point against the same entry, made by several: shown once, the others as "also".
+    const shown: ((typeof contradictions)[number] & { also: string[] })[] = [];
+    for (const found of contradictions) {
+      const twin = shown.find((kept) => samePoint(kept, found, (id) => metaOf.get(id) ?? null));
+      if (twin) twin.also.push(twin.a === found.a || twin.b === found.a ? found.b : found.a);
+      else shown.push({ ...found, also: [] });
+    }
     await pause();
 
     // Bridges.
@@ -323,7 +340,8 @@ export class KnowledgeInsights {
         const reached = new Map<number, { concepts: Set<string>; strong: boolean }>();
         const tying: KnowledgeConceptRef[] = [];
         for (const concept of conceptsOf.get(meta.id)!) {
-          if (NON_TOPIC_CONCEPT_TYPES.has(concept.type.toLowerCase())) continue;
+          // A named example (a product, an app, a person, an organization) is no shared topic.
+          if (NON_TOPIC_CONCEPT_TYPES.has(concept.type.toLowerCase()) || BRIDGE_EXAMPLE_TYPES.has(concept.type.toLowerCase())) continue;
           const others = entriesOf.get(concept.id)!;
           if (others.length < 2 || others.length > most || entriesByName.get(linkGapConceptKey(concept))!.size > most) continue;
           const strong = bridgeStrong(concept);
@@ -383,6 +401,8 @@ export class KnowledgeInsights {
         const scored: { concept: KnowledgeConceptRef; peers: number }[] = [];
         for (const concept of conceptsOf.get(meta.id)!) {
           if (!SINGLE_SOURCE_TYPES.has(concept.type.toLowerCase()) || entriesOf.get(concept.id)!.length !== 1) continue;
+          // The entry's own title ("Start an app from zero with $300…"), or a metric it only names ("Payment conversion rate").
+          if (namesTitle(concept.name, meta.title) || statesNoClaim(concept)) continue;
           const topics = neighbours(graph.canonicalConceptId(concept.id)).filter(isTopic);
           if (topics.length === 0) continue;
           let discussing = 0;
@@ -390,6 +410,8 @@ export class KnowledgeInsights {
           if (discussing < Math.max(SINGLE_SOURCE_MIN_PEERS, SINGLE_SOURCE_MIN_SHARE * peers.length)) continue;
           // Another entry says it in other words: backed, not single-source.
           if (graph.backingConcepts(concept.id).some((other) => graph.visibleEntriesOf(other, scope).some((id) => id !== meta.id && metaOf.has(id)))) continue;
+          // Another entry states its figure in its text ("Candy Crush (231 configurable settings)").
+          if (this.options.stating?.(concept.name).some((id) => id !== meta.id && metaOf.has(id))) continue;
           scored.push({ concept, peers: discussing });
         }
         if (scored.length === 0) continue;
@@ -413,14 +435,15 @@ export class KnowledgeInsights {
 
     const gaps = await gapsReady;
     return {
-      contradictions: contradictions.slice(0, limit).map(
+      contradictions: shown.slice(0, limit).map(
         (found): KnowledgeContradiction => ({
           a: summaryOf(found.a),
           b: summaryOf(found.b),
           similarity: found.similarity === null ? null : round(found.similarity),
           source: found.source,
           pairs: found.pairs,
-          note: found.note
+          note: found.note,
+          ...(found.also.length > 0 ? { also: found.also.map(summaryOf) } : {})
         })
       ),
       bridges: bridges.slice(0, limit).map(
@@ -435,7 +458,7 @@ export class KnowledgeInsights {
         .filter((pair) => metaOf.has(pair.a) && metaOf.has(pair.b))
         .slice(0, limit)
         .map((pair) => ({ a: summaryOf(pair.a), b: summaryOf(pair.b), similarity: round(pair.similarity), pair })),
-      totals: { contradictions: contradictions.length, bridges: bridges.length, singleSource: singleSourceTotal, gaps: gaps.length }
+      totals: { contradictions: shown.length, bridges: bridges.length, singleSource: singleSourceTotal, gaps: gaps.length }
     };
   }
 }
@@ -453,16 +476,60 @@ export function conceptCentrality(conceptId: string, entryConcepts: ReadonlySet<
 }
 
 /**
- * Whether a concept ties two entries on its own: a claim (a tactic, rule, guideline or result), or
- * a thing named in two words or more ("Google Ads API"). A one-word name ("iOS", "WebDriverAgent")
- * or a metric ("CAC payback", "Session time") is common ground, not a topic: it ties a bridge's
- * cluster only beside another concept.
+ * Whether a concept ties two entries on its own: a strong claim, advice (a tactic or guideline) or a
+ * result that states a figure ("Views on a new IG account" states none). A rule (one App Store rule
+ * cited by a teardown and a checklist), a metric, a thing or a screen ("Screen 6") is common ground,
+ * not a topic: it ties a bridge's cluster only beside another concept. 126 real entries: "83% beats
+ * 80%" tied to the App Store cluster by "Screen 6" and "Penelope's pregnancy app", the $100k/day
+ * teardown by one review-gating Rule.
  */
 function bridgeStrong(concept: KnowledgeConceptRef): boolean {
   const type = concept.type.toLowerCase();
-  if (type === "metric") return false;
-  if (CLAIM_CONCEPT_TYPES.has(type)) return true;
-  return (concept.name.match(/[\p{L}\p{N}]+/gu) ?? []).length >= 2;
+  if (type === "tactic" || type === "guideline") return true;
+  return type === "result" && /\d/.test(concept.name);
+}
+
+/** A concept name's words as {@link namesTitle} compares them: {@link tokenize}'s, "-ing" folded ("Starting" / "Start"). */
+function titleWords(text: string): Set<string> {
+  return new Set(tokenize(text).map((token) => (token.length > 5 && token.endsWith("ing") ? token.slice(0, -3) : token)));
+}
+/**
+ * The share of a concept name's words its entry's title must hold for the concept to be the title
+ * restated: half ("Making a US-based TikTok account" on "How to create a US TikTok account and
+ * target only the US": tiktok, account of making, based, tiktok, account).
+ */
+const TITLE_SHARE = 0.5;
+
+/**
+ * Whether a concept restates its entry's title: two or more of its words, at least
+ * {@link TITLE_SHARE} of them, are the title's ("Start an app from zero with $300 using used
+ * iPhones and TikTok accounts" on "Starting an app from zero with $300: 3 used iPhones × 5 TikTok
+ * accounts…"). That is what the entry is about, not a claim it makes in passing.
+ */
+export function namesTitle(conceptName: string, title: string): boolean {
+  const words = titleWords(conceptName);
+  const titled = titleWords(title);
+  let held = 0;
+  for (const word of words) if (titled.has(word)) held += 1;
+  return held >= 2 && held >= TITLE_SHARE * words.size;
+}
+
+/** Words that give a metric a direction ("Paywall conversion up 20%", "Churn lower on annual plans"). */
+const DIRECTION_WORDS: ReadonlySet<string> = new Set(
+  (
+    "up down more less fewer higher lower increase increases increased decrease decreases decreased rise rises rose fall falls fell drop drops " +
+    "dropped grow grows grew raise raises raised cut cuts lift lifts double doubles doubled triple tripled beat beats better worse best worst " +
+    "improve improves improved outperform outperforms above below over under vs versus"
+  ).split(" ")
+);
+
+/** Whether a concept is a metric that states no claim: no number and no direction, only what is measured ("Payment conversion rate"). */
+export function statesNoClaim(concept: Pick<KnowledgeConceptRef, "name" | "type">): boolean {
+  if (concept.type.toLowerCase() !== "metric" || /\d|%/.test(concept.name)) return false;
+  return !concept.name
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .some((word) => DIRECTION_WORDS.has(word));
 }
 
 /**
@@ -472,6 +539,55 @@ function bridgeStrong(concept: KnowledgeConceptRef): boolean {
  */
 function noteTier(meta: Pick<KnowledgeEntryMeta, "kind">): number {
   return /^(research[ _-]?|reference[ _-]?)?notes?$/i.test((meta.kind ?? "").trim()) ? 1 : 0;
+}
+
+/**
+ * How much of the shorter note's words (the sides' names and the words every note uses aside) the
+ * other must hold for two disagreements with one entry to make the same point. 126 real entries:
+ * the two research notes against daniel's self-hosted VPN ("a self-hosted Hetzner VPS makes TikTok
+ * see a normal US home user" vs "IP-intelligence vendors label it datacenter", and vs "a
+ * residential-looking IP beats a datacenter one") share 0.6; jason's ISP proxy and Ema's NordVPN
+ * against daniel share 0.3 or less with them.
+ */
+const SAME_POINT_NOTE_OVERLAP = 0.5;
+/** Words every note uses to say who claims what: no part of the point. */
+const NOTE_FILLER: ReadonlySet<string> = new Set(tokenize("say says said claim claims recommend recommends argue argues state states report reports note research entry side both while whereas"));
+
+/** A note's words as {@link samePoint} compares them: tokens of 3+ characters, -ing and -ed folded, filler and `names` left out. */
+function pointWords(note: string, names: ReadonlySet<string>): Set<string> {
+  const out = new Set<string>();
+  for (const token of tokenize(note)) {
+    if (token.length < 3 || NOTE_FILLER.has(token) || names.has(token)) continue;
+    out.add(token.length > 5 && token.endsWith("ing") ? token.slice(0, -3) : token.length > 4 && token.endsWith("ed") ? token.slice(0, -2) : token);
+  }
+  return out;
+}
+
+/**
+ * Whether two contradictions make the same point against the same entry: they share exactly one
+ * side, and either share a concept pair (the same two concepts, either way round) or their notes say
+ * much the same ({@link SAME_POINT_NOTE_OVERLAP}, the four entries' authors' and handles' words aside).
+ */
+export function samePoint(
+  x: Pick<KnowledgeContradictionFound, "a" | "b" | "pairs" | "note">,
+  y: Pick<KnowledgeContradictionFound, "a" | "b" | "pairs" | "note">,
+  metaOf: (id: string) => Pick<KnowledgeEntryMeta, "author" | "handle"> | null
+): boolean {
+  if ([x.a, x.b].filter((id) => id === y.a || id === y.b).length !== 1) return false;
+  const key = (pair: { from: KnowledgeConceptRef; to: KnowledgeConceptRef }): string => [pair.from.id, pair.to.id].sort().join("\u0000");
+  const pairs = new Set(x.pairs.map(key));
+  if (y.pairs.some((pair) => pairs.has(key(pair)))) return true;
+  if (x.note === null || y.note === null) return false;
+  const names = new Set<string>();
+  for (const id of [x.a, x.b, y.a, y.b]) {
+    const meta = metaOf(id);
+    for (const token of tokenize(`${meta?.author ?? ""} ${meta?.handle ?? ""}`)) names.add(token);
+  }
+  const [wx, wy] = [pointWords(x.note, names), pointWords(y.note, names)];
+  if (wx.size === 0 || wy.size === 0) return false;
+  let shared = 0;
+  for (const word of wx) if (wy.has(word)) shared += 1;
+  return shared >= SAME_POINT_NOTE_OVERLAP * Math.min(wx.size, wy.size);
 }
 
 /** A deep copy of a cached, JSON-shaped value (callers may change what they are given). */

@@ -49,6 +49,7 @@ after(() => {
 const A = summary({ id: "ke_aaaaaaaaaaaa", title: "Trials should be 7 days", author: "Om", handle: "om" });
 const B = summary({ id: "ke_bbbbbbbbbbbb", title: "Trials should be 30 days", author: null, handle: null });
 const C = summary({ id: "ke_cccccccccccc", title: "Pricing pages" });
+const D = summary({ id: "ke_dddddddddddd", title: "Trials should be 14 days" });
 const ref = (id: string, name: string, type = "Tactic") => ({ id, name, type });
 
 const INSIGHTS: KnowledgeInsightsResponse = {
@@ -59,7 +60,8 @@ const INSIGHTS: KnowledgeInsightsResponse = {
       similarity: 0.82,
       source: "checked",
       pairs: [{ from: ref("tactic-short-trial", "Short trial"), to: ref("tactic-long-trial", "Long trial") }],
-      note: "<b>One says a week</b>, the other a month."
+      note: "<b>One says a week</b>, the other a month.",
+      also: [D]
     }
   ],
   bridges: [{ entry: C, clusters: [{ label: "Pricing", size: 9 }, { label: null, size: 3 }], concepts: [ref("topic-anchoring", "Anchoring", "Topic")] }],
@@ -167,6 +169,14 @@ describe("the Insights view", () => {
     assert.match(section("Bridges").textContent!, /Links 2 clusters: “Pricing” \(9 entries\), a cluster of 3 entries/);
     assert.match(section("Single source").textContent!, /Never discount.*only in.*Trials should be 30 days/);
     assert.match(section("Link gaps").textContent!, /87% similar.*Queued for re-linking/);
+  });
+
+  it("names the entries that make the same point against the same side, each opening its entry", async () => {
+    await show();
+    const also = section("Contradictions").querySelector("[data-insight-also]")!;
+    assert.match(also.textContent!, /also:.*Trials should be 14 days/);
+    await click(also.querySelector(`[data-insight-entry="${D.id}"]`)!);
+    assert.deepEqual(selections, [{ kind: "entry", id: D.id }]);
   });
 
   it("renders the daemon's text as text, never as HTML", async () => {

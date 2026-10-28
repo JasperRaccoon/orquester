@@ -17,14 +17,22 @@
  * at these names. Names that nearly coincide ({@link CONCEPT_CHECK_ALIKE_WORDS}+ words in common, at
  * least half of their words) are asked about at a lower bar (`alikeNames`), with or without a shared
  * entry: two entries often name one thing in two wordings ("US App Store download and warm-up" /
- * "… plus warm-up"). Sharing an entry first (myKG often extracts one thing twice from one entry),
+ * "… plus warm-up"). Concepts of two different entries that share an anchor — a distinctive Tool,
+ * Organization or Product both link to or name ({@link conceptAnchors}: "Only Gmail is safe" / "Use
+ * Gmail only", "Buy a clean ISP proxy with an IPQS/Scamalytics check" / "Check IP quality on
+ * IPQS/Scamalytics before creating the account") — are asked about at a lower bar still
+ * (`anchored`), past the merge bar's own guard too (`similarity`), but never when one name has
+ * numbers the other lacks, and never for the anchor types themselves. Sharing an entry first (myKG often extracts one thing twice from one entry),
  * then closest first; at most {@link CONCEPT_CHECK_MAX_PER_ROUND} a round. Linking's rounds follow
  * one another while a round answered something (`linking/service.ts`), so the candidates are asked
  * about round after round until none is left.
  *
  * Each concept is shown with an excerpt of one of its entries: the passage naming it best among its
  * first entries ({@link conceptExcerptFor}), not an entry's opening. A check records its input
- * version ({@link CONCEPT_CHECK_INPUT_VERSION}).
+ * version ({@link CONCEPT_CHECK_INPUT_VERSION}). The prompt's same-specificity rule says that two
+ * tactics recommending the same action with the same tools are the same however they are phrased
+ * ("buy X with a Y check" / "check X on Y"), and that a difference of numbers, conditions or tools
+ * keeps them apart.
  */
 
 import type { KnowledgeConceptMergeCheck, KnowledgeConceptMergeRejection } from "@orquester/config";
@@ -54,8 +62,10 @@ export const CONCEPT_CHECK_EXCERPT_ENTRIES = 3;
  * its name or an alias whole, else the largest share of one's words, among its first
  * {@link CONCEPT_CHECK_EXCERPT_ENTRIES} entries ({@link conceptExcerpt}). Version 1 answers are not
  * asked again: on the live graph every one of them showed a sentence with the concept's words.
+ * 3: the same input, with the prompt's same-action rule ({@link CONCEPT_CHECK_SYSTEM}); earlier
+ * answers are not asked again (none of the pairs that rule is for had been asked).
  */
-export const CONCEPT_CHECK_INPUT_VERSION = 2;
+export const CONCEPT_CHECK_INPUT_VERSION = 3;
 const REASON_MAX = 300;
 /** Types never checked (see the module header). */
 const SKIP_TYPES: ReadonlySet<string> = new Set(["Person"]);
@@ -73,6 +83,11 @@ export interface ConceptCheckBars {
    * half of their words), whether or not they share an entry. Absent: no lower bar for them.
    */
   alikeNames?: number;
+  /**
+   * They share an anchor ({@link conceptAnchors}: a distinctive Tool, Organization or Product they
+   * link to or name), whether or not they share an entry or name words. Absent: no anchor path.
+   */
+  anchored?: number;
 }
 
 /** Name words two concepts must have in common for the `alikeNames` bar; and at least half of their words (Jaccard). */
@@ -106,8 +121,21 @@ function alikeNames(x: ReadonlySet<string>, y: ReadonlySet<string>): boolean {
  * 0.974. Names sharing 3+ words and half of their words, at ≥ 0.94, add 101 pairs (82 sharing no
  * entry; siblings among them, "… health data …" ~ "… financial data …", which the check tells
  * apart): three rounds.
+ *
+ * Once those were asked too (the live graph of 2026-10-28: 3,103 concepts, 126 entries, 256 checks),
+ * no pair was left on the name paths, yet tactics of different entries saying one thing in other
+ * words stayed apart: six "check the ISP proxy on IPQS/Scamalytics" tactics at 0.912–0.971
+ * ("Buy a clean ISP proxy with an IPQS/Scamalytics check" ~ "ISP proxy that passes IPQS and
+ * Scamalytics" 0.946: four words of nine in common), "Only Gmail is safe" ~ "Use Gmail only" 0.957,
+ * "Make an outlook/proton email" ~ "Use Outlook or Proton" 0.955, "NordVPN for US TikTok" ~ "Use
+ * NordVPN to target US audience on TikTok" 0.905 — names with too few words in common for the
+ * `alikeNames` bar, but naming (or linked to) the same tools. The anchor path asks about those: two
+ * concepts of different entries sharing an anchor ({@link conceptAnchors}) at ≥ 0.90, the numbers
+ * guard never overruled there. 0.88 would add 138 pairs (335), mostly a case study's own claims
+ * ("~28,000 visitors from ChatGPT" ~ "Runpod new customers per day from ChatGPT"); every link of the
+ * four groups above is at 0.90 or more. 197 pairs: five rounds once.
  */
-export const E5_SMALL_CONCEPT_CHECK_BARS: ConceptCheckBars = { sharedEntry: 0.96, alone: 0.975, alikeNames: 0.94 };
+export const E5_SMALL_CONCEPT_CHECK_BARS: ConceptCheckBars = { sharedEntry: 0.96, alone: 0.975, alikeNames: 0.94, anchored: 0.9 };
 
 const BARS_BY_MODEL: Readonly<Record<string, ConceptCheckBars>> = { [EMBEDDING_MODEL_ID]: E5_SMALL_CONCEPT_CHECK_BARS };
 
@@ -120,13 +148,90 @@ export interface ConceptCheckCandidate {
   b: GraphConcept;
   similarity: number;
   sharesEntry: boolean;
+  /** Why the rule refused them; `similarity` for a pair found by its anchors below the merge bar. */
   refusal: ConceptMergeRefusal;
+  /** The anchors they share (concept ids) when the anchor path found them (absent: the name paths). */
+  anchors?: string[];
+}
+
+/** Types an anchor can be ({@link conceptAnchors}): a named thing a claim is about. */
+export const CONCEPT_ANCHOR_TYPES: ReadonlySet<string> = new Set(["Tool", "Organization", "Product"]);
+/** Types the anchor path never pairs: two named things (or people) linked to one tool are not one thing. */
+const ANCHOR_PATH_SKIP_TYPES: ReadonlySet<string> = new Set(["Person", ...CONCEPT_ANCHOR_TYPES]);
+/** An anchor is distinctive while at most this share of the entries link it (and at least {@link ANCHOR_MIN_ENTRIES}). */
+export const CONCEPT_ANCHOR_MAX_SHARE = 0.08;
+const ANCHOR_MIN_ENTRIES = 3;
+/** A word of an anchor's name counts in another concept's name only when at most this many concept names have it (rare). */
+export const CONCEPT_ANCHOR_WORD_MAX_NAMES = 12;
+
+/**
+ * Each concept's anchors (concept ids, as the overlay names them): the distinctive Tool,
+ * Organization and Product concepts ({@link CONCEPT_ANCHOR_TYPES}; linked by at most
+ * {@link CONCEPT_ANCHOR_MAX_SHARE} of the entries, so "Apple" or "Google" anchor nothing) that it
+ * links to in myKG's edges, or whose name it holds: every word of the anchor's name or of one of its
+ * aliases, one of them rare among concept names ({@link CONCEPT_ANCHOR_WORD_MAX_NAMES}) — "Use Gmail
+ * only" holds "Gmail", "ISP proxy plus IPQS/Scamalytics check" holds "Scamalytics" and "IPQS" (an
+ * alias of IPQualityScore). Anchors are never their own anchors.
+ */
+export function conceptAnchors(
+  concepts: readonly GraphConcept[],
+  edges: readonly { from: string; to: string }[],
+  canonical: (conceptId: string) => string
+): Map<string, Set<string>> {
+  const entries = new Set<string>();
+  for (const concept of concepts) for (const id of concept.entryIds) entries.add(id);
+  const maxEntries = Math.max(ANCHOR_MIN_ENTRIES, Math.floor(entries.size * CONCEPT_ANCHOR_MAX_SHARE));
+  const byId = new Map(concepts.map((concept) => [concept.id, concept]));
+  const anchor = new Set(concepts.filter((c) => CONCEPT_ANCHOR_TYPES.has(c.type) && c.entryIds.length <= maxEntries).map((c) => c.id));
+  const out = new Map<string, Set<string>>();
+  const add = (conceptId: string, anchorId: string): void => {
+    const id = canonical(anchorId);
+    if (id === canonical(conceptId)) return;
+    let set = out.get(conceptId);
+    if (!set) out.set(conceptId, (set = new Set()));
+    set.add(id);
+  };
+  for (const edge of edges) {
+    if (!byId.has(edge.from) || !byId.has(edge.to)) continue;
+    if (anchor.has(edge.to)) add(edge.from, edge.to);
+    if (anchor.has(edge.from)) add(edge.to, edge.from);
+  }
+  // Rare name words: how many concept names hold each word.
+  const tokensOf = new Map(concepts.map((concept) => [concept.id, conceptNameTokens(concept.name)]));
+  const names = new Map<string, number>();
+  for (const tokens of tokensOf.values()) for (const token of tokens) names.set(token, (names.get(token) ?? 0) + 1);
+  const byWord = new Map<string, { id: string; tokens: Set<string> }[]>();
+  for (const id of anchor) {
+    const concept = byId.get(id)!;
+    for (const name of [concept.name, ...concept.aliases]) {
+      const tokens = conceptNameTokens(name);
+      const rare = [...tokens].filter((token) => !/^\d+$/.test(token) && token.length >= 3 && (names.get(token) ?? 0) <= CONCEPT_ANCHOR_WORD_MAX_NAMES);
+      if (rare.length === 0) continue;
+      let list = byWord.get(rare[0]!);
+      if (!list) byWord.set(rare[0]!, (list = []));
+      list.push({ id, tokens });
+    }
+  }
+  for (const concept of concepts) {
+    const tokens = tokensOf.get(concept.id)!;
+    for (const token of tokens) {
+      for (const candidate of byWord.get(token) ?? []) {
+        if (candidate.id === concept.id) continue;
+        let all = true;
+        for (const word of candidate.tokens) if (!tokens.has(word)) all = false;
+        if (all) add(concept.id, candidate.id);
+      }
+    }
+  }
+  return out;
 }
 
 export interface ConceptCheckCandidatesInput {
   /** myKG's concepts (before the merge overlay). */
   concepts: readonly GraphConcept[];
   vectors: ReadonlyMap<string, Float32Array>;
+  /** myKG's edges (before the overlay), for the anchor path ({@link conceptAnchors}); absent: name anchors only. */
+  edges?: readonly { from: string; to: string }[];
   thresholds: ConceptMergeThresholds;
   bars: ConceptCheckBars;
   rejected: readonly KnowledgeConceptMergeRejection[];
@@ -150,7 +255,11 @@ function dot(a: Float32Array, b: Float32Array): number {
 /** Pairs worth asking about, best first (see the module header). */
 export async function conceptCheckCandidates(input: ConceptCheckCandidatesInput): Promise<ConceptCheckCandidate[]> {
   const pause = input.pause ?? nextTurn;
-  const low = Math.min(input.bars.sharedEntry, input.bars.alone, input.bars.alikeNames ?? Number.POSITIVE_INFINITY);
+  const low = Math.min(input.bars.sharedEntry, input.bars.alone, input.bars.alikeNames ?? Number.POSITIVE_INFINITY, input.bars.anchored ?? Number.POSITIVE_INFINITY);
+  const anchoredBar = input.bars.anchored;
+  const anchorsOf = anchoredBar === undefined ? new Map<string, Set<string>>() : conceptAnchors(input.concepts, input.edges ?? [], input.canonical);
+  // Below the merge bar the rule says "similarity" before its name guards: the anchor path asks them at its own bar.
+  const anchorThresholds: ConceptMergeThresholds = { ...input.thresholds, merge: Math.min(input.thresholds.merge, anchoredBar ?? input.thresholds.merge) };
   const forbidden = new Set<string>();
   const pairKey = (x: string, y: string): string => (x < y ? `${x}\u0000${y}` : `${y}\u0000${x}`);
   for (const rejection of input.rejected) {
@@ -178,20 +287,28 @@ export async function conceptCheckCandidates(input: ConceptCheckCandidatesInput)
         const similarity = dot(x.vector, y.vector);
         if (similarity < low) continue;
         const sharesEntry = x.concept.entryIds.some((id) => y.concept.entryIds.includes(id));
-        if (similarity < (sharesEntry ? input.bars.sharedEntry : input.bars.alone)) {
-          const alike = input.bars.alikeNames;
-          if (alike === undefined || similarity < alike || !alikeNames(x.tokens, y.tokens)) continue;
+        const alike = input.bars.alikeNames;
+        const named =
+          similarity >= (sharesEntry ? input.bars.sharedEntry : input.bars.alone) || (alike !== undefined && similarity >= alike && alikeNames(x.tokens, y.tokens));
+        let anchors: string[] | undefined;
+        if (!named) {
+          // Two entries naming one thing: one entry's duplicates are the shared-entry bar's.
+          if (anchoredBar === undefined || similarity < anchoredBar || sharesEntry || ANCHOR_PATH_SKIP_TYPES.has(x.concept.type)) continue;
+          const theirs = anchorsOf.get(y.concept.id);
+          anchors = [...(anchorsOf.get(x.concept.id) ?? [])].filter((id) => theirs?.has(id)).sort();
+          if (anchors.length === 0) continue;
         }
-        const refusal = conceptMergeRefusal(x.concept, y.concept, similarity, input.thresholds);
-        if (refusal === null || !CHECKABLE.has(refusal)) continue;
-        if (refusal === "numbers" && conceptNameNumbers(x.concept.name).size > 0 && conceptNameNumbers(y.concept.name).size > 0) continue;
+        let refusal = conceptMergeRefusal(x.concept, y.concept, similarity, anchors ? anchorThresholds : input.thresholds);
+        // Below the merge bar and past every name guard: the rule would merge them at the anchor bar.
+        if (refusal === null && anchors && similarity < input.thresholds.merge) refusal = "similarity";
+        if (refusal === null || !(CHECKABLE.has(refusal) || (anchors && refusal === "similarity"))) continue;
+        // Numbers in one name only: the same claim with and without its figures on the name paths; at the anchor bar, a figure is a difference of specificity ("~2,100 conversions from ChatGPT" ~ "Runpod conversions from ChatGPT").
+        if (refusal === "numbers" && (anchors || (conceptNameNumbers(x.concept.name).size > 0 && conceptNameNumbers(y.concept.name).size > 0))) continue;
         if (refusal === "negation" && (conceptNameNegations(x.concept.name).size === 0 || conceptNameNegations(y.concept.name).size === 0)) continue;
-        let common = false;
+        let common = anchors !== undefined;
         for (const token of x.tokens) {
-          if (y.tokens.has(token)) {
-            common = true;
-            break;
-          }
+          if (common) break;
+          if (y.tokens.has(token)) common = true;
         }
         if (!common) continue;
         const key = pairKey(x.concept.id, y.concept.id);
@@ -199,7 +316,7 @@ export async function conceptCheckCandidates(input: ConceptCheckCandidatesInput)
         const [a, b] = x.concept.id < y.concept.id ? [x.concept, y.concept] : [y.concept, x.concept];
         const check = asked.get(key);
         if (check && check.nameA === a.name && check.nameB === b.name) continue;
-        out.push({ a, b, similarity, sharesEntry, refusal });
+        out.push({ a, b, similarity, sharesEntry, refusal, ...(anchors ? { anchors } : {}) });
       }
     }
   }
@@ -216,7 +333,8 @@ export const CONCEPT_CHECK_SYSTEM = [
   "You decide whether two concepts extracted from a knowledge base name the same thing.",
   'Answer with ONLY a JSON object, no prose and no other keys: {"same": true | false, "keep": "a" | "b", "reason": "<one sentence>"}.',
   "- same is true only if A and B denote the same thing at the same level of specificity, so that one name could replace the other everywhere.",
-  "- NOT the same: different numbers, quantities or durations (48 hours vs 7 days); one is the negation or the opposite of the other; a different scope (a part or one step vs the whole, one platform, market or product vs another, a general practice vs one specific variant of it); a list vs one of its items; two related, similar or alternative things.",
+  '- Two tactics or rules that recommend the same action with the same tools, products or services ARE the same, however each is phrased: "Buy a clean ISP proxy with an IPQS/Scamalytics check" and "Check the proxy on IPQS and Scamalytics" are the same; so are "Use Gmail only" and "Only Gmail is safe".',
+  "- NOT the same: different numbers, quantities, thresholds or durations (48 hours vs 7 days, a score under 60 vs under 30); different conditions (before vs after creating the account, US vs any country); different or additional tools, products or providers (NordVPN vs a self-hosted VPN, IPQS vs IPRoyal's own option); one is the negation or the opposite of the other; a different scope (a part or one step vs the whole, one platform, market or product vs another, a general practice vs one specific variant of it); a list vs one of its items; two related, similar or alternative things.",
   "- When in doubt, answer false.",
   '- keep: the name that is clearer and more complete, "a" or "b" (give it even when same is false).',
   `- reason: one sentence of at most ${REASON_MAX} characters.`
@@ -397,6 +515,7 @@ export class ConceptMergeCheckSource implements KnowledgeRoundTaskSource {
       bars,
       rejected: state.rejected,
       checks: state.checks,
+      ...(state.edges ? { edges: state.edges } : {}),
       canonical: state.canonical,
       // Items rounds gave up on are skipped below: the next ones take their place.
       limit: options.skip ? Number.POSITIVE_INFINITY : cap,
