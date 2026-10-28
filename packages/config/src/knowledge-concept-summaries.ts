@@ -29,6 +29,11 @@ export const knowledgeConceptSummaryRecordSchema = z
     members: z.array(z.object({ id: z.string().min(1), contentHash: z.string() }).passthrough()).min(1),
     /** The entries the writer was shown (a subset of `members`). */
     inputs: z.array(z.string().min(1)),
+    /**
+     * Of `inputs`, those an author's link put there rather than the graph: the entry of a Person
+     * the graph links as recommending the concept (quality round 5). Absent: none (an older build).
+     */
+    attributed: z.array(z.string().min(1)).optional(),
     text: z.string().min(1),
     positions: z.array(z.object({ entryId: z.string().min(1), claim: z.string().min(1) }).passthrough()),
     writtenAt: z.string().catch("")

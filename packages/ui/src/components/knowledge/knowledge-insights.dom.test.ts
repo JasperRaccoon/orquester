@@ -179,6 +179,16 @@ describe("the Insights view", () => {
     assert.deepEqual(selections, [{ kind: "entry", id: D.id }]);
   });
 
+  it("says which side each folded entry joins, each entry once per side", async () => {
+    const E = summary({ id: "ke_eeeeeeeeeeee", title: "Trials should be 3 days", author: null, handle: "trialguy" });
+    answer = async () => ({ ...INSIGHTS, contradictions: [{ ...INSIGHTS.contradictions[0]!, also: [D, E], alsoJoins: { a: [D, E], b: [E] } }] });
+    await show();
+    const rows = [...section("Contradictions").querySelectorAll("[data-insight-also]")];
+    // B has neither author nor handle: its title names its side.
+    assert.deepEqual(rows.map((row) => row.querySelector("span")!.textContent), ["Also with Om, against Trials should be 30 days:", "Also with Trials should be 30 days, against Om:"]);
+    assert.deepEqual(rows.map((row) => [...row.querySelectorAll("[data-insight-entry]")].map((link) => link.getAttribute("data-insight-entry"))), [[D.id, E.id], [E.id]]);
+  });
+
   it("renders the daemon's text as text, never as HTML", async () => {
     await show();
     const contradiction = section("Contradictions");

@@ -145,7 +145,7 @@ test("linking is handed the LLM quality sources; a cluster name recorded through
   const h = await harness(t, undefined, (given) => (sources = given));
   assert.deepEqual(
     sources.map((source) => source.step),
-    ["concept-check", "cluster-name", "concept-summary"]
+    ["concept-check", "cluster-name", "concept-summary", "family-summary"]
   );
   const names = sources.find((source) => source.step === "cluster-name")!;
   const before = graphChanges(h.events);

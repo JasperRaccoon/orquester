@@ -23,6 +23,7 @@ import {
   type KnowledgeColor,
   type KnowledgeConcept,
   type KnowledgeConceptDetail,
+  type KnowledgeConceptFamily,
   type KnowledgeConceptSummary,
   type KnowledgeConceptRef,
   type KnowledgeDisagreement,
@@ -412,7 +413,21 @@ function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
   // The neutral summary (absent from an older daemon, or before it is written).
   const summary = parseConceptSummary(value.summary);
   if (summary) detail.summary = summary;
+  // Its family (absent from an older daemon, or for a concept with none).
+  const family = parseConceptFamily(value.family);
+  if (family) detail.family = family;
   return detail;
+}
+
+/** A concept family: an id, a name and two or more member concepts (each once) required; its summary as a concept summary's. */
+function parseConceptFamily(value: unknown): KnowledgeConceptFamily | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "" || typeof value.name !== "string" || value.name.trim() === "") return null;
+  const concepts = conceptRefs(value.concepts);
+  if (!concepts || concepts.length < 2) return null;
+  const family: KnowledgeConceptFamily = { id: value.id, name: value.name, concepts };
+  const summary = parseConceptSummary(value.summary);
+  if (summary) family.summary = summary;
+  return family;
 }
 
 /** A concept summary: text required; a malformed position (or a second one of an entry) is left out. */
@@ -605,15 +620,21 @@ export function parseKnowledgeContradiction(value: unknown): KnowledgeContradict
   if (!isRecord(value)) return null;
   const pair = entryPair(value.a, value.b);
   if (!pair) return null;
-  // Other entries making the same point against the same side; neither side of the pair itself.
-  const also = (list(value.also, parseKnowledgeEntrySummary) ?? []).filter((entry) => entry.id !== pair.a.id && entry.id !== pair.b.id);
+  // Other entries making the same point against the same side, each once; neither side of the pair itself.
+  const others = (raw: unknown): KnowledgeEntrySummary[] => {
+    const seen = new Set([pair.a.id, pair.b.id]);
+    return (list(raw, parseKnowledgeEntrySummary) ?? []).filter((entry) => !seen.has(entry.id) && seen.add(entry.id) !== undefined);
+  };
+  const also = others(value.also);
+  const joins = isRecord(value.alsoJoins) ? { a: others(value.alsoJoins.a), b: others(value.alsoJoins.b) } : null;
   return {
     ...pair,
     similarity: unitSimilarity(value.similarity),
     source: contradictionSource(value.source),
     pairs: list(value.pairs, parseConceptPair) ?? [],
     note: noteOf(value.note),
-    ...(also.length > 0 ? { also } : {})
+    ...(also.length > 0 ? { also } : {}),
+    ...(joins && joins.a.length + joins.b.length > 0 ? { alsoJoins: joins } : {})
   };
 }
 

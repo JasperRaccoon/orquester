@@ -373,6 +373,23 @@ export interface KnowledgeConceptDetail {
    * for a concept with one entry, or before it is written.
    */
   summary?: KnowledgeConceptSummary;
+  /**
+   * The concept family this concept belongs to (quality round 5): concepts of one type that answer
+   * the same question in different ways ("Warm up for 48 hours", "… 5-7 days"), with one neutral
+   * summary of every member's positions. Absent from an older daemon or for a concept with no family.
+   */
+  family?: KnowledgeConceptFamily;
+}
+
+export interface KnowledgeConceptFamily {
+  /** Stable id of the family. */
+  id: string;
+  /** The question the members answer, e.g. "Warm-up length before the first post". */
+  name: string;
+  /** The visible member concepts, this one included. */
+  concepts: KnowledgeConceptRef[];
+  /** Every visible member entry's position, attributed; absent until written. */
+  summary?: KnowledgeConceptSummary;
 }
 
 export interface KnowledgeConceptSummary {
@@ -692,9 +709,15 @@ export interface KnowledgeContradiction {
   note: string | null;
   /**
    * Other entries that make the same point against the same side (insights fold them into this
-   * one: a very similar note, or a concept pair in common); absent when none.
+   * one: a very similar note, or a concept pair in common), each once; absent when none.
    */
   also?: KnowledgeEntrySummary[];
+  /**
+   * The entries of `also` by the side they join: `a` lists those making `a`'s point against `b`,
+   * `b` those making `b`'s point against `a`. One entry can join each side on a different point.
+   * Absent when there is no `also`, and from an older daemon.
+   */
+  alsoJoins?: { a: KnowledgeEntrySummary[]; b: KnowledgeEntrySummary[] };
 }
 
 export interface KnowledgeBridge {

@@ -283,24 +283,48 @@ function passages(text: string): string[] {
 
 /** A duration as a text states one: "48 hours", "1–2 days", "3-5 days", "15-30 min", "7-day". */
 export const DURATION = /\b\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?[\s-]*(?:hrs?|hours?|days?|weeks?|wks?|mins?|minutes?|months?)\b/i;
+/** A number as a text states one, in figures or as a small number word ("5 tiktok accounts", "2–3 accounts", "two accounts"). */
+export const NUMBER = /\b\d+(?:[.,]\d+)?\b|\b(?:two|three|four|five|six|seven|eight|nine|ten|twice|dozen)\b/i;
 /** What a stated duration counts for, in query words, when the query asks how long: it is the answer. */
 const DURATION_WEIGHT = 2;
+/**
+ * What a stated number counts for, in query words, beside at least one of them, when the query asks
+ * how many: half a word, so a passage holding more of the query's nouns still wins ("a new device
+ * for each US number/TikTok account" over "scroll TikTok at least 10min every day").
+ */
+const NUMBER_WEIGHT = 0.5;
+
+/** What a query asks for beside its words: a duration ("how long …"), a count ("how many …"), or neither. */
+export type AnswerShape = "duration" | "count" | null;
 
 /**
- * One or two lines from `body` (inside `span` when given): the passage sharing the most query
- * terms (a passage stating a duration counts {@link DURATION_WEIGHT} more when `duration`: the
- * query asks how long), followed by the next one while it fits; the span's opening otherwise.
+ * How well a passage answers a query: how many of its terms it holds (a term may be a group of
+ * alternatives: its forms and synonyms, counted once), plus {@link DURATION_WEIGHT} for a stated
+ * duration when the query asks how long, or {@link NUMBER_WEIGHT} for a stated number beside a
+ * term it holds when the query asks how many.
  */
-export function bestSnippet(body: string, queryTerms: readonly string[], span?: TextSpan, duration = false): string {
+export function passageScore(text: string, groups: readonly (string | readonly string[])[], shape: AnswerShape = null): number {
+  const tokens = new Set(tokenize(text));
+  let held = 0;
+  for (const group of groups) if ((typeof group === "string" ? [group] : group).some((term) => tokens.has(term))) held += 1;
+  if (shape === "duration" && DURATION.test(text)) return held + DURATION_WEIGHT;
+  if (shape === "count" && held > 0 && NUMBER.test(text)) return held + NUMBER_WEIGHT;
+  return held;
+}
+
+/**
+ * One or two lines from `body` (inside `span` when given): the passage that answers the query best
+ * ({@link passageScore}), followed by the next one while it fits; the span's opening otherwise.
+ */
+export function bestSnippet(body: string, queryTerms: readonly (string | readonly string[])[], span?: TextSpan, shape: AnswerShape = null): string {
   const region = span ? body.slice(span.start, span.end) : body;
   const pieces = passages(region);
   if (pieces.length === 0) return "";
-  const wanted = new Set(queryTerms);
   let best = 0;
   let bestScore = 0;
-  if (wanted.size > 0 || duration) {
+  if (queryTerms.length > 0 || shape === "duration") {
     pieces.forEach((piece, index) => {
-      const seen = new Set(tokenize(piece).filter((t) => wanted.has(t))).size + (duration && DURATION.test(piece) ? DURATION_WEIGHT : 0);
+      const seen = passageScore(piece, queryTerms, shape);
       if (seen > bestScore) {
         bestScore = seen;
         best = index;

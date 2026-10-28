@@ -196,7 +196,7 @@ test("knowledge_get: a concept — description, entries, links; a hidden or unkn
   assert.deepEqual(errorOf(hidden), { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." });
 });
 
-test("knowledge_get: a concept's summary and each entry's position, attributed and cited; the extracted description says it may be one entry's", async () => {
+test("knowledge_get: a concept's summary and each entry's position, attributed and cited; with a summary, no one-sided extracted description", async () => {
   const concept = { id: "tactic-tiktok-account-warmup", name: "TikTok account warm-up", type: "Tactic", confidence: 0.9, description: "Scroll, then post the first video after 1–2 days.", aliases: [], attributes: {} };
   const detail = {
     concept,
@@ -217,13 +217,50 @@ test("knowledge_get: a concept's summary and each entry's position, attributed a
   // An entry the detail lists cites as it does; another by its id.
   assert.ok(out.includes(`- Om Patel ("Alternatives pages"): Post the first video after 1–2 days. ${meta().citation}`), out);
   assert.ok(out.includes(`- unknown author ("Don't use NordVPN"): Warm up for 3–5 days. [Don't use NordVPN](orquester-knowledge:entry/ke_bbbbbbbbbbbb)`), out);
-  assert.match(out, /\nExtracted description \(may be one entry's claim\): Scroll, then post the first video after 1–2 days\./);
-  assert.ok(out.indexOf("Summary:") < out.indexOf("Extracted description"));
+  // myKG's description (one entry's claim, stated as the concept's) is left out: that entry's position says it.
+  assert.ok(!out.includes("Scroll, then post the first video after 1–2 days.") && !out.includes("Extracted description"), out);
   // Without a summary (an older daemon, or not written yet): the description as before.
   const plain = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), { status: 200, body: { kind: "concept", concept: { ...detail, summary: undefined } } });
   const before = textOf(await run(plain, "knowledge_get", { id: concept.id }));
   assert.ok(!before.includes("Summary:") && !before.includes("Extracted description"));
   assert.match(before, /\nScroll, then post the first video after 1–2 days\./);
+});
+
+test("knowledge_get: a concept's family — the question, its summary, the other members and every member entry's position", async () => {
+  const concept = { id: "tactic-warm-3", name: "Warm up each account for 3 days", type: "Tactic", confidence: 0.9, description: null, aliases: [], attributes: {} };
+  const family = {
+    id: "family-0123456789ab",
+    name: "Warm-up length before the first post",
+    concepts: [
+      { id: "tactic-warm-48", name: "Warm up the account for 48 hours before posting", type: "Tactic" },
+      { id: "tactic-warm-3", name: "Warm up each account for 3 days", type: "Tactic" },
+      { id: "tactic-warm-57", name: "Warm up the TikTok account for 5-7 days", type: "Tactic" }
+    ],
+    summary: {
+      text: "How long a new account is used like a real user's before it posts.",
+      positions: [
+        { entryId: "ke_aaaaaaaaaaaa", title: "Alternatives pages", author: "jason", claim: "Warm up for 48 hours." },
+        { entryId: "ke_cccccccccccc", title: "US TikTok from Italy", author: "Emanuele Totaro", claim: "Warm up for 5–7 days." }
+      ]
+    }
+  };
+  const detail = { concept, collections: ["kc_seo0000000"], entries: [meta()], neighbors: [], family };
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), { status: 200, body: { kind: "concept", concept: detail } });
+  const out = textOf(await run(api, "knowledge_get", { id: concept.id }));
+  assert.ok(out.includes("\nFamily: Warm-up length before the first post — How long a new account is used like a real user's before it posts.\n"), out);
+  assert.ok(out.includes("\nFamily members: Warm up the account for 48 hours before posting (Tactic) [tactic-warm-48], Warm up the TikTok account for 5-7 days (Tactic) [tactic-warm-57]\n"), out);
+  assert.ok(out.includes(`\nFamily positions:\n- jason ("Alternatives pages"): Warm up for 48 hours. ${meta().citation}\n- Emanuele Totaro ("US TikTok from Italy"): Warm up for 5–7 days. [US TikTok from Italy · Emanuele Totaro](orquester-knowledge:entry/ke_cccccccccccc)`), out);
+  // Before it is written (or for a caller who may not read it): the family under its fallback name, no summary.
+  const unnamed = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), {
+    status: 200,
+    body: { kind: "concept", concept: { ...detail, family: { ...family, name: "Concepts answering the same question", summary: undefined } } }
+  });
+  const bare = textOf(await run(unnamed, "knowledge_get", { id: concept.id }));
+  assert.ok(bare.includes("\nFamily: Concepts answering the same question\nFamily members: "), bare);
+  assert.ok(!bare.includes("Family positions"));
+  // An older daemon: no family line.
+  const older = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), { status: 200, body: { kind: "concept", concept: { ...detail, family: undefined } } });
+  assert.ok(!textOf(await run(older, "knowledge_get", { id: concept.id })).includes("Family"));
 });
 
 test("knowledge_save: one call, many items, the session named, handles without @; no card, even while planning", async () => {
@@ -568,7 +605,7 @@ test("worker tools: a part of a task the chat does not hold, a part out of range
 test("worker tools: no result of any step exceeds the budget, whatever the task's size, characters or lines", async () => {
   const long = (bytes: number) => "Pass 2 document with no line break at all, 中文 and 😀 emoji, \"quoted\" \\ back\tslash. ".repeat(Math.ceil(bytes / 90));
   const inputs = [nameList(10_000), nameList(49_500), nameList(52_000), nameList(75_000), long(50_000), long(130_000), `${"\u0001".repeat(9_000)}\n${"😀".repeat(12_000)}`];
-  for (const step of ["pass1", "pass2", "normalize_names", "pair-check", "concept-check", "cluster-name", "concept-summary"]) {
+  for (const step of ["pass1", "pass2", "normalize_names", "pair-check", "concept-check", "cluster-name", "concept-summary", "family-summary"]) {
     for (const [i, input] of inputs.entries()) {
       for (const instructions of ["I".repeat(6_000), null]) {
         const task = workerTask({ step, input, instructions, sameInstructionsAs: instructions === null ? "t0" : null, taskId: `${step}-${i}`.padEnd(200, "0") });
@@ -763,16 +800,19 @@ test("knowledge_search: entry match data, concept titles and citations survive; 
   assert.match(out, /ke_wwwwwwwwwwww[^\n]*weak[^\n]*concept/);
   assert.match(out, /120[^\d]+480[^\n]*2\/5/, "the passage retains its offsets and one-based chunk number");
   assert.match(out, /Weak[^\n]*never cite[^\n]*evidence/i);
-  assert.match(out, /Showing 1–2 of 31/);
+  // The header and the footer count alike: entries, and the concept hits beside them.
+  assert.match(out, /^2 entries and 1 concept \(over SEO, Ads\)\./);
+  assert.match(out, /Showing entries 1–2 of 31 matching \(the 1 concept not counted\)\./);
 
   // A later page counts from the cursor's offset; the last one has no next cursor.
   api.on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [response.hits[0]!], searched: ["kc_seo0000000"], total: 31, nextCursor: cursorAt(9) } });
   const later = textOf(await run(api, "knowledge_search", { query: "x", cursor: cursorAt(8) }));
-  assert.match(later, /Showing 9–9 of 31/);
+  assert.match(later, /^1 entry \(over SEO\)\./);
+  assert.match(later, /Showing entries 9–9 of 31 matching\./);
   assert.ok(later.includes(cursorAt(9)));
   api.on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [response.hits[0]!, response.hits[2]!], searched: ["kc_seo0000000"], total: 31, nextCursor: null } });
   const last = textOf(await run(api, "knowledge_search", { query: "x", cursor: cursorAt(29) }));
-  assert.match(last, /Showing 30–31 of 31/);
+  assert.match(last, /Showing entries 30–31 of 31 matching\./);
   assert.doesNotMatch(last, /Next page/);
 });
 
@@ -1164,11 +1204,60 @@ test("knowledge_get: `disagreements` lists every entry it disagrees with (+N mor
     '- ke_dddddddddddd "Three accounts a phone" · LLM-checked · meaning 0.92',
     "  note: 2-3 vs 5 accounts",
     `  cite: ${detail.disagreements![2]!.entry.citation}`,
-    "+22 more",
+    "+22 more (knowledge_insights lists every contradiction)",
     "Similar:",
     '- ke_eeeeeeeeeeee "Warm-up guide" · meaning 0.90',
     `  cite: ${detail.similar![2]!.entry.citation}`
   ]);
+});
+
+test("knowledge_get with several ids: every disagreement with its note, up to 20, one line of note each; +N more past them", async () => {
+  const other = (n: number) => meta({ id: `ke_d${String(n).padStart(11, "0")}`, title: `Disagreeing ${n}` });
+  const long = `${"jason says to warm up for 48 hours before posting and to use an ISP proxy. ".repeat(6)}`;
+  const disagreements = Array.from({ length: 6 }, (_, n) => ({
+    entry: other(n),
+    similarity: 0.9,
+    source: n === 5 ? ("graph" as const) : ("checked" as const),
+    pairs: n === 5 ? [{ from: concept("t-sim", "Keep the SIM"), to: concept("t-nosim", "No SIM") }] : [],
+    note: n === 5 ? null : n === 0 ? long : `Note ${n}: Alex says 2-3 accounts per device; the other says 5.`
+  }));
+  const detail = (id: string, total: number): KnowledgeEntryDetail => {
+    const entry = meta({ id, title: `Title ${id}` });
+    return { entry: { ...entry, body: "Body." }, concepts: [], related: [], similar: [], possibleDuplicates: [], disagreements, disagreementsTotal: total, citation: entry.citation };
+  };
+  const api = withCollections(new FakeDaemonApi())
+    .on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: detail("ke_aaaaaaaaaaaa", 6) } })
+    .on("GET", knowledgeRoutes.item("ke_bbbbbbbbbbbb"), { status: 200, body: { kind: "entry", entry: detail("ke_bbbbbbbbbbbb", 26) } });
+  const out = textOf(await run(api, "knowledge_get", { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"] }));
+  const [first, second] = out.split("Disagrees with:").slice(1);
+  for (const part of [first!, second!]) {
+    for (let n = 0; n < 6; n += 1) assert.ok(part.includes(`- ke_d${String(n).padStart(11, "0")} "Disagreeing ${n}" · `), `disagreement ${n}, not "+2 more"`);
+    for (let n = 1; n < 5; n += 1) assert.ok(part.includes(`  note: Note ${n}: Alex says 2-3 accounts per device; the other says 5.`));
+    assert.ok(part.includes("  concepts: Keep the SIM (Tactic) vs No SIM (Tactic)"), "no note: its concept pairs");
+    const note = part.split("\n").find((line) => line.startsWith("  note: jason"))!;
+    assert.ok(note.length <= "  note: ".length + 240 && note.endsWith("…"), "a long note is cut shorter, on one line");
+    assert.ok(!part.includes(`cite: ${other(1).citation}`), "compact: no citation per disagreement");
+  }
+  assert.ok(!first!.includes("more (knowledge_insights"), "every one listed");
+  assert.ok(second!.includes("+20 more (knowledge_insights lists every contradiction)"));
+});
+
+test("knowledge_insights: `also` by the side each entry joins, each once; an older daemon's list once per entry", async () => {
+  const alex = meta({ id: "ke_kkkkkkkkkkkk", title: "iPhone setup", author: "Alex Nguyen" });
+  const jason = meta({ id: "ke_jjjjjjjjjjjj", title: "13 steps", author: null, handle: "jasonugc" });
+  const yanme = meta({ id: "ke_yyyyyyyyyyyy", title: "Zero to app", author: "yanme" });
+  const ema = meta({ id: "ke_mmmmmmmmmmmm", title: "7 steps", author: "Emanuele Totaro" });
+  const item = { a: alex, b: jason, similarity: 0.95, source: "checked" as const, pairs: [], note: "Alex says 2-3 accounts per device; jason says one." };
+  const render = async (contradiction: KnowledgeInsightsResponse["contradictions"][number]) => {
+    const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.insights, { status: 200, body: { ...INSIGHTS, contradictions: [contradiction] } });
+    return textOf(await run(api, "knowledge_insights", {})).split("\n").filter((line) => line.startsWith("   also"));
+  };
+  assert.deepEqual(await render({ ...item, also: [yanme, ema], alsoJoins: { a: [yanme], b: [yanme, ema] } }), [
+    '   also with Alex Nguyen (against @jasonugc): ke_yyyyyyyyyyyy "Zero to app"',
+    '   also with @jasonugc (against Alex Nguyen): ke_yyyyyyyyyyyy "Zero to app"; ke_mmmmmmmmmmmm "7 steps"'
+  ]);
+  assert.deepEqual(await render({ ...item, also: [ema], alsoJoins: { a: [], b: [ema] } }), ['   also with @jasonugc (against Alex Nguyen): ke_mmmmmmmmmmmm "7 steps"']);
+  assert.deepEqual(await render({ ...item, also: [yanme, yanme] }), ['   also: ke_yyyyyyyyyyyy "Zero to app" (the same point)'], "an older daemon: no sides, each entry once");
 });
 
 test("knowledge_insights: a long note is cut at a sentence end, else a word end, with …", async () => {

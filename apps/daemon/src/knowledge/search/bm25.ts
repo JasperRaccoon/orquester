@@ -28,6 +28,21 @@ export class Bm25Index {
     return this.postings.get(term)?.has(key) ?? false;
   }
 
+  /** Whether any document has the (tokenized) term. */
+  has(term: string): boolean {
+    return this.postings.has(term);
+  }
+
+  /** How many documents have the (tokenized) term. */
+  documentFrequency(term: string): number {
+    return this.postings.get(term)?.size ?? 0;
+  }
+
+  /** How many documents are indexed. */
+  size(): number {
+    return this.lengths.size;
+  }
+
   /** The documents that have every one of the (tokenized) terms; none for no terms. */
   keysWithAll(terms: readonly string[]): string[] {
     const lists = [...new Set(terms)].map((term) => this.postings.get(term));
@@ -79,26 +94,40 @@ export class Bm25Index {
     this.totalLength -= length;
   }
 
-  search(queryTerms: readonly string[], accept: (key: string) => boolean, limit: number): Bm25Hit[] {
+  /**
+   * The best documents for the query. A query term may be a group of alternatives (its forms and
+   * synonyms: "phone", "iphone", "device"): a document scores the best of them, once per group.
+   */
+  search(queryTerms: readonly (string | readonly string[])[], accept: (key: string) => boolean, limit: number): Bm25Hit[] {
     const n = this.lengths.size;
     if (n === 0 || queryTerms.length === 0 || limit <= 0) return [];
     const avg = this.totalLength / n || 1;
     const scores = new Map<string, number>();
     const accepted = new Map<string, boolean>();
-    for (const term of new Set(queryTerms)) {
-      const posting = this.postings.get(term);
-      if (!posting) continue;
-      const idf = Math.log(1 + (n - posting.size + 0.5) / (posting.size + 0.5));
-      for (const [key, freq] of posting) {
-        let ok = accepted.get(key);
-        if (ok === undefined) {
-          ok = accept(key);
-          accepted.set(key, ok);
+    const seen = new Set<string>();
+    for (const group of queryTerms) {
+      const alternatives = [...new Set(typeof group === "string" ? [group] : group)];
+      const key0 = alternatives.join("\u0000");
+      if (seen.has(key0)) continue;
+      seen.add(key0);
+      const best = new Map<string, number>();
+      for (const term of alternatives) {
+        const posting = this.postings.get(term);
+        if (!posting) continue;
+        const idf = Math.log(1 + (n - posting.size + 0.5) / (posting.size + 0.5));
+        for (const [key, freq] of posting) {
+          let ok = accepted.get(key);
+          if (ok === undefined) {
+            ok = accept(key);
+            accepted.set(key, ok);
+          }
+          if (!ok) continue;
+          const norm = freq + K1 * (1 - B + (B * this.lengths.get(key)!) / avg);
+          const score = (idf * freq * (K1 + 1)) / norm;
+          if (score > (best.get(key) ?? 0)) best.set(key, score);
         }
-        if (!ok) continue;
-        const norm = freq + K1 * (1 - B + (B * this.lengths.get(key)!) / avg);
-        scores.set(key, (scores.get(key) ?? 0) + (idf * freq * (K1 + 1)) / norm);
       }
+      for (const [key, score] of best) scores.set(key, (scores.get(key) ?? 0) + score);
     }
     return [...scores]
       .map(([key, score]) => ({ key, score }))

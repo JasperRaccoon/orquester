@@ -51,6 +51,7 @@ export const defaultAnswer: AnswerFor = (task) => {
   if (task.step === "concept-check") return JSON.stringify({ same: false, keep: "a", reason: "Different things." });
   if (task.step === "cluster-name") return JSON.stringify({ label: "Test topic" });
   if (task.step === "concept-summary") return JSON.stringify({ text: "A test concept.", positions: [] });
+  if (task.step === "family-summary") return JSON.stringify({ name: "A test question here", text: "A test family.", positions: [] });
   if (task.step === "round-test") return JSON.stringify({ ok: true });
   const file = /^FILE (\S+)/m.exec(task.input)?.[1];
   if (task.step === "pass2" && file) {

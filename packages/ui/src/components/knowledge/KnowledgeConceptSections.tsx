@@ -1,6 +1,6 @@
 // The concept panel's phase 2 sections (phase 2 spec, "Concept panel"): the concepts merged into
-// this one as duplicates, each merge with its Undo (confirmed first), and the similar concepts
-// below the merge bar. Logic in `panel.logic.ts`.
+// this one as duplicates, each merge with its Undo (confirmed first), the similar concepts below the
+// merge bar, each entry's position, and the concept's family. Logic in `panel.logic.ts`.
 
 import React, { useState } from "react";
 import { Loader2, Undo2 } from "lucide-react";
@@ -123,6 +123,59 @@ export const ConceptPositions: React.FC<{
           </li>
         ))}
       </ul>
+    </section>
+  );
+};
+
+/**
+ * "Same question": the concept's family (`KnowledgeConceptDetail.family`) — the question its
+ * members answer, its neutral summary, the other members (each opens) and what every member's
+ * entries answer, attributed (each opens its entry). Nothing without a family.
+ */
+export const ConceptFamilySection: React.FC<{
+  detail: Pick<KnowledgeConceptDetail, "concept" | "family">;
+  onOpen: (id: string) => void;
+  onOpenEntry: (id: string) => void;
+}> = ({ detail, onOpen, onOpenEntry }) => {
+  const family = detail.family;
+  if (!family) return null;
+  const others = family.concepts.filter((member) => member.id !== detail.concept.id);
+  const positions = family.summary?.positions ?? [];
+  return (
+    <section aria-label="Family" data-knowledge-family={family.id}>
+      <SectionLabel>Same question</SectionLabel>
+      <p data-knowledge-family-name className="text-xs font-medium leading-relaxed text-neutral-200">
+        {family.name}
+      </p>
+      {family.summary && <p className="mt-0.5 text-[11px] leading-relaxed text-neutral-400">{family.summary.text}</p>}
+      {others.length > 0 && (
+        <ul className="mt-1.5 space-y-0.5">
+          {others.map((member) => (
+            <li key={member.id}>
+              <button
+                type="button"
+                data-knowledge-family-member={member.id}
+                onClick={() => onOpen(member.id)}
+                className="block w-full truncate rounded-md px-2 py-1 text-left text-xs text-neutral-200 hover:bg-neutral-900"
+              >
+                {member.name}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {positions.length > 0 && (
+        <ul className="mt-1.5 space-y-1.5">
+          {positions.map((position) => (
+            <li key={position.entryId} data-knowledge-family-position={position.entryId} className="rounded-md px-2 py-1">
+              <button type="button" className="block w-full truncate text-left text-[11px] text-neutral-500 hover:underline" onClick={() => onOpenEntry(position.entryId)}>
+                {position.author ?? "Unknown author"} · {position.title || "Untitled"}
+              </button>
+              <p className="text-xs leading-relaxed text-neutral-200">{position.claim}</p>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 };

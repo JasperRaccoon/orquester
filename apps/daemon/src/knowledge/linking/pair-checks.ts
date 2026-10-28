@@ -16,10 +16,13 @@
  *    Tactic of each (not shared) names the same subject in {@link PAIR_CHECK_ALTERNATIVE_WORDS}+
  *    words ("Outlook/Proton email for TikTok account" / "Create TikTok accounts with a fresh Gmail");
  * 3. different numbers for one claim: two entries by different authors with claim-like concepts of
- *    one type, close by concept vector ({@link PAIR_CHECK_NUMBERS_MIN_SIMILARITY}), whose names say
- *    the same thing but for their numbers ({@link numbersOnlyDiffer}: "Warm up the TikTok account
- *    for 5-7 days" / "TikTok account warm-up"; "Create TikTok accounts (2–3 maximum per device)" /
- *    "One new device for each US number/TikTok account");
+ *    one type and different figures ({@link numbersDiffer}) whose names say the same thing but for
+ *    their numbers, close by concept vector ({@link PAIR_CHECK_NUMBERS_MIN_SIMILARITY},
+ *    {@link numbersOnlyDiffer}: "Warm up the TikTok account for 5-7 days" / "TikTok account
+ *    warm-up"; "Create TikTok accounts (2–3 maximum per device)" / "One new device for each US
+ *    number/TikTok account"), or that answer the same question in other words (the view's
+ *    `sameQuestion`, `KnowledgeGraph.sameQuestion`: "Warm up the account for 48 hours before
+ *    posting" / "3-5 days of warming up");
  * 4. close (≥ `good`) and sharing a concept of a claim-like type ({@link PAIR_CHECK_TYPES}).
  * Meta entries are left out: a survey entry (a synthesis, or a note titled as a map, audit, hub or
  * index: `isSurveyEntry`, as contradictions read them) never takes part, and an entry linked to
@@ -43,9 +46,10 @@
  * The task shows each entry's title and body; a body longer than {@link PAIR_CHECK_BODY_CHARS} as
  * its opening and the passages most relevant to the other entry ({@link pairCheckExcerpt},
  * `search/excerpts.ts`), the pair's focus concepts' first. A check records its input version
- * ({@link PAIR_CHECK_INPUT_VERSION}). A `contradicts` one asked before version 4 (whose note calls
- * the sides "A" and "B"; before 3 its prompt counted claims an entry only quotes or reports) is
- * asked again once, whichever tier finds the pair, or none ({@link KnowledgePairChecks.recheckPairs});
+ * ({@link PAIR_CHECK_INPUT_VERSION}). A `contradicts` one asked before version 5 (before 4 its note calls
+ * the sides "A" and "B"; before 3 its prompt counted claims an entry only quotes or reports; before
+ * 5 its note could bundle a difference of choice with the conflict) is asked again once, whichever
+ * tier finds the pair, or none ({@link KnowledgePairChecks.recheckPairs});
  * a `consistent` or `unrelated` one asked on version 1 (each body's opening only) of a body that
  * version cut, or before version 4 of a pair the numbers tier finds (that prompt let a different
  * number for one step pass as agreement), is a candidate again, once ({@link pairCheckNeedsRecheck}).
@@ -89,9 +93,13 @@ export const PAIR_CHECK_BODY_CHARS = 3_000;
  * shown with its author or handle, and the note names the sides by them ("jason says …; Alex
  * Nguyen says …"), never "A" and "B" (on an entry's page "A" was sometimes the other entry and
  * sometimes this one: `noteUsesSideLetters`); a different number, duration or quantity for
- * one step counts as a disagreement.
+ * one step counts as a disagreement. 5: a note states only the points that conflict, and a mere
+ * difference of choice (an ISP proxy and a VPN, where neither argues against the other) is no
+ * conflict: version 4 notes bundled one with a real disagreement ("jason says to warm up for 48
+ * hours and to use an ISP proxy through Shadowrocket. Emanuele Totaro says to warm up for 5-7 days
+ * and to use a VPN (NordVPN …)", where jason never argues against a VPN).
  */
-export const PAIR_CHECK_INPUT_VERSION = 4;
+export const PAIR_CHECK_INPUT_VERSION = 5;
 /** What input version 1 showed of a body: a longer one was cut there (see {@link pairCheckNeedsRecheck}). */
 export const PAIR_CHECK_V1_BODY_CHARS = 2_000;
 /** Weights of the other entry's concept names when choosing excerpts: a concept both are linked to counts double. */
@@ -127,8 +135,9 @@ export const PAIR_CHECK_SYSTEM = [
   "- Tension inside one entry (it says two things that pull against each other) is not a contradiction between the two entries.",
   "- A research note that qualifies, refines, adds conditions to or updates a post is consistent with it, unless it states that the post's claim is wrong.",
   "- A different number, duration, quantity or limit for the same step (a 48-hour warm-up and a 5-7 day one; 2-3 accounts per device and 5) is a disagreement when each entry gives its number as what to do.",
+  "- A difference of choice is not a disagreement: the entries pick different tools, providers or methods (an ISP proxy and a VPN; one VPN app and another) and neither argues against the other's choice. It is one when an entry says the other's choice is wrong, risky or worse, or to use only its own and avoid others.",
   'Answer with ONLY a JSON object, no prose and no other keys: {"verdict": "contradicts" | "consistent" | "unrelated", "note": "<one or two sentences>"}.',
-  "- contradicts: each entry itself makes a claim, number or recommendation about the same thing, and the two cannot both hold. The note states what each side claims.",
+  "- contradicts: each entry itself makes a claim, number or recommendation about the same thing, and the two cannot both hold. The note states only the points that conflict, each side's claim on each of them; it leaves out where the entries merely differ in choice or detail.",
   "- consistent: they are about the same thing and agree with or complement each other. The note says what they share.",
   "- unrelated: they are not about the same thing. The note says why.",
   'In the note, call each side by the name shown for it (its author, else its handle, else a short form of its title), as in "jason says to warm up for 48 hours; Alex Nguyen says to start posting after 1-2 days." Never call them A and B, or first and second entry.',
@@ -302,9 +311,9 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
   }
 
   /**
-   * The pairs of current `contradicts` checks before input version 4, to ask again once whichever
-   * tier finds them, or none ({@link pairCheckCandidates}' `recheck`): their notes call the sides
-   * "A" and "B".
+   * The pairs of current `contradicts` checks before input version 5, to ask again once whichever
+   * tier finds them, or none ({@link pairCheckCandidates}' `recheck`): their notes may call the sides
+   * "A" and "B" (before 4) or bundle a difference of choice with the conflict (before 5).
    */
   recheckPairs(): PairKey[] {
     const out: PairKey[] = [];
@@ -318,7 +327,7 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
 
   /**
    * The entries of current checks that may need asking again ({@link pairCheckNeedsRecheck}): those
-   * of `contradicts` checks before version 4 and of `consistent` or `unrelated` checks on version 1
+   * of `contradicts` checks before version 5 and of `consistent` or `unrelated` checks on version 1
    * (their bodies' lengths decide).
    */
   recheckEntryIds(): string[] {
@@ -401,9 +410,10 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
 }
 
 /**
- * Whether a check is asked again: a `contradicts` verdict asked before input version 4 (its note
- * calls the sides "A" and "B"; before 3 its prompt counted claims an entry only quotes or reports:
- * {@link PAIR_CHECK_INPUT_VERSION}); a `consistent` or `unrelated` verdict on input version 1 where
+ * Whether a check is asked again: a `contradicts` verdict asked before input version 5 (its note may
+ * bundle a difference of choice with the conflict; before 4 it calls the sides "A" and "B"; before 3
+ * its prompt counted claims an entry only quotes or reports: {@link PAIR_CHECK_INPUT_VERSION}); a
+ * `consistent` or `unrelated` verdict on input version 1 where
  * either body was longer than that version showed ({@link PAIR_CHECK_V1_BODY_CHARS}), so the check
  * saw a cut text, or before version 4 of a pair found for its numbers (`reason` "numbers": that
  * prompt let a different number for one step pass as agreement). The other verdicts stand. A check
@@ -415,7 +425,8 @@ export function pairCheckNeedsRecheck(
   reason?: PairCandidateReason
 ): boolean {
   const version = record.inputVersion ?? 1;
-  if (record.verdict === "contradicts" || reason === "numbers") return version < 4;
+  if (record.verdict === "contradicts") return version < 5;
+  if (reason === "numbers") return version < 4;
   return version < 2 && (longBody(record.a) || longBody(record.b));
 }
 
@@ -572,12 +583,21 @@ export function claimNumbers(name: string): { numbers: Set<string>; words: Set<s
  * not "Warm up the account for 48 hours before posting" / "2 posts per account per day").
  */
 export function numbersOnlyDiffer(x: ReturnType<typeof claimNumbers>, y: ReturnType<typeof claimNumbers>, unsaid = true): boolean {
-  const [small, large] = x.numbers.size <= y.numbers.size ? [x.numbers, y.numbers] : [y.numbers, x.numbers];
-  if (large.size === 0) return false;
-  if (small.size === 0 ? !unsaid : [...small].every((n) => large.has(n))) return false;
+  if (!numbersDiffer(x, y, unsaid)) return false;
   let shared = 0;
   for (const word of x.words) if (y.words.has(word)) shared += 1;
   return shared >= 2 && shared * 2 >= Math.max(x.words.size, y.words.size);
+}
+
+/**
+ * Whether two claim names give different figures: their numbers differ and neither's holds the
+ * other's, except that one with no number differs only when `unsaid` (advice may leave its number
+ * unsaid: "TikTok account warm-up" / "Warm up the TikTok account for 5-7 days").
+ */
+export function numbersDiffer(x: Pick<ReturnType<typeof claimNumbers>, "numbers">, y: Pick<ReturnType<typeof claimNumbers>, "numbers">, unsaid = true): boolean {
+  const [small, large] = x.numbers.size <= y.numbers.size ? [x.numbers, y.numbers] : [y.numbers, x.numbers];
+  if (large.size === 0) return false;
+  return small.size === 0 ? unsaid : ![...small].every((n) => large.has(n));
 }
 
 /**
@@ -816,9 +836,12 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
     if (taking.has(pair.a) && taking.has(pair.b)) consider(pair.a, pair.b, similarity(pair.a, pair.b), "contradicts");
   }
 
-  // Different numbers for one claim: claim concepts of one type, close by concept vector, whose names
-  // differ only in their numbers, on entries by different authors that do not both link either.
+  // Different numbers for one claim: claim concepts of one type with different figures, whose names
+  // differ only in their numbers at a close concept vector, or that answer the same question
+  // (`sameQuestion`: "Warm up the account for 48 hours before posting" / "3-5 days of warming up"),
+  // on entries by different authors that do not both link either.
   const conceptVector = options.view.conceptVector?.bind(options.view);
+  const sameQuestion = options.view.sameQuestion?.bind(options.view);
   if (conceptVector) {
     const claims = new Map<string, { concept: KnowledgeConceptRef; name: ReturnType<typeof claimNumbers>; vector: Float32Array }[]>();
     for (const [conceptId, entries] of entriesOfConcept) {
@@ -838,10 +861,12 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
         for (let j = 0; j < list.length; j += 1) {
           const y = list[j]!;
           if (j === i || (j < i && y.name.numbers.size > 0)) continue;
-          if (!numbersOnlyDiffer(x.name, y.name, ADVICE_TYPES.has(x.concept.type)) || x.vector.length !== y.vector.length) continue;
+          const unsaid = ADVICE_TYPES.has(x.concept.type);
+          if (!numbersDiffer(x.name, y.name, unsaid) || x.vector.length !== y.vector.length) continue;
           let sim = 0;
           for (let d = 0; d < x.vector.length; d += 1) sim += x.vector[d]! * y.vector[d]!;
-          if (sim < PAIR_CHECK_NUMBERS_MIN_SIMILARITY) continue;
+          const sameClaim = sim >= PAIR_CHECK_NUMBERS_MIN_SIMILARITY && numbersOnlyDiffer(x.name, y.name, unsaid);
+          if (!sameClaim && !sameQuestion?.(x.concept, y.concept)) continue;
           for (const a of entriesOfConcept.get(x.concept.id)!) {
             if (conceptIdsOf.get(a)!.has(y.concept.id)) continue;
             for (const b of entriesOfConcept.get(y.concept.id)!) {

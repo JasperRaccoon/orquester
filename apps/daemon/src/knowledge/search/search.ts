@@ -34,12 +34,13 @@ import type { KnowledgeEmbedderSource } from "./embedder.ts";
 import { type KnowledgeEntryFilter, entryMatchesFilter, filterKey, parseKnowledgeFilters, splitFilterList } from "./filters.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import { computeKnowledgeFacets } from "./facets.ts";
+import type { KnowledgeConceptFamilySummariesPort } from "./concept-family-summaries.ts";
 import type { KnowledgeConceptSummariesPort } from "./concept-summaries.ts";
 import { findContradictions, isSurveyEntry } from "./contradictions.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
 import { KnowledgeInsights } from "./insights.ts";
 import { claimFigure, namesPhrase, statesClaimNumber } from "./mentions.ts";
-import { DURATION, type TextSpan, bestSnippet, tokenize } from "./text.ts";
+import { type AnswerShape, DURATION, type TextSpan, bestSnippet, passageScore, tokenize } from "./text.ts";
 import { InProcessVectorIndex } from "./vector-index.ts";
 import { type KnowledgeScope, UNFILED, entryInScope, knowledgeScope, scopeCollectionIds, visibleCollections } from "./visibility.ts";
 
@@ -95,6 +96,23 @@ const DURATION_QUESTION = /\bhow\s+long\b/i;
  * long as you have a new device" held the most.
  */
 const DURATION_TERMS: readonly string[] = tokenize("hours days weeks");
+/** A query that asks for a count ("how many TikTok accounts per phone"): "many" is the question, not a word to match. */
+const COUNT_QUESTION = /\bhow\s+(?:many|much)\b/i;
+/**
+ * Words the entries use for one thing a query names in any of them: "how many TikTok accounts per
+ * phone" is answered by "5 tiktok accounts on each iphone" and "2–3 TikTok accounts maximum per
+ * device" ({@link KnowledgeSearch.termGroups}).
+ */
+const QUERY_SYNONYMS: readonly (readonly string[])[] = [tokenize("phone iphone device smartphone handset")];
+/**
+ * By relevance, a query that asks how long ranks an entry that states no duration beside its
+ * subject ({@link KnowledgeSearch.answersDuration}) at this share of its score: on the live base "how
+ * long to warm up a new TikTok account" put first Ema's "warm-up matters more than VPN", whose only
+ * duration is when to check the account's country, above five posts that each state a warm-up length.
+ */
+const NO_DURATION_RANK = 0.8;
+/** A query word on at most this share of the entries is part of what it asks about (its subject), not of every result's topic. */
+const SUBJECT_MAX_SHARE = 0.15;
 /** Recency half-life of the `recent` sort, in days. */
 const RECENCY_HALF_LIFE_DAYS = 90;
 /** Body words of an example entry its keyword fallback searches with (beside its title). */
@@ -162,6 +180,8 @@ export class KnowledgeSearch {
   } = { pairChecks: null, linkGapQueued: null, revision: 0, unsubscribe: null };
   /** Neutral concept summaries (`concept-summaries.ts`); null: none ({@link connectConceptSummaries}). */
   private conceptSummaries: KnowledgeConceptSummariesPort | null = null;
+  /** Concept families with their names and summaries; null: none ({@link connectConceptFamilies}). */
+  private conceptFamilies: KnowledgeConceptFamilySummariesPort | null = null;
 
   constructor(options: KnowledgeSearchOptions) {
     this.store = options.store;
@@ -219,6 +239,11 @@ export class KnowledgeSearch {
   /** Where concept details read their summaries from (null: none). */
   connectConceptSummaries(port: KnowledgeConceptSummariesPort | null): void {
     this.conceptSummaries = port;
+  }
+
+  /** Where concept details read their families from (`concept-family-summaries.ts`; null: none). */
+  connectConceptFamilies(port: KnowledgeConceptFamilySummariesPort | null): void {
+    this.conceptFamilies = port;
   }
 
   /** Subscribe to the store and index every entry's text (in the background; queries wait for it). */
@@ -364,8 +389,14 @@ export class KnowledgeSearch {
     // "How long …" asks for a duration: "long" is the question, not a word to match ("as long as"); a
     // duration is said in hours, days or weeks, which the keyword signal searches beside the query's words.
     const duration = DURATION_QUESTION.test(query);
-    const terms = duration ? tokenize(query).filter((token) => token !== "long") : tokenize(query);
-    const keyword = query ? this.bm25.search(duration ? [...terms, ...DURATION_TERMS] : terms, accept, CANDIDATES).map((hit) => hit.key) : [];
+    // "How many …" asks for a count: "many" (or "much") is the question, a stated number the answer.
+    const count = !duration && COUNT_QUESTION.test(query);
+    const shape: AnswerShape = duration ? "duration" : count ? "count" : null;
+    const question = (token: string): boolean => (duration && token === "long") || (count && (token === "many" || token === "much"));
+    const terms = tokenize(query).filter((token) => !question(token));
+    // Each word with its forms and synonyms in the entries ("warm" / "warming", "phone" / "iphone").
+    const groups = this.termGroups(terms);
+    const keyword = query ? this.bm25.search(duration ? [...groups, ...DURATION_TERMS] : groups, accept, CANDIDATES).map((hit) => hit.key) : [];
     const meaningHits = query ? await this.meaningSearch(query, accept) : [];
     const meaningById = new Map(meaningHits.map((hit) => [hit.entryId, hit]));
     const meaning = meaningHits.map((hit) => hit.entryId);
@@ -413,7 +444,7 @@ export class KnowledgeSearch {
     /** The best possible entry score (first in every list that ran), so scores land in 0..1. */
     const scale = ((query ? WEIGHT.keyword + WEIGHT.meaning + WEIGHT.expansion : 0) + (similarTo.length > 0 ? WEIGHT.similar : 0)) / (RRF_K + 1);
     const normalized = (score: number) => Math.min(1, Math.round((score / scale) * 1e4) / 1e4);
-    const ranked = sort === "newest" ? this.rank(entryScores, sort, diverse) : this.withOtherSides(this.rank(entryScores, sort, diverse, terms), scope, terms);
+    const ranked = sort === "newest" ? this.rank(entryScores, sort, diverse) : this.withOtherSides(this.rank(entryScores, sort, diverse, terms, duration ? groups : null), scope, groups);
 
     // --- Concept hits (first page only) ---------------------------------------
     // A concept is one ranked list, an entry the sum of up to four: their fused scores are not on one
@@ -446,9 +477,9 @@ export class KnowledgeSearch {
 
     // --- Page -------------------------------------------------------------------
     const signals = {
-      terms,
-      words: queryWords(query).filter((word) => !duration || word.word !== "long"),
-      duration,
+      groups,
+      words: queryWords(query).filter((word) => !word.tokens.every(question)),
+      shape,
       keyword: new Set(keyword),
       meaning: meaningById,
       similar: similarHits.hits,
@@ -563,14 +594,14 @@ export class KnowledgeSearch {
    * up daniel (#2) and Alex (#3), so neither brought up Ema's NordVPN post (daniel's checked
    * disagreement, #9) or Ema's "VPN matters less" (Alex's, #7).
    */
-  private withOtherSides(ranked: readonly Ranked[], scope: KnowledgeScope, terms: readonly string[]): Ranked[] {
+  private withOtherSides(ranked: readonly Ranked[], scope: KnowledgeScope, groups: readonly (readonly string[])[]): Ranked[] {
     const checks = this.linkingPorts.pairChecks;
     if (!checks || ranked.length < 2) return [...ranked];
     const place = new Map(ranked.slice(0, OTHER_SIDE_REACH).map((item, at) => [item.id, at]));
     const found = findContradictions({ graph: this.graph, scope, pairChecks: checks, accept: (id) => place.has(id), entryMeta: (id) => this.store.getMeta(id) });
     const sides = new Map<string, { id: string; at: number; noted: number }[]>();
-    const wanted = new Set(terms);
-    const whole = [...wanted].reduce((sum, token) => sum + this.bm25.idf(token), 0);
+    // A query word counts once, by its own idf, whichever of its forms or synonyms a note holds.
+    const whole = groups.reduce((sum, group) => sum + this.bm25.idf(group[0]!), 0);
     for (const { a, b, source, note } of found.values()) {
       if (source !== "checked" || note === null) continue;
       // How much of the query the note is about: its query words, rare ones weighing more. A
@@ -578,7 +609,8 @@ export class KnowledgeSearch {
       // note holds only the words every result has ("TikTok account") is about something else
       // (daniel's VPN disagreements, for "how long to warm up a new TikTok account"): its other side
       // stays where the query put it.
-      const noted = [...new Set(tokenize(note))].reduce((sum, token) => sum + (wanted.has(token) ? this.bm25.idf(token) : 0), 0);
+      const said = new Set(tokenize(note));
+      const noted = groups.reduce((sum, group) => sum + (group.some((token) => said.has(token)) ? this.bm25.idf(group[0]!) : 0), 0);
       if (noted <= 0 || noted < OTHER_SIDE_NOTED * whole) continue;
       for (const [x, y] of [
         [a, b],
@@ -609,12 +641,65 @@ export class KnowledgeSearch {
   }
 
   /**
+   * Each query token with the forms of it the entries hold ("warm" / "warming" / "warmed", "use" /
+   * "using") and its synonyms there ({@link QUERY_SYNONYMS}); the token itself first. A group
+   * matches as one word: BM25 scores the best of its terms, a passage holds it once.
+   */
+  termGroups(terms: readonly string[]): string[][] {
+    return [...new Set(terms)].map((term) => {
+      const out = new Set([term]);
+      for (const form of termForms(term)) if (this.bm25.has(form)) out.add(form);
+      for (const group of QUERY_SYNONYMS) if (group.includes(term)) for (const other of group) if (this.bm25.has(other)) out.add(other);
+      return [...out];
+    });
+  }
+
+  /**
+   * What a query asks about, of its word groups: those whose word is on at most
+   * {@link SUBJECT_MAX_SHARE} of the entries ("warm" in "how long to warm up a new TikTok account",
+   * not "tiktok" or "account"), else the rarest one.
+   */
+  private subjectOf(groups: readonly (readonly string[])[]): (readonly string[])[] {
+    if (groups.length === 0) return [];
+    const most = SUBJECT_MAX_SHARE * this.bm25.size();
+    const rare = groups.filter((group) => this.bm25.documentFrequency(group[0]!) <= most);
+    if (rare.length > 0) return rare;
+    return [groups.reduce((x, y) => (this.bm25.idf(y[0]!) > this.bm25.idf(x[0]!) ? y : x))];
+  }
+
+  /**
+   * Whether an entry states a duration in a clause (a sentence, a line, a part between semicolons)
+   * of its title or body that holds a word of the query's subject: "3-5 days of warming up", "warm
+   * it up for 48 hours", not "check account country after 60 days".
+   */
+  private answersDuration(id: string, subject: readonly (readonly string[])[]): boolean {
+    const text = `${this.store.getMeta(id)?.title ?? ""}\n${this.bodies.get(id) ?? ""}`;
+    for (const match of text.matchAll(DURATIONS)) {
+      let start = match.index;
+      while (start > 0 && !clauseEndsAt(text, start - 1)) start -= 1;
+      let end = match.index + match[0].length;
+      while (end < text.length && !clauseEndsAt(text, end)) end += 1;
+      const clause = new Set(tokenize(text.slice(start, end)));
+      if (subject.some((group) => group.some((token) => clause.has(token)))) return true;
+    }
+    return false;
+  }
+
+  /**
    * The ranked entry list (≤ KNOWLEDGE_SEARCH_MAX_RESULTS): sorted, then spread apart by MMR. By
    * relevance a survey ({@link isSurveyEntry}) ranks at {@link SURVEY_RANK} of its score unless the
    * query asks for one ({@link SURVEY_QUERY_WORDS}): it restates what the entries it surveys say,
-   * so it matches most queries on their topic, with a passage about something else.
+   * so it matches most queries on their topic, with a passage about something else. A query that
+   * asks how long (`durationOf`: its word groups) ranks an entry stating no duration beside its
+   * subject at {@link NO_DURATION_RANK} of its score.
    */
-  private rank(entryScores: ReadonlyMap<string, number>, sort: KnowledgeSearchSort, diverse: boolean, terms: readonly string[] = []): Ranked[] {
+  private rank(
+    entryScores: ReadonlyMap<string, number>,
+    sort: KnowledgeSearchSort,
+    diverse: boolean,
+    terms: readonly string[] = [],
+    durationOf: readonly (readonly string[])[] | null = null
+  ): Ranked[] {
     if (sort === "newest") {
       const dated: (Ranked & { savedAt: string })[] = [];
       for (const [id, fused] of entryScores) {
@@ -629,7 +714,9 @@ export class KnowledgeSearch {
     const now = Date.now();
     const ranked: Ranked[] = [];
     const surveysWanted = terms.some((term) => SURVEY_QUERY_WORDS.has(term));
-    const surveyRank = (id: string): number => (!surveysWanted && isSurveyEntry(this.store.getMeta(id)) ? SURVEY_RANK : 1);
+    const subject = durationOf ? this.subjectOf(durationOf) : [];
+    const surveyRank = (id: string): number =>
+      (!surveysWanted && isSurveyEntry(this.store.getMeta(id)) ? SURVEY_RANK : 1) * (subject.length > 0 && !this.answersDuration(id, subject) ? NO_DURATION_RANK : 1);
     for (const [id, fused] of entryScores) {
       if (sort === "recent") {
         const meta = this.store.getMeta(id);
@@ -649,7 +736,8 @@ export class KnowledgeSearch {
     scope: KnowledgeScope,
     score: number,
     signals: {
-      terms: string[];
+      /** The query's words, each with its forms and synonyms in the entries. */
+      groups: readonly (readonly string[])[];
       words: { word: string; tokens: string[] }[];
       keyword: ReadonlySet<string>;
       meaning: ReadonlyMap<string, KnowledgeVectorHit>;
@@ -658,8 +746,8 @@ export class KnowledgeSearch {
       expansion: ReadonlySet<string>;
       expansionSeeds: ReadonlyMap<string, string[]>;
       thresholds: KnowledgeVectorThresholds | null;
-      /** The query asks how long: a passage stating a duration is preferred. */
-      duration: boolean;
+      /** The query asks how long or how many: a passage stating a duration, or a number, is preferred. */
+      shape: AnswerShape;
     }
   ): KnowledgeSearchHit {
     const id = meta.id;
@@ -670,12 +758,13 @@ export class KnowledgeSearch {
     if (meaningHit) via.push("meaning");
     if (signals.similarIds.has(id)) via.push("similar");
     if (signals.expansion.has(id)) via.push("concept");
-    const terms = signals.words.filter((w) => w.tokens.every((token) => this.bm25.contains(id, token))).map((w) => w.word);
-    const distinct = [...new Set(signals.terms)];
-    const coverage = distinct.length > 0 ? distinct.filter((token) => this.bm25.contains(id, token)).length / distinct.length : 0;
+    const holds = (group: readonly string[]): boolean => group.some((token) => this.bm25.contains(id, token));
+    const groupOf = new Map(signals.groups.map((group) => [group[0]!, group]));
+    const terms = signals.words.filter((w) => w.tokens.every((token) => holds(groupOf.get(token) ?? [token]))).map((w) => w.word);
+    const coverage = signals.groups.length > 0 ? signals.groups.filter(holds).length / signals.groups.length : 0;
     const similarity = Math.max(meaningHit?.score ?? -Infinity, similarHit?.score ?? -Infinity);
     const body = this.bodies.get(id) ?? "";
-    const passage = meaningHit ? queryPassage(meaningHit, body, distinct, signals.duration) : null;
+    const passage = meaningHit ? queryPassage(meaningHit, body, signals.groups, signals.shape) : null;
     const match: KnowledgeEntryMatch = {
       band: matchBand(Number.isFinite(similarity) ? similarity : null, coverage, via, signals.thresholds),
       via,
@@ -687,7 +776,7 @@ export class KnowledgeSearch {
         .map(({ id: conceptId, name, type }): KnowledgeConceptRef => ({ id: conceptId, name, type }))
     };
     const span: TextSpan | undefined = passage?.span ?? similarHit?.span;
-    const snippet = bestSnippet(body, signals.terms, span, signals.duration);
+    const snippet = bestSnippet(body, signals.groups, span, signals.shape);
     return { kind: "entry", score, entry: this.summary(meta, scope, snippet), match };
   }
 
@@ -802,12 +891,20 @@ export class KnowledgeSearch {
       .filter((m): m is KnowledgeEntryMeta => m !== null)
       .sort(newestFirst);
     // Served only to a caller who can see every entry it was written from (`concept-summaries.ts`).
-    const summary = this.conceptSummaries?.summaryFor(this.graph.canonicalConceptId(id), {
-      visible: (entryId) => {
-        const meta = this.store.getMeta(entryId);
-        return meta && entryInScope(meta, scope) ? meta : null;
+    const visible = (entryId: string): KnowledgeEntryMeta | null => {
+      const meta = this.store.getMeta(entryId);
+      return meta && entryInScope(meta, scope) ? meta : null;
+    };
+    const canonical = this.graph.canonicalConceptId(id);
+    const summary = this.conceptSummaries?.summaryFor(canonical, { visible, behind: new Set(view.entryIds) });
+    // Its visible family members; the name and summary as concept summaries (`concept-family-summaries.ts`).
+    const family = this.conceptFamilies?.familyFor(canonical, {
+      concept: (conceptId) => {
+        const ref = this.graph.conceptRef(conceptId, scope);
+        return ref ? { id: ref.id, name: ref.name, type: ref.type } : null;
       },
-      behind: new Set(view.entryIds)
+      visible,
+      behind: (conceptId) => this.graph.visibleEntriesOf(conceptId, scope)
     });
     return {
       concept: view.concept,
@@ -817,7 +914,8 @@ export class KnowledgeSearch {
       mergedFrom: view.mergedFrom,
       similarConcepts: view.similarConcepts,
       entryIds: newest.slice(0, CONCEPT_ENTRY_IDS_LIMIT).map((m) => m.id),
-      ...(summary ? { summary } : {})
+      ...(summary ? { summary } : {}),
+      ...(family ? { family } : {})
     };
   }
 
@@ -1024,23 +1122,38 @@ function matchBand(
   return "weak";
 }
 
+/** Every duration a text states ({@link DURATION}, global). */
+const DURATIONS = new RegExp(DURATION.source, "gi");
+/** Whether a clause ends at `at`: a semicolon, a line break, or a sentence end before a space. */
+function clauseEndsAt(text: string, at: number): boolean {
+  const char = text[at]!;
+  return char === ";" || char === "\n" || ((char === "." || char === "!" || char === "?") && /\s/.test(text[at + 1] ?? " "));
+}
+
+/** Other forms a query token may take in an entry: "warm" → "warming", "warmed"; "use" → "using", "used"; "warming" → "warm", "warme". */
+function termForms(term: string): string[] {
+  if (term.length > 5 && term.endsWith("ing")) return [term.slice(0, -3), `${term.slice(0, -3)}e`];
+  if (term.length > 4 && term.endsWith("ed")) return [term.slice(0, -2), term.slice(0, -1)];
+  if (/\d/.test(term) || term.length < 3) return [];
+  return term.endsWith("e") ? [`${term.slice(0, -1)}ing`, `${term}d`] : [`${term}ing`, `${term}ed`];
+}
+
 /**
  * The passage a hit shows: of an entry's chunks, the one whose cosine to the query plus
- * {@link PASSAGE_TERMS_WEIGHT} × the share of the query's distinct tokens it holds is best (the
- * best by cosine on a tie). Cosine alone picks, in a long survey, whichever chunk sits nearest the
- * query's topic; the query's own words say which one answers it.
+ * {@link PASSAGE_TERMS_WEIGHT} × how much of the query it holds ({@link passageScore}: its words,
+ * each in any of its forms or synonyms, and a stated duration or number when it asks how long or
+ * how many) is best (the best by cosine on a tie). Cosine alone picks, in a long survey, whichever
+ * chunk sits nearest the query's topic; the query's own words say which one answers it.
  */
-function queryPassage(hit: KnowledgeVectorHit, body: string, tokens: readonly string[], duration = false): { chunk: number; span: TextSpan } {
+function queryPassage(hit: KnowledgeVectorHit, body: string, groups: readonly (readonly string[])[], shape: AnswerShape = null): { chunk: number; span: TextSpan } {
   const chunks = hit.chunkScores;
-  if (!chunks || chunks.length < 2 || tokens.length === 0) return { chunk: hit.chunk, span: hit.span };
-  const wanted = new Set(tokens);
+  if (!chunks || chunks.length < 2 || groups.length === 0) return { chunk: hit.chunk, span: hit.span };
   let best = { chunk: hit.chunk, span: hit.span };
   let bestScore = -Infinity;
+  const most = groups.length + (shape === "duration" ? 2 : shape === "count" ? 0.5 : 0);
   chunks.forEach(({ score, span }, chunk) => {
     const text = body.slice(span.start, span.end);
-    // A query asking how long counts a stated duration as one more word held.
-    const held = new Set(tokenize(text).filter((token) => wanted.has(token))).size + (duration && DURATION.test(text) ? 1 : 0);
-    const total = score + (PASSAGE_TERMS_WEIGHT * held) / (wanted.size + (duration ? 1 : 0));
+    const total = score + (PASSAGE_TERMS_WEIGHT * passageScore(text, groups, shape)) / most;
     if (total > bestScore + 1e-9 || (Math.abs(total - bestScore) <= 1e-9 && chunk === hit.chunk)) {
       bestScore = total;
       best = { chunk, span };

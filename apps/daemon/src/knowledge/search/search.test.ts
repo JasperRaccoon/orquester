@@ -724,6 +724,58 @@ test("a query that asks how long: \"long\" is the question, a stated duration ma
   assert.ok(!hit.match!.terms.includes("long"));
 });
 
+test("a query word matches the forms and synonyms the entries use: a phone is an iPhone or a device, warm is warming", async (t) => {
+  const { search } = await setup(t, {
+    embedder: null,
+    more: (store) => {
+      store.put("ke_iphoneiphone", "- 5 tiktok accounts on each iphone\n- warm up each account for 3 days", [ADS], { title: "Zero to app" }, true);
+      store.put("ke_devicedevice", "Only create 2-3 TikTok accounts maximum per device.", [ADS], { title: "iPhone setup" }, true);
+      store.put("ke_warmingwarmi", "8 3-5 days of warming up\n9 Fill a profile", [ADS], { title: "Super short guide" }, true);
+    }
+  });
+  await search.idle();
+  const phone = entryHits((await search.search({ query: "tiktok accounts per phone", limit: 10 }, ALL)).hits);
+  for (const id of ["ke_iphoneiphone", "ke_devicedevice"]) {
+    const hit = phone.find((h) => h.entry.id === id);
+    assert.ok(hit, `${id} in ${phone.map((h) => h.entry.id).join(" ")}`);
+    assert.ok(hit.match!.terms.includes("phone"), `${id} holds "phone" as ${hit.match!.terms.join(",")}`);
+    assert.ok(hit.match!.terms.includes("accounts"));
+  }
+  const warm = entryIds((await search.search({ query: "warm", limit: 10 }, ALL)).hits);
+  assert.ok(warm.includes("ke_warmingwarmi") && warm.includes("ke_iphoneiphone"), warm.join(" "));
+  assert.deepEqual(search.termGroups(["warm", "phone"]), [["warm", "warming"], ["phone", "iphone", "device"]], "only forms and synonyms some entry holds");
+});
+
+test("a query that asks how many: \"many\" is the question, and the passage shown states a number beside the query's words", async (t) => {
+  const { search } = await setup(t, {
+    embedder: null,
+    more: (store) => store.put("ke_manymanymany", "Accounts on a phone get flagged when you overdo it.\n\nRun 5 accounts on each phone, no more.", [ADS], { title: "Phone farm" }, true)
+  });
+  await search.idle();
+  const hitFor = async (query: string) => entryHits((await search.search({ query, limit: 10 }, ALL)).hits).find((h) => h.entry.id === "ke_manymanymany")!;
+  const many = await hitFor("how many accounts per phone");
+  assert.match(many.entry.snippet, /^Run 5 accounts on each phone/);
+  assert.ok(!many.match!.terms.includes("many"));
+  assert.match((await hitFor("accounts per phone")).entry.snippet, /^Accounts on a phone get flagged/, "not asked how many: the first passage holding as many words");
+});
+
+test("a query that asks how long ranks an entry that states no duration beside its subject below one that does", async (t) => {
+  const { search } = await setup(t, {
+    embedder: null,
+    more: (store) => {
+      store.put("ke_noduration01", "Warm up the account properly: warming up matters more than the VPN. Warm, warm, warm.", [ADS], { title: "Warm-up matters more than VPN; check the account after 60 days" }, true);
+      store.put("ke_fortyeight01", "Then warm it up for 48 hours before you post.", [ADS], { title: "13 steps" }, true);
+      for (let i = 0; i < 8; i += 1) store.put(`ke_filleraccnt${i}`, `An account note ${i}.`, [ADS], { title: `Account ${i}` }, true);
+    }
+  });
+  await search.idle();
+  const order = async (query: string) => entryIds((await search.search({ query, limit: 10 }, ALL)).hits);
+  const plain = await order("warm up an account");
+  assert.ok(plain.indexOf("ke_noduration01") < plain.indexOf("ke_fortyeight01"), plain.join(" "));
+  const long = await order("how long to warm up an account");
+  assert.ok(long.indexOf("ke_fortyeight01") < long.indexOf("ke_noduration01"), `its 60 days check the account, not the warm-up: ${long.join(" ")}`);
+});
+
 test("match bands reflect semantic thresholds and lexical coverage through search results", async (t) => {
   const { search, embedders } = await geometricSearch(t, [
     { id: "ke_bandstrong01", title: "Semantic high", body: "unrelated", vector: [0.8, 0.6] },

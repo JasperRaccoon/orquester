@@ -85,6 +85,12 @@ export interface KnowledgeLinkGraphView {
    * is none; absent: none known (pair checks' "numbers" tier finds nothing).
    */
   conceptVector?(conceptId: string): Float32Array | null;
+  /**
+   * Whether two concepts answer the same question (`KnowledgeGraph.sameQuestion`: concept families
+   * when injected, else close concept vectors with a telling name word in common); absent: never
+   * (pair checks' "numbers" tier then pairs only names that differ in their numbers alone).
+   */
+  sameQuestion?(a: KnowledgeConceptRef, b: KnowledgeConceptRef): boolean;
 }
 
 /** Whether neighbour context can be built: an embedder is loaded. */

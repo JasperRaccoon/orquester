@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { type ConceptMergeOverlay, KnowledgeGraph } from "./graph.ts";
+import { type ConceptMergeOverlay, KnowledgeGraph, isMachineSlug } from "./graph.ts";
 import { FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 import { knowledgeScope } from "./visibility.ts";
 
@@ -245,11 +245,31 @@ test("a short name's similar concepts: only related names (a shared word, one na
     graph.concept("channel-tiktok", scope)!.similarConcepts.map((s) => s.concept.name),
     ["TikTok Ads", "Musical.ly", "Douyin", "TikTokShop"]
   );
-  // Two long names: meaning alone decides, as before.
-  assert.deepEqual(
-    graph.concept("tactic-long", scope)!.similarConcepts.map((s) => s.concept.name),
-    ["Post three times a day on Reels", "Answer every comment within the hour"]
-  );
+  // Two long names: a shared topic word, or 0.97 and more ("Answer every comment within the hour"
+  // shares none with "Post three times a day on TikTok").
+  assert.deepEqual(graph.concept("tactic-long", scope)!.similarConcepts.map((s) => s.concept.name), ["Post three times a day on Reels"]);
+  graph.setSimilarConcepts(() => [{ id: "tactic-other", similarity: 0.97 }]);
+  assert.deepEqual(graph.concept("tactic-long", scope)!.similarConcepts.map((s) => s.concept.name), ["Answer every comment within the hour"]);
+});
+
+test("similar concepts of longer names: a generic word in common is no relation (the live look-alike)", async () => {
+  const store = new FakeStore();
+  store.collection(A, "A");
+  store.put(eA, "a", [A], {}, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  const on = [`${eA}.md`];
+  await loadGraph(graph, [
+    node("tactic-use-an-erased-iphone", "Use an erased iPhone", on),
+    node("tactic-remove-entitlements", "Remove entitlements you don't actively use", on),
+    node("tactic-factory-reset-the-iphone", "Factory reset the iPhone", on)
+  ]);
+  const scope = knowledgeScope({ kind: "all" }, [A]);
+  graph.setSimilarConcepts(() => [
+    { id: "tactic-remove-entitlements", similarity: 0.931 },
+    { id: "tactic-factory-reset-the-iphone", similarity: 0.93 }
+  ]);
+  // "use" is generic; "iPhone" a topic word ("erased" and "reset" one too).
+  assert.deepEqual(graph.concept("tactic-use-an-erased-iphone", scope)!.similarConcepts.map((s) => s.concept.name), ["Factory reset the iPhone"]);
 });
 
 // A merge must never show a scope what only hidden entries say (the review's reproduction): the
@@ -355,4 +375,29 @@ test("a merge into a visible concept: a hidden folded concept's names, attribute
   assert.deepEqual(graph.searchConcepts(["secret"], profile, 10), []);
   assert.deepEqual(graph.searchConcepts(["budget", "two", "million"], profile, 10), []);
   assert.equal(graph.concept("tactic-secret", profile), null);
+});
+
+test("person-merge leftovers: a machine slug (a nameless Person's id) is never an alias, whether myKG wrote it or a merge folded it in", async () => {
+  assert.equal(isMachineSlug("person-personematotaro", "Person"), true);
+  assert.equal(isMachineSlug("tactic-warm-up", "Tactic"), true);
+  assert.equal(isMachineSlug("ema_totaro", "Person"), false);
+  assert.equal(isMachineSlug("Emanuele Totaro", "Person"), false);
+  assert.equal(isMachineSlug("person-to-person referrals", "Tactic"), false, "a phrase, and another type's prefix");
+  assert.equal(isMachineSlug("Person-Ema", "Person"), false, "not a slug: capitals");
+  const store = new FakeStore();
+  store.collection(A, "A");
+  store.put(eA, "a", [A], {}, true);
+  store.put(eB, "b", [A], {}, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  await loadGraph(graph, [
+    node("person-ema-totaro", "Ema Totaro", [`${eA}.md`], { type: "Person", aliases: ["Ema", "ema_totaro", "person-personematotaro"] }),
+    // A Person myKG gave no name: the graph names it by its id.
+    { id: "person-personematotaro", type: "Person", confidence: 0.9, attributes: {}, source_files: [`${eB}.md`] }
+  ]);
+  const all = knowledgeScope({ kind: "all" }, [A]);
+  assert.deepEqual(graph.concept("person-ema-totaro", all)!.concept.aliases, ["Ema", "ema_totaro"]);
+  graph.setConceptMerges([{ id: "cm_ema", type: "Person", into: "person-ema-totaro", merged: ["person-personematotaro"], similarity: 1, createdAt: "t" }]);
+  const merged = graph.concept("person-ema-totaro", all)!;
+  assert.deepEqual(merged.concept.aliases, ["Ema", "ema_totaro"]);
+  assert.deepEqual(merged.mergedFrom.map((ref) => ref.id), ["person-personematotaro"], "still listed as merged from");
 });
