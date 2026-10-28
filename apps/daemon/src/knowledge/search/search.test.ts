@@ -677,6 +677,53 @@ test("the other side of a checked disagreement the query finds comes up next to 
   assert.deepEqual([...after].sort(), [...before].sort(), "the same hits");
 });
 
+test("a hit another hit brought up still brings up its own other side; a disagreement whose note is not about the query moves nothing", async (t) => {
+  const { search } = await setup(t, {
+    embedder: null,
+    more: (store) => {
+      store.put("ke_jasonjasonja", "VPN or proxy for the account: buy an ISP proxy. Proxy, VPN, account.", [ADS], { title: "VPN proxy account" }, true);
+      store.put("ke_danieldaniel", "Self-host a VPN for the account instead of a shared proxy.", [ADS], { title: "VPN proxy" }, true);
+      for (let i = 0; i < 6; i += 1) store.put(`ke_fillerfill0${i}`, `A VPN or proxy note ${i}.`, [ADS], { title: `VPN proxy filler ${i}` }, true);
+      store.put("ke_emaemaemaema", "Install a VPN (NordVPN) before you open the app, then keep it on for days and days.", [ADS], { title: "Seven steps" }, true);
+      store.put("ke_offtopicoffo", "The warm-up matters more than the proxy.", [ADS], { title: "Warm-up" }, true);
+    }
+  });
+  await search.idle();
+  const order = async () => entryIds((await search.search({ query: "vpn proxy account", limit: 20 }, ALL)).hits);
+  const before = await order();
+  assert.ok(before.indexOf("ke_emaemaemaema") > 3 && before.indexOf("ke_offtopicoffo") > 3, before.join(" "));
+  const at = "2026-10-28T00:00:00.000Z";
+  const checks: KnowledgePairCheck[] = [
+    { a: "ke_danieldaniel", b: "ke_jasonjasonja", verdict: "contradicts", note: "jason buys an ISP proxy for the account; daniel says a shared proxy gets flagged.", checkedAt: at },
+    { a: "ke_danieldaniel", b: "ke_emaemaemaema", verdict: "contradicts", note: "Ema uses NordVPN for the account; daniel says a shared VPN gets the account banned.", checkedAt: at },
+    { a: "ke_jasonjasonja", b: "ke_offtopicoffo", verdict: "contradicts", note: "jason says set up a proxy first; the other says warm-up comes first.", checkedAt: at }
+  ];
+  search.connectLinking({ pairChecks: { all: () => checks, get: () => null, onChange: () => () => undefined } });
+  const after = await order();
+  // jason brings up daniel (proxy, account); daniel, though brought up, brings up Ema (vpn, account).
+  assert.equal(after.indexOf("ke_danieldaniel"), after.indexOf("ke_jasonjasonja") + 1, after.join(" "));
+  assert.equal(after.indexOf("ke_emaemaemaema"), after.indexOf("ke_danieldaniel") + 1, after.join(" "));
+  // jason and the warm-up post disagree about something the note holds one query word of: it stays put.
+  assert.equal(after.indexOf("ke_offtopicoffo"), before.indexOf("ke_offtopicoffo") + (before.indexOf("ke_emaemaemaema") > before.indexOf("ke_offtopicoffo") ? 1 : 0), after.join(" "));
+});
+
+test("a query that asks how long: \"long\" is the question, a stated duration matches and is the passage shown", async (t) => {
+  const { search } = await setup(t, {
+    embedder: null,
+    more: (store) => {
+      store.put("ke_aslongasyoul", "Keep posting as long as you like; the account will grow. Warm vibes, long captions.", [ADS], { title: "Posting for a long time" }, true);
+      store.put("ke_fortyeighthh", "Make an account with a fresh email and warm up the account.\nThen warm it up for 48 hours before you post.", [ADS], { title: "Account steps" }, true);
+    }
+  });
+  await search.idle();
+  const hits = entryHits((await search.search({ query: "how long to warm up an account", limit: 10 }, ALL)).hits);
+  const ids = hits.map((hit) => hit.entry.id);
+  assert.ok(ids.indexOf("ke_fortyeighthh") < ids.indexOf("ke_aslongasyoul") || !ids.includes("ke_aslongasyoul"), ids.join(" "));
+  const hit = hits.find((h) => h.entry.id === "ke_fortyeighthh")!;
+  assert.match(hit.entry.snippet, /48 hours/);
+  assert.ok(!hit.match!.terms.includes("long"));
+});
+
 test("match bands reflect semantic thresholds and lexical coverage through search results", async (t) => {
   const { search, embedders } = await geometricSearch(t, [
     { id: "ke_bandstrong01", title: "Semantic high", body: "unrelated", vector: [0.8, 0.6] },

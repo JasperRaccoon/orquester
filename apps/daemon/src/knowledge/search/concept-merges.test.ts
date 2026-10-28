@@ -9,6 +9,10 @@ import {
   type ConceptMergeThresholds,
   type PlanConcept,
   KnowledgeConceptMerges,
+  commonNameWords,
+  compoundBacking,
+  compoundParts,
+  conceptBacks,
   conceptMergeId,
   conceptMergeRefusal,
   conceptNameNumbers,
@@ -347,4 +351,43 @@ test("backing: the same claim in other words on the graph's concepts; never a di
   assert.deepEqual(h.graph.backingConcepts("tactic-apple"), ["tactic-apple-email"], "half their words shared");
   assert.deepEqual(h.graph.backingConcepts("tactic-allow"), [], "a one-word swap says the opposite");
   assert.deepEqual(h.graph.backingConcepts("tactic-bumble"), [], "fewer than half their words shared");
+});
+
+test("backing: one name substantially containing the other with two telling words, or very close with two words shared; never shared common words alone", () => {
+  const bars: ConceptMergeThresholds = { merge: 0.91, similar: 0.93, contained: 0.85 };
+  // Common words: on more than 1% of the names (here: tiktok, account, us, trial, card, free).
+  const common = commonNameWords([
+    ...Array.from({ length: 60 }, (_, i) => `TikTok account step ${i}`),
+    ...Array.from({ length: 30 }, (_, i) => `US free trial card ${i}`),
+    "Set language and region to target country"
+  ]);
+  for (const word of ["tiktok", "account", "us", "trial", "card", "free"]) assert.ok(common.has(word), word);
+  assert.ok(!common.has("language") && !common.has("0"), "a number is never common; nor a word of few names");
+  const backs = (x: string, y: string, cos: number) => conceptBacks(T(x), T(y), cos, bars, common);
+  // jason's step holds set, language and country of "Set language and region to target country" (3 of 5).
+  assert.equal(backs("Set language to English and country to United States on the setup screens, then connect to wifi", "Set language and region to target country", 0.914), true);
+  assert.equal(backs("Set language to English and country to United States on the setup screens, then connect to wifi", "Set language and region to target country", 0.89), false, "below the bar");
+  assert.equal(backs("Card-free trial", "Card-required (opt-out) trials", 0.93), false, "shared common words alone");
+  assert.equal(backs("Buy a used iPhone for the US TikTok account", "US eSIM for US TikTok account", 0.93), false);
+  assert.equal(backs("Bidding on competitor names as paid-search keywords", "Bid on bottom-of-funnel (competitor-name) keywords", 0.972), true, "very close, two words shared");
+  assert.equal(backs("Upload a custom EULA in the EULA field", "Use Apple's own EULA link", 0.961), false);
+  assert.equal(backs("Allow OAI-SearchBot", "Block OAI-SearchBot", 0.99), false, "a one-word swap, however close");
+  assert.equal(backs("Warm up the account for 48 hours", "Warm up the account for 3 days", 0.99), false, "different numbers");
+});
+
+test("backing: a compound claim whose main steps other entries' claims say", () => {
+  assert.deepEqual(compoundParts("Buy a used iPhone 12 (~$50), factory reset it and take the SIM out"), ["Buy a used iPhone 12 (~$50)", "factory reset it", "take the SIM out"]);
+  assert.deepEqual(compoundParts("Set language and region to target country"), ["Set language", "region to target country"]);
+  assert.deepEqual(compoundParts("Loot boxes (odds, prices and caps)"), ["Loot boxes (odds, prices and caps)"], "never inside parentheses");
+  const compound = { name: "Buy a used iPhone 12 (~$50), factory reset it and take the SIM out", entryIds: ["ke_jason"] };
+  const other = (id: string, name: string, entryIds = ["ke_other"], type = "Tactic", similarity = 0.9) => ({ id, type, name, entryIds, similarity });
+  const reset = other("t-reset", "Factory reset the iPhone");
+  const buy = other("t-buy", "Buy a used iPhone for the US TikTok account");
+  assert.deepEqual(compoundBacking(compound, [reset, buy], 0.85).sort(), ["t-buy", "t-reset"], "two of three steps, most of its words");
+  assert.deepEqual(compoundBacking(compound, [reset], 0.85), [], "one step is not its main steps");
+  assert.deepEqual(compoundBacking(compound, [reset, other("t-buy3", "Buy 3 used iPhones (~$100 each)")], 0.85), [], "another figure backs no step");
+  assert.deepEqual(compoundBacking(compound, [reset, { ...buy, entryIds: ["ke_jason"] }], 0.85), [], "a claim on the same entry backs nothing");
+  assert.deepEqual(compoundBacking(compound, [reset, { ...buy, similarity: 0.8 }], 0.85), [], "far by concept vector");
+  assert.deepEqual(compoundBacking({ name: "Post twice a day, then once a day", entryIds: ["ke_p"] }, [other("t-3x", "Post 3x a day on 5 accounts")], 0.85), [], "twice is a number");
+  assert.deepEqual(compoundBacking({ name: "Factory reset the iPhone", entryIds: ["ke_p"] }, [reset], 0.85), [], "not compound");
 });

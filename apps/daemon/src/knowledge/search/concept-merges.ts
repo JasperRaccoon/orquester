@@ -196,23 +196,158 @@ export function conceptMergeRefusal(
 const BACKS_MIN_JACCARD = 0.5;
 
 /**
+ * A name word on more than this share of all concept names ("us", "tiktok", "account", "trial",
+ * "free", "per", "user": 1% of the live graph's 3,103 names is 31) says little about which claim a
+ * name makes: it does not count towards {@link BACKS_SUBSTANTIAL_SHARE}'s two telling words.
+ */
+export const BACKS_COMMON_WORD_SHARE = 0.01;
+/** … and on more than this many names (in a small graph 1% is a name or two). */
+const BACKS_COMMON_MIN_NAMES = 3;
+
+/** The words of more than {@link BACKS_COMMON_WORD_SHARE} of `names`, and of more than {@link BACKS_COMMON_MIN_NAMES} ({@link conceptNameTokens}, numbers aside). */
+export function commonNameWords(names: Iterable<string>): Set<string> {
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const name of names) {
+    total += 1;
+    for (const token of conceptNameTokens(name)) counts.set(token, (counts.get(token) ?? 0) + 1);
+  }
+  const out = new Set<string>();
+  for (const [token, count] of counts) if (count > Math.max(BACKS_COMMON_MIN_NAMES, BACKS_COMMON_WORD_SHARE * total) && !/^\d/.test(token)) out.add(token);
+  return out;
+}
+
+/**
+ * One name substantially contains the other ({@link conceptBacks}) when it holds this share of the
+ * shorter name's words, two of them telling ones (not {@link commonNameWords}), at cosine ≥
+ * {@link BACKS_SUBSTANTIAL_SIMILARITY}. Live graph of 2026-10-28: "Set language and region to target
+ * country" (set, language, country of its 5 words) in jason's "Set language to English and country
+ * to United States on the setup screens, then connect to wifi" 0.914. Without the telling words,
+ * shared common words backed opposites: "Card-free trial" ~ "Card-required (opt-out) trials", "Web
+ * checkout instead of IAP" ~ "IAP as the default checkout", "Buy a used iPhone for the US TikTok
+ * account" ~ "US eSIM for US TikTok account".
+ */
+const BACKS_SUBSTANTIAL_SHARE = 0.6;
+const BACKS_SUBSTANTIAL_SIMILARITY = 0.9;
+/**
+ * Close by concept vector alone, with two name words shared: same-type claim names at or above it
+ * restate one claim (live graph of 2026-10-28: 8 of the 9 claim pairs on different entries at ≥
+ * 0.965, "Bidding on competitor names as paid-search keywords" ~ "Bid on bottom-of-funnel
+ * (competitor-name) keywords" 0.972; below it opposite advice appears: "Upload a custom EULA" ~ "Use
+ * Apple's own EULA link" 0.961, "Gmail only for TikTok account" ~ "Outlook/Proton email for TikTok
+ * account" 0.953).
+ */
+const BACKS_CLOSE_SIMILARITY = 0.965;
+
+/**
  * Whether one concept backs the other: another entry linking it says the same thing (insights'
  * single-source claims and an entry's novelty count it). Same type, the same numbers and negations,
- * and either one name holds every word (three or more) of the other at cosine ≥ `contained`, or
- * cosine ≥ `similar` with half their words shared and not a one-word swap ("Allow OAI-SearchBot" ~
- * "Block OAI-SearchBot"). Looser than a merge: a restatement or a part of a claim backs it.
+ * and, not a one-word swap ("Allow OAI-SearchBot" ~ "Block OAI-SearchBot"), either one name holds
+ * every word (three or more) of the other at cosine ≥ `contained`; or one substantially contains the
+ * other ({@link BACKS_SUBSTANTIAL_SHARE} of the shorter name's words, two of them telling: not in
+ * `common`) at ≥ {@link BACKS_SUBSTANTIAL_SIMILARITY}; or they share two words at ≥
+ * {@link BACKS_CLOSE_SIMILARITY}; or cosine ≥ `similar` with half their words shared. Looser than a
+ * merge: a restatement or a part of a claim backs it.
  */
-function conceptBacks(a: { type: string; name: string }, b: { type: string; name: string }, similarity: number, thresholds: ConceptMergeThresholds): boolean {
-  if (a.type !== b.type || !(similarity >= Math.min(thresholds.contained ?? thresholds.similar, thresholds.similar))) return false;
+export function conceptBacks(
+  a: { type: string; name: string },
+  b: { type: string; name: string },
+  similarity: number,
+  thresholds: ConceptMergeThresholds,
+  common: ReadonlySet<string> = new Set()
+): boolean {
+  if (a.type !== b.type || !(similarity >= Math.min(thresholds.contained ?? thresholds.similar, thresholds.similar, BACKS_SUBSTANTIAL_SIMILARITY))) return false;
   if (!sameSet(conceptNameNumbers(a.name), conceptNameNumbers(b.name)) || !sameSet(conceptNameNegations(a.name), conceptNameNegations(b.name))) return false;
   const ta = conceptNameTokens(a.name);
   const tb = conceptNameTokens(b.name);
   const [small, large] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
   let shared = 0;
-  for (const token of small) if (large.has(token)) shared += 1;
+  let telling = 0;
+  for (const token of small) {
+    if (!large.has(token)) continue;
+    shared += 1;
+    if (!common.has(token)) telling += 1;
+  }
   if (small.size >= 3 && shared === small.size) return similarity >= (thresholds.contained ?? thresholds.similar);
-  if (similarity < thresholds.similar || shared < 2 || shared / (ta.size + tb.size - shared) < BACKS_MIN_JACCARD) return false;
-  return !(ta.size - shared === 1 && tb.size - shared === 1);
+  if (shared < 2 || (ta.size - shared === 1 && tb.size - shared === 1)) return false;
+  if (similarity >= BACKS_SUBSTANTIAL_SIMILARITY && telling >= 2 && shared >= BACKS_SUBSTANTIAL_SHARE * small.size) return true;
+  if (similarity >= BACKS_CLOSE_SIMILARITY) return true;
+  return similarity >= thresholds.similar && shared / (ta.size + tb.size - shared) >= BACKS_MIN_JACCARD;
+}
+
+/** Claim types a part of a compound claim may be backed by ({@link compoundBacking}). */
+export const COMPOUND_PART_TYPES: ReadonlySet<string> = new Set(["Tactic", "Rule", "Guideline", "Result", "Metric"]);
+/** A compound claim is backed when two or more of its parts are, holding at least this share of its words. */
+const COMPOUND_BACKED_SHARE = 0.5;
+/** Small numbers as words, read as numbers in a part ("twice a day" → 2). */
+const PART_NUMBER_WORDS: Readonly<Record<string, string>> = { one: "1", once: "1", two: "2", twice: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9", ten: "10" };
+
+/**
+ * A claim name's parts, when it lists several steps ("Buy a used iPhone 12 (~$50), factory reset it
+ * and take the SIM out" → "Buy a used iPhone 12 (~$50)", "factory reset it", "take the SIM out"):
+ * split at commas, semicolons and "and" / "then" / "plus" outside parentheses. One part: not compound.
+ */
+export function compoundParts(name: string): string[] {
+  const masked = name.replace(/\([^)]*\)/g, (inside) => inside.replace(/[,;]|\b(?:and|then|plus)\b/gi, (m) => "\u0000".repeat(m.length)));
+  const parts: string[] = [];
+  let start = 0;
+  for (const match of masked.matchAll(/\s*[,;]\s*(?:then\s+|and\s+)?|\s+(?:and|then|plus)\s+/gi)) {
+    parts.push(name.slice(start, match.index));
+    start = match.index! + match[0].length;
+  }
+  parts.push(name.slice(start));
+  return parts.map((part) => part.trim()).filter((part) => conceptNameTokens(part).size > 0);
+}
+
+/**
+ * The concepts that back a compound claim's main steps (its {@link compoundParts} of two words or
+ * more), or none unless two or more such parts are backed, holding {@link COMPOUND_BACKED_SHARE} of
+ * its words: "Buy a used iPhone 12 (~$50), factory reset it and take the SIM out" is said elsewhere
+ * as "Buy a used iPhone for the US TikTok account" and "Factory reset the iPhone". A part is backed
+ * by a claim concept of `others` (any claim type, on an entry the compound is not on, at cosine ≥
+ * `minimum` to the compound) that holds every telling word of it (one at least; not in `common`)
+ * and two thirds of its words, and states no number the part does not ("Post 3x/day on 5 accounts"
+ * backs no "Post twice a day"; a backer without numbers backs the step, not its figure).
+ */
+export function compoundBacking(
+  compound: { name: string; entryIds: readonly string[] },
+  others: readonly { id: string; type: string; name: string; entryIds: readonly string[]; similarity: number }[],
+  minimum: number,
+  common: ReadonlySet<string> = new Set()
+): string[] {
+  const parts = compoundParts(compound.name);
+  if (parts.length < 2) return [];
+  const own = new Set(compound.entryIds);
+  const numbersOf = (name: string): Set<string> => {
+    const out = conceptNameNumbers(name);
+    for (const token of conceptNameTokens(name)) if (PART_NUMBER_WORDS[token]) out.add(PART_NUMBER_WORDS[token]!);
+    return out;
+  };
+  const candidates = others
+    .filter((other) => COMPOUND_PART_TYPES.has(other.type) && other.similarity >= minimum && other.entryIds.some((id) => !own.has(id)))
+    .map((other) => ({ id: other.id, words: conceptNameTokens(other.name), numbers: numbersOf(other.name) }));
+  let total = 0;
+  let backed = 0;
+  let backedParts = 0;
+  const by = new Set<string>();
+  for (const part of parts) {
+    const words = [...conceptNameTokens(part)].filter((token) => !/^\d/.test(token) && !PART_NUMBER_WORDS[token]);
+    total += words.length;
+    const telling = words.filter((word) => !common.has(word));
+    if (words.length < 2 || telling.length === 0) continue;
+    const numbers = numbersOf(part);
+    const backer = candidates.find(
+      (other) =>
+        telling.every((word) => other.words.has(word)) &&
+        3 * words.filter((word) => other.words.has(word)).length >= 2 * words.length &&
+        [...other.numbers].every((n) => numbers.has(n))
+    );
+    if (!backer) continue;
+    backed += words.length;
+    backedParts += 1;
+    by.add(backer.id);
+  }
+  return backedParts >= 2 && backed >= COMPOUND_BACKED_SHARE * total ? [...by] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +770,7 @@ export class KnowledgeConceptMerges {
   private readonly unsubscribe: (() => void)[] = [];
   private byType: { revision: number; map: Map<string, string[]> } | null = null;
   private byId: { revision: number; map: Map<string, GraphConcept> } | null = null;
+  private common: { revision: number; words: Set<string> } | null = null;
   /** {@link backing}'s answers for one set of vectors, load and merges. */
   private backed: { set: ConceptVectorSet; revision: string; map: Map<string, readonly string[]> } | null = null;
   private stopped = false;
@@ -722,6 +858,8 @@ export class KnowledgeConceptMerges {
    */
   checkState(): {
     concepts: readonly GraphConcept[];
+    /** myKG's edges (before the overlay): what the checks' neighbour anchors come from. */
+    edges?: readonly { from: string; to: string }[];
     set: ConceptVectorSet;
     thresholds: ConceptMergeThresholds;
     rejected: readonly KnowledgeConceptMergeRejection[];
@@ -734,6 +872,7 @@ export class KnowledgeConceptMerges {
     if (!set || !thresholds) return null;
     return {
       concepts: this.graph.baseConcepts(),
+      edges: this.graph.baseEdges(),
       set,
       thresholds,
       rejected: this.file.rejected,
@@ -826,7 +965,8 @@ export class KnowledgeConceptMerges {
   }
 
   /**
-   * The concepts of the current graph that back `conceptId` ({@link conceptBacks}), as the ids the
+   * The concepts of the current graph that back `conceptId` ({@link conceptBacks}; for a compound claim
+   * nothing backs whole, those that back its main steps: {@link compoundBacking}), as the ids the
    * graph goes by (merged ones under the concept they were merged into), never itself; none until
    * vectors from a calibrated model are complete. Remembered per vectors, load and merges.
    */
@@ -855,13 +995,37 @@ export class KnowledgeConceptMerges {
           const similarity = dot(vector, otherVector);
           if (similarity < bar) continue;
           const concept = this.conceptsById().get(other);
-          if (concept && conceptBacks(source, concept, similarity, thresholds)) found.add(canonical);
+          if (concept && conceptBacks(source, concept, similarity, thresholds, this.commonWords())) found.add(canonical);
         }
+      }
+      // A compound claim nothing backs whole may have its main steps said elsewhere.
+      const self = this.conceptsById().get(own);
+      const vector = set.vectors.get(own);
+      if (found.size === 0 && self && vector && COMPOUND_PART_TYPES.has(type) && compoundParts(self.name).length >= 2) {
+        const others: { id: string; type: string; name: string; entryIds: readonly string[]; similarity: number }[] = [];
+        for (const partType of COMPOUND_PART_TYPES) {
+          for (const other of this.idsOfType(partType)) {
+            const canonical = this.graph.canonicalConceptId(other);
+            const otherVector = set.vectors.get(other);
+            const concept = this.conceptsById().get(other);
+            if (canonical === own || !otherVector || !concept) continue;
+            const similarity = dot(vector, otherVector);
+            if (similarity >= bar) others.push({ id: canonical, type: concept.type, name: concept.name, entryIds: concept.entryIds, similarity });
+          }
+        }
+        for (const id of compoundBacking(self, others, bar, this.commonWords())) found.add(id);
       }
     }
     const out = [...found].sort();
     this.backed.map.set(conceptId, out);
     return out;
+  }
+
+  /** The words common to many of the current load's concept names ({@link commonNameWords}). */
+  private commonWords(): ReadonlySet<string> {
+    const revision = this.graph.loadRevision();
+    if (!this.common || this.common.revision !== revision) this.common = { revision, words: commonNameWords(this.graph.baseConcepts().map((concept) => concept.name)) };
+    return this.common.words;
   }
 
   /** myKG's concepts by id (the current load). */

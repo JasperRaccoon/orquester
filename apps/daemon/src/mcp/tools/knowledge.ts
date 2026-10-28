@@ -43,6 +43,7 @@ import {
   KNOWLEDGE_SIMILAR_MAX_EXAMPLES,
   KNOWLEDGE_TITLE_MAX,
   KNOWLEDGE_WORKER_PART_MAX,
+  knowledgeCitation,
   knowledgeRoutes,
   knowledgeWorkerCharSize,
   knowledgeWorkerTextSize,
@@ -518,7 +519,23 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
   if (similarConcepts.length > 0) {
     lines.push(`Similar concepts: ${similarConcepts.slice(0, 5).map(({ concept: other, similarity }) => `${conceptName(other)} [${other.id}] ${similarity.toFixed(2)}`).join(", ")}`);
   }
-  if (concept.description) lines.push(clipText(concept.description.trim(), CONCEPT_DESCRIPTION_CHARS));
+  // The neutral summary and each entry's own position (absent from an older daemon, or before it is
+  // written); myKG's description may then be one entry's claim, and says so.
+  const summary = detail.summary;
+  if (summary) {
+    lines.push(`Summary: ${clipText(oneLine(summary.text), CONCEPT_DESCRIPTION_CHARS)}`);
+    if (summary.positions.length > 0) {
+      const citations = new Map(detail.entries.map((entry) => [entry.id, entry.citation]));
+      lines.push("Positions:");
+      for (const position of summary.positions.slice(0, listMax)) {
+        const cite = citations.get(position.entryId) ?? knowledgeCitation({ id: position.entryId, title: position.title, author: position.author, handle: null });
+        lines.push(`- ${label(position.author ?? "unknown author")} (${quotedTitle(position.title)}): ${clipText(oneLine(position.claim), NOTE_CHARS)} ${cite}`);
+      }
+      const more = summary.positions.length - listMax;
+      if (more > 0) lines.push(`+${more} more`);
+    }
+  }
+  if (concept.description) lines.push(`${summary ? "Extracted description (may be one entry's claim): " : ""}${clipText(concept.description.trim(), CONCEPT_DESCRIPTION_CHARS)}`);
   const attributes = Object.entries(concept.attributes).slice(0, listMax);
   if (attributes.length > 0) lines.push(`Attributes: ${attributes.map(([key, attribute]) => `${label(key)}: ${clipText(oneLine(attribute.value), DESCRIPTION_CHARS)}`).join("; ")}`);
   if (detail.entries.length > 0) {
@@ -687,6 +704,7 @@ function renderInsights(response: KnowledgeInsightsResponse, over: readonly stri
     ...insightsSection("Contradictions", "entries that disagree", response.contradictions, totals?.contradictions, (item) => [
       `${entryRef(item.a)} ↔ ${entryRef(item.b)} · ${contradictionSource(item.source)}${item.similarity === null ? "" : ` · meaning ${item.similarity.toFixed(2)}`}`,
       ...contradictionDetail(item.note, item.pairs, "   "),
+      ...(item.also && item.also.length > 0 ? [`   also: ${item.also.map(entryRef).join("; ")} (the same point)`] : []),
       `   cite: ${item.a.citation}`,
       `   cite: ${item.b.citation}`
     ]),

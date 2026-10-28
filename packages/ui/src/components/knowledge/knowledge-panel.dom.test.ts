@@ -481,6 +481,35 @@ describe("the entry panel", () => {
     });
     const mergedRow = (id: string) => doc().querySelector(`[data-knowledge-merged="${id}"]`);
 
+    it("shows the neutral summary and each entry's position, attributed, each opening its entry; the extracted description below it", async () => {
+      await show(
+        concept({
+          concept: { id: KEPT, name: "Pricing page", type: "Tactic", confidence: 0.9, description: "Show three plans, annual first.", aliases: [], attributes: {} },
+          summary: {
+            text: "A page that lists a product's plans and prices.",
+            positions: [
+              { entryId: "ke_aaaaaaaaaaaa", title: "Paywall teardown", author: "Alex Nguyen", claim: "Show three plans with annual first." },
+              { entryId: "ke_bbbbbbbbbbbb", title: "", author: null, claim: "One plan converts better under $10." }
+            ]
+          }
+        })
+      );
+      assert.equal(doc().querySelector("[data-knowledge-summary]")?.textContent, "A page that lists a product's plans and prices.");
+      assert.match(doc().body.textContent!, /As extracted: Show three plans, annual first\./);
+      const section = doc().querySelector('section[aria-label="Positions"]')!;
+      const rows = [...section.querySelectorAll("[data-knowledge-position]")].map((row) => row.textContent);
+      assert.deepEqual(rows, ["Alex Nguyen · Paywall teardownShow three plans with annual first.", "Unknown author · UntitledOne plan converts better under $10."]);
+      await click(buttonNamed("Alex Nguyen · Paywall teardown", section));
+      assert.deepEqual(selected, [{ kind: "entry", id: "ke_aaaaaaaaaaaa" }]);
+
+      // No summary (an older daemon, or not written yet): the description as before, no positions.
+      await show(concept({ concept: { id: KEPT, name: "Pricing page", type: "Tactic", confidence: 0.9, description: "Show three plans, annual first.", aliases: [], attributes: {} } }));
+      assert.equal(doc().querySelector("[data-knowledge-summary]"), null);
+      assert.equal(doc().querySelector('section[aria-label="Positions"]'), null);
+      assert.doesNotMatch(doc().body.textContent!, /As extracted/);
+      assert.match(doc().body.textContent!, /Show three plans, annual first\./);
+    });
+
     it("lists similar concepts, each opening", async () => {
       await show(concept());
       const section = doc().querySelector('section[aria-label="Similar concepts"]')!;

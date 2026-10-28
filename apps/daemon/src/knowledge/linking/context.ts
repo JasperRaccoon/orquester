@@ -80,6 +80,11 @@ export interface KnowledgeLinkGraphView {
    * Absent: linking only looks again on its own changes.
    */
   vectorsSettled?(): Promise<void>;
+  /**
+   * A concept's vector from a calibrated model (concept merges' concept vectors), null while there
+   * is none; absent: none known (pair checks' "numbers" tier finds nothing).
+   */
+  conceptVector?(conceptId: string): Float32Array | null;
 }
 
 /** Whether neighbour context can be built: an embedder is loaded. */

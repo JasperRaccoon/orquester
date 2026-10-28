@@ -4,7 +4,9 @@
  *
  * - `graph`: a concept of A `contradicts` a concept of B in the concept graph (either direction,
  *   after merges), A ≠ B, both visible, the edge itself visible; note = the edge's `context`;
- * - `checked`: an LLM pair check said `contradicts` (its note first, the graph's pairs kept).
+ * - `checked`: an LLM pair check said `contradicts` (its note first; of the graph's pairs, those
+ *   both of whose concepts the note speaks of: {@link noteInvolves}). A note from before pair-check
+ *   input version 4 that calls the sides "A" and "B" names them by author ({@link nameNoteSides}).
  *
  * A pair check that found the two `consistent` or `unrelated` overrides the graph's guess: the
  * checker read both entries, the graph only their extracted concepts.
@@ -29,6 +31,7 @@
 import type { KnowledgeConceptRef, KnowledgeEntryMeta } from "@orquester/api";
 import type { KnowledgePairChecksPort } from "../ports.ts";
 import type { GraphEdge, KnowledgeGraph } from "./graph.ts";
+import { tokenize } from "./text.ts";
 import type { KnowledgeScope } from "./visibility.ts";
 
 /** The concept-graph relation that says one concept contradicts another. */
@@ -55,8 +58,12 @@ export interface FindContradictionsOptions {
   accept: (entryId: string) => boolean;
   /** Only pairs with this entry (similar entries); absent: every pair. */
   entryId?: string;
-  /** An entry's kind and title ({@link isSurveyEntry}); absent or null: it may take a side. */
-  entryMeta?: (entryId: string) => Pick<KnowledgeEntryMeta, "kind" | "title"> | null;
+  /**
+   * An entry's kind and title ({@link isSurveyEntry}; absent or null: it may take a side), and its
+   * author and handle (what names it in a checked note from before pair-check input version 4:
+   * {@link nameNoteSides}; absent: a note is shown as it is).
+   */
+  entryMeta?: (entryId: string) => (Pick<KnowledgeEntryMeta, "kind" | "title"> & Partial<Pick<KnowledgeEntryMeta, "author" | "handle">>) | null;
 }
 
 /** Kinds of notes whose title can mark them as a survey of other entries ({@link isSurveyEntry}). */
@@ -123,6 +130,81 @@ export function isResolvedNote(note: string): boolean {
 }
 
 export const pairKeyOf = (x: string, y: string): string => (x < y ? `${x}\u0000${y}` : `${y}\u0000${x}`);
+
+/**
+ * A side letter of a pair-check note before input version 4: a capital "A" or "B" standing alone
+ * (not "A/B", "B2B", "A-list"), possibly as "entry A", followed by "'s", ",", ":", a verb-like word
+ * ending in s (says, claims, recommends, reports) or "and"/"or"/"is"/"has". An article "A" opening a
+ * sentence ("A residential IP …") is not one.
+ */
+const SIDE_LETTER = /(?<![\p{L}\p{N}/&+-])(?:[Ee]ntry )?([AB])(?![\p{L}\p{N}/&+-])(?=['’]s\b|,|:| (?:[a-z]+s|and|or|is|was|has|did|does)\b)/gu;
+
+/** Whether a note names the two sides "A" and "B" (both letters stand as a side: {@link SIDE_LETTER}). */
+export function noteUsesSideLetters(note: string): boolean {
+  const letters = new Set<string>();
+  for (const match of note.matchAll(SIDE_LETTER)) letters.add(match[1]!);
+  return letters.size === 2;
+}
+
+/** A word as {@link noteInvolves} compares it: {@link tokenize}'s, without "-ing" and "-ed" ("hosted" → "host"). */
+const involvementWord = (token: string): string => (token.length > 5 && token.endsWith("ing") ? token.slice(0, -3) : token.length > 4 && token.endsWith("ed") ? token.slice(0, -2) : token);
+const involvementWords = (text: string): string[] => tokenize(text).filter((token) => token.length >= 2 && !/^\d+$/.test(token)).map(involvementWord);
+
+/**
+ * Whether a checker's note speaks of a concept: at least half of the concept name's words (its
+ * {@link tokenize} tokens, numbers aside) are in the note. "Self-host Outline VPN on Hetzner ($5/mo)
+ * instead of NordVPN" is in "… recommends a self-hosted VPN on a Hetzner datacenter VPS …"; "US App
+ * Store download and warm-up" is not.
+ */
+export function noteInvolves(note: string, conceptName: string): boolean {
+  const words = new Set(involvementWords(conceptName));
+  if (words.size === 0) return false;
+  const said = new Set(involvementWords(note));
+  let found = 0;
+  for (const word of words) if (said.has(word)) found += 1;
+  return found * 2 >= words.size;
+}
+
+/** What names one side of a contradiction in its note: its author or handle, or a short title. */
+export type ContradictionSide = Pick<KnowledgeEntryMeta, "title"> & Partial<Pick<KnowledgeEntryMeta, "author" | "handle">>;
+
+/** Words of a title kept in a short title. */
+const SHORT_TITLE_WORDS = 6;
+
+/** A title's first clause (before ":", " — ", " (" or " | "), at most {@link SHORT_TITLE_WORDS} words, in quotes. */
+function shortTitle(title: string): string {
+  const clause = title.replace(/\s+/g, " ").trim().split(/:\s| [—–|] | \(/)[0]!.trim() || title.trim();
+  const words = clause.split(" ");
+  return `“${words.length > SHORT_TITLE_WORDS ? `${words.slice(0, SHORT_TITLE_WORDS).join(" ")}…` : clause}”`;
+}
+
+/**
+ * How a note names each side (input version 4 and {@link nameNoteSides}): its author, else its
+ * handle ("@jasonugc"), else a short title; both by short title when the two names are the same.
+ */
+export function sideNames(a: ContradictionSide, b: ContradictionSide): [string, string] {
+  const name = (side: ContradictionSide): string | null => {
+    const author = side.author?.replace(/\s+/g, " ").trim();
+    if (author) return author;
+    const handle = side.handle?.trim().replace(/^@+/, "");
+    return handle ? `@${handle}` : null;
+  };
+  const [x, y] = [name(a), name(b)];
+  const same = x !== null && y !== null && x.toLowerCase() === y.toLowerCase();
+  return [x !== null && !same ? x : shortTitle(a.title), y !== null && !same ? y : shortTitle(b.title)];
+}
+
+/**
+ * A note from before pair-check input version 4 with its "A" and "B" named ({@link sideNames}): "A"
+ * is the check's `a` side (the pair's smaller id, as the check was asked), "B" its `b` side ("A says
+ * … B says …" → "jason says … Alex Nguyen says …"). Only a note that uses both letters as sides
+ * ({@link noteUsesSideLetters}) is changed; any other is returned as it is.
+ */
+export function nameNoteSides(note: string, a: ContradictionSide, b: ContradictionSide): string {
+  if (!noteUsesSideLetters(note)) return note;
+  const [x, y] = sideNames(a, b);
+  return note.replace(SIDE_LETTER, (_match, letter: string) => (letter === "A" ? x : y));
+}
 
 /** The edge's `context` (graph.ts reads myKG's attribute as text) as one line, or null. */
 function contextOf(edge: GraphEdge): string | null {
@@ -219,10 +301,15 @@ export function findContradictions(options: FindContradictionsOptions): Map<stri
       continue;
     }
     const item = found.get(key);
-    const note = check.note?.replace(/\s+/g, " ").trim() || null;
+    const said = check.note?.replace(/\s+/g, " ").trim() || null;
+    // A note that calls the sides "A" and "B" (before input version 4) names them: A is the check's `a`.
+    const [sideA, sideB] = [options.entryMeta?.(check.a), options.entryMeta?.(check.b)];
+    const note = said !== null && sideA && sideB ? nameNoteSides(said, sideA, sideB) : said;
     if (item) {
       item.source = "checked";
       item.note = note ?? item.note;
+      // The graph's concept pairs the checker's note speaks of; none when it speaks of none of them.
+      if (note !== null) item.pairs = item.pairs.filter(({ from, to }) => noteInvolves(note, from.name) && noteInvolves(note, to.name));
     } else {
       const [a, b] = check.a < check.b ? [check.a, check.b] : [check.b, check.a];
       found.set(key, { a, b, source: "checked", pairs: [], note, edges: new Set() });

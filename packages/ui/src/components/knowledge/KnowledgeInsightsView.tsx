@@ -340,6 +340,14 @@ const ContradictionItem: React.FC<{ item: KnowledgeContradiction } & LinkProps> 
   <li data-insight="contradiction" className={cn(ITEM, "border-danger/30")}>
     <EntryPair a={item.a} b={item.b} between={<span className="text-danger">disagrees with</span>} {...link} />
     {item.note && <p className="text-xs leading-relaxed text-neutral-300">{item.note}</p>}
+    {item.also && item.also.length > 0 && (
+      <p data-insight-also className="flex min-w-0 flex-wrap items-center gap-1 text-[11.5px] text-neutral-400">
+        <span>also:</span>
+        {item.also.map((entry) => (
+          <EntryLink key={entry.id} entry={entry} selected={link.selected} onOpen={link.openEntry} />
+        ))}
+      </p>
+    )}
     {item.pairs.length > 0 && (
       <ul aria-label="Clashing concepts" className="space-y-0.5">
         {item.pairs.map((pair) => (

@@ -196,6 +196,36 @@ test("knowledge_get: a concept — description, entries, links; a hidden or unkn
   assert.deepEqual(errorOf(hidden), { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." });
 });
 
+test("knowledge_get: a concept's summary and each entry's position, attributed and cited; the extracted description says it may be one entry's", async () => {
+  const concept = { id: "tactic-tiktok-account-warmup", name: "TikTok account warm-up", type: "Tactic", confidence: 0.9, description: "Scroll, then post the first video after 1–2 days.", aliases: [], attributes: {} };
+  const detail = {
+    concept,
+    collections: ["kc_seo0000000"],
+    entries: [meta()],
+    neighbors: [],
+    summary: {
+      text: "Using a new TikTok account like a real user for a while before posting.",
+      positions: [
+        { entryId: "ke_aaaaaaaaaaaa", title: "Alternatives pages", author: "Om Patel", claim: "Post the first video after 1–2 days." },
+        { entryId: "ke_bbbbbbbbbbbb", title: "Don't use NordVPN", author: null, claim: "Warm up for 3–5 days." }
+      ]
+    }
+  };
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), { status: 200, body: { kind: "concept", concept: detail } });
+  const out = textOf(await run(api, "knowledge_get", { id: concept.id }));
+  assert.match(out, /\nSummary: Using a new TikTok account like a real user for a while before posting\.\nPositions:\n/);
+  // An entry the detail lists cites as it does; another by its id.
+  assert.ok(out.includes(`- Om Patel ("Alternatives pages"): Post the first video after 1–2 days. ${meta().citation}`), out);
+  assert.ok(out.includes(`- unknown author ("Don't use NordVPN"): Warm up for 3–5 days. [Don't use NordVPN](orquester-knowledge:entry/ke_bbbbbbbbbbbb)`), out);
+  assert.match(out, /\nExtracted description \(may be one entry's claim\): Scroll, then post the first video after 1–2 days\./);
+  assert.ok(out.indexOf("Summary:") < out.indexOf("Extracted description"));
+  // Without a summary (an older daemon, or not written yet): the description as before.
+  const plain = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), { status: 200, body: { kind: "concept", concept: { ...detail, summary: undefined } } });
+  const before = textOf(await run(plain, "knowledge_get", { id: concept.id }));
+  assert.ok(!before.includes("Summary:") && !before.includes("Extracted description"));
+  assert.match(before, /\nScroll, then post the first video after 1–2 days\./);
+});
+
 test("knowledge_save: one call, many items, the session named, handles without @; no card, even while planning", async () => {
   const saved: KnowledgeSaveResponse = {
     results: [
@@ -538,7 +568,7 @@ test("worker tools: a part of a task the chat does not hold, a part out of range
 test("worker tools: no result of any step exceeds the budget, whatever the task's size, characters or lines", async () => {
   const long = (bytes: number) => "Pass 2 document with no line break at all, 中文 and 😀 emoji, \"quoted\" \\ back\tslash. ".repeat(Math.ceil(bytes / 90));
   const inputs = [nameList(10_000), nameList(49_500), nameList(52_000), nameList(75_000), long(50_000), long(130_000), `${"\u0001".repeat(9_000)}\n${"😀".repeat(12_000)}`];
-  for (const step of ["pass1", "pass2", "normalize_names", "pair-check", "concept-check", "cluster-name"]) {
+  for (const step of ["pass1", "pass2", "normalize_names", "pair-check", "concept-check", "cluster-name", "concept-summary"]) {
     for (const [i, input] of inputs.entries()) {
       for (const instructions of ["I".repeat(6_000), null]) {
         const task = workerTask({ step, input, instructions, sameInstructionsAs: instructions === null ? "t0" : null, taskId: `${step}-${i}`.padEnd(200, "0") });
@@ -936,7 +966,15 @@ const INSIGHTS: KnowledgeInsightsResponse = {
       ],
       note: "Capping\nslows learning"
     },
-    { a: meta({ id: "ke_cccccccccccc", title: "Long pages" }), b: meta({ id: "ke_dddddddddddd", title: "Short pages" }), similarity: null, source: "checked", pairs: [], note: null }
+    {
+      a: meta({ id: "ke_cccccccccccc", title: "Long pages" }),
+      b: meta({ id: "ke_dddddddddddd", title: "Short pages" }),
+      similarity: null,
+      source: "checked",
+      pairs: [],
+      note: null,
+      also: [meta({ id: "ke_iiiiiiiiiiii", title: "Medium pages" })]
+    }
   ],
   bridges: [
     {
@@ -971,6 +1009,7 @@ test("knowledge_insights: one GET with the session, the limit (default 10) and t
       `   cite: ${c("ke_aaaaaaaaaaaa", "Cap the budget")}`,
       `   cite: ${c("ke_bbbbbbbbbbbb", "Never cap\nthe budget")}`,
       '2. ke_cccccccccccc "Long pages" ↔ ke_dddddddddddd "Short pages" · LLM-checked',
+      '   also: ke_iiiiiiiiiiii "Medium pages" (the same point)',
       `   cite: ${c("ke_cccccccccccc", "Long pages")}`,
       `   cite: ${c("ke_dddddddddddd", "Short pages")}`,
       "Bridges, entries tying clusters together (1):",

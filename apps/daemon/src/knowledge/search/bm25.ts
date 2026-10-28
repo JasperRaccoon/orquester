@@ -28,6 +28,14 @@ export class Bm25Index {
     return this.postings.get(term)?.has(key) ?? false;
   }
 
+  /** The documents that have every one of the (tokenized) terms; none for no terms. */
+  keysWithAll(terms: readonly string[]): string[] {
+    const lists = [...new Set(terms)].map((term) => this.postings.get(term));
+    if (lists.length === 0 || lists.some((list) => list === undefined)) return [];
+    const [first, ...rest] = (lists as Map<string, number>[]).sort((x, y) => x.size - y.size);
+    return [...first!.keys()].filter((key) => rest.every((list) => list.has(key)));
+  }
+
   /** The term's inverse document frequency as `search` weighs it (0 for a term no document has). */
   idf(term: string): number {
     const n = this.lengths.size;
