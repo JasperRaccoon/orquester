@@ -24,7 +24,7 @@ import { CollectionChip, ErrorLine, Eyebrow, SectionLabel } from "./parts";
 import { KnowledgeEntryEditor } from "./KnowledgeEntryEditor";
 import { entryByline, entryDate, entryPostUrl, formatKnowledgeDate, knowledgeErrorCode, knowledgeErrorText } from "./knowledge.logic";
 import { Disagreements, DuplicatesBanner, EntryBody, NoveltyLine, SimilarEntries } from "./KnowledgeEntrySections";
-import { ConceptPositions, MergedFrom, SimilarConcepts, type KnowledgeConceptSectionsApi } from "./KnowledgeConceptSections";
+import { ConceptFamilySection, ConceptPositions, MergedFrom, SimilarConcepts, type KnowledgeConceptSectionsApi } from "./KnowledgeConceptSections";
 import { entryPanelIds, type KnowledgeMergePlan } from "./panel.logic";
 import { conceptMarksOf, type ConceptMarks } from "./graph.logic";
 
@@ -466,16 +466,20 @@ const ConceptDetailView: React.FC<{
           {concept.type} · {confidence}% confidence
         </Eyebrow>
         <h2 className="text-base font-semibold leading-snug text-neutral-100">{concept.name}</h2>
-        {/* The neutral summary when there is one; myKG's description may then be one entry's claim. */}
+        {/* The neutral summary when there is one. myKG's description is then often one entry's claim
+            stated as the concept's (that entry's position says it): kept, folded, for checking. */}
         {detail.summary ? (
           <>
             <p data-knowledge-summary className="text-[13px] leading-relaxed text-neutral-300">
               {detail.summary.text}
             </p>
             {concept.description && (
-              <p className="text-[11px] leading-relaxed text-neutral-500" title="Extracted from the entries; it may be one entry's claim">
-                As extracted: {concept.description}
-              </p>
+              <details data-knowledge-original className="text-[11px] leading-relaxed text-neutral-500">
+                <summary className="cursor-pointer select-none" title="Extracted from the entries; it may be one entry's claim">
+                  Original extraction
+                </summary>
+                <p className="mt-1">{concept.description}</p>
+              </details>
             )}
           </>
         ) : (
@@ -490,6 +494,7 @@ const ConceptDetailView: React.FC<{
       </div>
 
       <ConceptPositions detail={detail} onOpenEntry={(id) => onSelect({ kind: "entry", id })} />
+      <ConceptFamilySection detail={detail} onOpen={(id) => onSelect({ kind: "concept", id })} onOpenEntry={(id) => onSelect({ kind: "entry", id })} />
 
       {onShowEntries && marks.entryIds.length > 0 && (
         <Button size="sm" variant="outline" className="max-w-full" onClick={() => onShowEntries(marks)}>

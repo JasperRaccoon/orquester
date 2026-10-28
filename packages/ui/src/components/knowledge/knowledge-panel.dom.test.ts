@@ -481,7 +481,7 @@ describe("the entry panel", () => {
     });
     const mergedRow = (id: string) => doc().querySelector(`[data-knowledge-merged="${id}"]`);
 
-    it("shows the neutral summary and each entry's position, attributed, each opening its entry; the extracted description below it", async () => {
+    it("shows the neutral summary and each entry's position, attributed, each opening its entry; the extracted description folded below it", async () => {
       await show(
         concept({
           concept: { id: KEPT, name: "Pricing page", type: "Tactic", confidence: 0.9, description: "Show three plans, annual first.", aliases: [], attributes: {} },
@@ -495,7 +495,12 @@ describe("the entry panel", () => {
         })
       );
       assert.equal(doc().querySelector("[data-knowledge-summary]")?.textContent, "A page that lists a product's plans and prices.");
-      assert.match(doc().body.textContent!, /As extracted: Show three plans, annual first\./);
+      // The one-sided extraction: folded under "Original extraction", closed.
+      const original = doc().querySelector("details[data-knowledge-original]") as HTMLDetailsElement | null;
+      assert.ok(original);
+      assert.equal(original.open, false);
+      assert.equal(original.querySelector("summary")?.textContent, "Original extraction");
+      assert.equal(original.querySelector("p")?.textContent, "Show three plans, annual first.");
       const section = doc().querySelector('section[aria-label="Positions"]')!;
       const rows = [...section.querySelectorAll("[data-knowledge-position]")].map((row) => row.textContent);
       assert.deepEqual(rows, ["Alex Nguyen · Paywall teardownShow three plans with annual first.", "Unknown author · UntitledOne plan converts better under $10."]);
@@ -506,8 +511,54 @@ describe("the entry panel", () => {
       await show(concept({ concept: { id: KEPT, name: "Pricing page", type: "Tactic", confidence: 0.9, description: "Show three plans, annual first.", aliases: [], attributes: {} } }));
       assert.equal(doc().querySelector("[data-knowledge-summary]"), null);
       assert.equal(doc().querySelector('section[aria-label="Positions"]'), null);
-      assert.doesNotMatch(doc().body.textContent!, /As extracted/);
+      assert.equal(doc().querySelector("[data-knowledge-original]"), null);
       assert.match(doc().body.textContent!, /Show three plans, annual first\./);
+    });
+
+    it("shows the concept's family: the question, its summary, the other members (each opening) and every member entry's answer", async () => {
+      const family = {
+        id: "family-0123456789ab",
+        name: "How many plans on the pricing page",
+        concepts: [
+          { id: KEPT, name: "Pricing page", type: "Tactic" },
+          { id: "tactic-one-plan", name: "One plan only", type: "Tactic" },
+          { id: "tactic-three-plans", name: "Three plans, annual first", type: "Tactic" }
+        ],
+        summary: {
+          text: "How many plans a pricing page shows.",
+          positions: [
+            { entryId: "ke_aaaaaaaaaaaa", title: "Paywall teardown", author: "Alex Nguyen", claim: "Three plans, annual first." },
+            { entryId: "ke_bbbbbbbbbbbb", title: "", author: null, claim: "One plan under $10." }
+          ]
+        }
+      };
+      await show(concept({ family }));
+      await click(buttonNamed("Alex Nguyen · Paywall teardown", doc().querySelector('section[aria-label="Family"]')!));
+      assert.deepEqual(selected.at(-1), { kind: "entry", id: "ke_aaaaaaaaaaaa" });
+      await show(concept({ family }));
+      const section = doc().querySelector('section[aria-label="Family"]')!;
+      assert.ok(section);
+      assert.equal(section.querySelector("[data-knowledge-family-name]")?.textContent, "How many plans on the pricing page");
+      assert.match(section.textContent!, /How many plans a pricing page shows\./);
+      assert.deepEqual(
+        [...section.querySelectorAll("[data-knowledge-family-member]")].map((button) => button.getAttribute("data-knowledge-family-member")),
+        ["tactic-one-plan", "tactic-three-plans"],
+        "the other members, not this one"
+      );
+      assert.deepEqual(
+        [...section.querySelectorAll("[data-knowledge-family-position]")].map((row) => row.textContent),
+        ["Alex Nguyen · Paywall teardownThree plans, annual first.", "Unknown author · UntitledOne plan under $10."]
+      );
+      await click(section.querySelector('[data-knowledge-family-member="tactic-one-plan"]')!);
+      assert.deepEqual(selected.at(-1), { kind: "concept", id: "tactic-one-plan" });
+      // Not yet named (or not for this caller): the members, no summary.
+      await show(concept({ family: { id: "family-0123456789ab", name: "Concepts answering the same question", concepts: [{ id: KEPT, name: "Pricing page", type: "Tactic" }, { id: "tactic-one-plan", name: "One plan only", type: "Tactic" }] } }));
+      const bare = doc().querySelector('section[aria-label="Family"]')!;
+      assert.equal(bare.querySelectorAll("[data-knowledge-family-member]").length, 1);
+      assert.equal(bare.querySelectorAll("[data-knowledge-family-position]").length, 0);
+      // No family (an older daemon): no section.
+      await show(concept());
+      assert.equal(doc().querySelector('section[aria-label="Family"]'), null);
     });
 
     it("lists similar concepts, each opening", async () => {
