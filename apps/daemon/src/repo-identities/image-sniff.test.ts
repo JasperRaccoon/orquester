@@ -41,12 +41,17 @@ test("sniffRepoIcon reads doctype subsets, any case, and stops at a comment body
 });
 
 test("sniffRepoIcon answers adversarial SVG-ish text in linear time", () => {
-  const timed = (input: string): { result: string | null; ms: number } => {
+  const measured = (input: string) => {
     const encoded = text(input);
-    const started = performance.now();
+    const started = process.cpuUsage();
     const result = sniffRepoIcon(encoded);
-    return { result, ms: performance.now() - started };
+    const used = process.cpuUsage(started);
+    return { result, cpu: used.user + used.system };
   };
+  // A smaller valid comment run is the CPU baseline. The 20x larger cases
+  // stay within 64x of it, so a quadratic trailing-comment scan still fails.
+  const baseline = measured(`<svg></svg>${"<!---->".repeat(1_000)}`);
+  assert.equal(baseline.result, "image/svg+xml");
   // The first took effectively forever, the rest seconds, with the old nested-quantifier regexes.
   const cases = [
     `<svg/>${"<!---->".repeat(60)}x`,
@@ -57,11 +62,11 @@ test("sniffRepoIcon answers adversarial SVG-ish text in linear time", () => {
     `<svg>${"</svg>".repeat(20_000)}x`
   ];
   for (const input of cases) {
-    const { result, ms } = timed(input);
+    const { result, cpu } = measured(input);
     assert.equal(result, null);
-    assert.ok(ms < 100, `${input.slice(0, 20)}... took ${ms.toFixed(1)} ms`);
+    assert.ok(cpu < 64 * baseline.cpu, `${input.slice(0, 20)}... exceeds the scaled comment-run CPU baseline`);
   }
-  const valid = timed(`<svg></svg>${"<!---->".repeat(20_000)}`);
+  const valid = measured(`<svg></svg>${"<!---->".repeat(20_000)}`);
   assert.equal(valid.result, "image/svg+xml");
-  assert.ok(valid.ms < 100, `trailing comments took ${valid.ms.toFixed(1)} ms`);
+  assert.ok(valid.cpu < 64 * baseline.cpu, "trailing comments exceed the scaled comment-run CPU baseline");
 });

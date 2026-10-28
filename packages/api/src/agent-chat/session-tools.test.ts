@@ -328,15 +328,22 @@ test("base64 runs: adversarial input â€” many runs one short of the threshold â€
   // character once and gives the string back untouched.
   const nearMiss = `${"A".repeat(SESSION_TOOL_BASE64_RUN_MIN_CHARS - 1)} `;
   const adversarial = nearMiss.repeat(Math.ceil((4 * 1024 * 1024) / nearMiss.length));
-  const started = performance.now();
+  // A same-size input of droppable runs is the CPU baseline; process CPU
+  // excludes other workers and scheduling pauses on a loaded CI host.
+  const baselineRun = `${"B".repeat(SESSION_TOOL_BASE64_RUN_MIN_CHARS)} `;
+  const baselineInput = baselineRun.repeat(Math.ceil((2 * adversarial.length) / baselineRun.length));
+  const baselineStarted = process.cpuUsage();
+  dropBase64Runs(baselineInput);
+  const baseline = process.cpuUsage(baselineStarted);
+  const started = process.cpuUsage();
   assert.equal(dropBase64Runs(adversarial), adversarial);
   // The same size again with every other run long enough: all of those go.
   const mixed = `${nearMiss}${"B".repeat(SESSION_TOOL_BASE64_RUN_MIN_CHARS)} `.repeat(500);
   const out = dropBase64Runs(mixed);
   assert.equal(out.split("[base64 omitted:").length - 1, 500);
   assert.ok(!out.includes("B"));
-  // Generous: a linear pass takes tens of milliseconds; the old pattern took minutes here.
-  assert.ok(performance.now() - started < 5_000, `${Math.round(performance.now() - started)} ms`);
+  const used = process.cpuUsage(started);
+  assert.ok(used.user + used.system < 16 * (baseline.user + baseline.system), "near-miss runs stay within the same-size CPU baseline");
 });
 
 test("Codex's alternate name for our server is ours; a row its adapter says is another server's never is", () => {

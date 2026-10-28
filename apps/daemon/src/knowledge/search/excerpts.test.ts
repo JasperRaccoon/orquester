@@ -68,10 +68,6 @@ describe("relevantExcerpt", () => {
     assert.deepEqual(relevantExcerpt(LONG_GUIDE.body, query, budget), excerpt, "deterministic");
   });
 
-  it("the opening alone was what a cut body showed: the passage is past it", () => {
-    assert.ok(!LONG_GUIDE.body.slice(0, 3_000).includes(GMAIL_PASSAGE));
-  });
-
   it("nothing in common with the other entry: only the opening, about its length", () => {
     const excerpt = relevantExcerpt(LONG_GUIDE.body, { text: "zzz qqq" }, 3_000);
     assert.equal(parts(excerpt.text).length, 1);

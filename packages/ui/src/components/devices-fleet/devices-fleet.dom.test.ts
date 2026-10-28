@@ -184,9 +184,9 @@ describe("the Devices fleet view", () => {
 
   it("the activity bar and the drawer offer Devices only while the plugin is on", async () => {
     await render(createElement("div", null, createElement(ActivityBar), createElement(DevicesDrawerEntry), createElement(DevicesFleetHeader)));
-    assert.equal(buttonNamed("Devices"), null, "no plugins list yet");
+    assert.equal(buttonNamed("Devices") === null, true, "no plugins list yet");
     await act(async () => useAppStore.setState({ plugins: [devicesPlugin(false)] }));
-    assert.equal(buttonNamed("Devices"), null, "plugin off");
+    assert.equal(buttonNamed("Devices") === null, true, "plugin off");
     await act(async () => useAppStore.setState({ plugins: [devicesPlugin(true)] }));
     const [bar, row] = [...document.querySelectorAll("button")].filter((b) => b.getAttribute("aria-label") === "Devices" || b.textContent?.trim() === "Devices");
     assert.ok(bar && row);
@@ -211,7 +211,11 @@ describe("the Devices fleet view", () => {
 
   it("visible cards fetch authenticated thumbnails and their current action log", async () => {
     const fetched: string[] = [];
-    const api = await connect(stateOf(testFleet()));
+    const fleet = testFleet();
+    // A restarting device may still carry the previous stream; its state must stop polling.
+    const starting = fleet.leases.find((lease) => lease.id === "A1B2-ios-3")!;
+    starting.stream = { kind: "serve-sim", deviceParam: starting.id };
+    const api = await connect(stateOf(fleet));
     await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps(fetched) }));
     await act(settle);
 
@@ -243,8 +247,8 @@ describe("the Devices fleet view", () => {
     const hostCard = (id: string) => document.querySelector(`[data-host-id="${id}"]`)!;
     const inCard = (id: string, name: string) => [...hostCard(id).querySelectorAll("button")].find((b) => b.textContent?.trim() === name) ?? null;
 
-    assert.equal(inCard("local", "Drain"), null, "this host has no Drain or Destroy");
-    assert.equal(inCard("local", "Destroy"), null);
+    assert.equal(inCard("local", "Drain") === null, true, "this host has no Drain or Destroy");
+    assert.equal(inCard("local", "Destroy") === null, true);
     assert.ok(inCard("box:bs-linux-3", "Resume"), "a draining host offers Resume");
 
     await click(inCard("box:bs-linux-1", "Drain")!);
@@ -321,7 +325,7 @@ describe("the Devices fleet view", () => {
     api.fail = false;
     await click(buttonNamed("Try again")!);
     await act(settle);
-    assert.equal(document.querySelector("[data-fleet-error]"), null);
+    assert.equal(document.querySelector("[data-fleet-error]") === null, true);
     assert.ok(document.querySelector('[data-lease-id="emulator-5554"]'));
   });
 
@@ -335,7 +339,7 @@ describe("the Devices fleet view", () => {
     await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
     assert.ok(document.querySelector("[data-fleet-loading]"));
     await act(async () => { answer(state); await settle(); });
-    assert.equal(document.querySelector("[data-fleet-loading]"), null);
+    assert.equal(document.querySelector("[data-fleet-loading]") === null, true);
     assert.ok(document.querySelector('[data-lease-id="emulator-5554"]'));
   });
 });

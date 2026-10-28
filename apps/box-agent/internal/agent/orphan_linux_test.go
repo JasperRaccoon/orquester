@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
-	"time"
 )
 
 // startLeftover starts `sleep` in its own process group, as a detached process is.
@@ -201,7 +200,7 @@ func TestALeftoverIgnoringSigtermIsKilled(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := procStateEntry{ProcID: "p", procIdentity: identityOf(t, cmd.Process.Pid)}
-	if got := stopOrphan(entry, 100*time.Millisecond); got != "SIGKILL" {
+	if got := stopOrphan(entry, 0); got != "SIGKILL" {
 		t.Fatalf("stopped with %q", got)
 	}
 	_ = cmd.Wait()

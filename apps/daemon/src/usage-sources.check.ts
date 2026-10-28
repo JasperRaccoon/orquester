@@ -183,8 +183,8 @@ async function grokTests() {
     now
   })();
   assert.ok(expired, "expired credential is still linked, not null");
-  assert.equal(expired.stale, true);
   assert.equal(fetches, 0, "expired token must not be sent upstream");
+  assert.equal(expired.stale, true);
 
   // 429 → backoff with last-good served stale; no second fetch.
   let calls = 0;

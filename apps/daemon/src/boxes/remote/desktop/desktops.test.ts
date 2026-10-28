@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -318,29 +318,21 @@ test("box host env: the box's own base, never the host's (no host PATH or NODE_O
 });
 
 test("box host signals: a group is hit only while its leader still carries the desktop's marker", async () => {
-  const connection = localBoxConnection();
+  const signals: string[] = [];
+  const { connection } = tmuxConnection(([command, flag, script, ...args]) => {
+    // Run the actual ownership check; replacing kill makes even a broken guard harmless.
+    const result = spawnSync(command!, [flag!, 'kill() { printf "SIGNAL %s\\n" "$2"; }\n' + script!, ...args], { encoding: "utf8" });
+    signals.push(...result.stdout.split("\n").filter((line) => line.startsWith("SIGNAL ")));
+    return { stdout: result.stdout, stderr: result.stderr, code: result.status ?? 1 };
+  });
   const host = new BoxDesktopHost({ boxId: "b1", connection: () => connection });
-  const leader = (args: string[], env: Record<string, string> = {}) => {
-    // detached: its own process group, the child leading it.
-    const child = spawn("/bin/sh", args, { detached: true, stdio: "ignore", env: { ...process.env, ...env } });
-    const exited = new Promise<NodeJS.Signals | null>((resolve) => child.once("exit", (_code, signal) => resolve(signal)));
-    return { pid: child.pid!, exited };
-  };
-
-  const app = leader(["-c", "sleep 600 & wait"], { XAUTHORITY: "/d/ours/Xauthority" });
-  // Someone else's group under the same pid (a reboot reused it): left alone.
-  await host.signalGroup(app.pid, "SIGTERM", { environ: "XAUTHORITY=/d/other/Xauthority" });
-  await host.signalGroup(app.pid, "SIGTERM", { argument: "/d/ours" });
-  await host.signalGroup(app.pid, "SIGKILL", { environ: "XAUTHORITY=/d/ours/Xauthority" });
-  assert.equal(await app.exited, "SIGKILL", "only the matching check signalled it");
-
-  const hostGroup = leader(["-c", "sleep 600 & wait", "sh", "/d/ours"]);
-  await host.signalGroup(hostGroup.pid, "SIGTERM", { argument: "/d/other" });
-  await host.signalGroup(hostGroup.pid, "SIGKILL", { argument: "/d/ours" });
-  assert.equal(await hostGroup.exited, "SIGKILL");
-
-  // Nothing there at all: no error.
-  await host.signalGroup(app.pid, "SIGKILL", { argument: "/d/ours" });
+  const pid = process.pid;
+  await host.signalGroup(pid, "SIGTERM", { environ: "XAUTHORITY=/d/other/Xauthority" });
+  await host.signalGroup(pid, "SIGTERM", { argument: "/d/other" });
+  await host.signalGroup(pid, "SIGKILL", { environ: `PATH=${process.env.PATH}` });
+  await host.signalGroup(pid, "SIGKILL", { argument: process.execPath });
+  await host.signalGroup(Number.MAX_SAFE_INTEGER, "SIGKILL", { argument: process.execPath });
+  assert.deepEqual(signals, ["SIGNAL KILL", "SIGNAL KILL"], "only matching ownership markers allow a signal");
 });
 
 test("an orq-agent without unix channels is told apart, and its VM refuses desktops with how it updates", async () => {

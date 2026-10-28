@@ -169,7 +169,7 @@ hooks = true
   });
 
   it("writes empty exclusion lists and no MCP servers for an empty profile", () => {
-    const doc = parseToml(renderGrokProfileConfigToml({ carriedOver: {}, mcpServers: {}, skillsIgnore: [], pluginsDisabled: [] }));
+    const doc = parseToml(renderGrokProfileConfigToml({ carriedOver: { mcp_servers: { global: { command: "global" } } }, mcpServers: {}, skillsIgnore: [], pluginsDisabled: [] }));
     assert.deepEqual(doc.skills, { ignore: [] });
     assert.deepEqual(doc.plugins, { disabled: [] });
     assert.deepEqual(doc.mcp_servers ?? {}, {});

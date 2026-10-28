@@ -1,15 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { parseForgeLink, type ForgeLink, type GitHubLinkPreview, type GitHubPullPreview } from "@orquester/api";
+import { type GitHubLinkPreview, type GitHubPullPreview } from "@orquester/api";
 
-import { checksPresentation, forgePillPresentation, previewTimeline } from "./pill.logic";
-
-const link = (href: string): ForgeLink => {
-  const parsed = parseForgeLink(href);
-  assert.ok(parsed, href);
-  return parsed;
-};
+import { checksPresentation, previewTimeline } from "./pill.logic";
 
 const PULL: GitHubPullPreview = {
   kind: "pull",
@@ -48,49 +42,6 @@ const issue = (state: "open" | "closed", stateReason: "completed" | "not_planned
   updatedAt: null,
   closedAt: "2026-10-03T00:00:00Z",
   comments: 0
-});
-
-describe("forgePillPresentation", () => {
-  it("maps PR states to GitHub's icons and tones", () => {
-    const pr = link("https://github.com/a/b/pull/1");
-    assert.deepEqual(forgePillPresentation(pr, PULL), { icon: "pull", tone: "open", stateLabel: "Open" });
-    assert.deepEqual(forgePillPresentation(pr, { ...PULL, state: "draft" }), { icon: "pull-draft", tone: "draft", stateLabel: "Draft" });
-    assert.deepEqual(forgePillPresentation(pr, { ...PULL, state: "merged" }), { icon: "pull-merged", tone: "merged", stateLabel: "Merged" });
-    assert.deepEqual(forgePillPresentation(pr, { ...PULL, state: "closed" }), { icon: "pull-closed", tone: "closed", stateLabel: "Closed" });
-  });
-
-  it("maps issue states, completed purple and not-planned grey", () => {
-    const ref = link("https://github.com/a/b/issues/2");
-    assert.deepEqual(forgePillPresentation(ref, issue("open")), { icon: "issue", tone: "open", stateLabel: "Open" });
-    assert.deepEqual(forgePillPresentation(ref, issue("closed", "completed")), { icon: "issue-done", tone: "merged", stateLabel: "Closed" });
-    assert.deepEqual(forgePillPresentation(ref, issue("closed")), { icon: "issue-done", tone: "merged", stateLabel: "Closed" });
-    assert.deepEqual(forgePillPresentation(ref, issue("closed", "not_planned")), {
-      icon: "issue-not-planned",
-      tone: "draft",
-      stateLabel: "Closed as not planned"
-    });
-    // An `/issues/N` that is a PR takes the PR's look once read.
-    assert.equal(forgePillPresentation(ref, { ...PULL, state: "merged" }).icon, "pull-merged");
-  });
-
-  it("names the kind, neutrally, before or without a preview", () => {
-    const cases: Array<[string, string]> = [
-      ["https://github.com/a/b/pull/1", "pull"],
-      ["https://github.com/a/b/issues/1", "issue"],
-      ["https://github.com/a/b/discussions/1", "discussion"],
-      ["https://github.com/a/b/commit/abcdef1", "commit"],
-      ["https://github.com/a/b", "repo"],
-      ["https://github.com/a/b/blob/main/x.ts", "file"],
-      ["https://github.com/a/b/tree/main/src", "folder"],
-      ["https://github.com/a/b/releases/tag/v1", "release"],
-      ["https://github.com/a/b/actions/runs/9", "run"],
-      ["https://gitlab.com/g/p/-/merge_requests/1", "gitlab"],
-      ["https://bitbucket.org/w/r/pull-requests/1", "bitbucket"]
-    ];
-    for (const [href, icon] of cases) {
-      assert.deepEqual(forgePillPresentation(link(href), null), { icon, tone: "neutral", stateLabel: null }, href);
-    }
-  });
 });
 
 describe("checksPresentation", () => {

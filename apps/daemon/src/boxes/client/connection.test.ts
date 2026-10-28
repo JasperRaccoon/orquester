@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { finished } from "node:stream/promises";
 import { test } from "node:test";
 
 import {
@@ -22,7 +23,7 @@ function feed(mux: BoxMux, ch: number, bytes: number): void {
 }
 
 /** A connection on a mux whose outgoing frames are captured; `nextOpen` resolves each `open` the host sends. */
-function linked(): {
+function linked(onControl?: (message: BoxControlMessage) => void): {
   connection: LinkedBoxConnection;
   mux: BoxMux;
   sent: BoxControlMessage[];
@@ -34,6 +35,7 @@ function linked(): {
     sendText: (text) => {
       const message = parseControlMessage(text)!;
       sent.push(message);
+      onControl?.(message);
       if (message.t === "open") waiters.shift()?.(message);
     },
     sendBinary: (frame) => {
@@ -68,32 +70,32 @@ test("a box that sends past its credit window gets the channel closed, not buffe
   mux.receiveControl({ t: "opened", ch: open.ch });
   const readable = await download;
   readable.pause();
-  const failed = new Promise<Error>((resolve) => readable.once("error", resolve));
+  const completion = finished(readable);
   // A whole window is fine even unread; one byte more is not.
   feed(mux, open.ch, BOX_CHANNEL_WINDOW_BYTES);
   assert.equal(sent.some((m) => m.t === "close"), false);
   mux.receiveBinary(encodeDataFrame(open.ch, 1, new Uint8Array(1)));
-  assert.equal(((await failed) as Error & { code: string }).code, "WINDOW_EXCEEDED");
+  mux.receiveControl({ t: "eof", ch: open.ch, stream: 1 });
+  mux.receiveControl({ t: "close", ch: open.ch });
+  readable.resume();
+  await assert.rejects(completion, { code: "WINDOW_EXCEEDED" });
   const close = sent.find((m) => m.t === "close" && m.ch === open.ch) as Extract<BoxControlMessage, { t: "close" }>;
   assert.equal(close.error?.code, "WINDOW_EXCEEDED");
 });
 
 test("credit returned to the box reopens the window", async () => {
-  const { connection, mux, sent, nextOpen } = linked();
+  let credited = 0;
+  let creditReturned!: () => void;
+  const consumedWindow = new Promise<void>((resolve) => (creditReturned = resolve));
+  const { connection, mux, sent, nextOpen } = linked((message) => {
+    if (message.t === "credit" && (credited += message.bytes) >= BOX_CHANNEL_WINDOW_BYTES) creditReturned();
+  });
   const download = connection.readFile("/big");
   const open = await nextOpen();
   mux.receiveControl({ t: "opened", ch: open.ch });
   const readable = await download;
   let got = 0;
   readable.on("data", (chunk: Buffer) => (got += chunk.byteLength));
-  const consumedWindow = new Promise<void>((resolve) => {
-    const check = (): void => {
-      const credited = sent.filter((m) => m.t === "credit" && m.ch === open.ch).reduce((sum, m) => sum + (m as { bytes: number }).bytes, 0);
-      if (credited >= BOX_CHANNEL_WINDOW_BYTES) resolve();
-      else setImmediate(check);
-    };
-    check();
-  });
   feed(mux, open.ch, BOX_CHANNEL_WINDOW_BYTES);
   await consumedWindow;
   feed(mux, open.ch, BOX_CHANNEL_WINDOW_BYTES / 2);
@@ -139,7 +141,7 @@ test("output a box sends after its eof is dropped, never pushed after the end", 
   // A late frame on the finished stream, in the same turn (before `end` was read).
   mux.receiveBinary(encodeDataFrame(open.ch, 1, Buffer.from("late")));
   mux.receiveControl({ t: "exit", ch: open.ch, code: 0, signal: null });
-  await new Promise((resolve) => proc.stdout.once("end", resolve));
+  await finished(proc.stdout);
   assert.equal(out, "tail");
   assert.deepEqual(errors, []);
 });
@@ -167,10 +169,13 @@ test("a file read never yields more than the length asked for", async () => {
   const readable = await download;
   let got = "";
   readable.on("data", (chunk: Buffer) => (got += chunk.toString()));
-  const failed = new Promise<Error>((resolve) => readable.once("error", resolve));
+  const completion = finished(readable);
   mux.receiveBinary(encodeDataFrame(open.ch, 1, Buffer.from("abcd")));
   mux.receiveBinary(encodeDataFrame(open.ch, 1, Buffer.from("efgh")));
-  assert.equal(((await failed) as Error & { code: string }).code, "TOO_LONG");
+  mux.receiveControl({ t: "eof", ch: open.ch, stream: 1 });
+  mux.receiveControl({ t: "close", ch: open.ch });
+  readable.resume();
+  await assert.rejects(completion, { code: "TOO_LONG" });
   assert.ok(!got.includes("e"));
   assert.equal((sent.find((m) => m.t === "close" && m.ch === open.ch) as Extract<BoxControlMessage, { t: "close" }>).error?.code, "TOO_LONG");
 });

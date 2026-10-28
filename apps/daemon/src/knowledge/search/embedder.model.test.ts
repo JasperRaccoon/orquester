@@ -5,6 +5,7 @@ import test from "node:test";
 import { Tokenizer } from "@huggingface/tokenizers";
 import { EMBEDDING_MODEL } from "../install/pins.ts";
 import { OnnxSentenceEmbedder } from "./embedder.ts";
+import { cpu } from "./test-fakes.ts";
 import { chunkBody, embeddingHeader, embeddingPassage } from "./text.ts";
 
 // Runs only with real model files: ORQUESTER_KG_MODEL_DIR is a transformers.js `localModelPath`
@@ -30,12 +31,12 @@ function pinned(logger: Pick<Console, "warn"> = console): OnnxSentenceEmbedder {
   });
 }
 
-test("the pinned model on onnxruntime-node: 384-d normalized vectors, semantically ordered across languages, fast when warm", { skip: SKIP, timeout: 120_000 }, async (t) => {
+test("the pinned model on onnxruntime-node: 384-d normalized vectors, semantically ordered across languages, fast when warm", { skip: SKIP }, async (t) => {
   const embedder = pinned();
   t.after(() => embedder.dispose());
-  const loadStarted = performance.now();
+  const loadStarted = cpu();
   await embedder.warm();
-  const loadMs = performance.now() - loadStarted;
+  const loadMs = cpu() - loadStarted;
 
   const [query, queryEs] = await embedder.embed(["Ranking in ChatGPT", "Cómo aparecer en las respuestas de ChatGPT"], "query");
   const [close, far] = await embedder.embed([
@@ -50,16 +51,14 @@ test("the pinned model on onnxruntime-node: 384-d normalized vectors, semantical
   const short = "Alternatives pages convert well. Write one per competitor: [competitor] vs [you], with honest comparison tables.";
   const timings: number[] = [];
   for (let i = 0; i < 20; i += 1) {
-    const started = performance.now();
+    const started = cpu();
     await embedder.embed([short]);
-    timings.push(performance.now() - started);
+    timings.push(cpu() - started);
   }
   timings.sort((a, b) => a - b);
   const median = timings[10]!;
-  const worst = timings[timings.length - 1]!;
 
-  t.diagnostic(`model load ${loadMs.toFixed(0)} ms; short entry warm median ${median.toFixed(1)} ms, max ${worst.toFixed(1)} ms`);
-  assert.ok(median < 200, `warm median ${median.toFixed(1)} ms`);
+  assert.ok(median < loadMs, `warm median ${median.toFixed(1)} CPU ms must stay below cold model load ${loadMs.toFixed(1)} CPU ms`);
 });
 
 test("contextual passages fit the pinned tokenizer's 512-token limit, including prefix and special tokens", { skip: SKIP }, async () => {

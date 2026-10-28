@@ -16,7 +16,6 @@ import {
   profileChipLabel,
   profileStatusPill,
   profileUnavailableReason,
-  scopeLabel
 } from "./logic.ts";
 
 const zero = { total: 0, enabled: 0 };
@@ -41,13 +40,6 @@ function profile(id: string, name: string, preparation: Partial<Record<string, S
 }
 
 describe("agent profile presentation", () => {
-  it("names the agent scope", () => {
-    assert.equal(scopeLabel("all"), "all agents");
-    assert.equal(scopeLabel(["claude"]), "Claude only");
-    assert.equal(scopeLabel(["codex", "claude"]), "Claude, Codex");
-    assert.equal(scopeLabel(["claude", "codex", "grok", "opencode"]), "all agents");
-  });
-
   it("counts what is on, and what a card lists", () => {
     const item = (enabled: boolean) => ({ id: "x", kind: "skill" as const, name: "x", enabled, agents: "all" as const });
     assert.equal(enabledLine([item(true), item(false), item(true)]), "2 of 3 on");

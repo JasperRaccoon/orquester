@@ -13,10 +13,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import fs, { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { describe, it, type TestContext } from "node:test";
 
 import type { EventMessage, SessionSummary } from "@orquester/api";
 import {
@@ -475,17 +476,26 @@ async function idle(w: World): Promise<void> {
   } while (w.router.hasWorkInFlight() || w.queue.hasWorkInFlight());
 }
 
-/**
- * Yield to the event loop until `check` holds: an intermediate state of the router's own async
- * steps, which no idle signal can name. Bounded by wall-clock time, not a turn count (a loaded
- * machine needs more turns), and loud when it is never reached.
- */
-async function until(check: () => boolean): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  while (!check()) {
-    if (Date.now() > deadline) throw new Error("the awaited state was never reached");
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+/** Pause the persisted waiter claim so a timer or release lands during that write. */
+function holdWaiterClaim(t: TestContext, w: World) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let entered!: () => void;
+  const claimed = new Promise<void>((resolve) => (entered = resolve));
+  const original = fs.writeFile;
+  const mocked = t.mock.method(fs, "writeFile", async (...args: Parameters<typeof writeFile>) => {
+    const [file, content] = args;
+    if (String(file).startsWith(`${w.replyFile}.`) && typeof content === "string" &&
+        /"state"\s*:\s*"claimed-by-waiter"/.test(content)) {
+      entered();
+      await gate;
+    }
+    return original(...args);
+  });
+  syncBuiltinESMExports();
+  const restore = () => { mocked.mock.restore(); syncBuiltinESMExports(); };
+  t.after(() => { release(); restore(); });
+  return { claimed, release, restore };
 }
 
 const exchange = (hop = 1, exchangeId = "ex-1"): CausedBy => ({ threadId: "req", exchangeId, hop });
@@ -528,9 +538,9 @@ describe("reply subscriptions: binding", () => {
     const w = await world();
     w.host.userTurn("tgt");
     const res = await w.router.subscribe("tgt", request("notify"));
+    assert.equal(postsTo(w.host, "tgt").length, 0, "no steer into the running turn");
     assert.equal(res.delivery, "queued");
     assert.equal(res.queueEntryId, res.commandId);
-    assert.equal(postsTo(w.host, "tgt").length, 0, "no steer into the running turn");
     assert.deepEqual(w.queue.pending().map((p) => [p.kind, p.parentSessionId, p.childSessionId]), [["message", "tgt", "req"]]);
 
     // The user's own turn ends: its answer is not the reply; the message is posted as the next turn.
@@ -554,16 +564,18 @@ describe("reply subscriptions: binding", () => {
 
   it("binds through a retried post: the attempt that landed, found by its own command id", async () => {
     const w = await world();
-    w.host.userTurn("tgt");
+    await w.host.api.request("POST", "/api/sessions/tgt/turn", { body: {
+      commandId: "earlier", input: request("notify").input, causedBy: exchange()
+    } });
     const res = await w.router.subscribe("tgt", request("notify"));
     w.host.settle("tgt", { reply: "user" });
     w.host.refuseNextWith({ status: 409, body: { error: { code: "COMMAND_REJECTED", message: "timed out", detail: { reason: "deadline" } } } });
     await idle(w);
-    assert.equal(postsTo(w.host, "tgt").length, 0, "the first attempt was refused");
+    assert.equal(postsTo(w.host, "tgt").length, 1, "the first attempt was refused");
     // The retry delay is the queue's; act on it directly (Deliver now) to keep the test clock-free.
     await w.queue.actOnMerge("tgt", res.commandId, { action: "deliver" });
     await idle(w);
-    const landed = postsTo(w.host, "tgt")[0]!;
+    const landed = postsTo(w.host, "tgt").at(-1)!;
     assert.equal(landed.body.commandId, `${res.commandId}:1`, "a retry is a new command id");
     w.host.settle("tgt", { reply: "Bound anyway." });
     await idle(w);
@@ -639,7 +651,7 @@ describe("reply subscriptions: the waiter and the router (CAS)", () => {
     await w.cleanup();
   });
 
-  it("the edge: settle and timeout in the same tick — exactly one consumer, either way", async () => {
+  it("the edge: settle and timeout in the same tick — exactly one consumer, either way", async (t) => {
     for (const order of ["timer-then-router", "router-then-timer"] as const) {
       const w = await world();
       const res = await w.router.subscribe("tgt", request("wait"));
@@ -649,10 +661,12 @@ describe("reply subscriptions: the waiter and the router (CAS)", () => {
         w.host.settle("tgt", { reply: "Edge." });
         w.timers.fireAll();
       } else {
+        const claim = holdWaiterClaim(t, w);
         w.host.settle("tgt", { reply: "Edge." });
-        // Fire once the router has claimed for the waiter (its persisted CAS), before it resolved.
-        await until(() => w.router.subscriptions()[0]!.state !== "waiting");
+        await claim.claimed;
         w.timers.fireAll();
+        claim.release();
+        claim.restore();
       }
       const answer = await waiting;
       await idle(w);
@@ -692,7 +706,7 @@ describe("reply subscriptions: the waiter and the router (CAS)", () => {
     await assert.rejects(w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 5 }), (e) => e instanceof ReplyError && e.code === "WAIT_CYCLE");
     release();
     await assert.rejects(
-      w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 5 }, { principal: { kind: "agent", threadId: "tgt", projectPath: "" } }),
+      w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 5 }, { principal: { kind: "agent", threadId: "tgt", projectPath: "" }, signal: AbortSignal.abort() }),
       (e) => e instanceof ReplyError && e.code === "PERMISSION_DENIED"
     );
     await assert.rejects(w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 0 }), (e) => e instanceof ReplyError && e.code === "INVALID_COMMAND");
@@ -970,28 +984,24 @@ describe("fix round 1: released waiters", () => {
     await w.cleanup();
   });
 
-  it("release racing the router's claim: exactly one consumer — the reply is delivered, never lost", async () => {
+  it("release racing the router's claim: exactly one consumer — the reply is delivered, never lost", async (t) => {
     const w = await world();
     const res = await w.router.subscribe("tgt", request("wait"));
     const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
     await idle(w);
+    const claim = holdWaiterClaim(t, w);
     w.host.settle("tgt", { reply: "Raced." });
-    // The router has written `claimed-by-waiter` (or is writing it) when the release lands.
-    await until(() => w.router.subscriptions()[0]!.state !== "waiting");
-    const state = w.router.subscriptions()[0]!.state;
-    const released = await w.router.release("tgt", res.subscriptionId);
+    await claim.claimed;
+    const release = w.router.release("tgt", res.subscriptionId);
+    claim.release();
+    claim.restore();
+    const released = await release;
     const answer = await waiting;
     await idle(w);
     const delivered = w.router.deliveries().length;
-    if (state === "claimed-by-waiter") {
-      assert.equal(released.released, true);
-      assert.equal(answer.outcome, "notify", "the released waiter got nothing");
-      assert.equal(delivered, 1, "so the reply was delivered");
-    } else {
-      // The waiter took it, then its call went away (the release): the reply comes as a message too.
-      assert.equal(answer.outcome, "replied");
-      assert.equal(delivered, 1);
-    }
+    assert.equal(released.released, true);
+    assert.equal(answer.outcome, "notify", "the released waiter got nothing");
+    assert.equal(delivered, 1, "so the reply was delivered");
     assert.equal(postsTo(w.host, "req").length, 1, "exactly one message either way");
     await w.cleanup();
   });
@@ -1046,11 +1056,11 @@ describe("fix round 1: never someone else's turn", () => {
     const res = await w.router.subscribe("tgt", request("notify"));
     assert.equal(res.delivery, "sent");
     await idle(w);
+    w.host.settle("tgt", { reply: "someone else's answer" });
+    await idle(w);
     const delivery = w.router.deliveries()[0]!;
     assert.equal(delivery.outcome, "failed");
     assert.match(parseThreadMessage(delivery.input)!.body, /joined its running turn instead of starting its own/);
-    w.host.settle("tgt", { reply: "someone else's answer" });
-    await idle(w);
     assert.equal(w.router.deliveries().length, 1, "that turn's reply is never delivered");
     await w.cleanup();
   });
@@ -1187,10 +1197,10 @@ describe("fix round 1: late waiters, lost turns, quiet events", () => {
     await w.router.subscribe("tgt", request("notify"));
     w.host.touch("tgt");
     await idle(w);
-    const reads = w.host.snapshotReads("tgt");
+    const reads = [w.host.headReads("tgt"), w.host.snapshotReads("tgt")];
     for (let i = 0; i < 5; i += 1) w.host.touch("tgt");
     await idle(w);
-    assert.equal(w.host.snapshotReads("tgt"), reads);
+    assert.deepEqual([w.host.headReads("tgt"), w.host.snapshotReads("tgt")], reads);
     await w.cleanup();
   });
 });
@@ -1432,8 +1442,10 @@ describe("Task 8 fix round 1: the release tombstone", () => {
     const w = await world();
     const res = await w.router.subscribe("tgt", request("wait"));
     assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: false, state: "notify" });
-    assert.deepEqual(await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 }), { outcome: "notify", reason: "timeout", willNotify: true });
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await idle(w);
     assert.equal(w.timers.pending(), 0, "the late wait never attached");
+    assert.deepEqual(await waiting, { outcome: "notify", reason: "timeout", willNotify: true });
     w.host.settle("tgt", { reply: "As a message." });
     await idle(w);
     const sub = w.router.subscriptions()[0]! as { state: string; ended?: string; released?: true };
@@ -1953,7 +1965,9 @@ describe("attention: a delegated child's question wakes its parent", () => {
     await idle(again);
     w.host.settle("req", { reply: "done" });
     await idle(again);
-    assert.equal(notices(w.host).length, 1);
+    w.host.settle("req", { reply: "notice read" });
+    await idle(again);
+    assert.equal(notices(w.host).length, 1, "no duplicate queued behind the notice's own turn");
     await again.cleanup();
   });
 
@@ -2052,7 +2066,7 @@ describe("a stopped chat is not woken by the delegates its stop interrupted", ()
   it("a parent waiting in wait_for_session returns at once, told the task stopped with it, and is not woken after", async () => {
     const w = await stoppable({ reply: "wait" });
     const waiting = w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 60 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
-    await until(() => sub(w, w.res.subscriptionId).state === "waiting" && w.timers.pending() > 0);
+    await w.router.whenIdle();
     await w.stop();
     const answer = await waiting;
     assert.equal(answer.outcome, "replied");

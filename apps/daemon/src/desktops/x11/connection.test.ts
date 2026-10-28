@@ -218,19 +218,22 @@ describe("X11Connection", () => {
     await assert.rejects(conn.internAtom("B"), X11ConnectionClosedError);
   });
 
-  test("a reply declaring more than the cap closes the connection instead of buffering it", async () => {
+  test("a reply declaring more than the cap closes the connection instead of buffering it", async (t) => {
     const { server, conn } = await connected();
-    const pending = conn.internAtom("A");
+    t.after(() => conn.close());
+    const pending = assert.rejects(conn.internAtom("A"), X11ConnectionClosedError);
     const closed = once(conn, "close") as Promise<[Error | null]>;
     // A reply header whose length field says ~16 GiB follows.
     const huge = reply(1);
     huge.writeUInt32LE(0xffffffff, 4);
     server.push(huge);
+    await new Promise((resolve) => setImmediate(resolve)); // drain the stream's error and close
+    assert.equal(conn.isClosed, true, "an oversized frame must close the connection");
     const [error] = await closed;
     assert.ok(error instanceof X11ConnectionClosedError);
     assert.ok(error.cause instanceof X11MessageTooLargeError);
     assert.ok((error.cause as X11MessageTooLargeError).length > MAX_SERVER_MESSAGE_BYTES);
-    await assert.rejects(pending, X11ConnectionClosedError);
+    await pending;
   });
 
   test("close() reports a null error", async () => {

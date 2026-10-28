@@ -286,7 +286,7 @@ describe("the List view", () => {
       const sort = doc().querySelector('[role="radiogroup"][aria-label="Sort"]')!;
       await click([...sort.querySelectorAll("button")].find((b) => b.textContent === "Newest")!);
       assert.equal(searches[searches.length - 1]?.sort, "newest");
-      assert.equal(searches[searches.length - 1]?.cursor, undefined, "a new sort starts over");
+      assert.equal((searches[searches.length - 1]?.cursor) === undefined, true, "a new sort starts over");
     } finally {
       mock.timers.reset();
     }
@@ -431,7 +431,7 @@ describe("the List view", () => {
 
     await click(buttonNamed("Clear"));
     assert.deepEqual(current, EMPTY);
-    assert.equal(lists[lists.length - 1]?.kinds, undefined);
+    assert.equal((lists[lists.length - 1]?.kinds) === undefined, true);
   });
 
   it("an older daemon without facets says filters need a newer server", async () => {
@@ -506,7 +506,8 @@ describe("the List view", () => {
     assert.doesNotMatch(text(), /No visible entry|Retry/);
   });
 
-  it("Rediscover: older entries like this week's, hidden for an older daemon, dismissible", async () => {
+  it("Rediscover: older entries like this week's, hidden for an older daemon, dismissible", async (t) => {
+    t.mock.method(Date, "now", () => Date.parse("2026-10-27T12:00:00.000Z"));
     const recent = new Date(Date.now() - DAY).toISOString();
     const listing = {
       listKnowledgeEntries: async (query: KnowledgeEntriesQuery = {}): Promise<KnowledgeEntriesResponse> => (
@@ -519,7 +520,7 @@ describe("the List view", () => {
     await show({ ...listing, searchKnowledge: async (req: KnowledgeSearchRequest) => (searches.push(req), { hits: [old], searched: [] }) });
     assert.deepEqual(searches[0]?.similarTo, ["ke_recent00000"]);
     assert.match(searches[0]?.filters?.savedBefore ?? "", /^\d{4}-\d{2}-\d{2}$/);
-    assert.equal(doc().querySelector('section[aria-label="Rediscover"]'), null);
+    assert.equal((doc().querySelector('section[aria-label="Rediscover"]')) === null, true);
     act(() => root.unmount());
 
     const mount = doc().createElement("div");
@@ -532,6 +533,6 @@ describe("the List view", () => {
     assert.deepEqual(selected, ["ke_old0000000"]);
 
     await click(buttonNamed("Dismiss Rediscover"));
-    assert.equal(strip(), null);
+    assert.equal((strip()) === null, true);
   });
 });

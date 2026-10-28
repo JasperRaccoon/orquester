@@ -174,11 +174,10 @@ describe("round task attempts", () => {
     await reread.load();
     assert.equal(reread.gaveUp(item.key), true);
     assert.equal(reread.gaveUp("other"), false);
-    assert.deepEqual(reread.givenUp().map((r) => [r.key, r.failures, r.gaveUpAt]), [[item.key, 3, "2026-10-27T12:00:00.000Z"]]);
     await reread.answered("other");
     await reread.flush();
-    const written = JSON.parse(await readFile(path, "utf8")) as { attempts: { key: string }[] };
-    assert.deepEqual(written.attempts.map((r) => r.key), [item.key]);
+    const written = JSON.parse(await readFile(path, "utf8")) as { attempts: { key: string; failures: number; gaveUpAt: string | null }[] };
+    assert.deepEqual(written.attempts.map((r) => [r.key, r.failures, r.gaveUpAt]), [[item.key, 3, "2026-10-27T12:00:00.000Z"]]);
   });
 });
 

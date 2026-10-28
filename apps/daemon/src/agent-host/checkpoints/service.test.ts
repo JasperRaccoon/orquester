@@ -17,6 +17,7 @@ import type { Checkpoint } from "@orquester/api/agent-chat";
 
 import type { CheckpointService } from "../services.ts";
 import { checkpointRefForThreadTurn, checkpointRefNamespace } from "./refs.ts";
+import { createGitRunner } from "./git.ts";
 import {
   CheckpointRefDeleteError,
   CheckpointRollbackUnsupportedError,
@@ -468,12 +469,27 @@ test("a cone sparse checkout captures skipped files instead of deleting them", a
 test("concurrent captures on two threads of one repo do not corrupt each other", async (t) => {
   const repo = await seededRepo();
   t.after(() => repo.cleanup());
-  const service = serviceFor(repo);
-
-  const [first, second] = await Promise.all([
-    service.captureBaseline({ threadId: "thread-one", cwd: repo.dir }),
-    service.captureBaseline({ threadId: "thread-two", cwd: repo.dir })
-  ]);
+  const runner = createGitRunner({ gitEnv: repo.gitEnv });
+  let parked!: () => void, release!: () => void;
+  const atWrite = new Promise<void>((resolve) => { parked = resolve; });
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let firstWrite = true;
+  const service = createCheckpointService({ gitEnv: repo.gitEnv, runnerFor: async () => ({
+    run: async (input) => {
+      if (firstWrite && input.args.includes("write-tree")) {
+        firstWrite = false;
+        parked();
+        await held;
+      }
+      return runner.run(input);
+    }
+  }) });
+  const firstPending = service.captureBaseline({ threadId: "thread-one", cwd: repo.dir });
+  await atWrite;
+  await repo.write("tracked.txt", "two\n");
+  const second = await service.captureBaseline({ threadId: "thread-two", cwd: repo.dir });
+  release();
+  const first = await firstPending;
 
   assert.ok(first);
   assert.ok(second);
@@ -482,6 +498,8 @@ test("concurrent captures on two threads of one repo do not corrupt each other",
   const expected = [".gitignore", "staged.txt", "tracked.txt", "untracked.txt"];
   assert.deepEqual(await treePaths(repo, first.ref), expected);
   assert.deepEqual(await treePaths(repo, second.ref), expected);
+  assert.equal(await repo.gitReadOnly("show", `${first.ref}:tracked.txt`), "one\n");
+  assert.equal(await repo.gitReadOnly("show", `${second.ref}:tracked.txt`), "two\n");
 });
 
 test("a repository with no commits at all still captures a baseline", async (t) => {

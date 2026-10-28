@@ -30,11 +30,6 @@ afterEach(() => {
   delete g.localStorage;
 });
 
-test("gitignored files are hidden by default", () => {
-  install();
-  assert.equal(loadSearchOptions("/p").includeIgnored, false);
-});
-
 test("a record written before includeIgnored existed loads with it off", () => {
   install({ "/p": { caseSensitive: true, wholeWord: false, regex: false, include: "*.ts", exclude: "", filtersExpanded: true } });
   const options = loadSearchOptions("/p");

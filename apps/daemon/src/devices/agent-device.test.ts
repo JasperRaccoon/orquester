@@ -184,14 +184,24 @@ test("the runner: a host's own command wins; missing config, missing CLI, timeou
   const client = createAgentDeviceClient({ toolchain: toolchain(null), env: process.env });
   const signal = new AbortController().signal;
 
+  host.agentDeviceCommand = () => ({ command: process.execPath, args: ["-e", "console.log(JSON.stringify({ success: true, data: {} }))", "--"], env: {} });
   const noConfig = await client.run({ host, lease: lease() }, "snapshot", [], { signal }).catch((error: unknown) => error);
   assert.ok(isDeviceError(noConfig) && noConfig.code === "UNAVAILABLE");
+  delete host.agentDeviceCommand;
   host.agentDeviceConfigPath = () => "/c.json";
   const noCli = await client.run({ host, lease: lease() }, "snapshot", [], { signal }).catch((error: unknown) => error);
   assert.ok(isDeviceError(noCli) && /not installed/.test(noCli.message));
 
   host.agentDeviceCommand = () => ({ command: process.execPath, args: [slow.path], env: {} });
-  const timedOut = await client.run({ host, lease: lease() }, "snapshot", [], { signal, timeoutMs: 200 }).catch((error: unknown) => error);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const timeoutWatcher = watch(slow.dir);
+  const started = once(timeoutWatcher, "change");
+  const waiting = client.run({ host, lease: lease() }, "snapshot", [], { signal, timeoutMs: 200 }).catch((error: unknown) => error);
+  await started;
+  timeoutWatcher.close();
+  t.mock.timers.tick(200);
+  const timedOut = await waiting;
+  t.mock.timers.reset();
   assert.ok(isDeviceError(timedOut) && /timed out/.test(timedOut.message), String(timedOut));
 
   const abort = new AbortController();

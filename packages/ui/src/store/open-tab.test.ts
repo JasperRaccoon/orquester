@@ -74,8 +74,9 @@ describe("openTab — resuming a conversation", () => {
       title: "Old conversation",
       refId: "claude"
     });
-    assert.equal(await store().openTab(RESUME), undefined, "the second click launches nothing");
+    const duplicate = store().openTab(RESUME);
     assert.equal(creates, 1);
+    assert.equal(await duplicate, undefined, "the second click launches nothing");
 
     release(session("s1"));
     assert.equal((await first)?.id, "s1");

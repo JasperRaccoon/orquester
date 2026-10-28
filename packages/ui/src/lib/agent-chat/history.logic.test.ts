@@ -11,6 +11,7 @@
  */
 
 import assert from "node:assert/strict";
+import { isDeepStrictEqual } from "node:util";
 import { beforeEach, describe, it } from "node:test";
 
 import {
@@ -476,7 +477,7 @@ describe("historyWithinCap", () => {
     const { history: capped, resync } = historyWithinCap(state);
 
     assert.equal(resync, false);
-    assert.deepEqual(capped.pages, [middle, newest]);
+    assert.ok(isDeepStrictEqual(capped.pages, [middle, newest]), "only the oldest page is evicted");
     assert.deepEqual(capped.bridge, state.bridge);
     assert.ok(capped.bridge.length + capped.pages.flatMap((page) => page.items).length <= 20_000);
     assert.equal(
@@ -496,14 +497,14 @@ describe("historyWithinCap", () => {
     });
     const { history: capped, resync } = historyWithinCap(state);
     assert.equal(resync, true);
-    assert.deepEqual([capped.pages, capped.bridge, capped.windowCut, capped.error], [[], [], 0, null]);
+    assert.ok(isDeepStrictEqual([capped.pages, capped.bridge, capped.windowCut, capped.error], [[], [], 0, null]));
     assert.deepEqual(capped.bounds, state.bounds, "the fresh snapshot replaces them");
   });
 
   it("drops everything when the bridge alone passes the cap", () => {
     const { history: capped, resync } = historyWithinCap(history({ bridge: bridgeOf(20_001) }));
     assert.equal(resync, true);
-    assert.deepEqual(capped.bridge, []);
+    assert.ok(isDeepStrictEqual(capped.bridge, []));
   });
 });
 

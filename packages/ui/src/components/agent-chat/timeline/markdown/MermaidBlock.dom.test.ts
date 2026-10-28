@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { createElement } from "react";
 import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { MermaidBlock } from "./MermaidBlock.tsx";
-import { loadPele, setPeleLoader, type PeleEngine } from "./mermaid-engine.ts";
+import { setPeleLoader, type PeleEngine } from "./mermaid-engine.ts";
 
 /**
  * Client rendering in jsdom, with the real `pele`: effects, the mount and the
@@ -57,6 +57,7 @@ after(() => {
 });
 
 beforeEach(() => {
+  mock.timers.enable({ apis: ["setTimeout"] });
   setPeleLoader(null);
   container = dom.window.document.createElement("div");
   dom.window.document.body.replaceChildren(container);
@@ -64,26 +65,29 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Unmount while the DOM globals still exist, then let the zero-delay timers the cleanups queue
-  // run (the Modal hands focus back a tick after it closes). Left pending, the last test's would
-  // fire after `after()` removed `document` and fail the file as asynchronous activity after the
-  // test ended. Equal-delay timers run in the order they were set, so this one runs after theirs.
+  // The Modal returns focus on a timer; flush it before removing the DOM globals.
   await act(async () => {
     root.unmount();
+    mock.timers.runAll();
   });
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  mock.timers.reset();
 });
 
-/** Renders the block and lets every load and mount settle. */
+/** Renders the block and waits for its diagram or source fallback to commit. */
 const show = async (props: { code?: string; mode?: "light" | "dark"; streaming?: boolean } = {}): Promise<void> => {
-  await act(async () => {
-    root.render(createElement(MermaidBlock, { code: FLOWCHART, streaming: false, mode: "dark", ...props }));
-  });
-  // The renderer and the diagram's type chunk load over several ticks.
-  for (let index = 0; index < 5; index += 1) {
-    await act(async () => {
-      await loadPele().catch(() => undefined);
-    });
+  let finish!: () => void;
+  const ready = new Promise<void>((resolve) => { finish = resolve; });
+  const check = () => {
+    if (diagram() || container.querySelector('[data-language="mermaid"] pre')) finish();
+  };
+  const observer = new dom.window.MutationObserver(check);
+  observer.observe(container, { childList: true, subtree: true, characterData: true });
+  try {
+    await act(async () => root.render(createElement(MermaidBlock, { code: FLOWCHART, streaming: false, mode: "dark", ...props })));
+    check();
+    await act(async () => ready);
+  } finally {
+    observer.disconnect();
   }
 };
 
@@ -114,16 +118,19 @@ describe("MermaidBlock in the DOM", () => {
     await show({ code: "flowchart TD\n  A-->" });
     assert.ok(container.textContent?.includes("Unable to render diagram: Parse error"), container.textContent ?? "");
     assert.ok(container.querySelector('[data-language="mermaid"]')?.textContent?.includes("A-->"));
-    assert.equal(diagram(), null);
+    assert.ok(diagram() === null, "the diagram is absent");
     assert.ok(![...container.querySelectorAll("button")].some((b) => b.textContent === "Retry"));
   });
 
   it("offers Retry when the renderer fails to load, and draws once it loads", async () => {
-    setPeleLoader(() => Promise.reject(new Error("Failed to fetch dynamically imported module")));
+    let fail = true;
+    setPeleLoader(() => fail
+      ? Promise.reject(new Error("Failed to fetch dynamically imported module"))
+      : import("pele/lazy"));
     await show();
     assert.ok(container.textContent?.includes("The diagram renderer failed to load."), container.textContent ?? "");
-    assert.equal(diagram(), null);
-    setPeleLoader(null);
+    assert.ok(diagram() === null, "the diagram is absent");
+    fail = false;
     await click(button("Retry"));
     await show();
     assert.ok(diagram(), container.innerHTML.slice(0, 300));
@@ -132,7 +139,7 @@ describe("MermaidBlock in the DOM", () => {
   it("toggles between the diagram and its source", async () => {
     await show();
     await click(button("Show code"));
-    assert.equal(diagram(), null);
+    assert.ok(diagram() === null, "the diagram is absent");
     assert.ok(container.querySelector('[data-language="mermaid"]')?.textContent?.includes("flowchart LR"));
     await click(button("Show diagram"));
     await show();
@@ -154,7 +161,7 @@ describe("MermaidBlock in the DOM", () => {
     await show();
     console.error = savedConsoleError;
     assert.ok(container.querySelector('[data-language="mermaid"]')?.textContent?.includes("flowchart LR"));
-    assert.equal(container.querySelector('[aria-label="Expand diagram"]'), null, "no diagram controls");
+    assert.ok(container.querySelector('[aria-label="Expand diagram"]') === null, "no diagram controls");
   });
 
   it("typesets $$ labels with the chat's KaTeX, as MathML without the TeX annotation", async () => {
@@ -174,7 +181,7 @@ describe("MermaidBlock in the DOM", () => {
     const math = svg.querySelector("foreignObject math");
     assert.ok(math, svg.outerHTML);
     assert.ok(math.querySelector("msup"), math.outerHTML);
-    assert.equal(svg.querySelector("annotation"), null);
+    assert.ok(svg.querySelector("annotation") === null, "the element is absent");
   });
 
   it("expands into the modal as a blob image, and revokes it on close", async () => {
@@ -191,7 +198,7 @@ describe("MermaidBlock in the DOM", () => {
       const close = dom.window.document.querySelector<HTMLElement>('[role="dialog"] [aria-label="Close"]');
       assert.ok(close);
       await click(close);
-      assert.equal(dom.window.document.querySelector('[role="dialog"]'), null);
+      assert.ok(dom.window.document.querySelector('[role="dialog"]') === null, "the element is absent");
       assert.deepEqual(revoked, [url]);
     } finally {
       URL.revokeObjectURL = realRevoke;

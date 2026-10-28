@@ -163,7 +163,7 @@ describe("ToolApprovalCard", () => {
   it("never takes focus: the composer keeps it when the card appears", () => {
     composer.focus();
     render(card({ secretFields: [{ key: "TOKEN", label: "Token" }], grantOptions: ["chat"] }));
-    assert.equal(dom.window.document.activeElement, composer);
+    assert.ok(dom.window.document.activeElement === composer, "the composer keeps focus");
   });
 
   it("ignores ⌘/Ctrl+Enter for 1.5 s after the card appears, then approves", async () => {
@@ -241,7 +241,7 @@ describe("ToolApprovalCard", () => {
     act(() => open.click());
     const reason = mount.querySelector("textarea");
     assert.ok(reason);
-    assert.equal(dom.window.document.activeElement, reason, "focus follows the pressed toggle into the field that replaced it");
+    assert.ok(dom.window.document.activeElement === reason, "focus follows the pressed toggle into the field that replaced it");
     type(reason, "Not on this machine");
     key(reason, { key: "Enter", ctrlKey: true });
     await flush();
@@ -375,8 +375,8 @@ describe("ToolApprovalCard", () => {
     await flush();
     assert.equal(q<HTMLInputElement>('input[type="password"]').value, "", "the typed secret is gone");
     assert.equal(q<HTMLButtonElement>("[data-approve]").disabled, true, "nothing typed: Approve waits for the value again");
-    assert.equal(mount.querySelector("textarea"), null, "the deny reason is closed and cleared");
-    assert.equal(dom.window.document.querySelector('[role="dialog"]'), null, "the review sheet closed");
+    assert.ok(mount.querySelector("textarea") === null, "the deny reason is closed and cleared");
+    assert.ok(dom.window.document.querySelector('[role="dialog"]') === null, "the review sheet closed");
     // A denial now carries no stale reason.
     act(() => q<HTMLButtonElement>("[data-deny]").click());
     await flush();

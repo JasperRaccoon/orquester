@@ -201,10 +201,11 @@ test("markInteracted and snapshot re-read the curtain, not the set list() left b
     true,
     "the broadcast list carries the fresh curtain"
   );
+  meta = { version: 1, workspaces: [] };
   assert.equal(
     (await service.snapshot()).find((e) => e.path === hidden)?.isArchived,
-    true,
-    "so does the POST response"
+    undefined,
+    "the POST response also carries a curtain changed since the broadcast"
   );
 
   await rm(root, { recursive: true, force: true });

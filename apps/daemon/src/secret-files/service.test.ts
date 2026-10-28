@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setMaxListeners } from "node:events";
 import { SECRET_FILES_MAX_PER_VAULT, type SecretFilesErrorCode, type SecretVaultDetail } from "@orquester/api";
 import { parseEnv } from "./files.ts";
 import { SecretFilesError, TRACKED_RETRY_MS, cloneFileState } from "./service.ts";
@@ -1124,7 +1125,12 @@ test("git failing where it never answered: a later light check asks again after 
   assert.equal(h.fs.gitCalls, after);
 });
 
-test("twenty git runs at once on the shared abort signal emit no MaxListenersExceededWarning", async () => {
+test("twenty git runs at once on the shared abort signal emit no MaxListenersExceededWarning", async (t) => {
+  const NativeAbortController = globalThis.AbortController;
+  globalThis.AbortController = class extends NativeAbortController {
+    constructor() { super(); setMaxListeners(10, this.signal); }
+  };
+  t.after(() => { globalThis.AbortController = NativeAbortController; });
   const h = await makeHarness();
   const names = Array.from({ length: 20 }, (_, index) => `c${String(index).padStart(2, "0")}`);
   const paths = names.map((name) => h.clone(name));

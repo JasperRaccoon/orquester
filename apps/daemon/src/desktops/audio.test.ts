@@ -1,7 +1,9 @@
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, rmSync, watch, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +12,7 @@ import type { DesktopAudioStateMessage } from "@orquester/api";
 import {
   DesktopAudioHub,
   type DesktopAudioEncoderExit,
+  type DesktopAudioEncoderProcess,
   type DesktopAudioHubOptions,
   type DesktopAudioSink
 } from "./audio.ts";
@@ -54,12 +57,12 @@ class FakeSink implements DesktopAudioSink {
 
 /** Collects `onEncoderExit` calls and lets a test await the next one. */
 function exitRecorder() {
-  const exits: Array<DesktopAudioEncoderExit & { desktopId: string; at: number }> = [];
+  const exits: Array<DesktopAudioEncoderExit & { desktopId: string }> = [];
   const waiters: Array<{ count: number; resolve: () => void }> = [];
   return {
     exits,
     onEncoderExit: (desktopId: string, exit: DesktopAudioEncoderExit) => {
-      exits.push({ ...exit, desktopId, at: Date.now() });
+      exits.push({ ...exit, desktopId });
       for (const waiter of waiters.filter((w) => exits.length >= w.count)) {
         waiters.splice(waiters.indexOf(waiter), 1);
         waiter.resolve();
@@ -73,16 +76,26 @@ function exitRecorder() {
   };
 }
 
-function tempDir(t: TestContext, prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
+class FakeEncoder extends EventEmitter implements DesktopAudioEncoderProcess {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  killed = false;
+
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.killed = true;
+    this.emit("close", null, signal);
+    return true;
+  }
 }
 
-function fakeFfmpeg(dir: string, body: string): string {
-  const path = join(dir, "ffmpeg");
-  writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-  return path;
+function fakeSpawner() {
+  const encoders: FakeEncoder[] = [];
+  const spawn = () => {
+    const child = new FakeEncoder();
+    encoders.push(child);
+    return child;
+  };
+  return { encoders, spawn };
 }
 
 function hub(t: TestContext, options: DesktopAudioHubOptions): DesktopAudioHub {
@@ -98,15 +111,15 @@ test("no ffmpeg: the sink hears audio unavailable and nothing spawns", (t) => {
   assert.equal(sink.states.length, 1);
   assert.equal(sink.states[0]!.audio, "unavailable");
   assert.match(sink.states[0]!.reason ?? "", /ffmpeg/);
-  assert.equal(audio.encoderPid("d1"), null);
   unsubscribe();
 });
 
 test("one encoder per desktop: framed packets with seq fan out; a backed-up sink is skipped", async (t) => {
-  const dir = tempDir(t, "orq-audio-");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { encoders, spawn } = fakeSpawner();
   const recorder = exitRecorder();
   const audio = hub(t, {
-    ffmpegPath: fakeFfmpeg(dir, `cat '${FIXTURE_PATH}'\nexec sleep 600`),
+    ffmpegPath: null,
     stopGraceMs: 100,
     onEncoderExit: recorder.onEncoderExit
   });
@@ -114,12 +127,12 @@ test("one encoder per desktop: framed packets with seq fan out; a backed-up sink
   const fast = new FakeSink();
   const slow = new FakeSink();
   slow.buffered = 64 * 1024;
-  const offFast = audio.subscribe("d1", "/run/d1/pulse/native", fast);
-  const offSlow = audio.subscribe("d1", "/run/d1/pulse/native", slow);
-  const pid = audio.encoderPid("d1");
-  assert.ok(pid);
-
-  await fast.until(() => fast.packets.length === 21);
+  const offFast = audio.subscribe("d1", "/run/d1/pulse/native", fast, spawn);
+  const offSlow = audio.subscribe("d1", "/run/d1/pulse/native", slow, spawn);
+  assert.equal(encoders.length, 1);
+  const encoder = encoders[0]!;
+  encoder.stdout.write(readFileSync(FIXTURE_PATH));
+  assert.equal(fast.packets.length, 21);
   const available = { type: "state", audio: "available", sampleRate: 48000, channels: 2, frameMs: 10 };
   assert.deepEqual(fast.states, [available]);
   assert.deepEqual(slow.states, [available]);
@@ -141,33 +154,46 @@ test("one encoder per desktop: framed packets with seq fan out; a backed-up sink
   offFast();
   offSlow();
   const again = new FakeSink();
-  const offAgain = audio.subscribe("d1", "/run/d1/pulse/native", again);
-  assert.equal(audio.encoderPid("d1"), pid);
+  const offAgain = audio.subscribe("d1", "/run/d1/pulse/native", again, spawn);
+  assert.equal(encoders.length, 1);
+  assert.equal(encoder.killed, false);
   assert.equal(recorder.exits.length, 0);
 
   // The last subscriber leaving stops the encoder after the grace, with SIGKILL.
-  const left = Date.now();
   offAgain();
   offAgain(); // idempotent
+  t.mock.timers.tick(99);
+  assert.equal(encoder.killed, false, "the encoder survives the grace period");
+  t.mock.timers.tick(1);
   await recorder.until(1);
   assert.deepEqual(recorder.exits.map(({ desktopId, expected: e, signal }) => ({ desktopId, e, signal })), [
     { desktopId: "d1", e: true, signal: "SIGKILL" }
   ]);
-  assert.ok(recorder.exits[0]!.at - left >= 90, "stopped only after the grace");
-  assert.equal(audio.encoderPid("d1"), null);
+  assert.equal(encoder.killed, true);
 });
 
 test("an encoder that keeps failing restarts with backoff, then reports unavailable with the reason", async (t) => {
-  const dir = tempDir(t, "orq-audio-");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { encoders, spawn } = fakeSpawner();
   const recorder = exitRecorder();
   const audio = hub(t, {
-    ffmpegPath: fakeFfmpeg(dir, `echo "Connection refused: pulse is gone" >&2\nexit 1`),
+    ffmpegPath: null,
     restartBackoffMs: [5, 10],
     onEncoderExit: recorder.onEncoderExit
   });
   const sink = new FakeSink();
-  audio.subscribe("d1", "/run/d1/pulse/native", sink);
-  await sink.until(() => sink.states.length === 2);
+  audio.subscribe("d1", "/run/d1/pulse/native", sink, spawn);
+  for (const [attempt, delay] of [5, 10, 10].entries()) {
+    const encoder = encoders[attempt]!;
+    encoder.stderr.write("Connection refused: pulse is gone\n");
+    encoder.emit("close", 1, null);
+    if (attempt < 2) {
+      t.mock.timers.tick(delay - 1);
+      assert.equal(encoders.length, attempt + 1, "restart waits for the backoff");
+      t.mock.timers.tick(1);
+    }
+  }
+  assert.equal(sink.states.length, 2);
   assert.equal(sink.states[0]!.audio, "available");
   assert.equal(sink.states[1]!.audio, "unavailable");
   assert.match(sink.states[1]!.reason ?? "", /code 1.*Connection refused: pulse is gone/);
@@ -176,27 +202,26 @@ test("an encoder that keeps failing restarts with backoff, then reports unavaila
 
   // A new subscriber hears the current state.
   const late = new FakeSink();
-  audio.subscribe("d1", "/run/d1/pulse/native", late);
+  audio.subscribe("d1", "/run/d1/pulse/native", late, spawn);
   assert.equal(late.states[0]!.audio, "unavailable");
 
   // stopDesktop ends the streams and the retries.
   audio.stopDesktop("d1");
   assert.equal(sink.closed, true);
   assert.equal(late.closed, true);
-  assert.equal(audio.encoderPid("d1"), null);
 });
 
 test("stopDesktop and shutdown kill encoders now; shutdown refuses new subscribers", async (t) => {
-  const dir = tempDir(t, "orq-audio-");
+  const { encoders, spawn } = fakeSpawner();
   const recorder = exitRecorder();
   const audio = hub(t, {
-    ffmpegPath: fakeFfmpeg(dir, "exec sleep 600"),
+    ffmpegPath: null,
     onEncoderExit: recorder.onEncoderExit
   });
   const one = new FakeSink();
-  audio.subscribe("d1", "/a/native", one);
-  audio.subscribe("d2", "/b/native", new FakeSink());
-  audio.subscribe("d3", "/c/native", new FakeSink());
+  audio.subscribe("d1", "/a/native", one, spawn);
+  audio.subscribe("d2", "/b/native", new FakeSink(), spawn);
+  audio.subscribe("d3", "/c/native", new FakeSink(), spawn);
   audio.stopDesktop("d1");
   assert.equal(one.closed, true);
   await recorder.until(1);
@@ -209,9 +234,10 @@ test("stopDesktop and shutdown kill encoders now; shutdown refuses new subscribe
     ["d3", true, "SIGKILL"]
   ]);
   const after = new FakeSink();
-  audio.subscribe("d2", "/b/native", after);
+  audio.subscribe("d2", "/b/native", after, spawn);
   assert.equal(after.states[0]!.audio, "unavailable");
-  assert.equal(audio.encoderPid("d2"), null);
+  assert.equal(encoders.length, 3);
+  assert.ok(encoders.every((encoder) => encoder.killed));
 });
 
 // ---------------------------------------------------------------------------
@@ -308,7 +334,7 @@ function tone(seconds: number): Buffer {
   return pcm;
 }
 
-test("integration: a tone in the desktop's sink arrives as Opus packets; the encoder stops after the grace", { timeout: 60_000 }, async (t) => {
+test("integration: a tone in the desktop's sink arrives as Opus packets; the encoder stops after the grace", async (t) => {
   const ffmpeg = onPath("ffmpeg");
   if (!ffmpeg || !onPath("pulseaudio") || !onPath("pacat") || !ffmpegHasPulseAndOpus(ffmpeg)) {
     t.skip("needs pulseaudio, pacat and ffmpeg with pulse + libopus");
@@ -329,7 +355,6 @@ test("integration: a tone in the desktop's sink arrives as Opus packets; the enc
   const sink = new FakeSink();
   const unsubscribe = audio.subscribe("d1", socketPath, sink);
   assert.equal(sink.states[0]!.audio, "available");
-  assert.ok(audio.encoderPid("d1"));
 
   const players: ChildProcess[] = [];
   t.after(async () => {
@@ -355,17 +380,10 @@ test("integration: a tone in the desktop's sink arrives as Opus packets; the enc
   await exited(play(tone(0.6)));
   await sink.until(() => loud().length >= 30);
 
-  // Latency on a warm encoder: a fresh player's spawn to its first loud packet.
-  // An upper bound on sink write → packet: it includes pacat's start and connect.
+  // After the first player drained, a fresh player still reaches the warm encoder.
   const mark = sink.packets.length;
-  const spawnedAt = performance.now();
-  let loudAt = 0;
   play(tone(0.3));
-  await sink.until(() => {
-    if (!loudAt && sink.packets.slice(mark).some((packet) => payload(packet) > 40)) loudAt = performance.now();
-    return loudAt > 0;
-  });
-  t.diagnostic(`warm encoder: pacat spawn → first loud packet ${(loudAt - spawnedAt).toFixed(1)} ms`);
+  await sink.until(() => sink.packets.slice(mark).some((packet) => payload(packet) > 40));
 
   const seqs = sink.packets.map((packet) => packet.readUInt32BE(4));
   seqs.forEach((seq, i) => assert.equal(seq, i, "seq increments per packet"));
@@ -377,6 +395,5 @@ test("integration: a tone in the desktop's sink arrives as Opus packets; the enc
   unsubscribe();
   await recorder.until(1);
   assert.equal(recorder.exits[0]!.expected, true);
-  assert.equal(audio.encoderPid("d1"), null);
   assert.deepEqual(logs, []);
 });

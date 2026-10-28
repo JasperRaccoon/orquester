@@ -3,7 +3,7 @@ import test from "node:test";
 import type { GitStatusResponse } from "@orquester/api";
 import { GIT_WORKING_DIFF_DEFAULT_MAX_BYTES, GIT_WORKING_DIFF_MAX_BYTES } from "@orquester/api";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -404,10 +404,10 @@ test("an untracked SYMLINK renders as its target string, never the target's byte
     const { git } = fakeGit((args) => (args[0] === "status" ? nul("?? link.txt") : ""));
 
     const { diff, binary } = await git.diff(dir, "link.txt", {});
+    assert.doesNotMatch(diff, /TOP-SECRET-HOST-CONTENT/, "the link must never be followed");
     assert.equal(binary, false);
     assert.match(diff, /new file mode 120000/, "a symlink is a 120000 blob, not a regular file");
     assert.match(diff, new RegExp(`\\+${secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
-    assert.doesNotMatch(diff, /TOP-SECRET-HOST-CONTENT/, "the link must never be followed");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -710,9 +710,9 @@ test("working diff ignores the user's own diff config: no quoting, a/ b/ prefixe
     await writeFile(join(dir, "site", "新しい.txt"), "untracked\n");
 
     const result = await new GitService().workingDiff(join(dir, "site"), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+    assert.doesNotMatch(result.diff, /\\303/, "no C-quoted bytes");
     assert.match(result.diff, /^diff --git a\/site\/naïve-café\.txt b\/site\/naïve-café\.txt$/m);
     assert.match(result.diff, /^--- a\/site\/naïve-café\.txt\n\+\+\+ b\/site\/naïve-café\.txt$/m);
-    assert.doesNotMatch(result.diff, /\\303/, "no C-quoted bytes");
     assert.deepEqual(result.untracked, ["site/新しい.txt"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -730,7 +730,7 @@ test("a repo's own fsmonitor command and post-index-change hook never run on the
     await git("config", "core.fsmonitor", join(dir, ".git", "fsmonitor.sh"));
     await script(join(dir, ".git", "hooks", "post-index-change"), "post-index-change");
     await script(join(dir, ".git", "hooks", "pre-commit"), "pre-commit");
-    await writeFile(join(dir, "kept.txt"), "two\n");
+    await utimes(join(dir, "kept.txt"), new Date(0), new Date(0));
     await writeFile(join(dir, "new.txt"), "untracked\n");
 
     const service = new GitService();
@@ -744,6 +744,7 @@ test("a repo's own fsmonitor command and post-index-change hook never run on the
     }
 
     // The user's own commit keeps the repo's hooks (and still no fsmonitor).
+    await writeFile(join(dir, "kept.txt"), "two\n");
     await service.stage(dir, ["kept.txt"]);
     const committed = await service.commit(dir, "two");
     assert.equal(committed.ok, true);

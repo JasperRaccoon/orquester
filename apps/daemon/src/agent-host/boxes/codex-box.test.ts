@@ -10,7 +10,7 @@ import { boxMcpSettingsPath, withRunInBox } from "@orquester/config";
 
 import { localBoxConnection } from "../../boxes/testing.ts";
 import { createCodexAdapter } from "../adapters/codex/index.ts";
-import { createFakeContext, EventCollector, waitUntil } from "../adapters/codex/testing.ts";
+import { createFakeContext, EventCollector } from "../adapters/codex/testing.ts";
 import type { HostThreadBox } from "../host-protocol.ts";
 import { RawFrameLog } from "../store/raw-log.ts";
 import { createAgentHostBoxes } from "./index.ts";
@@ -41,6 +41,7 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
     version: "codex-cli 0.159.0",
     results: {
       "account/login/start": { type: "chatgptAuthTokens" },
+      "thread/turns/list": { data: [], nextCursor: null },
       // The box's effective config: its copy of the account's `config.toml`, every secret blanked
       // by the sync (boxes/sync/codecs.ts).
       "config/read": {
@@ -98,6 +99,14 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
     tmpDir: () => join(appdir, "tmp"),
     buildEnv: () => ({ PATH: "/host/bin", HOME: "/var/lib/orquester", OPENAI_API_KEY: "sk-host", ORQUESTER_SESSION_ID: "t1" })
   });
+  let refreshWritten!: () => void;
+  const refreshSent = new Promise<void>((resolve) => { refreshWritten = resolve; });
+  const logRawFrame = fake.context.logRawFrame;
+  fake.context.logRawFrame = (threadId, raw) => {
+    logRawFrame(threadId, raw);
+    const { direction, frame } = raw as { direction: string; frame: Frame };
+    if (direction === "send" && frame.id === 1000 && frame.method === undefined) refreshWritten();
+  };
   const adapter = await createCodexAdapter(fake.context);
   const events = new EventCollector(adapter.events);
   const box: HostThreadBox = {
@@ -131,7 +140,9 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
     const login = received.find((frame) => frame.method === "account/login/start");
     assert.deepEqual(login?.params, { type: "chatgptAuthTokens", accessToken: "access-1", chatgptAccountId: "ws-1", chatgptPlanType: null });
     // The refresh request was answered with the broker's NEXT token, as the binding shapes it.
-    await waitUntil(() => asked.length >= 2, "the refresh's token request");
+    await refreshSent;
+    // The next native reply proves the peer consumed the refresh answer before its log is read.
+    await adapter.readThread("t1");
     const refreshAnswer = (await readFile(peer.logPath, "utf8"))
       .split("\n")
       .filter((line) => line.length > 0)

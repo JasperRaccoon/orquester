@@ -215,24 +215,21 @@ test("consecutive ** segments collapse and still match", () => {
 
 test("pathological many-star pattern stays linear", () => {
   // A pattern that would blow up exponentially under a naive recursive matcher.
-  // The guard is RELATIVE, not a wall-clock budget: the whole daemon suite runs its
-  // files in parallel, and an absolute millisecond budget with ~10% headroom flakes
-  // under that CPU contention. Timing a single-star pattern over the same path gives
-  // the machine's *current* linear cost, and contention scales both measurements
-  // together. Exponential backtracking overshoots by many orders of magnitude, so a
-  // generous factor still fails loudly on a real regression.
+  // Compare CPU time against a single-star pattern over the same path, so host
+  // scheduling does not count against the matcher. Exponential backtracking
+  // overshoots by many orders of magnitude; the generous ratio catches it.
   const list = parseGlobList(`/${"*a".repeat(50)}x`, "include");
   const linear = parseGlobList("/*x", "include");
   const path = `${"a".repeat(4000)}b`; // long single segment, no trailing x → no match
   const time = (compiled: ReturnType<typeof parseGlobList>): number => {
-    const start = performance.now();
+    const start = process.cpuUsage();
     for (let i = 0; i < 200; i++) {
       assert.equal(matchesGlobList(compiled, path), false);
     }
-    return performance.now() - start;
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1000;
   };
-  // Warm the JIT, then take the best of three runs on each — the minimum is the
-  // measurement least polluted by a scheduler preemption.
+  // Warm the JIT, then take the best of three runs to reduce GC noise.
   const best = (compiled: ReturnType<typeof parseGlobList>): number => {
     time(compiled);
     return Math.min(time(compiled), time(compiled), time(compiled));

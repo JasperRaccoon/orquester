@@ -160,7 +160,7 @@ describe("the chat's URL filter", () => {
     };
     try {
       await render("https://example.com/first.png");
-      assert.equal(mount.querySelector("img"), null);
+      assert.ok(mount.querySelector("img") === null, "the element is absent");
       await act(async () => mount.querySelector("button")!.click());
       assert.equal(mount.querySelector("img")?.getAttribute("src"), "https://example.com/first.png");
 
@@ -247,7 +247,7 @@ describe("knowledge citations in a message", () => {
     assert.ok(chip, "a chip");
     assert.equal(chip.tagName, "BUTTON");
     assert.equal(chip.getAttribute("type"), "button");
-    assert.equal(chip.closest("a"), null, "not inside a link");
+    assert.ok(chip.closest("a") === null, "not inside a link");
     assert.equal(chip.textContent, "Alternatives pages · @hridoyreh");
     assert.equal(chips(LIVE).length, 2);
     assert.equal(doc().querySelectorAll('a[href^="orquester-knowledge:"]').length, 0, "no anchor carries the scheme");
@@ -410,8 +410,8 @@ describe("a knowledge citation's hover card", () => {
 
   it("is not there, and reads nothing, until a chip is focused or hovered", async () => {
     await show();
-    assert.equal(card(LIVE), null);
-    assert.equal(doc().querySelector('[role="tooltip"]'), null);
+    assert.ok(card(LIVE) === null, "the citation card is absent");
+    assert.ok(doc().querySelector('[role="tooltip"]') === null, "the element is absent");
     assert.deepEqual(reads, []);
   });
 
@@ -432,13 +432,13 @@ describe("a knowledge citation's hover card", () => {
     assert.deepEqual(reads, [LIVE], "read once, on focus");
 
     await key("Escape");
-    assert.equal(card(LIVE), null, "Escape hides it");
+    assert.ok(card(LIVE) === null, "Escape hides it");
     assert.equal(chip(LIVE).getAttribute("aria-describedby"), null);
 
     await focus(chip(GONE));
     assert.ok(card(GONE));
     await blur(chip(GONE));
-    assert.equal(card(GONE), null, "leaving the chip hides it");
+    assert.ok(card(GONE) === null, "leaving the chip hides it");
   });
 
   it("says a deleted entry is deleted", async () => {
@@ -464,7 +464,7 @@ describe("a knowledge citation's hover card", () => {
         await focus(chip(LIVE));
         assert.match(card(LIVE)!.querySelector('[role="status"]')?.textContent ?? "", /Loading/);
         await act(async () => reset());
-        assert.equal(card(LIVE)!.querySelector('[role="status"]'), null, "no read remains in flight");
+        assert.ok(card(LIVE)!.querySelector('[role="status"]') === null, "no read remains in flight");
         assert.match(card(LIVE)!.textContent!, /unavailable/i);
         const stale = await normalRead(LIVE);
         stale.entry.entry.title = "Stale pre-reset title";

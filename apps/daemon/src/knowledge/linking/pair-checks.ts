@@ -219,11 +219,6 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
     return this.attempts.get(itemKey)?.gaveUpAt != null;
   }
 
-  /** Items rounds gave up on, most recent first (status, tests). */
-  givenUp(): readonly KnowledgeRoundAttemptRecord[] {
-    return [...this.attempts.values()].filter((record) => record.gaveUpAt != null).sort((x, y) => (y.gaveUpAt! < x.gaveUpAt! ? -1 : 1));
-  }
-
   /**
    * A round handed this item out and ended without an acceptable answer: counted, persisted, and
    * after {@link ROUND_TASK_MAX_ATTEMPTS} such rounds it is given up on. Answers whether it is now.

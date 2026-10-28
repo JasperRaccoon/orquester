@@ -212,9 +212,12 @@ test("listManaged: the org's orq- apps with their Machine", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/apps?org_slug=personal`, body: fixture("fly", "apps-managed") },
     { method: "GET", url: `${API}/apps/${APP}/machines?summary=true`, body: fixture("fly", "machines-list") },
-    { method: "GET", url: `${API}/apps/orq-ffeeddccbbaa/machines?summary=true`, body: [] }
+    { method: "GET", url: `${API}/apps/orq-ffeeddccbbaa/machines?summary=true`, body: [] },
+    { method: "GET", url: `${API}/apps/my-website/machines?summary=true`, body: [], times: Infinity }
   ]);
   const managed = await flyAdapter.listManaged(credentials, replayOptions(t, replay));
+  // my-website is not Orquester's and is never touched.
+  assert.equal(replay.requests.some((entry) => entry.url.includes("my-website")), false);
   assert.deepEqual(managed, [
     {
       ref: { app: APP, machineId: "1111111a2b3c4d", region: "fra" },
@@ -225,6 +228,4 @@ test("listManaged: the org's orq- apps with their Machine", async (t) => {
     },
     { ref: { app: "orq-ffeeddccbbaa" }, name: "orq-ffeeddccbbaa", boxId: "ffeeddccbbaa", createdAt: null, state: "pending" }
   ]);
-  // my-website is not Orquester's and is never touched.
-  assert.equal(replay.requests.some((entry) => entry.url.includes("my-website")), false);
 });

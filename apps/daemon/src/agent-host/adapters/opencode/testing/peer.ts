@@ -136,7 +136,7 @@ if (mode === "silent") {
     }
     if (req.url?.startsWith("/global/health")) {
       const body = mode === "unhealthy"
-        ? { healthy: false }
+        ? { healthy: false, version }
         : { healthy: true, version: mode === "old" ? "1.10.0" : version };
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
       return;

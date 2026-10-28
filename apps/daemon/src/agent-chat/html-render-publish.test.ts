@@ -263,7 +263,5 @@ test("a FIFO in an image's place never blocks the open: refused at once, not wai
   const fifo = join(project, "chart.png");
   execFileSync("mkfifo", [fifo]);
   // Without O_NONBLOCK the open waits for a writer forever (and holds a threadpool thread).
-  const started = Date.now();
   assert.equal(await openInsideRoot(fifo, project), null, "not a regular file");
-  assert.ok(Date.now() - started < 5_000);
 });

@@ -36,8 +36,9 @@ test("the envelope is keyed by question TEXT — the only key that can work here
 });
 
 test("an array of answers is accepted, trimmed, and blanks dropped", () => {
-  assert.deepEqual(answersToXaiResponse(REAL, { [TEXT]: [" alpha.txt ", "", "beta.txt"] }).answers, {
-    [TEXT]: ["alpha.txt", "beta.txt"]
+  assert.deepEqual(answersToXaiResponse(REAL, { [TEXT]: [" alpha.txt ", "", "beta.txt"] }), {
+    outcome: "accepted",
+    answers: { [TEXT]: ["alpha.txt", "beta.txt"] }
   });
 });
 

@@ -206,6 +206,7 @@ describe("the composer outbox", () => {
     assert.equal(outboxQueueShownAt("A"), 6_000, "the next page reads what this one stamped");
 
     adoptOutboxLeftovers("A");
+    recordOutboxSend({ sessionId: "B", commandId: "still-sending", sentAt: 1_000, turn: { input: "in flight" } });
     writeOutboxQueue("A", []);
     assert.equal(outboxQueueShownAt("A"), null, "the queue is gone, and its stamp with it");
   });
@@ -253,7 +254,7 @@ describe("the composer outbox", () => {
     const parse = (entries: unknown[]) => readStoredOutbox(JSON.stringify({ v: 1, entries }));
 
     it("reads nothing out of a value that is not a v1 outbox", async () => {
-      for (const raw of [null, "", "{nope", "[]", "42", '{"v":2,"entries":[]}', '{"v":1}', '{"v":1,"entries":{}}']) {
+      for (const raw of [null, "", "{nope", "[]", "42", JSON.stringify({ v: 2, entries: [send] }), '{"v":1}', '{"v":1,"entries":{}}']) {
         assert.deepEqual(readStoredOutbox(raw), [], `${raw}`);
       }
     });
@@ -397,7 +398,7 @@ describe("the composer outbox", () => {
         [7_000, null, null, null]
       );
       backing.set(COMPOSER_OUTBOX_KEY, JSON.stringify({ v: 1, entries: [queuedEntry], shown: [1, 2] }));
-      assert.equal(outboxQueueShownAt("A"), null, "a stamp map that is not one reads as none");
+      assert.equal(outboxQueueShownAt("0"), null, "an array index is not a thread stamp");
       assert.equal(readStoredOutbox(backing.get(COMPOSER_OUTBOX_KEY)!).length, 1, "and costs no entry");
     });
 

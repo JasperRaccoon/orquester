@@ -127,10 +127,13 @@ test("box-opened channels: refused without a handler, odd ids only", () => {
   assert.equal((sent.at(-1) as { error: { code: string } }).error.code, "BAD_CHANNEL");
 });
 
-test("LinkedBoxConnection: requests wait for a link until their timeout", async () => {
+test("LinkedBoxConnection: requests wait for a link until their timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
   const connection = new LinkedBoxConnection("b1", { sys: localSysInfo(), paths: { kind: "identity" }, agentVersion: "v", procs: [] });
   assert.equal(connection.connected, false);
-  await assert.rejects(connection.request("sys.info", {}, { timeoutMs: 10 }), { code: "BOX_DISCONNECTED" });
+  const timedOut = assert.rejects(connection.request("sys.info", {}, { timeoutMs: 10 }), { code: "BOX_DISCONNECTED" });
+  t.mock.timers.tick(10);
+  await timedOut;
 
   const { mux, sent } = capture();
   const waiting = connection.request("fs.realpath", { path: "/a" }, { timeoutMs: 10_000 });

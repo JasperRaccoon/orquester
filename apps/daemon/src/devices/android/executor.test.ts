@@ -22,7 +22,7 @@ test("local executor: atomic text files, missing reads, listings", async (t) => 
   assert.equal(await LOCAL_EXECUTOR.exists(file), false);
 });
 
-test("local executor: a detached process leads its own group and logs to its file; signals never reach kill(-1)", { timeout: 5_000 }, async (t) => {
+test("local executor: a detached process leads its own group and logs to its file; signals never reach kill(-1)", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "orq-exec-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const log = join(dir, "out.log");
@@ -42,7 +42,12 @@ test("local executor: a detached process leads its own group and logs to its fil
   await started;
   const stat = await LOCAL_EXECUTOR.procStat(pid);
   assert.equal(stat?.pgrp, pid);
-  assert.equal(await LOCAL_EXECUTOR.signal(null, -1, "SIGTERM"), false);
+  const kill = t.mock.method(process, "kill", () => true);
+  try {
+    assert.equal(await LOCAL_EXECUTOR.signal(null, -1, "SIGTERM"), false);
+  } finally {
+    kill.mock.restore();
+  }
   assert.equal(await LOCAL_EXECUTOR.signal(pid, -1, "SIGTERM"), true);
   assert.equal(await waitForExit(pid, 5_000, 50, LOCAL_EXECUTOR), true);
   assert.match(await readFile(log, "utf8"), /started/);

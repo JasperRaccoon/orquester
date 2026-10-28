@@ -54,9 +54,6 @@ class InertObserver {
   observe(): void {}
   unobserve(): void {}
   disconnect(): void {}
-  takeRecords(): [] {
-    return [];
-  }
 }
 
 before(async () => {
@@ -244,6 +241,7 @@ describe("restoring a remembered position whose row is gone", () => {
     const { store, revealed, render, release } = await setUp();
     await render(store.getState().rows, remembered("t3"));
     assert.deepEqual(revealed, []);
+    assert.equal(document.querySelector<HTMLElement>("[data-agent-chat-timeline]")?.scrollTop, remembered("t3").scrollOffset);
     release();
   });
 });

@@ -406,8 +406,13 @@ test("GET /api/fs/download streams a file and zips a folder in the box", async (
   const folder = await h.inject({ method: "GET", url: `/api/fs/download?path=${q(join(h.projectPath, "pkg"))}` });
   assert.equal(folder.statusCode, 200);
   assert.equal(folder.headers["content-type"], "application/zip");
+  // bsdtar pads stdout to a block boundary; yauzl requires the ZIP end record at EOF.
+  const data = folder.rawPayload;
+  const end = data.lastIndexOf(Buffer.from("504b0506", "hex"));
+  const length = end >= 0 && end + 22 <= data.length ? end + 22 + data.readUInt16LE(end + 20) : data.length;
+  const zip = data.subarray(length).every((byte) => byte === 0) ? data.subarray(0, length) : data;
   const listing = await new Promise<string[]>((resolve, reject) => {
-    yauzl.fromBuffer(folder.rawPayload, (error, archive) => {
+    yauzl.fromBuffer(zip, (error, archive) => {
       if (error) return reject(error);
       const names: string[] = [];
       archive.on("entry", (entry: yauzl.Entry) => names.push(entry.fileName));
@@ -646,6 +651,11 @@ test("a Windows box: every path in and out is a host path", async (t) => {
     assert.ok(h.connection.execs.some((exec) => exec.command === "rg" && exec.args[0] === "--path-separator"));
   }
 
+  h.connection.request = (async (method: string, params: { path?: string }, options?: unknown) => {
+    // Real agent errors name Windows box paths, rather than this fixture's Linux disk path.
+    if (method === "fs.stat" && params.path?.endsWith("nope.txt")) throw { code: "EACCES", message: `Cannot read '${params.path}'.` };
+    return (request as (m: string, p: unknown, o?: unknown) => Promise<unknown>)(method, params, options);
+  }) as typeof h.connection.request;
   const missing = await h.inject({ method: "GET", url: `/api/fs/read?path=${q(join(h.projectPath, "nope.txt"))}` });
   assert.equal(missing.statusCode, 400);
   assert.doesNotMatch(missing.json().message, /C:\\orq/i, "error messages name host paths");

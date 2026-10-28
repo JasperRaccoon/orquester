@@ -364,11 +364,13 @@ test("a refused chat stays remembered until a push actually reached the host", a
   assert.deepEqual(pushes, ["codex-1", "codex-1"]);
   // Delivered: nothing more is owed to it.
   assert.notEqual(await r.refresher.manifest("codex-1"), "unavailable");
+  await new Promise<void>(setImmediate);
   assert.deepEqual(pushes, ["codex-1", "codex-1"], "a delivered manifest is not pushed again");
 });
 
 
-test("Knowledge Graph: the chat's knowledge view is read fresh for every manifest; failing or unanswered it counts as off", async () => {
+test("Knowledge Graph: the chat's knowledge view is read fresh for every manifest; failing or unanswered it counts as off", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const catalog = [...CATALOG, tool("knowledge_search", "knowledge"), tool("knowledge_save", "knowledge"), tool("knowledge_worker_next_task", "knowledge")];
   const reads: string[] = [];
   let view: ManifestKnowledge | Error | "hang" = { enabled: true, worker: false, searchable: true, visibleCollectionNames: ["SEO"] };
@@ -395,7 +397,12 @@ test("Knowledge Graph: the chat's knowledge view is read fresh for every manifes
   assert.deepEqual(reads, ["claude-1", "claude-1", "claude-1"]);
   for (const failing of [new Error("store down"), "hang" as const]) {
     view = failing;
-    const off = await manifestOf(r, "claude-1");
+    const reading = manifestOf(r, "claude-1");
+    if (failing === "hang") {
+      await new Promise<void>(setImmediate);
+      t.mock.timers.tick(20);
+    }
+    const off = await reading;
     assert.deepEqual(off.tools, ALL, "the plugin counts as off");
     assert.doesNotMatch(off.instructions, /Knowledge:/);
   }
@@ -405,7 +412,8 @@ test("Knowledge Graph: the chat's knowledge view is read fresh for every manifes
   assert.deepEqual((await manifestOf(rig({ catalog: () => catalog }), "claude-1")).tools, ALL);
 });
 
-test("Knowledge Graph: a worker session (its owner in the session list) gets ONLY the worker tools even when the knowledge read fails, hangs or is unwired", async () => {
+test("Knowledge Graph: a worker session (its owner in the session list) gets ONLY the worker tools even when the knowledge read fails, hangs or is unwired", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const catalog = [...CATALOG, tool("knowledge_search", "knowledge"), tool("knowledge_save", "knowledge"), tool("knowledge_worker_next_task", "knowledge"), tool("knowledge_worker_submit", "knowledge")];
   const worker = [chatSummary({ id: "claude-1", owner: { kind: "knowledge-indexer", runId: "r1" } } as unknown as Partial<SessionSummary>)];
   let view: Error | "hang" = new Error("store down");
@@ -417,7 +425,12 @@ test("Knowledge Graph: a worker session (its owner in the session list) gets ONL
   r.api.on("GET", "/api/sessions", { status: 200, body: worker });
   for (const failing of [new Error("store down"), "hang" as const]) {
     view = failing;
-    const manifest = await manifestOf(r, "claude-1");
+    const reading = manifestOf(r, "claude-1");
+    if (failing === "hang") {
+      await new Promise<void>(setImmediate);
+      t.mock.timers.tick(20);
+    }
+    const manifest = await reading;
     assert.deepEqual(manifest.tools, ["knowledge_worker_next_task", "knowledge_worker_submit"], String(failing));
     assert.doesNotMatch(manifest.instructions, /list_sessions|update_todos/);
   }

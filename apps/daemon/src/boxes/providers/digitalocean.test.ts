@@ -198,7 +198,8 @@ test("destroy: a reconciled Droplet's key is found by the box name", async (t) =
   const replay = replayFetch([
     { method: "DELETE", url: `${API}/droplets/300000002`, status: 204 },
     { method: "GET", url: `${API}/account/keys?page=1&per_page=200`, body: fixture("digitalocean", "ssh-keys") },
-    { method: "DELETE", url: `${API}/account/keys/500000002`, status: 204 }
+    { method: "DELETE", url: `${API}/account/keys/500000002`, status: 204 },
+    { method: "DELETE", url: `${API}/account/keys/500000009`, status: 204, times: Infinity }
   ]);
   await digitaloceanAdapter.destroy(credentials, { dropletId: 300000002, region: "nyc3", sshKeyName: "orq-ffeeddccbbaa" }, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);

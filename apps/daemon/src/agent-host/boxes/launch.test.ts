@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter, once } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,7 +12,7 @@ import { localBoxConnection } from "../../boxes/testing.ts";
 import type { AdapterContext, AdapterLogger } from "../adapter.ts";
 import type { HostThreadBox } from "../host-protocol.ts";
 import { claudeBoxCredentials, isBoxLoginRefusal, prepareClaudeBoxSession } from "../adapters/claude/box-launch.ts";
-import { createFakeContext, waitUntil } from "../adapters/codex/testing.ts";
+import { createFakeContext } from "../adapters/codex/testing.ts";
 import { renderGrokOverlayConfig } from "../adapters/grok/launch.ts";
 import { BoxDaemonCallError } from "./daemon-client.ts";
 import { createAgentHostBoxes, BoxLaunchError } from "./index.ts";
@@ -57,7 +58,7 @@ function launchBox(connection: { boxId: string; sys: HostThreadBox["sys"]; paths
 }
 
 test("the System account never launches in a box (spec §7); OpenCode, which has no managed accounts, may", async () => {
-  const home = await boxHome(["opencode"]);
+  const home = await boxHome(["opencode", "claude"]);
   const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
   const sync = recordingSync();
   const boxes = createAgentHostBoxes({
@@ -189,7 +190,7 @@ test("Claude's box login: a refresh-token-free credentials file, rewritten only 
   const tokens = recordingTokens({
     accessToken: "access-1",
     expiresAt: now + 8 * 60 * 60_000,
-    extra: { scopes: "user:inference user:profile", subscriptionType: "max", rateLimitTier: "default_claude_max_20x" }
+    extra: { refreshToken: "refresh-host-secret", scopes: "user:inference user:profile", subscriptionType: "max", rateLimitTier: "default_claude_max_20x" }
   });
   const boxes = createAgentHostBoxes({ appdir: join(root, "appdir"), connector: () => connection, tokens, sync: recordingSync(), logger: quiet, now: () => now });
   const launch = await boxes.launch({
@@ -241,13 +242,15 @@ test("Claude's box login is renewed mid-turn: a timer armed for the margin rewri
   let now = 1_800_000_000_000;
   const timers: { callback: () => void; delayMs: number; done: boolean }[] = [];
   const live = () => timers.filter((timer) => !timer.done);
-  const fire = (): void => {
+  let rearmed: (() => void) | undefined;
+  const fire = (): Promise<void> => new Promise((resolve) => {
     const [timer] = live();
     assert.ok(timer !== undefined, "a renewal timer is armed");
     timer.done = true;
     now += timer.delayMs;
+    rearmed = resolve;
     timer.callback();
-  };
+  });
   const tokens = recordingTokens({ accessToken: "access-1", expiresAt: now + 8 * 60 * 60_000 });
   let failRenewal = false;
   const boxes = createAgentHostBoxes({
@@ -265,6 +268,8 @@ test("Claude's box login is renewed mid-turn: a timer armed for the margin rewri
     schedule: (callback, delayMs) => {
       const timer = { callback, delayMs, done: false };
       timers.push(timer);
+      rearmed?.();
+      rearmed = undefined;
       return () => {
         timer.done = true;
       };
@@ -285,15 +290,13 @@ test("Claude's box login is renewed mid-turn: a timer armed for the margin rewri
   // looked at again without asking for anything.
   assert.equal(live().length, 1);
   assert.equal(live()[0]?.delayMs, BOX_TOKEN_RENEW_MAX_DELAY_MS);
-  fire();
-  await waitUntil(() => live().length === 1, "the timer re-armed for the rest");
+  await fire();
   assert.equal(tokens.requests.length, 1);
   assert.equal(live()[0]?.delayMs, 8 * 60 * 60_000 - BOX_TOKEN_RENEW_MAX_DELAY_MS - BOX_TOKEN_RESTART_MARGIN_MS + 1);
 
   // A turn is running (no turn boundary in sight) when the moment comes: the file is rewritten.
   tokens.grant = { accessToken: "access-2", expiresAt: now + live()[0]!.delayMs + 4 * 60 * 60_000 };
-  fire();
-  await waitUntil(() => live().length === 1, "the timer re-armed after the renewal");
+  await fire();
   assert.equal(await fileToken(), "access-2");
   assert.equal(tokens.requests.length, 2);
   // Re-armed for the NEW token's margin.
@@ -301,14 +304,12 @@ test("Claude's box login is renewed mid-turn: a timer armed for the margin rewri
 
   // A renewal that fails while the token is still good is retried a minute later, not dropped.
   failRenewal = true;
-  fire();
-  await waitUntil(() => live().length === 1, "the retry armed");
+  await fire();
   assert.equal(live()[0]?.delayMs, 60_000);
   assert.equal(await fileToken(), "access-2");
   failRenewal = false;
   tokens.grant = { accessToken: "access-3", expiresAt: now + 60_000 + 8 * 60 * 60_000 };
-  fire();
-  await waitUntil(() => live().length === 1, "the timer re-armed after the retry");
+  await fire();
   assert.equal(await fileToken(), "access-3");
 
   // Closing the launch cancels the timer.
@@ -535,21 +536,23 @@ test("the box login follows the account's real login file: rewritten in place or
   });
   const path = "/box/t1/.credentials.json";
   const tokenOf = (text: string) => (JSON.parse(text) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken;
-  let boxToken = "";
+  const written = new EventEmitter();
   await launch.installCredentials(async (grant) => {
     await connection.writeFile(path, JSON.stringify(claudeBoxCredentials(grant, now)), { mode: 0o600, mkdirs: true });
-    boxToken = grant.accessToken;
+    written.emit(grant.accessToken);
   });
 
   tokens.grant = { accessToken: "access-2", expiresAt: now + 8 * 60 * 60_000 };
+  const rewritten = once(written, "access-2");
   await writeFile(hostPath, hostLogin("access-2", now + 8 * 60 * 60_000), { mode: 0o600 });
-  await waitUntil(() => boxToken === "access-2", "the in-place rewrite adopted");
+  await rewritten;
   assert.equal(tokenOf(await readFile(connection.localPathOf(path), "utf8")), "access-2");
 
   tokens.grant = { accessToken: "access-3", expiresAt: now + 8 * 60 * 60_000 };
+  const replaced = once(written, "access-3");
   await writeFile(`${hostPath}.tmp`, hostLogin("access-3", now + 8 * 60 * 60_000), { mode: 0o600 });
   await rename(`${hostPath}.tmp`, hostPath);
-  await waitUntil(() => boxToken === "access-3", "the renamed file adopted");
+  await replaced;
   assert.equal(tokenOf(await readFile(connection.localPathOf(path), "utf8")), "access-3");
   await launch.close();
 });

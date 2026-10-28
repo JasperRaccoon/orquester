@@ -463,6 +463,8 @@ test("a log that does not continue an entry's cursor â€” rewritten, or shorter â
 test("a thread deleted while its output is read returns only the recreated thread's output", async (t) => {
   const { store, rootDir } = await tempStore(t);
   await store.append({ threadId: "t1", events: [created("t1"), appendable("t1", "start", "tool.started", SHELL), streamed("t1", "o1", SHELL, "old\n")] });
+  // Park the race in the output join, after the item lookup is cached.
+  await store.readItem("t1", "start");
   const probe = await fs.open(path.join(rootDir, "probe"), "w");
   const prototype = Object.getPrototypeOf(probe) as fs.FileHandle;
   await probe.close();

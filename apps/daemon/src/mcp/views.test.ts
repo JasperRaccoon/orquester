@@ -17,6 +17,7 @@ test("session views distinguish a new chat from running and exited terminals", (
 });
 
 test("sessionView projects a chat summary and a terminal summary", () => {
+  assert.equal(sessionView(chatSummary(), ctx).chat?.profile, null);
   const chat = sessionView(chatSummary({ accountId: "acc-1" }), ctx);
   assert.equal(chat.kind, "chat"); assert.equal(chat.adapter, "claude"); assert.equal(chat.agent, "claude");
   assert.deepEqual(chat.project, { workspace: "acme", name: "api", path: "/w/acme/api" });
@@ -30,7 +31,6 @@ test("sessionView projects a chat summary and a terminal summary", () => {
   assert.deepEqual(sessionView(chatSummary({ profileId: "prof-1" }), named).chat?.profile, { id: "prof-1", name: "Video" });
   assert.deepEqual(sessionView(chatSummary({ profileId: "prof-gone" }), named).chat?.profile, { id: "prof-gone" });
   assert.equal(sessionView(chatSummary({ profileId: null }), named).chat?.profile, null);
-  assert.equal(sessionView(chatSummary(), ctx).chat?.profile, null);
   const term = sessionView(shellSummary({ kind: "agent", status: "exited", exitCode: 1 }), ctx);
   assert.equal(term.kind, "terminal"); assert.deepEqual(term.terminal, { status: "exited", exitCode: 1, legacyAgent: true }); assert.equal(term.chat, undefined);
 });

@@ -8,7 +8,7 @@ import type { AgentChainEntry } from "@orquester/api";
 import type { NodeResult, WaitingOn } from "../contracts.ts";
 import { type AgentBlockOutput, type AgentPhase } from "./executor.ts";
 import { byAccount, type FakeBehaviour } from "./testing/fake-chat-host.ts";
-import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
+import { account, agentNode, SimulatedCrash, testWorkflow } from "./testing/fake-context.ts";
 import { Scenario } from "./testing/scenario.ts";
 import { revealSecrets } from "./secret-text.ts";
 
@@ -136,10 +136,13 @@ test("the deadline is wall-clock: a resumed block does not get its maxMinutes ag
   const sc = new Scenario({ accounts: CLAUDE, behaviour: () => [{ kind: "hang" }] });
   const wf = testWorkflow([agentNode("n1", { maxMinutes: 30 })]);
   const start = sc.clock.now().getTime();
-  const run = await sc.runWithRestart(wf, "n1", { phase: "watching" });
-  assert.equal((run.result as { error: { kind: string } }).error.kind, "timeout");
-  const took = sc.clock.now().getTime() - start;
-  assert.ok(took < 31 * 60_000, `took ${took}`);
+  const first = sc.context(wf, "n1", { crashAt: { phase: "watching" } });
+  await assert.rejects(sc.clock.drive(sc.executor().execute(first.ctx)), SimulatedCrash);
+  await sc.clock.advance(10 * 60_000);
+  const resumed = sc.context(wf, "n1", { resumeFrom: first.persisted.at(-1)! });
+  const result = await sc.clock.drive(sc.executor().execute(resumed.ctx));
+  assert.equal((result as { error: { kind: string } }).error.kind, "timeout");
+  assert.equal(sc.clock.now().getTime() - start, 30 * 60_000);
 });
 
 // Secrets (§5.7): the state the block persists (WaitingOn → run.json, unredacted) never holds a

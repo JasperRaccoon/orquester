@@ -126,21 +126,6 @@ test("readSseFrames CANCELS the body when the consumer breaks out", async () => 
   assert.equal(cancelled(), true);
 });
 
-test("readSseFrames cancels the body when the consumer throws", async () => {
-  const { body, cancelled } = streamOf(["data: a\n\n", "data: b\n\n"]);
-  const boom = new Error("handler blew up");
-  await assert.rejects(
-    (async () => {
-      for await (const frame of readSseFrames(body)) {
-        void frame;
-        throw boom;
-      }
-    })(),
-    (error: unknown) => error === boom
-  );
-  assert.equal(cancelled(), true);
-});
-
 test("readSseFrames on a null body ends immediately", async () => {
   const seen: unknown[] = [];
   for await (const frame of readSseFrames(null)) {

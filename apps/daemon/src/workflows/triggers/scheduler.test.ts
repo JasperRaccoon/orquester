@@ -162,10 +162,11 @@ test("an unrelated edit keeps the cursor; a disabled node is not scheduled; an i
   await scheduler.start();
   assert.equal(scheduler.triggerState("wf", "off"), null);
   assert.deepEqual(scheduler.triggerState("wf", "bad"), { nextRunAt: null, lastFiredAt: null });
-  clock.jump("2026-09-28T10:10:00.000Z");
+  clock.jump("2026-09-28T10:16:00.000Z");
   host.changed();
   await scheduler.idle();
-  assert.equal(scheduler.triggerState("wf", "s1")!.nextRunAt, "2026-09-28T10:15:00.000Z", "unchanged cron keeps its next time");
+  assert.equal((host.fired[0]!.payload as { scheduledFor: string }).scheduledFor, "2026-09-28T10:15:00.000Z", "the unchanged cursor still fires its overdue slot");
+  assert.equal(scheduler.triggerState("wf", "s1")!.nextRunAt, "2026-09-28T10:30:00.000Z");
   await run(HOUR);
   assert.deepEqual(new Set(host.fired.map((r) => r.triggerNodeId)), new Set(["s1"]));
   scheduler.stop();

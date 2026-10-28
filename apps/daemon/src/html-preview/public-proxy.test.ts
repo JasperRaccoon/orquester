@@ -92,9 +92,7 @@ describe("publicAddresses: resolve first, then check every address", () => {
   });
 
   it("refuses localhost names without resolving them, and takes bracketed IPv6 literals as literals", async () => {
-    const resolve = async (): Promise<never> => {
-      throw new Error("never resolved");
-    };
+    const resolve = async () => [{ address: "93.184.216.34", family: 4 }];
     for (const host of ["localhost", "LOCALHOST.", "app.localhost", "[::1]", "[::ffff:127.0.0.1]"]) {
       assert.equal(await publicAddresses(host, { resolve }), undefined, host);
     }
@@ -206,23 +204,39 @@ describe("the SOCKS5 proxy", () => {
   });
 
   it("refuses a non-CONNECT command", async () => {
-    const proxy = await startPublicProxy();
-    try {
+    await withServer(async (port, connections) => {
+      const proxy = await startPublicProxy({ blocked: (address) => address !== "127.0.0.1" });
       const socket = net.connect(proxy.port, "127.0.0.1");
-      await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
-      const replies: Buffer[] = [];
-      socket.on("data", (chunk: Buffer) => replies.push(chunk));
-      const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
-      // Greeting, then BIND (command 2) to 1.1.1.1:80.
-      socket.write(Buffer.from([5, 1, 0]));
-      socket.write(Buffer.from([5, 2, 0, 1, 1, 1, 1, 1, 0, 80]));
-      await closed;
-      const all = Buffer.concat(replies);
-      assert.deepEqual([...all.subarray(0, 2)], [5, 0]);
-      assert.equal(all[3], 7);
-    } finally {
-      await proxy.close();
-    }
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.once("connect", resolve);
+          socket.once("error", reject);
+        });
+        const replies: Buffer[] = [];
+        const reply = new Promise<Buffer>((resolve, reject) => {
+          socket.on("data", (chunk: Buffer) => {
+            replies.push(chunk);
+            const bytes = Buffer.concat(replies);
+            if (bytes.length >= 12) resolve(bytes);
+          });
+          socket.once("error", reject);
+          socket.once("close", () => reject(new Error("closed before the complete SOCKS reply")));
+        });
+        const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+        // Greeting and BIND share the stream as before; an allowed local target
+        // makes a missing command guard produce a reply instead of a network wait.
+        socket.write(Buffer.from([5, 1, 0]));
+        socket.write(Buffer.from([5, 2, 0, 1, 127, 0, 0, 1, port >> 8, port & 0xff]));
+        const all = await reply;
+        assert.deepEqual([...all.subarray(0, 2)], [5, 0]);
+        assert.equal(all[3], 7);
+        assert.equal(connections(), 0, "an unsupported command never reaches its target");
+        await closed;
+      } finally {
+        socket.destroy();
+        await proxy.close();
+      }
+    });
   });
 });
 
@@ -294,6 +308,8 @@ describe("name resolution (c-ares, bounded)", () => {
       assert.ok(reads.every((bytes) => bytes.length > 0));
       assert.equal(settled, 0, "the file reads finished while every lookup was still pending");
       t.mock.timers.tick(1500);
+      await Promise.resolve();
+      assert.equal(settled, lookups.length, "the fake deadline settled active and queued lookups");
       assert.deepEqual(await Promise.all(lookups), Array.from({ length: 8 }, () => []));
       assert.ok(dns.queries() > 0);
     } finally {
@@ -302,31 +318,42 @@ describe("name resolution (c-ares, bounded)", () => {
     }
   });
 
-  it("closing cancels what is still in flight, and a closed resolver answers nothing", async () => {
+  it("closing cancels what is still in flight, and a closed resolver answers nothing", async (t) => {
     const dns = await dnsServer({}, true);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const resolver = createDnsResolver({ servers: [dns.server], timeoutMs: 30_000 });
+    t.after(async () => {
+      resolver.close();
+      await dns.close();
+    });
     const pending = resolver.resolve("slow.example");
+    let cancelled: unknown;
+    void pending.then((addresses) => { cancelled = addresses; });
     resolver.close();
-    const started = Date.now();
-    assert.deepEqual(await pending, []);
-    assert.ok(Date.now() - started < 2000);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(cancelled, [], "close settled the lookup without firing its timeout");
     assert.deepEqual(await resolver.resolve("after.example"), []);
-    await dns.close();
   });
 
-  it("closing answers the lookups still waiting for a slot too, at once", async () => {
+  it("closing answers the lookups still waiting for a slot too, at once", async (t) => {
     const dns = await dnsServer({}, true);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const resolver = createDnsResolver({ servers: [dns.server], timeoutMs: 60_000 });
+    t.after(async () => {
+      resolver.close();
+      await dns.close();
+    });
     // Four in flight, three waiting for a slot.
     const pending = Array.from({ length: 7 }, (_, index) => resolver.resolve(`slow-${index}.example`));
-    const started = Date.now();
+    let cancelled: unknown;
+    void Promise.all(pending).then((addresses) => { cancelled = addresses; });
     resolver.close();
-    assert.deepEqual(await Promise.all(pending), Array.from({ length: 7 }, () => []));
-    assert.ok(Date.now() - started < 2000, `${Date.now() - started} ms`);
-    await dns.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(cancelled, Array.from({ length: 7 }, () => []), "close settled active and queued lookups without firing their timeouts");
   });
 
   it("the proxy refuses a name whose lookup times out", async (t) => {
+    const endings = t.mock.method(net.Socket.prototype, "end");
     const dns = await dnsServer({}, true);
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const proxy = await startPublicProxy({ dnsServers: [dns.server], lookupTimeoutMs: 500 });
@@ -334,6 +361,10 @@ describe("name resolution (c-ares, bounded)", () => {
       const connecting = socksConnect(proxy.port, "slow.example", 443);
       await dns.queried;
       t.mock.timers.tick(500);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.ok(endings.mock.calls.some(({ arguments: [chunk] }) =>
+        Buffer.isBuffer(chunk) && chunk.length === 10 && chunk[0] === 5 && chunk[1] === SOCKS_REFUSED_BY_RULE
+      ), "the fake deadline sent the SOCKS refusal before any native DNS timeout");
       const { code, socket } = await connecting;
       assert.equal(code, SOCKS_REFUSED_BY_RULE);
       socket.destroy();

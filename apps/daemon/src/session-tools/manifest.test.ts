@@ -12,7 +12,7 @@ import { z } from "zod";
 
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type Tier, type ToolsetId } from "../mcp/catalog/contract.ts";
 import { catalogFor } from "../mcp/catalog/index.ts";
-import { buildSessionToolsManifest, denyFor, type ManifestKnowledge, type ManifestThread } from "./manifest.ts";
+import { buildSessionToolsManifest, type ManifestKnowledge, type ManifestThread } from "./manifest.ts";
 
 const tool = (name: string, toolset: ToolsetId, tier: Tier | ((args: Record<string, unknown>) => Tier)): AnyOrquesterTool =>
   defineTool({
@@ -57,6 +57,9 @@ const server = (over: Partial<DaemonPointingServer>): DaemonPointingServer => ({
   ...over
 });
 
+const denials = (thread: ManifestThread, servers: readonly DaemonPointingServer[]): string[] =>
+  buildSessionToolsManifest({ thread, catalog: [], daemonPointing: servers }).deny;
+
 test("deny: the thread's agent, in its own account home or its project — exactly what its CLI loads", () => {
   const servers = [
     server({ name: "orquester_remote" }),
@@ -67,12 +70,12 @@ test("deny: the thread's agent, in its own account home or its project — exact
     server({ name: "orquester", reason: "name" }),
     server({ name: "orquester_remote", reason: "url" })
   ];
-  assert.deepEqual(denyFor(thread(), servers), ["here", "orquester", "orquester_remote"]);
-  assert.deepEqual(denyFor(thread({ home: "system" }), [server({ home: "system", name: "sys" })]), ["sys"]);
+  assert.deepEqual(denials(thread(), servers), ["here", "orquester", "orquester_remote"]);
+  assert.deepEqual(denials(thread({ home: "system" }), [server({ home: "system", name: "sys" })]), ["sys"]);
   // A thread bound to no project matches no project-level server.
-  assert.deepEqual(denyFor(thread({ projectPaths: [] }), [server({ name: "here", scope: "project", projectPath: "/w/acme/api" })]), []);
+  assert.deepEqual(denials(thread({ projectPaths: [] }), [server({ name: "here", scope: "project", projectPath: "/w/acme/api" })]), []);
   // The canonical spelling counts too.
-  assert.deepEqual(denyFor(thread({ projectPaths: ["/w/acme/api-link", "/w/acme/api"] }), [server({ name: "p", scope: "project", projectPath: "/w/acme/api" })]), ["p"]);
+  assert.deepEqual(denials(thread({ projectPaths: ["/w/acme/api-link", "/w/acme/api"] }), [server({ name: "p", scope: "project", projectPath: "/w/acme/api" })]), ["p"]);
 });
 
 test("deny: a chat in a directory inside its project — the configs from the root down to its cwd, never a sibling's or a deeper one's", () => {
@@ -86,14 +89,14 @@ test("deny: a chat in a directory inside its project — the configs from the ro
     server({ name: "other_project", scope: "project", projectPath: "/w/acme/web" })
   ];
   // An ancestor of the project counts (Codex reads from its project root — the git root, maybe above).
-  assert.deepEqual(denyFor(thread({ cwdPaths: ["/w/acme/api/packages/app"] }), servers), ["at_cwd", "on_the_way", "outside", "root"]);
-  assert.deepEqual(denyFor(thread(), servers), ["outside", "root"], "at the project root: the root's and its ancestors'");
+  assert.deepEqual(denials(thread({ cwdPaths: ["/w/acme/api/packages/app"] }), servers), ["at_cwd", "on_the_way", "outside", "root"]);
+  assert.deepEqual(denials(thread(), servers), ["outside", "root"], "at the project root: the root's and its ancestors'");
 });
 
 test("deny: a Codex project server in every home — trust (`loadedByHomes`) is display only", () => {
   const codex = (loadedByHomes?: string[]) => server({ agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api", name: "proj", ...(loadedByHomes ? { loadedByHomes } : {}) });
   for (const loadedByHomes of [["acct-1"], [], undefined]) {
-    assert.deepEqual(denyFor(thread({ agentId: "codex", home: "system" }), [codex(loadedByHomes)]), ["proj"]);
+    assert.deepEqual(denials(thread({ agentId: "codex", home: "system" }), [codex(loadedByHomes)]), ["proj"]);
   }
 });
 
@@ -103,16 +106,16 @@ test("deny: a chat whose cwd or project leaves its bounds — every server of it
     server({ name: "other_project", scope: "project", projectPath: "/w/acme/web" }),
     server({ name: "codex_one", agent: "codex" })
   ];
-  assert.deepEqual(denyFor(thread({ denyEveryKnown: true }), servers), ["other_home", "other_project"], "its own agent's only");
-  assert.deepEqual(denyFor(thread(), servers), []);
+  assert.deepEqual(denials(thread({ denyEveryKnown: true }), servers), ["other_home", "other_project"], "its own agent's only");
+  assert.deepEqual(denials(thread(), servers), []);
 });
 
 test("deny: a server every home of the agent loads (Grok's inherited ~/.claude.json, allHomes) is denied in an account home too", () => {
   const inherited = server({ agent: "grok", home: "system", name: "claude_inherited", allHomes: true });
   const ownConfig = server({ agent: "grok", home: "system", name: "grok_system_only" });
-  assert.deepEqual(denyFor(thread({ agentId: "grok", home: "acct-g" }), [inherited, ownConfig]), ["claude_inherited"]);
-  assert.deepEqual(denyFor(thread({ agentId: "grok", home: "system" }), [inherited, ownConfig]), ["claude_inherited", "grok_system_only"]);
-  assert.deepEqual(denyFor(thread({ agentId: "claude", home: "acct-g" }), [inherited]), [], "only the agent it is reported under");
+  assert.deepEqual(denials(thread({ agentId: "grok", home: "acct-g" }), [inherited, ownConfig]), ["claude_inherited"]);
+  assert.deepEqual(denials(thread({ agentId: "grok", home: "system" }), [inherited, ownConfig]), ["claude_inherited", "grok_system_only"]);
+  assert.deepEqual(denials(thread({ agentId: "claude", home: "acct-g" }), [inherited]), [], "only the agent it is reported under");
 });
 
 test("the manifest: tools, the composed block and the deny list; no legacy toolsets field", () => {

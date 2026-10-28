@@ -85,7 +85,6 @@ test("an OAuth client gets an access token once and reuses it until it nearly ex
 });
 
 test("removeNode deletes only tagged devices named orq-<boxId>", async (t) => {
-  const deleted: string[] = [];
   const api = fakeApi(t, {
     "GET /api/v2/tailnet/-/devices": () =>
       Response.json({
@@ -96,14 +95,11 @@ test("removeNode deletes only tagged devices named orq-<boxId>", async (t) => {
           { id: "4", nodeId: "n4", hostname: "orq-box-other0000000", name: "orq-box-other0000000.tail1.ts.net", tags: ["tag:orq-box"] }
         ]
       }),
-    "DELETE /api/v2/device/n1": () => {
-      deleted.push("n1");
-      return new Response(null, { status: 200 });
-    }
+    "DELETE /api/v2/device/n1": () => new Response(null, { status: 200 })
   });
   const keys = createTailscaleKeys({ credentials: () => ({ apiToken: "tskey-api-TOKEN" }) });
   await keys.removeNode({ boxId: "box-0123456789ab", signal });
-  assert.deepEqual(deleted, ["n1"]);
+  assert.deepEqual(api.calls.filter((call) => call.method === "DELETE").map((call) => call.url), ["/api/v2/device/n1"]);
 });
 
 test("unconfigured credentials and API errors fail without leaking secrets", async (t) => {

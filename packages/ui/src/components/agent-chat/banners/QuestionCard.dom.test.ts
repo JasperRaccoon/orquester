@@ -184,7 +184,7 @@ describe("QuestionCard — the question and its options", () => {
   it("never takes focus: the composer keeps it while a question with previews appears", () => {
     focus(composer);
     render(request(question({ options: [{ label: "A", description: "", preview: "a" }, { label: "B", description: "" }] })));
-    assert.equal(dom.window.document.activeElement, composer);
+    assert.ok(dom.window.document.activeElement === composer, "the composer keeps focus");
   });
 
   it("renders the question as the chat's markdown", () => {
@@ -209,7 +209,7 @@ describe("QuestionCard — the question and its options", () => {
     assert.ok(option.textContent?.includes(label), "the whole label is there");
     assert.equal(option.querySelector("strong")?.textContent, "history stays");
     assert.equal(option.querySelector("code")?.textContent, "git mv");
-    assert.equal(option.querySelector("a"), null, "a description cannot take the option click");
+    assert.ok(option.querySelector("a") === null, "a description cannot take the option click");
   });
 
   it("keeps the numbered options, picks by digit, and ignores a digit typed into the answer", () => {
@@ -369,7 +369,7 @@ describe("QuestionCard — option previews", () => {
 
     // The arrow keys browse the options, and the pane with them.
     key(options[2]!, { key: "ArrowUp" });
-    assert.equal(dom.window.document.activeElement, options[1]);
+    assert.ok(dom.window.document.activeElement === options[1], "focus stays on the chosen option");
     assert.equal(preview().getAttribute("aria-label"), "Preview: Top bar");
   });
 
@@ -379,7 +379,7 @@ describe("QuestionCard — option previews", () => {
       question: "Then?",
       options: [
         { label: "Dark", description: "", preview: "dark mock" },
-        { label: "Light", description: "", preview: "light mock" }
+        { label: "Light", value: "Top bar", description: "", preview: "light mock" }
       ]
     })));
     act(() => {
@@ -408,8 +408,8 @@ describe("QuestionCard — option previews", () => {
     assert.equal(frame.hasAttribute("srcdoc"), false);
     assert.equal(frame.getAttribute("referrerpolicy"), "no-referrer");
     assert.equal(frame.title, "Preview of Card");
-    assert.equal(dom.window.document.getElementById("evil"), null);
-    assert.equal(mount.querySelector("script"), null);
+    assert.ok(dom.window.document.getElementById("evil") === null, "the element is absent");
+    assert.ok(mount.querySelector("script") === null, "the element is absent");
   });
 
   it("builds the framed document with a CSP that refuses every fetch, and the theme's tokens", () => {

@@ -344,7 +344,7 @@ export function redactUrlCredentials(url: string): string {
   return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#\s]+@/i, "$1***@");
 }
 
-/** The digest a `files` pin compares (paths, hashes, flags), as the daemon's `treeDigest`. */
+/** The digest a `files` pin compares (paths, hashes, flags). */
 export function treeDigest(tree: ProfilePreviewTree): string {
   const hash = createHash("sha256");
   for (const file of tree.files) hash.update(`${file.path}\0${file.sha256}\0${file.flag ?? ""}\n`);

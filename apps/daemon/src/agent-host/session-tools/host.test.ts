@@ -21,6 +21,7 @@ import { DAEMON_UNAVAILABLE_MESSAGE, cancelledResult } from "../../session-tools
 import { TEST_CHAT_TOOLS } from "../../session-tools/testing.ts";
 import { buildChatToolDefinitions, knownSessionToolNames } from "./definitions.ts";
 import { createDaemonForwarder, type ManifestAnswer } from "./forwarder.ts";
+import { drain } from "../support/leftover-processes.testing.ts";
 import {
   createSessionToolsHost,
   DENIAL_DEGRADED_WARNING,
@@ -83,10 +84,15 @@ function recordingForward() {
   return { forward, calls, nextCall };
 }
 
-async function connect(t: { after(fn: () => Promise<void>): void }, grant: SessionToolsGrant): Promise<Client> {
+async function connect(t: { after(fn: () => Promise<void>): void }, grant: SessionToolsGrant, cancelled?: () => void): Promise<Client> {
   const client = new Client({ name: "probe", version: "0" });
   const transport = new StreamableHTTPClientTransport(new URL(grant.url), {
-    requestInit: { headers: { Authorization: grant.authorization } }
+    requestInit: { headers: { Authorization: grant.authorization } },
+    ...(cancelled ? { fetch: async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const response = await fetch(input, init);
+      if (typeof init?.body === "string" && JSON.parse(init.body).method === "notifications/cancelled") cancelled();
+      return response;
+    } } : {})
   });
   await client.connect(transport);
   t.after(() => client.close());
@@ -184,19 +190,17 @@ test("the endpoint serves POST /mcp only", async (t) => {
 
 test("a provider's own cancel aborts the call", async (t) => {
   const { host: service, rec } = host(t);
-  const client = await connect(t, await service.issue("thread-a", CODEX));
+  let cancelled!: () => void;
+  const cancellationHandled = new Promise<void>((resolve) => { cancelled = resolve; });
+  const client = await connect(t, await service.issue("thread-a", CODEX), cancelled);
   const controller = new AbortController();
   const started = rec.nextCall();
   const pending = client.callTool({ name: "wait_for_cancel", arguments: {} }, undefined, { signal: controller.signal });
   await started;
   controller.abort();
   await assert.rejects(pending);
-  // The SDK's `notifications/cancelled` reached the endpoint and aborted the forward.
-  await new Promise<void>((resolve) => {
-    const signal = rec.calls[0]!.signal;
-    if (signal.aborted) resolve();
-    else signal.addEventListener("abort", () => resolve(), { once: true });
-  });
+  // The notification's HTTP reply proves the endpoint processed it before checking the call.
+  await cancellationHandled;
   assert.equal(rec.calls[0]!.signal.aborted, true);
 });
 
@@ -211,10 +215,10 @@ test("an interrupted turn aborts its thread's calls, and only its thread's", asy
   const pendingB = b.callTool({ name: "wait_for_cancel", arguments: {} });
   await started;
   service.abortThreadCalls("thread-a");
-  const resultA = (await pendingA) as CallToolResult;
-  assert.equal(resultA.isError, true);
   assert.equal(rec.calls[0]!.signal.aborted, true);
   assert.equal(rec.calls[1]!.signal.aborted, false);
+  const resultA = (await pendingA) as CallToolResult;
+  assert.equal(resultA.isError, true);
   service.abortThreadCalls("thread-b");
   await pendingB;
 });
@@ -227,8 +231,8 @@ test("revoking a credential aborts the calls made with it", async (t) => {
   const pending = client.callTool({ name: "wait_for_cancel", arguments: {} });
   await started;
   grant.revoke();
-  await pending.catch(() => undefined);
   assert.equal(rec.calls[0]!.signal.aborted, true);
+  await pending.catch(() => undefined);
 });
 
 test("the in-process path (Claude's) files calls under the thread it was bound to", async (t) => {
@@ -451,17 +455,21 @@ test("a launch waiting for its denials takes the manifest another launch of its 
   b.revoke();
 });
 
-test("a launch waiting for its denials gives up when the host stops", async () => {
+test("a launch waiting for its denials gives up when the host stops", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let entered!: () => void;
   const asked = new Promise<void>((resolve) => (entered = resolve));
   const service = testHost(recordingForward().forward, async () => {
     entered();
     return { kind: "unavailable" };
   });
-  const launch = service.issue("thread-a", CODEX);
+  let refused = false;
+  const launch = assert.rejects(service.issue("thread-a", CODEX), isSessionToolsDenialsUnknown).then(() => { refused = true; });
   await asked;
   await service.stop();
-  await assert.rejects(launch, isSessionToolsDenialsUnknown);
+  await drain();
+  assert.equal(refused, true, "stop settles the launch before its deadline advances");
+  await launch;
 });
 
 test("a fallback launch drops a wanted list it cannot read anyway (no restart at every idle point)", async (t) => {
@@ -524,6 +532,7 @@ test("a pulled manifest names the live daemon only when its socket is still the 
 });
 
 test("forgetting a thread, or interrupting its turn, ends a launch's wait for its denials at once", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   for (const end of ["forgetThread", "abortThreadCalls"] as const) {
     let entered!: () => void;
     const asked = new Promise<void>((resolve) => (entered = resolve));
@@ -532,10 +541,13 @@ test("forgetting a thread, or interrupting its turn, ends a launch's wait for it
       return { kind: "unavailable" };
     });
     t.after(() => service.stop());
-    const launch = service.issue("thread-a", CODEX);
+    let refused = false;
+    const launch = assert.rejects(service.issue("thread-a", CODEX), isSessionToolsDenialsUnknown, end).then(() => { refused = true; });
     await asked;
     service[end]("thread-a");
-    await assert.rejects(launch, isSessionToolsDenialsUnknown, end);
+    await drain();
+    assert.equal(refused, true, end);
+    await launch;
   }
 });
 

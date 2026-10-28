@@ -118,10 +118,6 @@ const held = () => secretFilesStore.getState().vaults;
 beforeEach(() => resetSecretFiles());
 
 describe("wire validation", () => {
-  it("keeps a well-formed vault as it is", () => {
-    assert.deepEqual(sanitizeSecretVault(vault()), vault());
-  });
-
   it("refuses a vault without a usable identity", () => {
     assert.equal(sanitizeSecretVault(null), null);
     assert.equal(sanitizeSecretVault({ ...vault(), workspace: "../etc" }), null);

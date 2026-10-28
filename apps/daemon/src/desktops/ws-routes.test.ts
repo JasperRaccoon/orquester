@@ -154,7 +154,7 @@ function clientFrame(opcode: number, payload: Buffer): Buffer {
   return Buffer.concat([Buffer.from([0x80 | opcode, 0x80 | payload.length]), mask, masked]);
 }
 
-test("both routes reject a missing or invalid token with 1008 after the upgrade", { timeout: 15_000 }, async (t) => {
+test("both routes reject a missing or invalid token with 1008 after the upgrade", async (t) => {
   let looked = 0;
   const port = await startApp(t, {
     vncSocketPath: () => {
@@ -177,7 +177,7 @@ test("both routes reject a missing or invalid token with 1008 after the upgrade"
   assert.equal(looked, 0);
 });
 
-test("a desktop that isn't running closes with 1011", { timeout: 15_000 }, async (t) => {
+test("a desktop that isn't running closes with 1011", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "orq-desktop-ws-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   let vncPath: string | null = null;
@@ -197,7 +197,7 @@ test("a desktop that isn't running closes with 1011", { timeout: 15_000 }, async
   assert.equal(reason, "desktop not running");
 });
 
-test("RFB relay round trip: binary both ways, either side closing closes both", { timeout: 15_000 }, async (t) => {
+test("RFB relay round trip: binary both ways, either side closing closes both", async (t) => {
   const vnc = await fakeVnc(t);
   const port = await startApp(t, { vncSocketPath: (id) => (id === DESKTOP_ID ? vnc.path : null) });
 
@@ -234,7 +234,7 @@ test("RFB relay round trip: binary both ways, either side closing closes both", 
   await upstreamClosed;
 });
 
-test("bytes sent before the upstream connects are delivered in order", { timeout: 15_000 }, async (t) => {
+test("bytes sent before the upstream connects are delivered in order", async (t) => {
   const vnc = await fakeVnc(t);
   const port = await startApp(t, { vncSocketPath: () => vnc.path });
 
@@ -274,7 +274,7 @@ test("bytes sent before the upstream connects are delivered in order", { timeout
   client.close();
 });
 
-test("ping is answered with pong on the same socket, queued behind RFB data already sent", { timeout: 15_000 }, async (t) => {
+test("ping is answered with pong on the same socket, queued behind RFB data already sent", async (t) => {
   const vnc = await fakeVnc(t);
   const port = await startApp(t, { vncSocketPath: () => vnc.path });
 
@@ -325,7 +325,7 @@ test("ping is answered with pong on the same socket, queued behind RFB data alre
   client.close();
 });
 
-test("audio route: state message first, then framed packets; ping/pong; close unsubscribes", { timeout: 15_000 }, async (t) => {
+test("audio route: state message first, then framed packets; ping/pong; close unsubscribes", async (t) => {
   const fake = fakeHub();
   const port = await startApp(t, {
     audioSource: (id) => (id === DESKTOP_ID ? { pulseSocketPath: "/run/desk-1/pulse/native" } : null),
@@ -361,7 +361,7 @@ test("audio route: state message first, then framed packets; ping/pong; close un
   await fake.unsubscribed;
 });
 
-test("audio route: sink.close (desktop stopped) closes the socket with 1011", { timeout: 15_000 }, async (t) => {
+test("audio route: sink.close (desktop stopped) closes the socket with 1011", async (t) => {
   const fake = fakeHub();
   const port = await startApp(t, {
     audioSource: () => ({ pulseSocketPath: "/run/desk-1/pulse/native" }),
@@ -375,7 +375,7 @@ test("audio route: sink.close (desktop stopped) closes the socket with 1011", { 
   await fake.unsubscribed;
 });
 
-test("audio route: running without audio sends state unavailable and stays open for pings", { timeout: 15_000 }, async (t) => {
+test("audio route: running without audio sends state unavailable and stays open for pings", async (t) => {
   const fake = fakeHub();
   const port = await startApp(t, {
     audioSource: () => ({ unavailable: "pulseaudio is not installed" }),

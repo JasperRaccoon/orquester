@@ -309,7 +309,7 @@ describe("R6 #11 — a provider row from an older host is repaired, never truste
       { id: "codex", refIds: ["codex"], capabilities }
     ]);
     assert.deepEqual(
-      rows.map((row) => row.id),
+      rows.map((row) => row?.id),
       ["codex"]
     );
   });

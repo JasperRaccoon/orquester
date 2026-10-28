@@ -8,7 +8,7 @@ import { request } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import Database from "better-sqlite3";
 
 import {
@@ -74,6 +74,11 @@ interface Harness {
   }>;
   stop(): Promise<void>;
 }
+
+const activeHarnesses = new Set<Harness>();
+afterEach(async () => {
+  await Promise.all([...activeHarnesses].map((h) => h.stop()));
+});
 
 async function harness(
   options: {
@@ -186,7 +191,7 @@ async function harness(
       req.end();
     });
 
-  return {
+  const h: Harness = {
     host,
     server,
     socketPath,
@@ -194,11 +199,14 @@ async function harness(
     call,
     stream,
     async stop(): Promise<void> {
+      activeHarnesses.delete(h);
       await server.close();
       await host.stop();
       await rm(dir, { recursive: true, force: true });
     }
   };
+  activeHarnesses.add(h);
+  return h;
 }
 
 describe("agent host server — auth (§6)", () => {
@@ -223,7 +231,6 @@ describe("agent host server — auth (§6)", () => {
     const wrong = await h.call("GET", agentHostRoutes.health, undefined, "nope");
     assert.deepEqual(wrong, missing);
     assert.equal((wrong.body as { error: { code: string } }).error.code, "COMMAND_REJECTED");
-    await h.stop();
   });
 });
 
@@ -244,7 +251,6 @@ describe("agent host server — readiness (§3.1, §8)", () => {
     assert.equal(agentHostSupports(body, "sessionProfiles"), true);
     assert.equal(agentHostSupports(body, "crossAgentFork"), true);
     assert.equal(agentHostSupports(body, "boxes"), true);
-    await h.stop();
   });
 
   it("reports live and active-turn threads for the drain-restart", async () => {
@@ -260,7 +266,6 @@ describe("agent host server — readiness (§3.1, §8)", () => {
       [],
       "the drain-restart also waits on live background work (§3.1)"
     );
-    await h.stop();
   });
 });
 
@@ -334,7 +339,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
       "COMMAND_ID_CONFLICT"
     );
     await h.host.settle();
-    await h.stop();
   });
 
   it("creates, renames and deletes a thread", async () => {
@@ -368,7 +372,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     assert.equal(deleted.status, 200);
     const gone = await h.call("GET", agentHostRoutes.read("thread-x"));
     assert.equal(gone.status, 404);
-    await h.stop();
   });
 
   it("reads a turn diff showing every change unless whitespace is asked to be hidden", async (t) => {
@@ -415,7 +418,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     const threadId = await h.host.createThread();
     assert.equal((await h.call("GET", agentHostRoutes.item(threadId, "nope"))).status, 404);
     assert.equal((await h.call("GET", agentHostRoutes.turnDiff(threadId, 7))).status, 404);
-    await h.stop();
   });
 
   it("serves a tool call's streamed output joined from the log, and 404s with its own code", async () => {
@@ -460,7 +462,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     const gone = await h.call("GET", agentHostRoutes.itemOutput("thread-gone", "start"));
     assert.equal(gone.status, 404);
     assert.equal((gone.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
-    await h.stop();
   });
 
   /** A thread whose shell streamed "one\n" then "  two\n" (10 bytes), beside a row that is no tool call. */
@@ -501,7 +502,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     assert.deepEqual((await output("?offset=4")).body, { toolUseId: "bgshell:task-1", offset: 4, text: "  two\n", totalBytes: 10, complete: false, truncated: false });
     // Neither: the whole join, exactly as a host before windows answered it.
     assert.deepEqual((await output("")).body, { toolUseId: "bgshell:task-1", output: "one\n  two\n", complete: false, truncated: false });
-    await h.stop();
   });
 
   it("refuses a malformed offset, clamps maxBytes, and answers an offset past the end as the end", async () => {
@@ -539,7 +539,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     const gone = await output("?offset=0", "start", "thread-gone");
     assert.equal(gone.status, 404);
     assert.equal((gone.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
-    await h.stop();
   });
 
   it("serves the provider snapshots with the host instance id", async () => {
@@ -551,7 +550,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
       (await h.call("POST", agentHostRoutes.providerRefresh("nope"))).status,
       404
     );
-    await h.stop();
   });
 
   it("claims an attachment from a raw octet-stream body and resolves it back", async () => {
@@ -599,7 +597,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
       (await h.call("GET", agentHostExtraRoutes.attachment(threadId, "nope"))).status,
       404
     );
-    await h.stop();
   });
 
   it("serves the §6.4 summary fields the daemon cannot derive from the log", async () => {
@@ -613,7 +610,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     assert.equal(body.chatSessionStatus, "running");
     assert.equal(body.backgroundLiveness, null);
     assert.deepEqual(body.pendingRequests, []);
-    await h.stop();
   });
 
   it("names every open request so the daemon can publish agentChat.pending", async () => {
@@ -652,14 +648,12 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     assert.deepEqual(body.pendingRequests.map(({ requestId, kind }) => ({ requestId, kind })), [
       { requestId: "req-7", kind: "approval" }
     ]);
-    await h.stop();
   });
 
   it("answers an unknown route with 404 rather than hanging", async () => {
     const h = await harness();
     assert.equal((await h.call("GET", "/nope")).status, 404);
     assert.equal((await h.call("POST", "/threads/thread-1/unknown", {})).status, 404);
-    await h.stop();
   });
 });
 
@@ -684,7 +678,6 @@ describe("agent host server — the event stream (§6.3)", () => {
     assert.ok(synchronizedIndex < messageIndex, "live frames follow the marker");
     live.close();
     await h.host.settle();
-    await h.stop();
   });
 
   it("reads a bounded snapshot for the stream and `GET …/thread` only when asked", async () => {
@@ -713,7 +706,6 @@ describe("agent host server — the event stream (§6.3)", () => {
       undefined
     ]);
     h.host.orchestrator.readThread = readThread;
-    await h.stop();
   });
 
   it("hands a history read the window's cut it names, and nothing for an empty one", async () => {
@@ -732,7 +724,6 @@ describe("agent host server — the event stream (§6.3)", () => {
       { before: "c-2", turns: THREAD_HISTORY_DEFAULT_TURNS }
     ]);
     h.host.orchestrator.readHistory = readHistory;
-    await h.stop();
   });
 
   it("replays by cursor when the range is small enough", async () => {
@@ -745,7 +736,6 @@ describe("agent host server — the event stream (§6.3)", () => {
     await live.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
     assert.equal(live.frames[0]?.kind, "event", "a small range replays instead of snapshotting");
     live.close();
-    await h.stop();
   });
 
   it("two clients converge on the same order (§6.6)", async () => {
@@ -771,7 +761,6 @@ describe("agent host server — the event stream (§6.3)", () => {
     );
     a.close();
     b.close();
-    await h.stop();
   });
 
 
@@ -788,10 +777,9 @@ describe("agent host server — the event stream (§6.3)", () => {
     // A host from before the code: its wording alone still says so; another failure does not.
     assert.equal(isThreadGoneStreamError({ kind: "error", message: line.message }), true);
     assert.equal(isThreadGoneStreamError({ kind: "error", message: "EIO: read failed" }), false);
-    await h.stop();
   });
 
-  it("closes every open stream when the host stops", { timeout: 10_000 }, async () => {
+  it("closes every open stream when the host stops", async () => {
     const h = await harness();
     const threadId = await h.host.createThread();
     const live = await h.stream(agentHostRoutes.events(threadId));
@@ -855,7 +843,6 @@ describe("agent host server - a deadline answers its specified status (E9)", () 
     // Marked as the refusal of a moment, which a merge back retries (`isDeadlineRefusal`).
     assert.deepEqual((envelope.error as { detail?: unknown }).detail, { reason: "deadline" });
     assert.equal(isDeadlineRefusal(envelope.error), true);
-    await h.stop();
   });
 
   it("is a 503 HOST_UNAVAILABLE while the host is still cold", async () => {
@@ -868,7 +855,6 @@ describe("agent host server - a deadline answers its specified status (E9)", () 
     const answer = await upload(h, "cold-thread");
     assert.equal(answer.status, 503);
     assert.equal((answer.body as { error: { code: string } }).error.code, "HOST_UNAVAILABLE");
-    await h.stop();
   });
 });
 
@@ -920,7 +906,6 @@ describe("agent host server — indexed history and search (design 2026-09-23, C
       oldestRetainedOrdinal: null,
       totalTurns: 0
     });
-    await h.stop();
   });
 
   it("caps the search query by code point and answers blank queries", async (t) => {
@@ -941,7 +926,6 @@ describe("agent host server — indexed history and search (design 2026-09-23, C
     const blank = await h.call("GET", agentHostRoutes.search);
     assert.equal(blank.status, 200);
     assert.deepEqual(blank.body, { query: "", hits: [], truncated: false, indexed: true });
-    await h.stop();
   });
 
   it("answers search `indexed: false` with a 200 when there is no usable index", async () => {
@@ -1485,7 +1469,6 @@ describe("agent host server — goals §5.7, the deploy's goal hold", () => {
     });
     // Only POST is the route.
     assert.equal((await h.call("GET", agentHostRoutes.holdGoals)).status, 404);
-    await h.stop();
   });
 
   it("POST /goals/resume-sessions takes the threads it knows and refuses a malformed body whole", async () => {
@@ -1542,7 +1525,6 @@ describe("agent host server — thread lineage's fork route (spec 2026-10-14 §6
     assert.equal(malformed.status, 400);
     const missing = await h.call("POST", agentHostRoutes.forkThread("nope"), { ...body, threadId: "fork-child-2" });
     assert.equal(missing.status, 404);
-    await h.stop();
   });
 
   it("confirmOnly answers a child the host holds and never creates one", async () => {
@@ -1580,7 +1562,6 @@ describe("agent host server — thread lineage's fork route (spec 2026-10-14 §6
     assert.equal(result.head.id, "fork-child-3");
     assert.equal(result.lineage.parentThreadId, parentId);
     assert.equal(result.strategy, "empty");
-    await h.stop();
   });
 });
 
@@ -1605,7 +1586,6 @@ describe("agent host server — the thread's head (follow-up: head reads)", () =
     assert.equal(body.runningTurn?.turnId, "turn-1");
     assert.equal(body.lastReply, null);
     assert.deepEqual(body.matchedTurns?.map((turn) => [turn.turnId, turn.userMessageId, turn.state]), [["turn-1", messageId, "running"]]);
-    await h.stop();
   });
 
   it("refuses a lookup past the cap with 400 INVALID_COMMAND rather than cutting it short", async () => {
@@ -1616,7 +1596,6 @@ describe("agent host server — the thread's head (follow-up: head reads)", () =
     const refused = await h.call("GET", `${agentHostRoutes.head(threadId)}?${params}`);
     assert.equal(refused.status, 400);
     assert.equal((refused.body as { error: { code: string } }).error.code, "INVALID_COMMAND");
-    await h.stop();
   });
 
   it("a thread it does not hold is its own THREAD_NOT_FOUND, never the route miss an older host answers", async () => {
@@ -1626,7 +1605,6 @@ describe("agent host server — the thread's head (follow-up: head reads)", () =
     const error = (gone.body as { error: { code: string; message: string } }).error;
     assert.equal(error.code, "THREAD_NOT_FOUND");
     assert.ok(!error.message.startsWith("No route for"), error.message);
-    await h.stop();
   });
 });
 
@@ -1706,7 +1684,6 @@ describe("agent host server — on-demand agent rows", () => {
     const { items: _fullItems, ...fullRest } = snap;
     const { items: _lazyItems, omittedAgentIds: _list, ...lazyRest } = omitted;
     assert.deepEqual(lazyRest, fullRest);
-    await h.stop();
   });
 
   it("a POST naming the stream writes the agent's rows into that stream, after `synchronized`", async () => {
@@ -1741,7 +1718,6 @@ describe("agent host server — on-demand agent rows", () => {
     assert.ok(!plain.frames.some((candidate) => candidate.kind === "agent-rows"), "only the named stream");
     plain.close();
     live.close();
-    await h.stop();
   });
 
   it("answers 404 STREAM_NOT_FOUND for a stream it does not hold or another thread's, and 400 for a malformed body", async () => {
@@ -1775,6 +1751,5 @@ describe("agent host server — on-demand agent rows", () => {
       assert.equal(code(refused), "INVALID_COMMAND");
     }
     live.close();
-    await h.stop();
   });
 });

@@ -23,7 +23,6 @@ import type { ProfileAdapterContext } from "../types.ts";
 import { CodexAppServerClient, type CodexConfigClient, type CodexConfigClientFactory } from "./codex-config-client.ts";
 import { codexHookHash } from "./hooks.ts";
 import { CodexProfileAdapter } from "./index.ts";
-import { armHangGuard } from "./testing/hang-guard.ts";
 
 const FAKE = fileURLToPath(new URL("./testing/fake-app-server.mjs", import.meta.url));
 
@@ -241,15 +240,13 @@ function assertProfileError(code: string, status?: number) {
 
 describe("CodexProfileAdapter", () => {
   let f: Fixture;
-  let checkHangGuard: () => void;
 
   beforeEach(async () => {
     // The app-server client's deadlines are wall-clock timers (a call's, the idle close's, the kill
     // grace's). This suite tests the adapter, not them (codex-config-client.test.ts does), and its
     // app-server is a Node script whose startup on a loaded host can outlast any deadline: mocked and
-    // never ticked, none of them fires here, short of the hang guard.
+    // never ticked, none of them fires here. The runner's deadline still bounds a hung test.
     mock.timers.enable({ apis: ["setTimeout"] });
-    checkHangGuard = armHangGuard();
     f = await makeFixture();
   });
 
@@ -259,7 +256,6 @@ describe("CodexProfileAdapter", () => {
       await rm(f.root, { recursive: true, force: true });
     } finally {
       mock.timers.reset();
-      checkHangGuard();
     }
   });
 

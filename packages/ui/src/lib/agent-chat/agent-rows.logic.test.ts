@@ -195,15 +195,17 @@ describe("on-demand agent rows — the loader reads each refusal for what it is"
   it("a frame that lands clears what was lost", async () => {
     const h = harness(async () => ({ ok: true }));
     h.loader.want("a");
-    for (let stream = 1; stream <= 2; stream += 1) {
+    for (let stream = 1; stream <= 3; stream += 1) {
       h.loader.sync(view({ streamId: `s-${stream}` }));
       await h.flush();
     }
     // Its frame landed: no longer omitted.
-    h.loader.sync(view({ streamId: "s-2", omitted: ["b"] }));
-    h.loader.sync(view({ streamId: "s-3", omitted: ["a"] }));
-    await h.flush();
+    h.loader.sync(view({ streamId: "s-3", omitted: ["b"] }));
     h.loader.sync(view({ streamId: "s-4", omitted: ["a"] }));
+    await h.flush();
+    h.loader.sync(view({ streamId: "s-5", omitted: ["a"] }));
+    await h.flush();
+    h.loader.sync(view({ streamId: "s-6", omitted: ["a"] }));
     await h.flush();
     assert.equal(h.events.unsupported, 0, "two lost since it last landed, not three");
   });

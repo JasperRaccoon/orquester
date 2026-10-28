@@ -1018,14 +1018,15 @@ test("the host's `indexed:false` page and its INDEX_UNAVAILABLE 503 pass through
 
 const PAGE_ID = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
 
-test("a page URL is minted only for a known tab and a published page's id", async () => {
+test("a page URL is minted only for a known tab and a published page's id", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
   const h = await makeHarness({ t1: tab("t1") });
   try {
     const minted = await h.app.inject({ method: "POST", url: agentChatRoutes.visualUrl("t1", PAGE_ID) });
     assert.equal(minted.statusCode, 200, minted.body);
     const body = minted.json() as { path: string; expiresAt: number };
     assert.ok(body.path.startsWith(`${agentChatRoutes.visual("t1", PAGE_ID)}?exp=`));
-    assert.ok(body.expiresAt > Date.now());
+    assert.ok(body.expiresAt > 1_800_000_000_000);
     assert.equal(
       (await h.app.inject({ method: "POST", url: agentChatRoutes.visualUrl("ghost", PAGE_ID) })).statusCode,
       404

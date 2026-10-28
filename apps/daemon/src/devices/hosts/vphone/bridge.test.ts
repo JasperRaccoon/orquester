@@ -70,6 +70,7 @@ test("stream.avcc: vphone frames arrive as serve-sim envelopes the panel decodes
   assert.equal(status, 200);
   assert.equal(type, "application/octet-stream");
   const { chunks } = avccDemux(bytes);
+  assert.equal(chunks.length, 3, "the guest stream must deliver its frame envelopes");
   assert.equal(chunks[0]!.type, "description");
   assert.deepEqual(Buffer.from(chunks[0]!.payload), FIXTURE_AVCC);
   assert.equal(chunks[1]!.type, "keyframe");

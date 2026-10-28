@@ -49,7 +49,7 @@ test("the evaluation harness retrieves known English and Spanish answers from th
   }
 });
 
-test("the pinned model: recall@5 ≥ 0.8 on the evaluation set, and thresholds that fit its calibration", { skip: SKIP_MODEL, timeout: 600_000 }, async (t) => {
+test("the pinned model: recall@5 ≥ 0.8 on the evaluation set, and thresholds that fit its calibration", { skip: SKIP_MODEL }, async (t) => {
   const embedder = new OnnxSentenceEmbedder({
     modelDir: MODEL_DIR!,
     modelId: EMBEDDING_MODEL.id,
@@ -93,7 +93,7 @@ test("the pinned model: recall@5 ≥ 0.8 on the evaluation set, and thresholds t
   assert.ok(steeredRank > likeRank, "the unlike entry's repost moves down");
 });
 
-test("the pinned model: the similarity graph over the evaluation set has several topic clusters, none holding half of it", { skip: SKIP_MODEL, timeout: 600_000 }, async (t) => {
+test("the pinned model: the similarity graph over the evaluation set has several topic clusters, none holding half of it", { skip: SKIP_MODEL }, async (t) => {
   const embedder = new OnnxSentenceEmbedder({
     modelDir: MODEL_DIR!,
     modelId: EMBEDDING_MODEL.id,

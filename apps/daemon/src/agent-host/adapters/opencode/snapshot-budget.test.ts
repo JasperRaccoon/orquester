@@ -117,8 +117,9 @@ test("E9: a cold probe waits for readiness and reads the catalogue; the next pro
     const pid = await peers.bound(0);
     await nextTurn();
     // It waits for the readiness line instead of giving up on the start...
-    assert.equal(settled, false, "the probe returned before the peer was ready");
+    const settledBeforeReady = settled;
     peers.ready(pid);
+    assert.equal(settledBeforeReady, false, "the probe returned before the peer was ready");
     const snapshot = await probe;
     // ...and then actually reads the catalogue off the server it started.
     assert.equal(snapshot.status, "ready");

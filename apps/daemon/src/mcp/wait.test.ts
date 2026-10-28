@@ -1,10 +1,22 @@
-import { test } from "node:test";
+import { afterEach, beforeEach, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { busEvent,FakeDaemonApi } from "./testing.ts";
 import { chatSummary,head,message,shellSummary,snapshot,stamp,turn } from "./fixtures.ts";
 import { turnBaseline,waitForAttention,waitForTurn,waitWhileWorking } from "./wait.ts";
 
+beforeEach(() => {
+  mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  mock.method(performance, "now", () => Date.now());
+});
+afterEach(() => { mock.restoreAll(); mock.timers.reset(); });
+
 const now = () => Date.now();
+/** Let the fake API's reads settle before advancing the watch's timer. */
+const elapse = async <T>(pending: Promise<T>, ms = 300): Promise<T> => {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  mock.timers.tick(ms);
+  return pending;
+};
 const running = (over = {}) => chatSummary({ chatSessionStatus: "running", activity: { state: "working", attention: null, lastOutputAt: null, needsAttentionAt: null }, latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null }, ...over });
 const done = (over = {}) => chatSummary({ latestTurn: { turnId: "t2", state: "completed", startedAt: stamp(2), completedAt: stamp(3) }, activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(3) }, ...over });
 
@@ -55,12 +67,12 @@ test("waitForTurn: an error the session showed before the message (a failed CLI 
 
   // Without a moving turn the old error never ends the wait.
   const stuck = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [errored] });
-  assert.equal((await waitForTurn(stuck, "c1", turnBaseline(errored), { timeoutMs: 20, signal: new AbortController().signal, now })).outcome, "timeout");
+  assert.equal((await elapse(waitForTurn(stuck, "c1", turnBaseline(errored), { timeoutMs: 20, signal: new AbortController().signal, now }), 20)).outcome, "timeout");
 });
 
 test("waitForTurn: the baseline turn itself never counts, a timeout reports timeout, a closed session throws", async () => {
   const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] });
-  const r = await waitForTurn(api, "c1", turnBaseline(chatSummary()), { timeoutMs: 20, signal: new AbortController().signal, now });
+  const r = await elapse(waitForTurn(api, "c1", turnBaseline(chatSummary()), { timeoutMs: 20, signal: new AbortController().signal, now }), 20);
   assert.equal(r.outcome, "timeout");
   const gone = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] });
   const p = waitForTurn(gone, "c1", turnBaseline(chatSummary()), { timeoutMs: 5_000, signal: new AbortController().signal, now });
@@ -71,9 +83,9 @@ test("waitForTurn: the baseline turn itself never counts, a timeout reports time
 
 test("waitForAttention: cursor semantics, immediate return, settle window collects siblings, timeout", async () => {
   const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [done()] });
-  const immediate = await waitForAttention(api, { select: () => true, after: stamp(0), timeoutMs: 5_000, signal: new AbortController().signal, now });
+  const immediate = await elapse(waitForAttention(api, { select: () => true, after: stamp(0), timeoutMs: 5_000, signal: new AbortController().signal, now }));
   assert.deepEqual(immediate.sessions.map((s) => s.id), ["c1"]); assert.equal(immediate.cursor, stamp(3)); assert.equal(immediate.timedOut, false);
-  const again = await waitForAttention(api, { select: () => true, after: immediate.cursor, timeoutMs: 20, signal: new AbortController().signal, now });
+  const again = await elapse(waitForAttention(api, { select: () => true, after: immediate.cursor, timeoutMs: 20, signal: new AbortController().signal, now }), 20);
   assert.deepEqual(again, { sessions: [], cursor: stamp(3), timedOut: true });
   let reads = 0;
   const two = new FakeDaemonApi().on("GET", "/api/sessions", () => (++reads === 1
@@ -82,7 +94,7 @@ test("waitForAttention: cursor semantics, immediate return, settle window collec
   const p = waitForAttention(two, { select: (s) => s.kind === "agent-chat", after: stamp(3), timeoutMs: 5_000, signal: new AbortController().signal, now });
   await new Promise((r) => setImmediate(r));
   two.emit(busEvent("session.activity", { id: "c1", activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(7) } }));
-  const r = await p;
+  const r = await elapse(p);
   assert.deepEqual(r.sessions.map((s) => s.id).sort(), ["c1", "c2"], "the settle window re-read picked up the sibling");
   assert.equal(r.cursor, stamp(7));
 });
@@ -121,7 +133,7 @@ test("an exited terminal keeps its finished attention through summaries that omi
   api.emit(busEvent("session.exited", exited));
   api.emit(busEvent("session.activity", { id: "s1", activity: { state: "idle", attention: "finished", lastOutputAt: stamp(1), needsAttentionAt: stamp(5) } }));
   api.emit(busEvent("session.updated", { ...exited, title: "renamed" }));
-  const r = await p;
+  const r = await elapse(p);
   assert.deepEqual(r.sessions.map((s) => s.id), ["s1"]);
   assert.equal(r.cursor, stamp(5));
 });
@@ -134,9 +146,9 @@ test("aborting an attention wait during settling releases the subscription; curs
   ac.abort();
   assert.deepEqual((await p).sessions, []);
   assert.equal(api.listenerCount(), 0);
-  const r = await waitForAttention(api, { select: () => true, after: "2026-09-22T02:00:02+02:00", timeoutMs: 5_000, signal: new AbortController().signal, now });
+  const r = await elapse(waitForAttention(api, { select: () => true, after: "2026-09-22T02:00:02+02:00", timeoutMs: 5_000, signal: new AbortController().signal, now }));
   assert.deepEqual([r.sessions.map((s) => s.id), r.cursor], [["c1"], stamp(3)]);
-  const same = await waitForAttention(api, { select: () => true, after: "2026-09-22T02:00:03+02:00", timeoutMs: 1, signal: new AbortController().signal, now });
+  const same = await elapse(waitForAttention(api, { select: () => true, after: "2026-09-22T02:00:03+02:00", timeoutMs: 1, signal: new AbortController().signal, now }), 1);
   assert.deepEqual(same.sessions, []);
 });
 
@@ -150,7 +162,7 @@ test("a late session.exited cannot bring a closed tab back into the watch", asyn
   api.emit(busEvent("session.exited", closed));
   api.on("GET", "/api/sessions", { status: 200, body: [closed, sibling] });
   api.emit(busEvent("session.updated", sibling));
-  const result = await pending;
+  const result = await elapse(pending);
   assert.deepEqual([result.sessions.map((session) => session.id), result.cursor], [["c2"], stamp(8)]);
 });
 
@@ -161,7 +173,7 @@ test("activity published during the initial list read is preserved, with the new
     api.emit(busEvent("session.activity", { id: "c2", activity: finished(2) }));
     return { status: 200, body: [running(), done({ id: "c2", activity: finished(4) })] };
   });
-  const r = await waitForAttention(api, { select: () => true, after: stamp(0), timeoutMs: 5_000, signal: new AbortController().signal, now });
+  const r = await elapse(waitForAttention(api, { select: () => true, after: stamp(0), timeoutMs: 5_000, signal: new AbortController().signal, now }));
   assert.deepEqual(r.sessions.map((s) => [s.id, s.activity?.needsAttentionAt]).sort(), [["c1", stamp(9)], ["c2", stamp(4)]]);
   assert.equal(r.cursor, stamp(9));
 });
@@ -176,7 +188,7 @@ test("a sibling stamped while the settle window's re-read is in flight is still 
     if (reads === 2) api.emit(busEvent("session.activity", { id: "c2", activity: finished }));
     return { status: 200, body: [done({ activity: finished }), running({ id: "c2" })] };
   });
-  const r = await waitForAttention(api, { select: () => true, after: stamp(5), timeoutMs: 5_000, signal: new AbortController().signal, now });
+  const r = await elapse(waitForAttention(api, { select: () => true, after: stamp(5), timeoutMs: 5_000, signal: new AbortController().signal, now }));
   assert.deepEqual(r.sessions.map((s) => s.id).sort(), ["c1", "c2"]);
   assert.equal(r.cursor, stamp(7));
 });
@@ -204,7 +216,7 @@ test("a project-wide or unfiltered attention wait just stops watching a closed s
   api.emit(busEvent("session.closed", { id: "c1" }));
   api.on("GET", "/api/sessions", { status: 200, body: [chatSummary(), done({ id: "c2", activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(9) } })] });
   api.emit(busEvent("session.activity", { id: "c2", activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(9) } }));
-  const r = await p;
+  const r = await elapse(p);
   assert.deepEqual([r.sessions.map((s) => s.id), r.cursor], [["c2"], stamp(9)]);
 });
 
@@ -212,7 +224,7 @@ test("a single-session attention wait is scoped by its sessionId alone, so no se
   const flagged = (id: string, n: number) => chatSummary({ id, activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(n) } });
   const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [flagged("c1", 7), flagged("c2", 9)] });
   const signal = new AbortController().signal;
-  const r = await waitForAttention(api, { sessionId: "c1", after: stamp(5), timeoutMs: 5_000, signal, now });
+  const r = await elapse(waitForAttention(api, { sessionId: "c1", after: stamp(5), timeoutMs: 5_000, signal, now }));
   assert.deepEqual([r.sessions.map((s) => s.id), r.cursor], [["c1"], stamp(7)], "c2 qualifies too, and is not watched");
 });
 

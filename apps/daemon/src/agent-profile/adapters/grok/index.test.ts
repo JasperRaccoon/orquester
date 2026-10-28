@@ -808,6 +808,7 @@ test("an inspect still running when a write lands is not cached: the next snapsh
   // A runCli whose answers the test releases one by one.
   const pending: { answer: (stdout: string) => void }[] = [];
   const arrived: (() => void)[] = [];
+  let autoAnswer: string | undefined;
   const nextCall = (): Promise<void> => new Promise((resolve) => arrived.push(resolve));
   const adapter = new GrokProfileAdapter(
     {
@@ -821,8 +822,9 @@ test("an inspect still running when a write lands is not cached: the next snapsh
     {
       backups: new ProfileBackups({ dir: agentProfileBackupsDir(join(fx.root, "appdir")) }),
       stash: fx.stash,
-      runCli: () =>
-        new Promise((resolve) => {
+      runCli: () => autoAnswer !== undefined
+        ? Promise.resolve({ code: 0, signal: null, stdout: autoAnswer, stderr: "", timedOut: false })
+        : new Promise((resolve) => {
           pending.push({ answer: (stdout) => resolve({ code: 0, signal: null, stdout, stderr: "", timedOut: false }) });
           arrived.shift()?.();
         })
@@ -850,7 +852,7 @@ test("an inspect still running when a write lands is not cached: the next snapsh
   await stale;
 
   // The next snapshot must not reuse that pre-install answer.
-  const fresh = adapter.snapshot();
-  await answerNext(JSON.stringify(after));
-  assert.ok((await fresh).items.some((entry) => entry.id === "plugin:gdrive"));
+  autoAnswer = JSON.stringify(after);
+  const fresh = await adapter.snapshot();
+  assert.ok(fresh.items.some((entry) => entry.id === "plugin:gdrive"));
 });

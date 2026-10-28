@@ -708,6 +708,7 @@ test("similar: entries that contradict it (graph, either direction) are listed e
 
 test("disagreements: every contradicting entry, checked first then closest, past the 3 `similar` keeps; each side lists the other", async () => {
   const s = await contradictionFixture();
+  s.index.set(ke("h"), around(DIMS, 0, 2, 0.995)); // The graph guess is closer than every checked disagreement.
   for (const name of ["n1", "n4", "n7", "n9"]) s.pairChecks.push(pairCheck(ke("a"), ke(name), "contradicts", `${name} disagrees`));
   const { similar, disagreements, disagreementsTotal } = s.similarity.forEntry(ke("a"), s.all);
   assert.deepEqual(
@@ -732,6 +733,7 @@ test("disagreements: every contradicting entry, checked first then closest, past
 
 test("disagreements: at most 20 listed, every one counted", async () => {
   const s = await contradictionFixture();
+  s.index.set(ke("h"), around(DIMS, 0, 2, 0.995)); // The graph guess is closer than every checked disagreement.
   for (let i = 1; i <= 21; i += 1) {
     if (i > 10) {
       s.put(`m${i}`, ["kc_seo"]);

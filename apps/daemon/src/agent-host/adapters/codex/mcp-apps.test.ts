@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import { after, describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 
 import { mcpAppReferenceOfActivityPayload, type RuntimeEvent } from "@orquester/api/agent-chat";
 
@@ -19,8 +19,8 @@ import { CodexSession, type CodexSessionOptions } from "./session.ts";
 import { EventCollector, createFakeContext, writeMockCodexServer, type MockConfig } from "./testing.ts";
 
 const cleanups: (() => void | Promise<void>)[] = [];
-after(async () => {
-  for (const cleanup of cleanups) await cleanup();
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
 const STORED_ID = "thread_1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
@@ -157,7 +157,6 @@ describe("codex — MCP Apps", () => {
     // The app replays the call's result: it is kept for an app's call.
     assert.deepEqual(data.result, { content: [{ type: "text", text: "shown" }], structuredContent: { n: 1 }, _meta: null });
     assert.ok(index < completedCall(events, "msg-after"), "the call's row keeps its place before the later frame");
-    await r.stop();
   });
 
   it("another tool sharing the resource gets its own reference from the cached snapshot", async () => {
@@ -186,7 +185,6 @@ describe("codex — MCP Apps", () => {
     assert.equal((data.mcpApp as { tool: string }).tool, "edit_widget");
     // The row's own-call check accepts it, so the app renders and its requests resolve.
     assert.deepEqual(mcpAppReferenceOfActivityPayload({ itemType: "mcp_tool_call", data }), data.mcpApp);
-    await r.stop();
   });
 
   it("a resource that is no app leaves an ordinary row, still in order", async () => {
@@ -202,7 +200,6 @@ describe("codex — MCP Apps", () => {
     assert.equal(r.stored.length, 0);
     assert.ok(r.logs.some((entry) => entry.level === "warn" && /no app document/.test(entry.message)));
     assert.ok(completedCall(events) < completedCall(events, "msg-after"));
-    await r.stop();
   });
 
   it("a call without a ui:// resource and a failed call are never captured", async () => {
@@ -221,7 +218,6 @@ describe("codex — MCP Apps", () => {
     const plain = r.events.events[completedCall(r.events.events, "plain")] as Extract<RuntimeEvent, { type: "item.completed" }>;
     // Not an app's call: its result stays dropped, as every other server's.
     assert.equal("result" in (plain.payload.data as Record<string, unknown>), false);
-    await r.stop();
   });
 
   it("a session tool's call is never an app, even one naming a ui:// resource; its result is still kept", async () => {
@@ -250,7 +246,6 @@ describe("codex — MCP Apps", () => {
     assert.equal("mcpApp" in data, false);
     // Task 1's rule stands: the session tool's result carries its reference.
     assert.deepEqual((data.result as { structuredContent?: unknown }).structuredContent, reference);
-    await r.stop();
   });
 
   it("without a grant no live row is Orquester's: a user's own `orquester` MCP App is captured like any other", async () => {
@@ -271,7 +266,6 @@ describe("codex — MCP Apps", () => {
     const data = completed.payload.data as Record<string, unknown>;
     assert.equal(data.sessionToolsServer, false, "never Orquester's");
     assert.ok(r.received().some((frame) => frame.method === "mcpServer/resource/read"), "its app resource is read");
-    await r.stop();
   });
 
   it("the session's end lets go of a capture in flight: the call completes plain before the exit", async () => {
@@ -326,7 +320,6 @@ describe("codex — MCP Apps", () => {
     assert.deepEqual(call?.params, { threadId: threadIdOf(r.session), server: "apps", tool: "reset", arguments: { hard: true } });
     const read = await r.session.mcpReadResource({ server: "apps", uri: "ui://apps/data.json" });
     assert.deepEqual(read.contents, [{ uri: "ui://apps/data.json", mimeType: "application/json", text: "{}" }]);
-    await r.stop();
   });
 
   it("an app's model context updates between turns as untrusted context beside the session tools", async () => {
@@ -350,6 +343,5 @@ describe("codex — MCP Apps", () => {
       "mcp-app:item-1": { kind: "untrusted", value: "MCP app apps/show_widget (mcp-app:item-1):\nboard has 3 cards" },
       orquester: { kind: "application", value: "Orquester tools block" }
     });
-    await r.stop();
   });
 });

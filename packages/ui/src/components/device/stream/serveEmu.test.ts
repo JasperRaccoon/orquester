@@ -180,7 +180,7 @@ describe("ServeEmuSession", () => {
     assert.equal(t.session.sendButton("home"), false);
   });
 
-  it("input-only mode is live on open and never decodes", () => {
+  it("input-only mode is live on open and never decodes", async () => {
     const sockets = fakeWebSocketClass();
     const decoders = fakeVideoDecoderClass();
     browserApis({ WebSocket: sockets.WebSocket, VideoDecoder: decoders.VideoDecoder, EncodedVideoChunk: decoders.EncodedVideoChunk });
@@ -195,6 +195,7 @@ describe("ServeEmuSession", () => {
     assert.equal(session.state, "live");
     assert.equal(sockets.instances.length, 1, "an input-only connection has no video-silence reconnect");
     sockets.instances[0]!.receive(recorded[0]!);
+    await settle();
     assert.equal(decoders.log.configs.length, 0);
     assert.equal(session.sendButton("home"), true);
     session.close();

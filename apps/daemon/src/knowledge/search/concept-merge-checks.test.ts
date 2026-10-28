@@ -261,10 +261,12 @@ test("candidates: names that nearly coincide are asked about at the lower `alike
     concept("tactic-and", "US App Store download and warm-up", ["ke_1"]),
     concept("tactic-plus", "US App Store download plus warm-up", ["ke_2"]), // 6 of 7 words: asked
     concept("tactic-isp-check", "ISP proxy with IPQS/Scamalytics risk check", ["ke_3"]),
-    concept("tactic-isp-pass", "ISP proxy that passes IPQS and Scamalytics", ["ke_4"]), // 4 of 8 words: asked
+    concept("tactic-isp-pass", "ISP proxy that passes IPQS and Scamalytics", ["ke_3"]), // 4 of 8 words, same entry: asked
     concept("tactic-low-risk", "Check the proxy for low risk", ["ke_5"]), // 3 of 7 words with the risk check (0.97): not
     concept("tactic-tumblr", "Tumblr posts as backlinks", ["ke_6"]),
-    concept("tactic-list", "Facebook groups, YouTube community posts, AI pages and Tumblr backlinks", ["ke_7"]) // 3 of 11 words: not
+    concept("tactic-list", "Facebook groups, YouTube community posts, AI pages and Tumblr backlinks", ["ke_7"]), // 3 of 11 words: not
+    concept("tactic-proxy-check", "Proxy risk check", ["ke_8"]),
+    concept("tactic-proxy-analysis", "Proxy risk analysis", ["ke_9"]) // half their words shared, but only two: not
   ];
   const vectors = new Map<string, Float32Array>([
     ["tactic-and", vec(0)],
@@ -273,15 +275,17 @@ test("candidates: names that nearly coincide are asked about at the lower `alike
     ["tactic-isp-pass", vec(2, 0.947)],
     ["tactic-low-risk", vec(2, 0.97, 4)],
     ["tactic-tumblr", vec(5)],
-    ["tactic-list", vec(5, 0.95)]
+    ["tactic-list", vec(5, 0.95)],
+    ["tactic-proxy-check", vec(7)],
+    ["tactic-proxy-analysis", vec(7, 0.95)]
   ]);
   const input = { concepts, vectors, thresholds: BARS, rejected: [], checks: [], canonical: (id: string) => id, limit: 40, pause: noPause };
   const found = await conceptCheckCandidates({ ...input, bars: { ...CHECK_BARS, alikeNames: 0.94 } });
   assert.deepEqual(
     found.map((c) => [c.a.id, c.b.id]),
     [
-      ["tactic-and", "tactic-plus"],
-      ["tactic-isp-check", "tactic-isp-pass"]
+      ["tactic-isp-check", "tactic-isp-pass"],
+      ["tactic-and", "tactic-plus"]
     ]
   );
   assert.deepEqual(await conceptCheckCandidates({ ...input, bars: CHECK_BARS }), [], "without the bar: below the one for concepts sharing no entry");
@@ -351,7 +355,7 @@ test("concept excerpts across entries: the first entries are searched, the best 
   assert.deepEqual(found, { title: "Second", text: "Warm up the account for 48 hours before posting, every time.", score: 2 });
   assert.deepEqual(read, ["ke_1", "ke_2"], "a whole name ends the search");
   read.length = 0;
-  const weak = await conceptExcerptFor({ name: "Account warm-up", aliases: [], entryIds: ["ke_4", "ke_1", "ke_9", "ke_2"] }, entry);
+  const weak = await conceptExcerptFor({ name: "Account warm-up", aliases: [], entryIds: ["ke_4", "ke_1", "ke_9", "ke_4"] }, entry);
   assert.equal(weak?.title, "First", "the first entry with the best share");
   assert.equal(read.length, CONCEPT_CHECK_EXCERPT_ENTRIES, "at most the first few entries");
   assert.equal(await conceptExcerptFor({ name: "x", aliases: [], entryIds: ["ke_9"] }, entry), null);

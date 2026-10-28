@@ -138,7 +138,7 @@ const loadsProjectConfigIn = (thread: ManifestThread, dir: string): boolean =>
  * whose config names a server it does not have (`mcp_servers.<absent>.enabled = false` → "invalid
  * transport", probed on 0.159.0), so a name from another home is never sent. Sorted, unique.
  */
-export function denyFor(thread: ManifestThread, servers: readonly DaemonPointingServer[]): string[] {
+function denyFor(thread: ManifestThread, servers: readonly DaemonPointingServer[]): string[] {
   const names = new Set<string>();
   for (const server of servers) {
     if (server.agent !== thread.agentId || typeof server.name !== "string" || server.name === "") continue;

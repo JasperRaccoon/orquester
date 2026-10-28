@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { after, describe, it } from "node:test";
+import { after, afterEach, describe, it } from "node:test";
 import type { KnowledgeConceptRef, KnowledgeEntry, KnowledgeEntryMeta, KnowledgeLinkState, KnowledgeSettings } from "@orquester/api";
 import { KNOWLEDGE_DEFAULT_SETTINGS } from "@orquester/api";
 import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgePairChecksPath, knowledgeStatePath, parseKnowledgeLinkingState, type KnowledgeConceptMergeCheck } from "@orquester/config";
@@ -32,6 +32,14 @@ import { MAX_REFUSALS } from "./inbox.ts";
 import { PAIR_CHECK_BODY_CHARS, PAIR_CHECK_INPUT_VERSION, PAIR_CHECK_MAX_PER_RUN } from "./pair-checks.ts";
 import { DEFAULT_NORMALIZE_TYPES, KnowledgeLinkingService, type KnowledgeLinkingOptions } from "./service.ts";
 import { FAKE_RUNTIME, FakeWorkerPort, fakeSpawn, writeMykgTask, type FakeAccountBehaviour } from "./testing.ts";
+
+const linkingServices: KnowledgeLinkingService[] = [];
+afterEach(async () => {
+  for (const service of linkingServices.splice(0).reverse()) {
+    await service.stop();
+    await service.pairChecksIdle();
+  }
+});
 
 const roots: string[] = [];
 after(async () => {
@@ -242,6 +250,7 @@ async function harness(options: {
     processProbe: { cmdline: async () => null, startTime: async () => 777, signal: () => false },
     ...options.extra
   });
+  linkingServices.push(service);
   const mykgDir = knowledgeMykgDir(appdir);
   return {
     appdir,
@@ -363,7 +372,6 @@ describe("KnowledgeLinkingService — the coalesced queue", () => {
     assert.deepEqual(children[1]!.args, ["extract-graph", knowledgeMykgInputDir(h.appdir), "--session", session, "--update"]);
     children[1]!.exit(1);
     await h.service.idle();
-    await h.service.stop();
   });
 });
 
@@ -568,7 +576,6 @@ describe("KnowledgeLinkingService — tasks a previous myKG process left in the 
     assert.deepEqual(await h.service.workerNext("probe-worker", undefined, live), reply);
     await assert.rejects(h.service.workerNext("probe-worker", undefined, leftover), (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_INVALID" && error.message.includes(`Your task is ${live}`));
     await failRun(children[1]!);
-    await h.service.stop();
   });
 });
 
@@ -587,7 +594,6 @@ describe("KnowledgeLinkingService — the rebuild estimate", () => {
       { entries: 100, tasks: 3 + 100 + DEFAULT_NORMALIZE_TYPES },
       "no graph yet: the default number of types"
     );
-    await h.service.stop();
   });
 });
 
@@ -619,7 +625,6 @@ describe("KnowledgeLinkingService — link states", () => {
     assert.equal(h.store.linkStates.has(ID(1)), false, "never marked linked from a stale extraction");
     assert.deepEqual((await readState(h)).pendingEntryIds, [ID(1)]);
     assert.equal(h.service.status().state, "queued");
-    await h.service.stop();
   });
 });
 
@@ -651,11 +656,10 @@ describe("KnowledgeLinkingService — link states (metadata edits)", () => {
     assert.equal(h.store.linkStates.get(ID(2)), "linked");
     assert.equal(h.store.linkStates.has(ID(1)), false, "its new header line is not in the graph yet");
     assert.deepEqual((await readState(h)).pendingEntryIds, [ID(1)]);
-    await h.service.stop();
   });
 });
 
-describe("KnowledgeLinkingService — runs against a fake myKG and fake worker chats", { timeout: 60_000 }, () => {
+describe("KnowledgeLinkingService — runs against a fake myKG and fake worker chats", () => {
   it("links new entries through worker chats, then re-links only an edited one with --update", async () => {
     const h = await harness();
     await h.service.start();
@@ -689,7 +693,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     const argv = (await h.log()).map((entry) => entry.argv);
     assert.deepEqual(argv[1], ["extract-graph", knowledgeMykgInputDir(h.appdir), "--session", state.session, "--update"]);
     assert.equal(h.service.status().state, "idle");
-    await h.service.stop();
   });
 
   it("pauses with resumesAt when every account is limited, survives a restart, and resumes the same run", async () => {
@@ -752,7 +755,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     await h.clock.advance(20_000);
     await h.until(ranOk(h, 2));
     assert.equal(h.store.linkStates.get(ID(2)), "linked");
-    await h.service.stop();
   });
 
   it("an update that died after myKG's ingest is re-run from the last good manifest: its edit and delete still land", async () => {
@@ -784,7 +786,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     const shard = JSON.parse(await readFile(join(paths.intermediate, "raw_extractions_shards", `${ID(2)}.md.json`), "utf8")) as { sha: string };
     assert.equal(shard.sha, createHash("sha256").update("two, edited").digest("hex"));
     assert.equal(h.store.linkStates.get(ID(2)), "linked");
-    await h.service.stop();
   });
 
   it("an entry saved after a failed first run, whose session the retry resumes, is linked by an update, not claimed", async () => {
@@ -813,7 +814,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     assert.equal(h.store.linkStates.get(ID(3)), "linked");
     const nodes = (await readFile(h.graph.loads.at(-1)! + "/nodes.jsonl", "utf8")).trim().split("\n");
     assert.equal(nodes.length, 3);
-    await h.service.stop();
   });
 
   it("turning the plugin off cancels the run and ends its chats; turning it on runs it again", async () => {
@@ -831,7 +831,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     await h.clock.advance(20_000);
     await h.until(ranOk(h, 1));
     assert.equal(h.store.linkStates.get(ID(1)), "linked");
-    await h.service.stop();
   });
 
   it("rebuild extracts into a fresh session and switches to it only on success", async () => {
@@ -850,7 +849,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     assert.equal(h.graph.loads.at(-1), mykgSessionPaths(h.mykgDir, after).output);
     await assert.rejects(stat(mykgSessionPaths(h.mykgDir, before).root), "the old session is removed");
     assert.deepEqual((await readdir(join(h.mykgDir, "mykg_sessions"))).sort(), [after]);
-    await h.service.stop();
   });
 
   it("a failed rebuild waits for the error retry like any failed run (no tight loop)", async () => {
@@ -876,7 +874,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     await h.until(ranOk(h, 2));
     assert.equal(lastRun(h)!.mode, "rebuild", "the rebuild is still owed, and runs at the retry");
     assert.equal((await h.log()).length, spawned + 1);
-    await h.service.stop();
   });
 
   it("only the run's own worker chats pass the worker gate", async () => {
@@ -893,7 +890,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     assert.equal(h.service.isActiveWorker(undefined), false);
     h.settings.set(false);
     await h.service.idle();
-    await h.service.stop();
   });
 });
 
@@ -991,7 +987,6 @@ describe("KnowledgeLinkingService — a state.json a newer Orquester wrote", () 
     assert.deepEqual(written.pendingEntryIds, [ID(2)]);
     assert.equal(written.lastError ?? null, null, "the notice is not written into the newer file");
     assert.deepEqual((await readdir(dirname(knowledgeStatePath(h.appdir)))).filter((name) => name.includes("unreadable")), [], "never moved aside");
-    await h.service.stop();
   });
 
   it("never writes over a newer file holding a field this build cannot read", async () => {
@@ -1002,7 +997,6 @@ describe("KnowledgeLinkingService — a state.json a newer Orquester wrote", () 
     h.service.entriesChanged(await h.store.put(ID(2), "two"));
     await h.service.rebuild();
     assert.equal(await readFile(knowledgeStatePath(h.appdir), "utf8"), text, "byte for byte as the newer build wrote it");
-    await h.service.stop();
   });
 });
 
@@ -1037,7 +1031,7 @@ function fakeGraphView() {
 const pass2Inputs = (h: Harness) => h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pass2");
 const withContext = (h: Harness) => pass2Inputs(h).filter((i) => i.input.includes(CONTEXT_HEADING)).length;
 
-describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context", { timeout: 120_000 }, () => {
+describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context", () => {
   it("re-links entries linked without context in batches of 25 once no save waits, myKG really asks again, and the status counts", async () => {
     const graph = fakeGraphView();
     const h = await harness({ extra: { graphView: graph.view } });
@@ -1080,7 +1074,6 @@ describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context
     await h.clock.advance(60_000);
     await h.service.idle();
     assert.equal(h.service.snapshot().recentRuns.length, 3);
-    await h.service.stop();
   });
 
   it("after a restart, re-linking starts once the entry vectors have loaded: no entry change or setting change is needed", async () => {
@@ -1201,7 +1194,6 @@ describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context
     await h.until(ranOk(h, 3));
     assert.equal(lastRun(h)!.entries, 1);
     assert.equal(h.store.linkContexts.get(ID(4)), LINK_CONTEXT_VERSION);
-    await h.service.stop();
   });
 
   it("a context version that cannot be saved never re-links the entry again and again", async () => {
@@ -1224,7 +1216,6 @@ describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context
     for (let i = 0; i < 3; i += 1) await h.clock.advance(60_000);
     await h.service.idle();
     assert.equal(h.service.snapshot().recentRuns.length, 2, "no second re-link of the same entries");
-    await h.service.stop();
   });
 
   it("a re-link that fails to extract an entry is retried twice, then given up on and reported", async () => {
@@ -1256,7 +1247,6 @@ describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context
     for (let i = 0; i < 3; i += 1) await h.clock.advance(60_000);
     await h.service.idle();
     assert.equal(h.service.snapshot().recentRuns.length, 4, "no fourth try");
-    await h.service.stop();
   });
 
   it("a re-link that failed once is retried and, linked this time, is back in the graph", async () => {
@@ -1280,7 +1270,6 @@ describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context
     assert.equal(h.store.linkContexts.get(ID(1)), LINK_CONTEXT_VERSION);
     assert.equal((await readState(h)).relink.attempts[ID(1)]?.failures, 0);
     assert.equal(h.service.snapshot().relink, null);
-    await h.service.stop();
   });
 });
 
@@ -1297,7 +1286,7 @@ async function tempAppdir(): Promise<string> {
   return appdir;
 }
 
-describe("KnowledgeLinkingService — phase 2: link-gap scans", { timeout: 120_000 }, () => {
+describe("KnowledgeLinkingService — phase 2: link-gap scans", () => {
   it("a graph load that changed nothing the scan reads (the vectors, the graph's content) is not scanned again", async () => {
     const graph = fakeGraphView();
     let revision = 1;
@@ -1325,11 +1314,10 @@ describe("KnowledgeLinkingService — phase 2: link-gap scans", { timeout: 120_0
     await h.clock.advance(20_000);
     await h.until(ranOk(h, 3));
     assert.deepEqual(await pairs(), [`${ID(1)} ${ID(2)}`, `${ID(1)} ${ID(3)}`, `${ID(2)} ${ID(3)}`]);
-    await h.service.stop();
   });
 });
 
-describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { timeout: 120_000 }, () => {
+describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", () => {
   it("after a graph load, link gaps are queued once; a pair-check round answers close pairs and counts its tokens", async () => {
     const graph = fakeGraphView();
     const h = await harness({ extra: { graphView: graph.view } });
@@ -1378,7 +1366,6 @@ describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { tim
     await h.service.pairChecksIdle();
     assert.equal(h.service.pairChecks.all().length, 1);
     assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pair-check").length, 1, "each pair is checked once per pair of content hashes");
-    await h.service.stop();
   });
 
   it("a consistent check on input version 1 that saw a cut body is asked again once, with excerpts, and recorded on the current version", async () => {
@@ -1429,10 +1416,10 @@ describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { tim
     h.service.entriesChanged(await h.store.put(ID(3), "body of 3, edited"));
     await h.clock.advance(20_000);
     await h.until(ranOk(h, 3));
-    await flushAsync(20);
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 4));
     await h.service.pairChecksIdle();
     assert.equal(pairInputs().filter((i) => i.input.includes(`(${ID(1)})`) && i.input.includes(`(${ID(2)})`)).length, 1, "asked again once");
-    await h.service.stop();
   });
 
   it("more candidates than a round takes: rounds follow one another until every pair is checked, each once", async () => {
@@ -1452,7 +1439,6 @@ describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { tim
     assert.equal(asked.length, 36, "each pair once");
     const rounds = new Set(h.service.snapshot().workers.filter((w) => w.runId.startsWith("kp_")).map((w) => w.runId));
     assert.equal(rounds.size, 2, "30, then the 6 left; then none");
-    await h.service.stop();
   });
 });
 
@@ -1497,7 +1483,7 @@ function fakeRoundSource(items: string[]) {
   };
 }
 
-describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 }, () => {
+describe("KnowledgeLinkingService — round task sources", () => {
   it("answers a source's capped tasks in the idle rounds only, round after round until none is left, counts their tokens, and asks each item once", async () => {
     const graph = fakeGraphView();
     const round = fakeRoundSource(["v", "w", "x", "y", "z"]);
@@ -1530,7 +1516,6 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     await h.service.pairChecksIdle();
     const asked = h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "round-test").map((i) => i.input);
     assert.equal(asked.length, 5, "each item once");
-    await h.service.stop();
   });
 
   it("a save during the rounds: linking goes first, and the rounds go on once it is idle again", async () => {
@@ -1559,7 +1544,6 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     await h.service.pairChecksIdle();
     assert.ok(round.calls.every((state) => state === "idle"), JSON.stringify(round.calls));
     assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "round-test").length, 5, "each item once");
-    await h.service.stop();
   });
 
   it("concept checks: more candidate pairs than a round takes are asked round after round until none is left", async () => {
@@ -1606,7 +1590,6 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     await h.service.pairChecksIdle();
     assert.deepEqual(checks.map((c) => c.nameA).sort(), ["48-hour account warm-up", "Proxy risk check", "US App Store download and warm-up"]);
     assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "concept-check").length, 3, "each pair once");
-    await h.service.stop();
   });
 
   it("an answer that changes nothing (the source asks the same item again) is not asked again before the next graph load", async () => {
@@ -1642,7 +1625,6 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     await flushAsync(20);
     await h.service.pairChecksIdle();
     assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.input === "Item same").length, 1);
-    await h.service.stop();
   });
 
   it("an item no chat answers acceptably cannot sink its round, and after three rounds it is never asked again", async () => {
@@ -1687,7 +1669,7 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     assert.equal(attemptsOf(h, "bad"), 2);
     assert.ok(!h.service.pairChecks.gaveUp(roundTaskKey("bad")), "two failed rounds");
     work();
-    await h.until(() => h.service.pairChecks.givenUp().length > 0);
+    await h.until(() => h.service.pairChecks.gaveUp(roundTaskKey("bad")));
     await h.service.pairChecksIdle();
     assert.ok(h.service.pairChecks.gaveUp(roundTaskKey("bad")), "given up after three rounds");
     const asked = askedBad();
@@ -1698,7 +1680,6 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     assert.deepEqual(recorded, ["good"]);
     const written = JSON.parse(await readFile(knowledgePairChecksPath(h.appdir), "utf8")) as { attempts?: { label: string; failures: number }[] };
     assert.deepEqual(written.attempts?.map((a) => [a.label, a.failures]), [["round-test bad", 3]]);
-    await h.service.stop();
   });
 
   it("an answer still being recorded when its round ends is recorded once, not again by the round's harvest", async () => {
@@ -1741,6 +1722,5 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     release();
     await h.service.pairChecksIdle();
     assert.deepEqual(records, ["slow"]);
-    await h.service.stop();
   });
 });

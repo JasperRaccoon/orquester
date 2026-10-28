@@ -257,15 +257,15 @@ interface Chromium {
 export const TASKKILL_TIMEOUT_MS = 5_000;
 
 /**
- * Kill a Windows process tree by pid (`taskkill /pid <pid> /T /F`), bounded by `timeoutMs` (the
- * command is killed past it). True only when it reported success in time; the caller then falls
+ * Kill a Windows process tree by pid (`taskkill /pid <pid> /T /F`), bounded by {@link TASKKILL_TIMEOUT_MS}
+ * (the command is killed past it). True only when it reported success in time; the caller then falls
  * back to killing the process itself. `run` is the test seam (a `spawnSync`).
  */
-export function killWindowsTree(pid: number, opts: { run?: typeof spawnSync; timeoutMs?: number } = {}): boolean {
+export function killWindowsTree(pid: number, opts: { run?: typeof spawnSync } = {}): boolean {
   const result = (opts.run ?? spawnSync)("taskkill", ["/pid", String(pid), "/T", "/F"], {
     stdio: "ignore",
     windowsHide: true,
-    timeout: opts.timeoutMs ?? TASKKILL_TIMEOUT_MS,
+    timeout: TASKKILL_TIMEOUT_MS,
     killSignal: "SIGKILL"
   });
   return result.status === 0 && result.error === undefined;

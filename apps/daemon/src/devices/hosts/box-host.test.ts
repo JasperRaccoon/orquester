@@ -288,9 +288,13 @@ describe("box device host factory", () => {
     await factory.start(context());
     const first = new AbortController();
     const cancelled = factory.provision!({ platform: "ios", approved: true, threadId: "t1" }, first.signal);
+    let cancellation: unknown;
+    void cancelled.catch((error: unknown) => { cancellation = error; });
     const joined = factory.provision!({ platform: "ios", approved: true, threadId: "t2" }, new AbortController().signal);
     await eventually(() => added.has("box:new1"), "the renting host");
     first.abort();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(isDeviceError(cancellation) && cancellation.code === "CANCELLED", "cancellation settles after the abort event");
     await assert.rejects(cancelled, (error) => isDeviceError(error) && error.code === "CANCELLED");
     boxes.mac("new1", new FakeMacBox());
     await boxes.preparer!({ boxId: "new1", connection: boxes.wiring().hub.get("new1")!, signal: new AbortController().signal, log: () => undefined });
@@ -320,11 +324,11 @@ describe("box device host factory", () => {
 
   it("rents a Mac host: refuses without approval, then rents, prepares and resolves it ready", async () => {
     await factory.start(context());
-    await assert.rejects(
-      factory.provision!({ platform: "ios", approved: false, threadId: "t1" }, new AbortController().signal),
-      (error) => isDeviceError(error) && error.code === "PLATFORM_NOT_READY" && /approval/.test(error.message)
-    );
-    assert.equal(boxes.started.length, 0);
+    const refused = factory.provision!({ platform: "ios", approved: false, threadId: "t1" }, new AbortController().signal);
+    void refused.catch(() => undefined);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(boxes.started.length, 0, "an unapproved request cannot start a rental");
+    await assert.rejects(refused, (error) => isDeviceError(error) && error.code === "PLATFORM_NOT_READY" && /approval/.test(error.message));
 
     const progress: DeviceHostProgress[] = [];
     const pending = factory.provision!({ platform: "ios", approved: true, threadId: "t1", onProgress: (entry) => progress.push(entry) }, new AbortController().signal);

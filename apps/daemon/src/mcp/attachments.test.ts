@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { appendFileSync,constants,existsSync } from "node:fs";
-import { mkdtemp,mkdir,open,readdir,rm,symlink,truncate,writeFile } from "node:fs/promises";
+import { mkdtemp,mkdir,readdir,rm,symlink,truncate,writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeDaemonApi } from "./testing.ts";
@@ -121,13 +123,25 @@ test("every file opened to validate an attachment is closed again, whatever the 
   assert.equal(await openFds(), baseline, "after a refusal that never read the body");
 });
 
-test("a FIFO in the sandbox is refused at once, never waited on", { skip: process.platform === "win32" && "no FIFOs", timeout: 10_000 }, async (t) => {
+test("a FIFO in the sandbox is refused at once, never waited on", { skip: process.platform === "win32" && "no FIFOs" }, async (t) => {
   const s = await sandbox();
   const fifo = join(s.ws, "acme", "api", "pipe.txt");
-  // Were open() ever to block on it again, the test would time out; this then releases the stuck reader so the run still ends.
-  t.after(async () => { await open(fifo, constants.O_WRONLY | constants.O_NONBLOCK).then((w) => w.close(), () => undefined); await rm(s.root, { recursive: true, force: true }); });
   execFileSync("mkfifo", [fifo]);
+  const realFifo = await fsPromises.realpath(fifo);
+  const nativeOpen = fsPromises.open;
+  let blockingOpen = false;
+  t.after(async () => { t.mock.restoreAll(); syncBuiltinESMExports(); await rm(s.root, { recursive: true, force: true }); });
+  // With no writer, unsafe flags would strand a native open. Record them before rejecting that syscall; check outside its catch.
+  t.mock.method(fsPromises, "open", (...args: Parameters<typeof fsPromises.open>) => {
+    if (args[0] === realFifo && !(typeof args[1] === "number" && (args[1] & constants.O_NONBLOCK) !== 0)) {
+      blockingOpen = true;
+      return Promise.reject(new Error("Blocking FIFO open refused by the test"));
+    }
+    return nativeOpen(...args);
+  });
+  syncBuiltinESMExports();
   await assert.rejects(uploadInlineAttachments(s.api, "c1", [{ path: fifo }]), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+  assert.equal(blockingOpen, false, "FIFO open must not wait for a writer");
 });
 
 test("base64 must be canonical: some data, padding only to a multiple of 4, never 4n+1 data characters", async (t) => {

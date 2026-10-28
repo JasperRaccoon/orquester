@@ -146,6 +146,7 @@ describe("BoxDeviceHost", () => {
     box.log.length = 0;
     const again = makeHost();
     await prepared(again);
+    await box.drain();
     assert.ok(!box.log.some((line) => line.includes("orq-warm-runner")), "warmed once per box");
   });
 

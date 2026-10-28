@@ -322,8 +322,9 @@ describe("the history slice", () => {
     ]) {
       const { fake, state } = await open();
       synchronize(fake, thread);
-      await state().actions.loadOlderHistory();
+      const loading = state().actions.loadOlderHistory();
       assert.equal(fake.historyCalls.length, 0, JSON.stringify(thread.history));
+      await loading;
     }
   });
 
@@ -555,10 +556,12 @@ describe("revealTurn", () => {
     const { fake, state } = await open();
     synchronize(fake);
 
-    assert.equal(await state().actions.revealTurn("t3"), true);
+    const revealing = state().actions.revealTurn("t3");
+    await settle();
+    assert.equal(fake.historyCalls.length, 0);
+    assert.equal(await revealing, true);
     assert.equal(state().reveal?.turnId, "t3");
     assert.equal(state().reveal?.rowId, "u3");
-    assert.equal(fake.historyCalls.length, 0);
   });
 
   it("loads older pages until the turn is on screen, then reveals it", async () => {
@@ -651,8 +654,10 @@ describe("revealTurn", () => {
   it("gives up at once on a turn the thread no longer has", async () => {
     const { fake, state } = await open();
     synchronize(fake);
-    assert.equal(await state().actions.revealTurn("t-reverted"), false);
+    const revealing = state().actions.revealTurn("t-reverted");
+    await settle();
     assert.equal(fake.historyCalls.length, 0);
+    assert.equal(await revealing, false);
     assert.equal(state().reveal, null);
   });
 
@@ -669,8 +674,9 @@ describe("revealTurn", () => {
         })
       );
     }
-    assert.equal(await revealing, false);
+    await settle();
     assert.equal(fake.historyCalls.length, 25);
+    assert.equal(await revealing, false);
   });
 
   it("waits for the thread to synchronize before looking", async () => {
@@ -1307,10 +1313,10 @@ describe("the history bridge", () => {
         await until(() => fake.waiting === 1, `page ${page} is asked for`);
         fake.answer(historyPage({ items: [windowRows[60 - page]!], page: { beforeCursor: `c${page}` }, seq }));
       }
-      await loading;
-
+      await settle();
       assert.equal(fake.historyCalls.length, 5);
       assert.equal(fake.waiting, 0, "nothing more asked for in this click");
+      await loading;
       assert.equal(state().slice.history.loading, false);
 
       const next = state().actions.loadOlderHistory();

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { WorkLogEntry } from "../../../lib/agent-chat/contracts";
-import { compactRequestLabel, isCompactCommandMessage, joinLifecycleDetails, splitSkillMentions } from "./row-chrome";
+import { isCompactCommandMessage, joinLifecycleDetails, splitSkillMentions } from "./row-chrome";
 
 function entry(over: Partial<WorkLogEntry> = {}): WorkLogEntry {
   return {
@@ -31,13 +31,6 @@ test("only a bare `/compact` from the user, with no attachments, is the command"
   assert.ok(
     !isCompactCommandMessage({ role: "user", text: "/compact", attachments: [{ id: "a" }] })
   );
-});
-
-test("idle compaction's own `/compact` is labelled automatic; any other is the user's", () => {
-  assert.equal(compactRequestLabel({ sentBy: "idle-compaction" }), "Compaction requested automatically before the prompt cache expired");
-  assert.equal(compactRequestLabel({}), "Compaction requested");
-  // An unknown value from a newer host reads as absent.
-  assert.equal(compactRequestLabel({ sentBy: "something-new" }), "Compaction requested");
 });
 
 test("the concatenated runs always reproduce the input exactly", () => {

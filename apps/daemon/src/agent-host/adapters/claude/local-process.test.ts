@@ -5,8 +5,10 @@
  */
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { once } from "node:events";
+import childProcess, { execFileSync } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,7 +37,7 @@ describe("the local Claude spawner", { skip: !LIFELINE_SUPPORTED }, () => {
     t.after(() => rm(root, { recursive: true, force: true }));
     const fifo = join(root, "release");
     execFileSync("mkfifo", [fifo]);
-    // Only the separate cap case advances real time; scheduler load cannot expire this drain.
+    // The cap never races this drain: it advances only under the mocked clock.
     t.mock.timers.enable({ apis: ["setTimeout"] });
     // The inherited writer waits on a pipe until the actual CLI process has exited.
     const { process: child, stderr } = start("(read release < \"$1\"; echo 'fatal: late line' >&2) & exit 3", fifo);
@@ -62,19 +64,33 @@ describe("the local Claude spawner", { skip: !LIFELINE_SUPPORTED }, () => {
     assert.match(atExit, /fatal: late line/);
   });
 
-  it("does not wait past the cap for a stderr something else keeps open", { timeout: 10_000 }, async () => {
-    const { process: child } = start("sleep 5 & exit 0");
-    const exitedAt = Date.now();
-    const [code] = (await once(child as unknown as NodeJS.EventEmitter, "exit")) as [number | null];
-    assert.equal(code, 0);
-    assert.ok(Date.now() - exitedAt < 2_000, "exit is bounded independently of the still-open stderr");
-    process.kill(-(child as unknown as { pid: number }).pid, "SIGKILL");
+  it("does not wait past the cap for a stderr something else keeps open", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const native = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      stdio: [], exitCode: 0, signalCode: null
+    });
+    const spawn = t.mock.method(childProcess, "spawn", () => native as unknown as childProcess.ChildProcess);
+    syncBuiltinESMExports();
+    t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
+    const { process: child } = start("exit 0");
+    let reported = false;
+    child.once("exit", () => { reported = true; });
+    const exited = once(child as unknown as NodeJS.EventEmitter, "exit");
+    native.emit("exit", 0, null);
+    assert.equal(reported, false, "the open stderr defers the exit");
+    t.mock.timers.runAll();
+    assert.deepEqual(await exited, [0, null]);
+    assert.equal(native.stderr.destroyed, false, "the cap releases the exit while stderr stays open");
   });
 
   it("a spawn error reaches the SDK's error listener and no exit is invented", async () => {
     const spawner = claudeLifelineSpawner(() => {})!;
     const child = spawner({ command: "/bin/sh", args: ["-c", "exit 0"], env: {}, cwd: "/nonexistent-dir", signal: new AbortController().signal });
+    let exited = false;
+    child.on("exit", () => { exited = true; });
     const [error] = (await once(child as unknown as NodeJS.EventEmitter, "error")) as [NodeJS.ErrnoException];
     assert.equal(error.code, "ENOENT");
+    assert.equal(exited, false, "a spawn failure reports only its error");
   });
 });

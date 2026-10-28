@@ -298,9 +298,11 @@ test("a stale Orquester session holding the device is closed and the call retrie
   await executor.execute({ host: new FakeDeviceHost(), lease: lease() }, { action: "snapshot" }, signal);
   assert.deepEqual(sessions, [undefined, "orq-00000000000000aa", undefined]);
 
-  const foreign = createDeviceActionExecutor({ agentDevice: { run: async () => inUse("someone-else") }, logger: quiet });
+  const foreignCommands: string[] = [];
+  const foreign = createDeviceActionExecutor({ agentDevice: { run: async (_target, command) => { foreignCommands.push(command); return inUse("someone-else"); } }, logger: quiet });
   const refused = await foreign.execute({ host: new FakeDeviceHost(), lease: lease() }, { action: "snapshot" }, signal).catch((error: unknown) => error);
   assert.ok(isDeviceError(refused) && refused.code === "DEVICE_BUSY");
+  assert.deepEqual(foreignCommands, ["snapshot"], "another caller's session cannot be closed");
 });
 
 test("restartApp: the app in front is relaunched; the home screen is refused (Android asks the launcher, iOS knows SpringBoard)", async () => {

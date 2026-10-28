@@ -198,7 +198,7 @@ describe("the Runs on row of the new-project modal", () => {
   it("is hidden while the plugin is off", async () => {
     await open(false);
     assert.equal(text().includes("Runs on"), false);
-    assert.equal(document.querySelector('[role="radio"]'), null);
+    assert.equal(document.querySelector('[role="radio"]') === null, true);
   });
 
   it("shows this host, one card per kind and Set up more…, unavailable kinds disabled with their reason", async () => {
@@ -245,7 +245,7 @@ describe("the Runs on row of the new-project modal", () => {
     await open(true);
     await type(document.querySelector<HTMLInputElement>('input[placeholder="project-name"]')!, "mac-build");
     await click(card("macOS"));
-    assert.equal(select("Region"), null, "one region: the OS version is asked instead");
+    assert.equal(select("Region") === null, true, "one region: the OS version is asked instead");
     assert.equal(select("OS version")?.value, "macos-15");
     assert.match(
       text(),
@@ -271,7 +271,7 @@ describe("the Runs on row of the new-project modal", () => {
     await type(document.querySelector<HTMLInputElement>('input[placeholder="https://github.com/owner/repo.git"]')!, PRESET.url);
     assert.ok(buttonNamed("Review"), "the host path reviews the typed clone");
     await click(card("Linux VM"));
-    assert.equal(buttonNamed("Review"), undefined);
+    assert.equal(buttonNamed("Review") === undefined, true);
     await click(buttonNamed("Clone into a new VM"));
     assert.deepEqual(typed, []);
     assert.equal(created.length, 1);

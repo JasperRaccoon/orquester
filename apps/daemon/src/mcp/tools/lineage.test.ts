@@ -214,16 +214,24 @@ test("merge_back_session sends the fork's text and reports the delivery; a sessi
   assert.equal(api.calls.filter((c) => c.method === "POST").length, posts, "nothing was sent");
 });
 
-test("fork_session re-sends the SAME commandId while the host restarts, so a retry is one fork", async () => {
+test("fork_session re-sends the SAME commandId while the host restarts, so a retry is one fork", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const { api } = harness();
   let attempts = 0;
+  let firstAttempt!: () => void;
+  const attempted = new Promise<void>((resolve) => { firstAttempt = resolve; });
   api.on("POST", agentChatRoutes.fork("c1"), () => {
     attempts += 1;
+    firstAttempt();
     return attempts === 1
       ? { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "restarting" } } }
       : { status: 200, body: { session: chatSummary({ id: "f1" }), strategy: "native", lineage: { parentThreadId: "c1", relation: "fork", createdAt: "x" } } };
   });
-  await tool("fork_session").run({ sessionId: "c1" }, api);
+  const forked = tool("fork_session").run({ sessionId: "c1" }, api);
+  await attempted;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  t.mock.timers.runAll();
+  await forked;
   const ids = api.calls.filter((c) => c.method === "POST").map((c) => (c.body as { commandId: string }).commandId);
   assert.equal(ids.length, 2);
   assert.equal(ids[0], ids[1]);

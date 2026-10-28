@@ -82,7 +82,8 @@ test("a blank initialCommand writes nothing to the PTY", async () => {
     // The next line must be the first one read: a queued blank command would
     // consume the read and print READ[] before this sentinel can be accepted.
     mgr.input(blank.id, "sentinel\r");
-    await outputContains(mgr, blank.id, "READ[sentinel]");
+    await outputContains(mgr, blank.id, "READ[");
+    assert.match(mgr.buffer(blank.id), /READ\[sentinel\]/, "the sentinel was the first line the program read");
     assert.doesNotMatch(mgr.buffer(blank.id), /READ\[\]/);
   } finally {
     mgr.closeAll();

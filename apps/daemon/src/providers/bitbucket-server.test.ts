@@ -53,7 +53,7 @@ test("parseRepoUrl accepts the https form with the embedded username the Clone d
 
 test("pickCloneUrls tolerates name:'http' meaning https and missing ssh", async (t) => {
   let clone = [
-    { name: "http", href: "https://bb.corp.com/bitbucket/scm/PRJ/repo.git" },
+    { name: "http", href: "https://fixture-user:fixture-secret@bb.corp.com/bitbucket/scm/PRJ/repo.git" },
     { name: "ssh", href: "ssh://git@bb.corp.com:7999/PRJ/repo.git" }
   ];
   t.mock.method(globalThis, "fetch", async () => Response.json({ links: { clone } }));
@@ -118,7 +118,7 @@ test("resolveDcLogin trusts the instance's X-AUSERNAME over the typed username",
   }
 });
 
-test("credential host includes non-standard ports; strips creds embedded by the API", () => {
+test("credential host includes non-standard ports", () => {
   assert.deepEqual(bitbucketServerProvider.credentialSpec({ ...ctx, login: "jdoe" }), {
     host: "bb.corp.com",
     username: "jdoe"

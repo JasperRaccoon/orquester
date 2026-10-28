@@ -171,7 +171,8 @@ test("a bad binary fails the acquire instead of hanging", async () => {
   }
 });
 
-test("a host abort cancels acquisition of a silent peer", async () => {
+test("a host abort cancels acquisition of a silent peer", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const peer = makePeer();
   const controller = new AbortController();
   const pool = new OpenCodeServerPool({
@@ -191,11 +192,12 @@ test("a host abort cancels acquisition of a silent peer", async () => {
     onStderr: (_projectDir, line) => {
       if (line.text.includes("never ready")) {
         controller.abort();
+        setImmediate(() => t.mock.timers.runAll());
       }
     }
   });
   try {
-    await assert.rejects(pool.acquire(peer.dir));
+    await assert.rejects(pool.acquire(peer.dir), (error) => error === controller.signal.reason);
     assert.equal(controller.signal.aborted, true, "the peer came up and was waited on, never ready");
   } finally {
     await pool.stopAll();

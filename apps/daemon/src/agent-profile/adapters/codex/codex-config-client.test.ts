@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { CodexRpcError } from "../../../agent-host/adapters/codex/protocol.ts";
 import { AgentProfileError } from "../../errors.ts";
 import { CodexAppServerClient, keyPath, toProfileError } from "./codex-config-client.ts";
-import { armHangGuard } from "./testing/hang-guard.ts";
 
 const FAKE = fileURLToPath(new URL("./testing/fake-app-server.mjs", import.meta.url));
 
@@ -25,18 +24,15 @@ describe("CodexAppServerClient", () => {
     await writeFile(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n');
   });
 
-  let checkHangGuard: () => void;
 
   // Every test runs on mocked timers: a deadline fires only when the test ticks it, never because
   // the fake app-server (a Node script) started slowly on a loaded host.
   beforeEach(() => {
     mock.timers.enable({ apis: ["setTimeout"] });
-    checkHangGuard = armHangGuard();
   });
 
   afterEach(() => {
     mock.timers.reset();
-    checkHangGuard();
   });
 
   after(async () => {

@@ -247,7 +247,8 @@ test("listManaged: VDCs named orq-<boxId>, with their server's state; one withou
   const replay = replayFetch([
     { method: "GET", url: `${API}/datacenters?depth=1&offset=0&limit=100`, body: fixture("ionos", "datacenters") },
     { method: "GET", url: `${API}/datacenters/${DC}/servers?depth=1&offset=0&limit=100`, body: fixture("ionos", "servers-in-datacenter") },
-    { method: "GET", url: `${API}/datacenters/${DC2}/servers?depth=1&offset=0&limit=100`, body: fixture("ionos", "servers-empty") }
+    { method: "GET", url: `${API}/datacenters/${DC2}/servers?depth=1&offset=0&limit=100`, body: fixture("ionos", "servers-empty") },
+    { method: "GET", url: `${API}/datacenters/11111111-1111-4111-8111-111111111113/servers?depth=1&offset=0&limit=100`, body: fixture("ionos", "servers-empty"), times: Infinity }
   ]);
   const managed = await ionosAdapter.listManaged(credentials, replayOptions(t, replay));
   assert.deepEqual(managed, [

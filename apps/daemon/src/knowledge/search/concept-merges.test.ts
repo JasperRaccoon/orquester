@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { KnowledgeConceptMergeRecord } from "@orquester/config";
 import { EMBEDDING_MODEL_ID } from "../install/pins.ts";
@@ -317,14 +317,16 @@ test("an unreadable file is moved aside and merging starts afresh", async (t) =>
   await loadGraph(h.graph, NODES);
   await h.merges.idle();
   assert.equal(h.merges.count(), 2);
-  assert.ok(h.logger.lines.some((line) => line.includes("moved to")));
+  const aside = (await readdir(dirname(h.path))).find((name) => name.startsWith("concept-merges.json.corrupt-"));
+  assert.ok(aside);
+  assert.equal(await readFile(join(dirname(h.path), aside), "utf8"), "{not json");
 });
 
 test("backing: the same claim in other words on the graph's concepts; never a different number, a one-word swap or another type", async (t) => {
   // Cosine bars that let every pair through, so only the name rules decide.
   const h = await coordinator(t, { thresholds: { merge: 0.9999, similar: 0.01, contained: 0.01 } });
-  const before = h.graph.backingRevision();
   await h.merges.start();
+  const before = h.graph.backingRevision();
   await loadGraph(h.graph, [
     node("tactic-limit", "Create TikTok accounts with a 2-3 account limit per device", [`${eA}.md`]),
     node("tactic-short", "2–3 accounts per device", [`${eB}.md`]),

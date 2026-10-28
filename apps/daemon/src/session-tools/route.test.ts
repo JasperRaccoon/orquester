@@ -229,7 +229,12 @@ test("a daemon that dies mid-call answers the restart message", async (t) => {
 
 test("cancelling the call on the host aborts the daemon-side handler", async (t) => {
   const hold = holdingTools();
-  const { socketPath } = await daemon(t, hold.tools);
+  const { app, socketPath } = await daemon(t, hold.tools);
+  let sawAbort = false;
+  void hold.aborted.then(() => { sawAbort = true; });
+  const disconnected = new Promise<void>((resolve) => {
+    app.server.once("request", (_request, response) => response.once("close", () => resolve()));
+  });
   const controller = new AbortController();
   const pending = forwarderFor(socketPath)({ threadId: "thread-a", callId: "c", name: "hold", arguments: {} }, controller.signal);
   await hold.running;
@@ -237,7 +242,9 @@ test("cancelling the call on the host aborts the daemon-side handler", async (t)
   const result = await pending;
   assert.equal(result.isError, true);
   assert.match(textOf(result), /^CANCELLED/);
-  await hold.aborted;
+  await disconnected;
+  await Promise.resolve();
+  assert.equal(sawAbort, true, "the closed socket aborts the daemon-side handler");
 });
 
 test("request_secret over the socket: the answer reaches the call; the host's cancel closes the card", async (t) => {
@@ -250,7 +257,7 @@ test("request_secret over the socket: the answer reaches the call; the host's ca
     }
   });
   const nextEvent = () => new Promise<AgentChatSecretRequestEventPayload>((resolve) => waiters.push(resolve));
-  const { socketPath } = await daemon(t, [toolByName("request_secret", "chat")!], fakeApi, secretRequests);
+  const { app, socketPath } = await daemon(t, [toolByName("request_secret", "chat")!], fakeApi, secretRequests);
   const forward = forwarderFor(socketPath);
   const args = { name: "API_KEY", prompt: "Paste it." };
 
@@ -267,12 +274,16 @@ test("request_secret over the socket: the answer reaches the call; the host's ca
 
   // Cancelled on the host (the provider's cancel, a Stop, the session ending): the card closes.
   opened = nextEvent();
+  const disconnected = new Promise<void>((resolve) => {
+    app.server.once("request", (_request, response) => response.once("close", () => resolve()));
+  });
   const controller = new AbortController();
   const cancelled = forward({ threadId: "thread-a", callId: "c2", name: "request_secret", arguments: args }, controller.signal);
   await opened;
-  const closed = nextEvent();
   controller.abort();
-  assert.deepEqual([(await closed).open, (await closed).outcome], [false, "cancelled"]);
+  await disconnected;
+  await Promise.resolve();
+  assert.deepEqual([events.at(-1)?.open, events.at(-1)?.outcome], [false, "cancelled"]);
   assert.equal((await cancelled).isError, true);
   assert.deepEqual(secretRequests.list("thread-a"), []);
 });

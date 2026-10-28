@@ -5,7 +5,6 @@ import {
   parseSecretVaultsConfig,
   secretBlobsDir,
   secretFilesDir,
-  secretVaultIndexPath,
   secretVaultRecordSchema,
   serializeSecretVaultsFile
 } from "./index.ts";
@@ -42,7 +41,6 @@ const plain = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
 
 test("the vault index and its blobs live under daemon/secret-files", () => {
   assert.equal(secretFilesDir("/srv/orq"), "/srv/orq/daemon/secret-files");
-  assert.equal(secretVaultIndexPath("/srv/orq"), "/srv/orq/daemon/secret-files/vaults.json");
   assert.equal(secretBlobsDir("/srv/orq"), "/srv/orq/daemon/secret-files/blobs");
 });
 

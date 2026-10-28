@@ -205,6 +205,7 @@ describe("Implement never sends a plan the wire cut (§5.6, §7.3)", () => {
     fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, items: [intact] }) });
     const plan = api.getState().actionableProposedPlan!;
     assert.equal(plan.truncated, undefined);
+    fake.onReadItem(async () => ({ item: intact }));
     assert.equal(await api.getState().actions.readFullPlanMarkdown(plan), "# Ship it");
     assert.deepEqual(fake.itemReads, []);
   });

@@ -1,3 +1,5 @@
+import assert from "node:assert/strict";
+import type { TestContext } from "node:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -211,4 +213,26 @@ export function edge(id: string, from: string, to: string, sourceFiles: string[]
     method: "llm_extraction",
     ...(sourceFiles ? { source_files: sourceFiles } : {})
   };
+}
+
+/** Process CPU excludes time descheduled by other test workers or a busy host. */
+export const cpu = (): number => { const { user, system } = process.cpuUsage(); return (user + system) / 1_000; };
+
+/** Median CPU for independent reference work; the checksum keeps that work observable. */
+export function cpuFloor(work: () => number): number {
+  return Array.from({ length: 3 }, () => {
+    const at = cpu();
+    const sum = work();
+    const elapsed = cpu() - at;
+    assert.ok(Number.isFinite(sum) && sum !== 0);
+    return elapsed;
+  }).sort((a, b) => a - b)[1]!;
+}
+
+/** Make a work slice expire after a fixed number of clock checks, without retaining mock calls. */
+export function workClock(t: TestContext, checksPerSlice: number): void {
+  let checks = 0;
+  const now = performance.now;
+  performance.now = () => Math.floor(++checks / checksPerSlice) * 40;
+  t.after(() => { performance.now = now; });
 }

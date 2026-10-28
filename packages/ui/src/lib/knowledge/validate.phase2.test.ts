@@ -121,7 +121,7 @@ describe("phase 2 wire validation", () => {
         { entry: B, similarity: null, source: "graph", pairs: [], note: null }
       ]);
       assert.equal(read.entry.disagreementsTotal, 40);
-      const fewer = parseKnowledgeItemResponse(entryItem({ disagreements: [{ entry: C, similarity: null, source: "graph", pairs: [], note: null }], disagreementsTotal: 0 }));
+      const fewer = parseKnowledgeItemResponse(entryItem({ disagreements: [{ entry: C, similarity: null, source: "graph", pairs: [], note: null }], disagreementsTotal: 1 }));
       assert.ok(fewer?.kind === "entry" && !("disagreementsTotal" in fewer.entry), "a total no larger than the list says nothing");
       const broken = parseKnowledgeItemResponse(entryItem({ disagreements: "all" }));
       assert.ok(broken?.kind === "entry" && !("disagreements" in broken.entry));

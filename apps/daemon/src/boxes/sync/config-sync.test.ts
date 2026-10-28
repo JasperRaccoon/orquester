@@ -426,7 +426,7 @@ test("box watch events outside a turn are grouped after the idle window with no 
 });
 
 // A deadline, not a wait: a mark that never expired would hold the publish back for good.
-test("a turn mark whose end never came stops holding the idle flush once it is older than turnMarkMaxMs", { timeout: 30_000 }, async (t) => {
+test("a turn mark whose end never came stops holding the idle flush once it is older than turnMarkMaxMs", async (t) => {
   const f = await fixture(t);
   let nowMs = Date.parse("2026-10-20T10:00:00Z");
   const warnings: string[] = [];

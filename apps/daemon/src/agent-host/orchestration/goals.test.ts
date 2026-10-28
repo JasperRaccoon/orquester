@@ -1755,7 +1755,7 @@ describe("final fix wave — `continuing`, the switch, Stop at a boundary, the m
     ]) {
       await assert.rejects(attempt, (error: unknown) =>
         isAgentChatCommandError(error) &&
-        error.code === "COMPACTION_UNAVAILABLE"
+        error.code === "COMPACTION_UNAVAILABLE" && /pause.*goal/i.test(error.message)
       );
     }
     await host.stop();

@@ -334,10 +334,11 @@ export class EventCollector {
   private readonly waiters: { match: (event: RuntimeEvent) => boolean; resolve: (event: RuntimeEvent) => void }[] =
     [];
 
-  constructor(source: AsyncIterable<RuntimeEvent>) {
+  constructor(source: AsyncIterable<RuntimeEvent>, onEvent?: () => void) {
     void (async () => {
       for await (const event of source) {
         this.events.push(event);
+        onEvent?.();
         for (let index = this.waiters.length - 1; index >= 0; index -= 1) {
           const waiter = this.waiters[index]!;
           if (waiter.match(event)) {
@@ -379,24 +380,6 @@ export class EventCollector {
 
   types(): string[] {
     return this.events.map((event) => event.type);
-  }
-}
-
-/** Poll a predicate on the microtask/timer queue. Never a bare sleep. */
-export async function waitUntil(
-  predicate: () => boolean,
-  label = "condition",
-  timeoutMs = 15_000
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (predicate()) {
-      return;
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`timed out waiting for ${label}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
 
@@ -484,7 +467,7 @@ const endParentAsk = (turnId, requestId, steps) => {
     if (step === "resolved") {
       send({ method: "serverRequest/resolved", params: { threadId, requestId } });
     } else if (step === "exit") {
-      setTimeout(() => { process.exit(1); }, 10);
+      process.stdout.write("", () => process.exit(1));
       return;
     } else {
       send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, step.slice("turn-".length)) } });
@@ -672,7 +655,7 @@ async function runTurn(turnId, script) {
       return;
     case "exit-mid-turn": {
       send({ method: "item/started", params: { item: { type: "commandExecution", id: itemId, pluginId: null, scriptPath: null, command: "sleep 30", cwd: process.cwd(), processId: null, source: "agent", status: "inProgress", commandActions: [], aggregatedOutput: null, exitCode: null, durationMs: null }, threadId, turnId, startedAtMs: 0 } });
-      setTimeout(() => { process.exit(script.exitCode); }, 10);
+      process.stdout.write("", () => process.exit(script.exitCode));
       return;
     }
   }

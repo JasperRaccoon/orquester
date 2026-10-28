@@ -15,13 +15,11 @@ import {
 } from "@orquester/api";
 
 import {
-  agentCardBoxBadge,
   archivedBoxNote,
   boxAccountOptions,
   boxChatChip,
   boxChatGate,
   boxCostSoFar,
-  boxDestroyedMessage,
   boxProjectMenu,
   boxShellChoices,
   boxShellRefId,
@@ -177,14 +175,6 @@ describe("project row badges", () => {
     assert.match(failed.title, /Hetzner answered 500[\s\S]*Retry destroy/);
   });
 
-  it("gives Opened agents cards the short form", () => {
-    assert.equal(agentCardBoxBadge(info(), NOW).text, "VM");
-    assert.equal(agentCardBoxBadge(info({ kind: "macos", deadlineAt: at(2 * DAY + HOUR) }), NOW).text, "2d 1h left");
-    assert.equal(agentCardBoxBadge(info({ state: "destroyed" }), NOW).text, "VM destroyed");
-    assert.equal(agentCardBoxBadge(info({ state: "provisioning" }), NOW).text, "VM setting up");
-    assert.equal(agentCardBoxBadge(info({ state: "unreachable" }), NOW).text, "VM unreachable");
-  });
-
   it("notes an archived box project still bills, until its box is gone", () => {
     assert.equal(archivedBoxNote(info()), "still billing");
     assert.equal(archivedBoxNote(info({ state: "unreachable" })), "still billing");
@@ -217,24 +207,6 @@ describe("project row badges", () => {
     assert.equal(setupStepText({ ...base, state: "failed", message: "Could not sync" }), "Sync agent configuration");
     assert.equal(setupStepText(null), null);
     assert.match(projectBoxBadge(info({ state: "provisioning" }), 0, setupStepText({ ...base, state: "running", message: "Codex account 1 of 1 · comparing files" })).title, /Setting up: Sync agent configuration \(Codex account 1 of 1 · comparing files\)/);
-  });
-});
-
-describe("destroyed wording", () => {
-  it("says outside Orquester for the dashboard, a provider error and the time limit", () => {
-    assert.equal(
-      boxDestroyedMessage(info({ destroyedReason: "provider-gone", stateReason: "gone in the Vultr dashboard" })),
-      "The VM was destroyed outside Orquester (gone in the Vultr dashboard). The transcript stays readable; you can't send new messages. Unpushed changes are lost."
-    );
-    assert.match(boxDestroyedMessage(info({ destroyedReason: "time-limit", kind: "macos" })), /^The VM was destroyed outside Orquester \(macOS time limit reached\)\./);
-    assert.match(boxDestroyedMessage(info({ destroyedReason: "provider-error" })), /outside Orquester \(Hetzner reported an error\)/);
-  });
-
-  it("says by Orquester otherwise, and names a failed setup", () => {
-    assert.match(boxDestroyedMessage(info({ destroyedReason: "agent" })), /^The VM was destroyed by Orquester \(the agent destroyed it\)\./);
-    assert.match(boxDestroyedMessage(info({ destroyedReason: "chat-closed" })), /by Orquester \(its chat was closed\)/);
-    assert.match(boxDestroyedMessage(info({ destroyedReason: "provisioning-failed", stateReason: "clone failed" })), /^The VM's setup failed and it was torn down \(clone failed\)\./);
-    assert.match(boxDestroyedMessage(info({ destroyedReason: null })), /^The VM was destroyed\. The transcript stays readable/);
   });
 });
 
@@ -458,7 +430,7 @@ describe("config change cards", () => {
   it("shows no diff for a binary or empty file, and makes hidden characters visible", () => {
     const base = { path: "/p", change: "modified" as const, executable: false, truncated: false };
     assert.deepEqual(
-      [configChangeFileRow({ ...base, diff: "", binary: true }).diff, configChangeFileRow({ ...base, diff: "", binary: true }).note],
+      [configChangeFileRow({ ...base, diff: "raw binary content", binary: true }).diff, configChangeFileRow({ ...base, diff: "raw binary content", binary: true }).note],
       [null, "Binary file — no diff to show."]
     );
     assert.equal(configChangeFileRow({ ...base, diff: "", binary: false }).note, "No textual changes.");

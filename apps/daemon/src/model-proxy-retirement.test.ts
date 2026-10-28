@@ -112,8 +112,8 @@ test("the proxy's fresher tokens are handed back, its launcher files removed, an
   // A later boot does nothing.
   await h.write(join(h.proxyDir, "auth", "xai-accb9682f5c.json"), { access_token: "newer", expired: "2027-01-01T00:00:00Z" });
   await retireModelProxy(opts);
-  assert.deepEqual(killed, ["orqsvc-cliproxy"]);
   assert.equal(JSON.parse(await readFile(h.cred("grok", GROK_ID), "utf8"))[GROK_KEY].key, "proxy-at");
+  assert.deepEqual(killed, ["orqsvc-cliproxy"]);
 });
 
 test("no proxy directory: nothing happens", async (t) => {

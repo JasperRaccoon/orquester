@@ -247,14 +247,14 @@ describe("the Knowledge view", () => {
     await click(buttonNamed("Back"));
     assert.equal(panel()?.getAttribute("aria-label"), "Concept details");
     await click(buttonNamed("Close panel"));
-    assert.equal(panel(), null);
+    assert.equal((panel()) === null, true);
   });
 
   it("toggles to the list: collections with counts and profiles, entry cards that open the entry", async () => {
     await show();
     const listRadio = [...doc().querySelectorAll('[role="radiogroup"][aria-label="View"] button')].find((b) => b.textContent === "List")!;
     await click(listRadio);
-    assert.equal(doc().querySelector('[data-testid="canvas"]'), null);
+    assert.equal((doc().querySelector('[data-testid="canvas"]')) === null, true);
     const nav = doc().querySelector('nav[aria-label="Collections"]')!;
     assert.match(nav.textContent!, /All/);
     assert.match(nav.textContent!, /SEO.*SaaS expert/);
@@ -285,7 +285,7 @@ describe("the Knowledge view", () => {
     const before = calls.filter((c) => c === "collections").length;
     await click(buttonNamed("Save"));
     assert.deepEqual(patches, [["kc_seo", { name: "Search", color: "chart-4" }]]);
-    assert.equal(doc().querySelector('form[aria-label="Edit collection"]'), null, "the dialog closed");
+    assert.equal((doc().querySelector('form[aria-label="Edit collection"]')) === null, true, "the dialog closed");
     assert.equal(calls.filter((c) => c === "collections").length, before + 1, "the collections were read again");
   });
 
@@ -358,7 +358,7 @@ describe("the Knowledge view", () => {
     await click([...doc().querySelectorAll('form[aria-label="Edit entry"] button[aria-pressed]')].find((b) => b.textContent === "Ads")!);
     await click(buttonNamed("Save"));
     assert.deepEqual(patches, [["ke_aaaaaaaaaaaa", { title: "Alternatives pages, revisited", collections: ["kc_ads", "kc_seo"] }]]);
-    assert.equal(doc().querySelector('form[aria-label="Edit entry"]'), null);
+    assert.equal((doc().querySelector('form[aria-label="Edit entry"]')) === null, true);
   });
 
   it("a concept asked for by a merged-away id becomes the kept concept it resolves to, without a Back to the old id", async () => {
@@ -371,7 +371,7 @@ describe("the Knowledge view", () => {
     assert.ok(aside, "the panel shows the kept concept");
     assert.equal(doc().querySelector('[data-node="tactic-alternatives"]')?.getAttribute("data-selected"), "true", "the canvas selects the kept concept");
     assert.ok(calls.includes("item:tactic-alternatives"), "the selection moved to the kept id");
-    assert.equal([...doc().querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Back"), undefined, "the old id is not a place to go back to");
+    assert.equal(([...doc().querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Back")) === undefined, true, "the old id is not a place to go back to");
   });
 
   describe("the concept panel's Show its entries in Similarity", () => {
@@ -413,7 +413,7 @@ describe("the Knowledge view", () => {
       const offer = panelButton();
       assert.ok(offer, "the concept panel offers it (the graph is out of sight behind it on a phone)");
       await click(offer);
-      assert.equal(doc().querySelector("aside"), null, "the panel closed so the graph shows");
+      assert.equal((doc().querySelector("aside")) === null, true, "the panel closed so the graph shows");
       assert.equal(canvas()?.getAttribute("data-layer"), "similarity");
       assert.deepEqual(hits(), ["ke_m00", "ke_m55"], "marked from entryIds: one past the 50 newest too");
       assert.match(text(), /Marked 2 of the 60 entries behind “Alternatives pages” \(the rest are not drawn\)\./);
@@ -445,7 +445,7 @@ describe("the Knowledge view", () => {
       await show();
       await click(doc().querySelector('[data-node="tactic-alternatives"]')!);
       assert.ok(doc().querySelector('aside[aria-label="Concept details"]'));
-      assert.equal(panelButton(), undefined);
+      assert.equal((panelButton()) === undefined, true);
     });
   });
 
@@ -456,7 +456,7 @@ describe("the Knowledge view", () => {
     const confirm = [...doc().querySelectorAll("button")].filter((b) => b.textContent?.trim() === "Delete").pop()!;
     await click(confirm);
     assert.ok(calls.includes("delete-entry:ke_aaaaaaaaaaaa"));
-    assert.equal(doc().querySelector("aside"), null);
+    assert.equal((doc().querySelector("aside")) === null, true);
   });
 
   it("the panel's More like this opens the List view searching for entries like that one", async () => {
@@ -467,9 +467,6 @@ describe("the Knowledge view", () => {
     });
     assert.ok(doc().querySelector('[role="radiogroup"][aria-label="View"] button[aria-checked="true"]')?.textContent !== "List", "starts outside the List view");
     await click(buttonNamed("More like this"));
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    });
     await settle();
     assert.equal(doc().querySelector('[role="radiogroup"][aria-label="View"] button[aria-checked="true"]')?.textContent, "List");
     assert.ok(
@@ -623,7 +620,7 @@ describe("the Knowledge view", () => {
       await act(async () => {
         doc().body.dispatchEvent(new dom.window.MouseEvent("mousedown", { bubbles: true }));
       });
-      assert.equal(doc().querySelector('[role="listbox"]'), null, "the results closed");
+      assert.equal((doc().querySelector('[role="listbox"]')) === null, true, "the results closed");
       assert.match(text(), /Matches: 1 entry\./, "the entry hit, which has no node on the canvas, is still named");
       await click(buttonNamed("Show results"));
       assert.match(doc().querySelector('[role="listbox"]')!.textContent!, /Competitor pages/);
@@ -657,14 +654,14 @@ describe("the Knowledge view", () => {
   it("shows the automatic re-linking in the status bar while entries are left to it", async () => {
     await show();
     const bar = () => doc().querySelector('[role="status"][aria-label="Knowledge status"]')!;
-    assert.equal(bar().querySelector("[data-knowledge-relink]"), null, "an older daemon says nothing");
+    assert.equal((bar().querySelector("[data-knowledge-relink]")) === null, true, "an older daemon says nothing");
     await act(async () => knowledgeStore.setState({ status: status({ entries: 2, relink: { pending: 89, done: 37, total: 126 } }) }));
     const relink = bar().querySelector("[data-knowledge-relink]");
     assert.equal(relink?.textContent, "Re-linking 37/126");
     assert.match(relink?.getAttribute("title") ?? "", /89 entries are still to be linked again/);
     assert.match(bar().textContent!, /Linking idle/, "beside the linking state");
     await act(async () => knowledgeStore.setState({ status: status({ entries: 2, relink: null }) }));
-    assert.equal(bar().querySelector("[data-knowledge-relink]"), null, "nothing left");
+    assert.equal((bar().querySelector("[data-knowledge-relink]")) === null, true, "nothing left");
   });
 
   it("fits the status bar on a phone while re-linking: the linking progress bar steps aside and the re-linking text truncates", async () => {
@@ -709,7 +706,7 @@ describe("the Knowledge view", () => {
 
     it("is not offered by a client without it", async () => {
       await show();
-      assert.equal(viewRadio("Insights"), null);
+      assert.equal((viewRadio("Insights")) === null, true);
       assert.ok(viewRadio("Graph") && viewRadio("List"));
     });
 
@@ -723,7 +720,7 @@ describe("the Knowledge view", () => {
         calls.filter((c) => c.startsWith("insights:")),
         ['insights:{"limit":1}']
       );
-      assert.equal(viewRadio("Insights"), null);
+      assert.equal((viewRadio("Insights")) === null, true);
     });
 
     it("is offered where the daemon serves it: its items open in the side panel, narrowed by the graph's chips", async () => {
@@ -732,7 +729,7 @@ describe("the Knowledge view", () => {
       assert.ok(insights, "a third view option");
       assert.ok(insights.querySelector("svg"), "with its icon (a phone shows the icons only)");
       await click(insights);
-      assert.equal(doc().querySelector('[data-testid="canvas"]'), null);
+      assert.equal((doc().querySelector('[data-testid="canvas"]')) === null, true);
       const contradictions = doc().querySelector('section[aria-label="Contradictions"]');
       assert.ok(contradictions);
       assert.match(contradictions.textContent!, /They disagree\./);
@@ -764,7 +761,7 @@ describe("the Knowledge view", () => {
       await act(async () => knowledgeStore.setState((s) => ({ graphRevision: s.graphRevision + 1 })));
       await settle();
       assert.ok(doc().querySelector('[data-testid="canvas"]'), "back on the graph");
-      assert.equal(viewRadio("Insights"), null);
+      assert.equal((viewRadio("Insights")) === null, true);
     });
   });
 });

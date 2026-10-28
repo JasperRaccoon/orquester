@@ -92,6 +92,7 @@ describe("useDeviceStream", () => {
 
     await fixture.render({ ...props, enabled: false });
     assert.equal(socket.readyState, 3);
+    assert.ok(ws.instances.every((socket) => socket.readyState === 3), "disabled streams leave no open or connecting sockets");
     assert.equal(fixture.handle.state, "closed");
   });
 

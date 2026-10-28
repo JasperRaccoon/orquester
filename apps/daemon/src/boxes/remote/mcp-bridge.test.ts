@@ -247,8 +247,12 @@ test("a box holds at most maxChannelsPerBox open bridges: more are refused until
   const second = await open("box-1");
   // The third of box-1 is refused at once: closed, nothing spawned.
   const refused = channel();
+  let unexpectedSpawn!: () => void;
+  const started = new Promise<void>((resolve) => spawned.push((unexpectedSpawn = resolve)));
   capture.handler()(context("box-1"), { kind: "mcp-bridge", serverId }, refused.stream);
-  await refused.closed;
+  await Promise.race([refused.closed, started]);
+  const pending = spawned.indexOf(unexpectedSpawn);
+  if (pending !== -1) spawned.splice(pending, 1);
   assert.equal(children.length, 2);
   // Another box has its own allowance.
   const other = await open("box-2");

@@ -165,7 +165,7 @@ describe("forge link pill", () => {
     assert.equal(anchor.dataset.forgeState, "neutral");
     assert.match(anchor.textContent ?? "", /acme\/app#12/);
     assert.equal(calls.length, 0);
-    assert.equal(card(), null);
+    assert.ok(card() === null, "the preview card is absent");
   });
 
   it("drops owner/repo for a link into the project's own repo", async () => {
@@ -204,13 +204,13 @@ describe("forge link pill", () => {
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
-    assert.equal(card(), null, "Escape dismisses the card");
+    assert.ok(card() === null, "Escape dismisses the card");
   });
 
   it("a touch does not open the card in the way of the tap", async () => {
     await render(createElement(ForgeLinkPill, { link: link(PR_URL) }));
     await hover("touch");
-    assert.equal(card(), null);
+    assert.ok(card() === null, "the preview card is absent");
     assert.equal(calls.length, 0);
   });
 

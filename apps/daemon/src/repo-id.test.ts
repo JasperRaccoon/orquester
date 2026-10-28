@@ -61,8 +61,8 @@ test("detectRepoInfo: an ambiguous origin URL falls back to the realpathed root,
   const url = "https://u:p/ss@github.com/o/r.git";
   await gitRepo(dir, ORIGIN(url));
   const info = await detectRepoInfo(dir);
-  assert.deepEqual(info, { repoId: await realpath(dir), originUrl: url });
   assert.equal(info?.repoId.includes("ss@"), false);
+  assert.deepEqual(info, { repoId: await realpath(dir), originUrl: url });
   assert.equal(remoteRepoFields(url), null);
 });
 

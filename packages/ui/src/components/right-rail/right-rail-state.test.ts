@@ -78,7 +78,7 @@ test("malformed stored widths fall back without losing the panel", async () => {
   for (const bad of ["0", "-40", "null", '"400"', "true", "[400]", "{}", "1e999"]) {
     const parsed = await loadStoredRail(`{"open":"history","width":${bad}}`);
     assert.equal(parsed.open, "history");
-    assert.ok(Number.isFinite(parsed.width) && parsed.width > 0);
+    assert.equal(parsed.width, 320);
   }
 });
 
