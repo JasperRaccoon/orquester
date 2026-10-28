@@ -704,6 +704,7 @@ function renderInsights(response: KnowledgeInsightsResponse, over: readonly stri
     ...insightsSection("Contradictions", "entries that disagree", response.contradictions, totals?.contradictions, (item) => [
       `${entryRef(item.a)} ↔ ${entryRef(item.b)} · ${contradictionSource(item.source)}${item.similarity === null ? "" : ` · meaning ${item.similarity.toFixed(2)}`}`,
       ...contradictionDetail(item.note, item.pairs, "   "),
+      ...(item.also && item.also.length > 0 ? [`   also: ${item.also.map(entryRef).join("; ")} (the same point)`] : []),
       `   cite: ${item.a.citation}`,
       `   cite: ${item.b.citation}`
     ]),

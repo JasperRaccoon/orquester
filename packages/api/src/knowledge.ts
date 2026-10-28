@@ -690,6 +690,11 @@ export interface KnowledgeContradiction {
   pairs: { from: KnowledgeConceptRef; to: KnowledgeConceptRef }[];
   /** The checker's one-line explanation, or the graph edge's context; null when none. */
   note: string | null;
+  /**
+   * Other entries that make the same point against the same side (insights fold them into this
+   * one: a very similar note, or a concept pair in common); absent when none.
+   */
+  also?: KnowledgeEntrySummary[];
 }
 
 export interface KnowledgeBridge {

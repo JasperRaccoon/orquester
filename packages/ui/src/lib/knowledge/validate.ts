@@ -605,12 +605,15 @@ export function parseKnowledgeContradiction(value: unknown): KnowledgeContradict
   if (!isRecord(value)) return null;
   const pair = entryPair(value.a, value.b);
   if (!pair) return null;
+  // Other entries making the same point against the same side; neither side of the pair itself.
+  const also = (list(value.also, parseKnowledgeEntrySummary) ?? []).filter((entry) => entry.id !== pair.a.id && entry.id !== pair.b.id);
   return {
     ...pair,
     similarity: unitSimilarity(value.similarity),
     source: contradictionSource(value.source),
     pairs: list(value.pairs, parseConceptPair) ?? [],
-    note: noteOf(value.note)
+    note: noteOf(value.note),
+    ...(also.length > 0 ? { also } : {})
   };
 }
 

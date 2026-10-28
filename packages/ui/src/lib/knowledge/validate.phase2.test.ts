@@ -293,6 +293,15 @@ describe("phase 2 wire validation", () => {
       assert.deepEqual(parsed.totals, { contradictions: 1, bridges: 1, singleSource: 2, gaps: 1 });
     });
 
+    it("reads the entries a contradiction folds in (`also`), never one of its own sides, and none as absent", () => {
+      const C = { ...A, id: "ke_cccccccccccc", title: "Third" };
+      const read = (also: unknown) => parseKnowledgeInsightsResponse({ ...full, contradictions: [{ ...full.contradictions[0], also }] })!.contradictions[0]!;
+      assert.deepEqual(read([C]).also, [C]);
+      assert.deepEqual(read([C, A, { title: "no id" }]).also, [C], "a side of the pair or a broken summary is dropped");
+      assert.equal("also" in read([]), false);
+      assert.equal("also" in read("x"), false);
+    });
+
     it("reads a missing list as empty, and refuses a broken envelope", () => {
       assert.deepEqual(parseKnowledgeInsightsResponse({ gaps: [] }), {
         contradictions: [],

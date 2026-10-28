@@ -966,7 +966,15 @@ const INSIGHTS: KnowledgeInsightsResponse = {
       ],
       note: "Capping\nslows learning"
     },
-    { a: meta({ id: "ke_cccccccccccc", title: "Long pages" }), b: meta({ id: "ke_dddddddddddd", title: "Short pages" }), similarity: null, source: "checked", pairs: [], note: null }
+    {
+      a: meta({ id: "ke_cccccccccccc", title: "Long pages" }),
+      b: meta({ id: "ke_dddddddddddd", title: "Short pages" }),
+      similarity: null,
+      source: "checked",
+      pairs: [],
+      note: null,
+      also: [meta({ id: "ke_iiiiiiiiiiii", title: "Medium pages" })]
+    }
   ],
   bridges: [
     {
@@ -1001,6 +1009,7 @@ test("knowledge_insights: one GET with the session, the limit (default 10) and t
       `   cite: ${c("ke_aaaaaaaaaaaa", "Cap the budget")}`,
       `   cite: ${c("ke_bbbbbbbbbbbb", "Never cap\nthe budget")}`,
       '2. ke_cccccccccccc "Long pages" ↔ ke_dddddddddddd "Short pages" · LLM-checked',
+      '   also: ke_iiiiiiiiiiii "Medium pages" (the same point)',
       `   cite: ${c("ke_cccccccccccc", "Long pages")}`,
       `   cite: ${c("ke_dddddddddddd", "Short pages")}`,
       "Bridges, entries tying clusters together (1):",
