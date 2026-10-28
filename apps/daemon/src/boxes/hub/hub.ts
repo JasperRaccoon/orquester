@@ -318,6 +318,34 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
     link.mux.shutdown();
   };
 
+  /** Unlisten what `previous` had and `next` has not, then listen the new or changed ports (all of `next` with `relisten`). */
+  const sendForwardChanges = async (
+    boxId: string,
+    mux: BoxMux,
+    previous: BoxAgentConfig["forwards"],
+    next: BoxAgentConfig["forwards"],
+    relisten: boolean
+  ): Promise<BoxForwardOutcome[]> => {
+    const options = { timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS };
+    const nextPorts = new Set(next.map((f) => f.boxPort));
+    const changed = relisten ? next : next.filter((spec) => previous.find((f) => f.boxPort === spec.boxPort)?.target !== spec.target);
+    // Unlistened first: a new forward may take a port just given up.
+    await Promise.all(
+      previous.filter((old) => !nextPorts.has(old.boxPort)).map((old) => mux.request("forward.unlisten", { boxPort: old.boxPort }, options).catch(() => undefined))
+    );
+    return await Promise.all(
+      changed.map(async (spec): Promise<BoxForwardOutcome> => {
+        try {
+          await mux.request("forward.listen", spec, options);
+          return { boxPort: spec.boxPort, error: null };
+        } catch (error) {
+          logger.warn("forward.listen failed", { boxId, boxPort: spec.boxPort, error: (error as Error).message });
+          return { boxPort: spec.boxPort, error: error as BoxError };
+        }
+      })
+    );
+  };
+
   const reject = (socket: WebSocket, code: BoxRejectCode, message: string, upgradeUrl?: string): void => {
     const frame: BoxReject = upgradeUrl ? { t: "reject", code, message, upgradeUrl } : { t: "reject", code, message };
     try {
@@ -391,11 +419,12 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
       dropLink(boxId, previous);
     }
     const paths = boxPathMapFor(hello.sys.os);
+    const welcomed = forwards.get(boxId) ?? [];
     const welcome: BoxWelcome = {
       t: "welcome",
       boxId,
       ...(auth.credential ? { credential: auth.credential } : {}),
-      config: { paths, heartbeatMs, forwards: forwards.get(boxId) ?? [] }
+      config: { paths, heartbeatMs, forwards: welcomed }
     };
     socket.send(JSON.stringify(welcome));
 
@@ -457,6 +486,9 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
       connections.set(boxId, connection);
     }
     connection.attachLink(mux, info);
+    // A list set during the handshake (no link to send it on) differs from the welcome's: sent now.
+    const listed = forwards.get(boxId) ?? [];
+    if (listed !== welcomed) void sendForwardChanges(boxId, mux, welcomed, listed, false);
     touchRecord(boxId, hello);
     logger.info("box connected", { boxId, agentVersion: hello.agentVersion, auth: hello.auth.kind });
     changes.emit("change", boxId, true);
@@ -629,31 +661,14 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
       }
     },
 
-    async setForwards(boxId, next) {
+    async setForwards(boxId, next, options = {}) {
       const previous = forwards.get(boxId) ?? [];
       forwards.set(boxId, next.map((f) => ({ ...f })));
       // Sent on the link itself, not through the connection: the welcome's list re-establishes the
       // forwards on a reconnect, so the connection must not replay them (a removed one would return).
       const mux = connections.get(boxId)?.currentMux();
       if (!mux) return [];
-      const options = { timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS };
-      const nextPorts = new Set(next.map((f) => f.boxPort));
-      const changed = next.filter((spec) => previous.find((f) => f.boxPort === spec.boxPort)?.target !== spec.target);
-      // Unlistened first: a new forward may take a port just given up.
-      await Promise.all(
-        previous.filter((old) => !nextPorts.has(old.boxPort)).map((old) => mux.request("forward.unlisten", { boxPort: old.boxPort }, options).catch(() => undefined))
-      );
-      return await Promise.all(
-        changed.map(async (spec): Promise<BoxForwardOutcome> => {
-          try {
-            await mux.request("forward.listen", spec, options);
-            return { boxPort: spec.boxPort, error: null };
-          } catch (error) {
-            logger.warn("forward.listen failed", { boxId, boxPort: spec.boxPort, error: (error as Error).message });
-            return { boxPort: spec.boxPort, error: error as BoxError };
-          }
-        })
-      );
+      return await sendForwardChanges(boxId, mux, previous, next, options.relisten === true);
     },
 
     handle<K extends BoxMethodName<BoxBoxToHostMethods>>(method: K, handler: BoxRequestHandler<K>) {
