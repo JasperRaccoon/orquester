@@ -88,6 +88,33 @@ test("common words link only two at a time, with nothing else in the shorter nam
   assert.deepEqual(families(guidelines, vocabulary), []);
 });
 
+test("common words: each name may have one word the other lacks; more, and no link", () => {
+  const vocabulary = familyVocabularyOf(new Map([["account", 79], ["devic", 101], ["tiktok", 63], ["us", 78], ["number", 25]]), 2979);
+  const swap = [concept("Create TikTok accounts (2–3 maximum per device)", 40), concept("Start with used iPhones and TikTok accounts from zero", 40)];
+  assert.equal(families(swap, vocabulary).length, 1, "maximum ~ zero: one word each");
+  const more = [concept("Create TikTok accounts (2–3 maximum per device)", 41), concept("One new device for each US number/TikTok account", 41)];
+  assert.deepEqual(families(more, vocabulary), [], "maximum ~ us, number: the longer says two things more");
+});
+
+test("a concept left in a group of one guide's steps still joins the family it links best to", () => {
+  // Two steps of Alex's guide pair up first (0.99, "account"), a group of one entry; the others pair
+  // (0.95, "warm"); the warm-up step links to both of them (0.986), the VPN step to neither.
+  const unit = (parts: Record<number, number>): Float32Array => {
+    const v = new Float32Array(DIMS);
+    for (const [i, x] of Object.entries(parts)) v[Number(i)] = x;
+    const norm = Math.hypot(...v);
+    return v.map((x) => x / norm);
+  };
+  const item = (name: string, entry: string, vector: Float32Array) => ({ concept: { ...concept(name, 0).concept, entryIds: [entry] }, vector });
+  const items = [
+    item("Warm up the account before posting", "ke_alex", unit({ 50: 1, 51: 0.1, 52: 0.1 })),
+    item("Keep a VPN on during the account setup", "ke_alex", unit({ 50: 1, 51: 0.2 })),
+    item("Warm up for 3 days", "ke_yanme", unit({ 50: 1, 52: 0.2, 53: 0.1 })),
+    item("Warm up for 48 hours", "ke_jason", unit({ 50: 1, 52: 0.2, 54: 0.1 }))
+  ];
+  assert.deepEqual(names(items, families(items)), [["Warm up for 3 days", "Warm up for 48 hours", "Warm up the account before posting"]]);
+});
+
 test("a family needs two entries; only claim types; never across types", () => {
   const one = [concept("No SIM in the phone", 8, { entries: ["ke_one"] }), concept("Never keep a foreign SIM", 8, { entries: ["ke_one"] })];
   assert.deepEqual(families(one), []);

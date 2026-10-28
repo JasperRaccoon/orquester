@@ -11,13 +11,15 @@
  *   vectors are close ({@link ConceptFamilyParams.near}, below the merge and similar-concept bars)
  *   AND their names share a topic word ({@link familyWords}: no glue or generic words, no numbers).
  *   A word on many names ({@link familyVocabulary}: "account", "tiktok", "device") links only with a
- *   second one, when the shorter name has no other word, at {@link ConceptFamilyParams.commonNear};
+ *   second one, when the names say little else (the shorter nothing more, or each one word the
+ *   other lacks), at {@link ConceptFamilyParams.commonNear};
  *   a word on very many ("app", "guideline") never. A link is worth its cosine, less when what the
  *   names share is not specific ({@link ConceptFamilyParams.specific}). Concepts are then grouped by
  *   average linkage over the links (a missing link counts 0): two groups join, best first, while
  *   the mean over every pair across them is at least {@link ConceptFamilyParams.link}, up to
  *   {@link ConceptFamilyParams.maxSize} concepts, so one shared word cannot chain two questions
- *   together. A family has at least 2 concepts and 2 different entries.
+ *   together. A family has at least 2 concepts and 2 different entries; a concept left out (alone,
+ *   or in a group of one guide's steps) joins the family it links best to on average, at `link`.
  * - Over the current graph (after the merge overlay); a merged concept's vector is the closest of
  *   its sources', its words those of every source's name.
  * - {@link KnowledgeConceptFamilies}: computed in the background after every complete vector
@@ -65,14 +67,15 @@ export interface ConceptFamilyParams {
  *   per device" ~ "5 TikTok accounts on each iPhone" 0.889).
  * - Common words alone at 0.90 (one sufficing) made 433 families, "Guideline 1.4" ~ "Guideline
  *   2.2" and "Locking accounts after chargebacks" ~ "One device per account" among them; requiring
- *   two, with nothing else in the shorter name, removed those.
+ *   two, with little else in the names, removed those.
  * - Average linkage at 0.6 with a link worth its cosine let "IP" (20 names) pull "One trial per
  *   IP" and "Buy an ISP proxy at IPRoyal" into the Scamalytics checks and split them; `specific`
  *   6.5 lets the two-word and rarer links merge first. `link` 0.65: 0.6 and 0.7 gave the same
  *   audit groups with 5 more or 7 fewer concepts in families.
- * - Result: 364 families over 1,114 concepts (180 of 2, 2 of 11, none larger; 0.2 s); the warm-up (11:
+ * - Result: 365 families over 1,147 concepts (171 of 2, 1 of 11, none larger; 0.3 s); the warm-up (11:
  *   jason's 48 hours, Alex's, yanme's 3 days, Evgeniy's 3–5, Ema's 5–7, Erikas's swiping and daily
- *   scrolling, …), accounts-per-device (6), SIM (4), Scamalytics (4), factory reset / erased iPhone
+ *   scrolling, …), accounts-per-device (7, Alex's "2–3 maximum per device" with them), SIM (4),
+ *   Scamalytics (4), factory reset / erased iPhone
  *   and US-number groups come out whole or nearly ("Remove the SIM card and stay on VPN 24/7" joins
  *   "Align SIM, IP, store and language"; "ISP proxy plus IPQS/Scamalytics check" the IP risk-score
  *   family; "Use a US number" the "specific numbers" one), the entitlements look-alike does not.
@@ -261,9 +264,12 @@ function linkOf(a: Prepared, b: Prepared, params: ConceptFamilyParams, vocabular
   }
   if (!rare) {
     if (common < 2) return 0;
-    // Common words only: the shorter name says nothing the longer one does not.
+    // Common words only: the names say little else — the shorter nothing the longer does not, or
+    // each one word the other lacks ("2–3 maximum per device" ~ "one per device").
+    const only = (x: ReadonlySet<string>, y: ReadonlySet<string>): number => [...x].filter((word) => !vocabulary.frequent.has(word) && !y.has(word)).length;
     const [small, large] = a.words.size <= b.words.size ? [a.words, b.words] : [b.words, a.words];
-    for (const word of small) if (!vocabulary.frequent.has(word) && !large.has(word)) return 0;
+    const extra = only(small, large);
+    if (extra > 1 || (extra === 1 && only(large, small) > 1)) return 0;
   }
   let similarity = -1;
   for (const x of a.vectors) for (const y of b.vectors) similarity = Math.max(similarity, dot(x, y));
@@ -272,7 +278,7 @@ function linkOf(a: Prepared, b: Prepared, params: ConceptFamilyParams, vocabular
 }
 
 /** Average linkage over one type's links (see the module header). */
-function cluster(links: ReadonlyMap<number, ReadonlyMap<number, number>>, params: ConceptFamilyParams): number[][] {
+function cluster(items: readonly Prepared[], links: ReadonlyMap<number, ReadonlyMap<number, number>>, params: ConceptFamilyParams): number[][] {
   // Groups by their smallest member index; sums of links between groups.
   const members = new Map<number, number[]>();
   const sums = new Map<number, Map<number, number>>();
@@ -310,7 +316,28 @@ function cluster(links: ReadonlyMap<number, ReadonlyMap<number, number>>, params
       rowOther.delete(drop);
     }
   }
-  return [...members.values()].filter((group) => group.length >= 2);
+  // A group of one guide's steps is no family; its concepts (and those left alone) may still join
+  // one: each, in order, the family it links best to on average, at `link` or more.
+  const entriesOf = (group: readonly number[]): number => new Set(group.flatMap((i) => items[i]!.concept.entryIds)).size;
+  const families = [...members.values()].filter((group) => group.length >= 2 && entriesOf(group) >= 2);
+  const placed = new Set(families.flat());
+  for (const i of [...links.keys()].sort((x, y) => x - y)) {
+    if (placed.has(i)) continue;
+    const row = links.get(i)!;
+    let best: { group: number[]; mean: number } | null = null;
+    for (const group of families) {
+      if (group.length >= params.maxSize) continue;
+      let sum = 0;
+      for (const member of group) sum += row.get(member) ?? 0;
+      const mean = sum / group.length;
+      if (mean >= params.link && (!best || mean > best.mean + 1e-12)) best = { group, mean };
+    }
+    if (best) {
+      best.group.push(i);
+      placed.add(i);
+    }
+  }
+  return families;
 }
 
 /** One type's links: index → index → link (both directions). */
@@ -356,7 +383,7 @@ export function familiesOf(input: ConceptFamiliesInput): ConceptFamily[] {
   const params = input.params ?? E5_SMALL_FAMILY_PARAMS;
   const vocabulary = input.vocabulary ?? familyVocabulary(input.concepts.map((concept) => concept.name));
   const out: ConceptFamily[] = [];
-  for (const [type, items] of prepare(input)) out.push(...familiesFrom(type, items, cluster(linksOf(items, params, vocabulary), params)));
+  for (const [type, items] of prepare(input)) out.push(...familiesFrom(type, items, cluster(items, linksOf(items, params, vocabulary), params)));
   return sortFamilies(out);
 }
 
@@ -371,7 +398,7 @@ export async function planConceptFamilies(input: ConceptFamiliesInput, pause: ()
       linksOf(items, params, vocabulary, from, Math.min(items.length, from + PAUSE_EVERY_ROWS), links);
       await pause();
     }
-    out.push(...familiesFrom(type, items, cluster(links, params)));
+    out.push(...familiesFrom(type, items, cluster(items, links, params)));
   }
   return sortFamilies(out);
 }
