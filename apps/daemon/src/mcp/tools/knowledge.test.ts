@@ -763,16 +763,19 @@ test("knowledge_search: entry match data, concept titles and citations survive; 
   assert.match(out, /ke_wwwwwwwwwwww[^\n]*weak[^\n]*concept/);
   assert.match(out, /120[^\d]+480[^\n]*2\/5/, "the passage retains its offsets and one-based chunk number");
   assert.match(out, /Weak[^\n]*never cite[^\n]*evidence/i);
-  assert.match(out, /Showing 1–2 of 31/);
+  // The header and the footer count alike: entries, and the concept hits beside them.
+  assert.match(out, /^2 entries and 1 concept \(over SEO, Ads\)\./);
+  assert.match(out, /Showing entries 1–2 of 31 matching \(the 1 concept not counted\)\./);
 
   // A later page counts from the cursor's offset; the last one has no next cursor.
   api.on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [response.hits[0]!], searched: ["kc_seo0000000"], total: 31, nextCursor: cursorAt(9) } });
   const later = textOf(await run(api, "knowledge_search", { query: "x", cursor: cursorAt(8) }));
-  assert.match(later, /Showing 9–9 of 31/);
+  assert.match(later, /^1 entry \(over SEO\)\./);
+  assert.match(later, /Showing entries 9–9 of 31 matching\./);
   assert.ok(later.includes(cursorAt(9)));
   api.on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [response.hits[0]!, response.hits[2]!], searched: ["kc_seo0000000"], total: 31, nextCursor: null } });
   const last = textOf(await run(api, "knowledge_search", { query: "x", cursor: cursorAt(29) }));
-  assert.match(last, /Showing 30–31 of 31/);
+  assert.match(last, /Showing entries 30–31 of 31 matching\./);
   assert.doesNotMatch(last, /Next page/);
 });
 
@@ -1164,11 +1167,60 @@ test("knowledge_get: `disagreements` lists every entry it disagrees with (+N mor
     '- ke_dddddddddddd "Three accounts a phone" · LLM-checked · meaning 0.92',
     "  note: 2-3 vs 5 accounts",
     `  cite: ${detail.disagreements![2]!.entry.citation}`,
-    "+22 more",
+    "+22 more (knowledge_insights lists every contradiction)",
     "Similar:",
     '- ke_eeeeeeeeeeee "Warm-up guide" · meaning 0.90',
     `  cite: ${detail.similar![2]!.entry.citation}`
   ]);
+});
+
+test("knowledge_get with several ids: every disagreement with its note, up to 20, one line of note each; +N more past them", async () => {
+  const other = (n: number) => meta({ id: `ke_d${String(n).padStart(11, "0")}`, title: `Disagreeing ${n}` });
+  const long = `${"jason says to warm up for 48 hours before posting and to use an ISP proxy. ".repeat(6)}`;
+  const disagreements = Array.from({ length: 6 }, (_, n) => ({
+    entry: other(n),
+    similarity: 0.9,
+    source: n === 5 ? ("graph" as const) : ("checked" as const),
+    pairs: n === 5 ? [{ from: concept("t-sim", "Keep the SIM"), to: concept("t-nosim", "No SIM") }] : [],
+    note: n === 5 ? null : n === 0 ? long : `Note ${n}: Alex says 2-3 accounts per device; the other says 5.`
+  }));
+  const detail = (id: string, total: number): KnowledgeEntryDetail => {
+    const entry = meta({ id, title: `Title ${id}` });
+    return { entry: { ...entry, body: "Body." }, concepts: [], related: [], similar: [], possibleDuplicates: [], disagreements, disagreementsTotal: total, citation: entry.citation };
+  };
+  const api = withCollections(new FakeDaemonApi())
+    .on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: detail("ke_aaaaaaaaaaaa", 6) } })
+    .on("GET", knowledgeRoutes.item("ke_bbbbbbbbbbbb"), { status: 200, body: { kind: "entry", entry: detail("ke_bbbbbbbbbbbb", 26) } });
+  const out = textOf(await run(api, "knowledge_get", { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"] }));
+  const [first, second] = out.split("Disagrees with:").slice(1);
+  for (const part of [first!, second!]) {
+    for (let n = 0; n < 6; n += 1) assert.ok(part.includes(`- ke_d${String(n).padStart(11, "0")} "Disagreeing ${n}" · `), `disagreement ${n}, not "+2 more"`);
+    for (let n = 1; n < 5; n += 1) assert.ok(part.includes(`  note: Note ${n}: Alex says 2-3 accounts per device; the other says 5.`));
+    assert.ok(part.includes("  concepts: Keep the SIM (Tactic) vs No SIM (Tactic)"), "no note: its concept pairs");
+    const note = part.split("\n").find((line) => line.startsWith("  note: jason"))!;
+    assert.ok(note.length <= "  note: ".length + 240 && note.endsWith("…"), "a long note is cut shorter, on one line");
+    assert.ok(!part.includes(`cite: ${other(1).citation}`), "compact: no citation per disagreement");
+  }
+  assert.ok(!first!.includes("more (knowledge_insights"), "every one listed");
+  assert.ok(second!.includes("+20 more (knowledge_insights lists every contradiction)"));
+});
+
+test("knowledge_insights: `also` by the side each entry joins, each once; an older daemon's list once per entry", async () => {
+  const alex = meta({ id: "ke_kkkkkkkkkkkk", title: "iPhone setup", author: "Alex Nguyen" });
+  const jason = meta({ id: "ke_jjjjjjjjjjjj", title: "13 steps", author: null, handle: "jasonugc" });
+  const yanme = meta({ id: "ke_yyyyyyyyyyyy", title: "Zero to app", author: "yanme" });
+  const ema = meta({ id: "ke_mmmmmmmmmmmm", title: "7 steps", author: "Emanuele Totaro" });
+  const item = { a: alex, b: jason, similarity: 0.95, source: "checked" as const, pairs: [], note: "Alex says 2-3 accounts per device; jason says one." };
+  const render = async (contradiction: KnowledgeInsightsResponse["contradictions"][number]) => {
+    const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.insights, { status: 200, body: { ...INSIGHTS, contradictions: [contradiction] } });
+    return textOf(await run(api, "knowledge_insights", {})).split("\n").filter((line) => line.startsWith("   also"));
+  };
+  assert.deepEqual(await render({ ...item, also: [yanme, ema], alsoJoins: { a: [yanme], b: [yanme, ema] } }), [
+    '   also with Alex Nguyen (against @jasonugc): ke_yyyyyyyyyyyy "Zero to app"',
+    '   also with @jasonugc (against Alex Nguyen): ke_yyyyyyyyyyyy "Zero to app"; ke_mmmmmmmmmmmm "7 steps"'
+  ]);
+  assert.deepEqual(await render({ ...item, also: [ema], alsoJoins: { a: [], b: [ema] } }), ['   also with @jasonugc (against Alex Nguyen): ke_mmmmmmmmmmmm "7 steps"']);
+  assert.deepEqual(await render({ ...item, also: [yanme, yanme] }), ['   also: ke_yyyyyyyyyyyy "Zero to app" (the same point)'], "an older daemon: no sides, each entry once");
 });
 
 test("knowledge_insights: a long note is cut at a sentence end, else a word end, with …", async () => {

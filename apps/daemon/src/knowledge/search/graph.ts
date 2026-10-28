@@ -14,7 +14,9 @@ import { isKnowledgeEntryId } from "@orquester/config";
 import type { KnowledgeGraphPort, KnowledgeStorePort } from "../ports.ts";
 import type { KnowledgeLogger } from "../store/errors.ts";
 import { Bm25Index } from "./bm25.ts";
+import { commonNameWords } from "./concept-merges.ts";
 import { isSurveyEntry } from "./contradictions.ts";
+import { type SameQuestion, type SameQuestionConcept, sameQuestionByVectors } from "./same-question.ts";
 import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibility.ts";
 
@@ -718,6 +720,12 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   private backingProvider: ((conceptId: string) => readonly string[]) | null = null;
   private vectorsReady: (() => boolean) | null = null;
   private backingRev = 0;
+  /** Two concepts' cosine from a calibrated model's concept vectors (concept merges); null: none. */
+  private similarityProvider: ((a: string, b: string) => number | null) | null = null;
+  /** The injected "same question" rule (concept families); null: {@link sameQuestionFallback}. */
+  private sameQuestionRule: SameQuestion | null = null;
+  /** The words of many concept names (`commonNameWords`) of a load, for the fallback rule. */
+  private commonWords: { load: number; words: ReadonlySet<string> } | null = null;
   private readonly loadListeners = new Set<() => void>();
   /** Numbers loads in the order they start; `appliedLoad` is the current base graph's. */
   private loadSeq = 0;
@@ -861,6 +869,60 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
       if (id !== own && this.snapshot.concepts.has(id)) out.add(id);
     }
     return [...out];
+  }
+
+  /**
+   * Where two concepts' closeness is read from (concept merges: the cosine of their vectors from a
+   * calibrated model, null when either has none); null: nowhere (the fallback "same question" rule
+   * then finds none).
+   */
+  setConceptSimilarity(provider: ((a: string, b: string) => number | null) | null): void {
+    this.similarityProvider = provider;
+    this.backingMoved();
+  }
+
+  /**
+   * The rule {@link sameQuestion} answers with (concept families: `sameQuestionWithFamilies` over
+   * {@link sameQuestionFallback}); null: the fallback alone.
+   */
+  setSameQuestion(rule: SameQuestion | null): void {
+    this.sameQuestionRule = rule;
+    this.backingMoved();
+  }
+
+  /**
+   * Whether two concepts answer the same question (`same-question.ts`): an entry's novelty and
+   * insights' single-source claims count such a concept on another entry as backing, pair checks'
+   * numbers tier pairs their different figures. By the injected rule, else {@link sameQuestionFallback}.
+   */
+  sameQuestion(a: SameQuestionConcept, b: SameQuestionConcept): boolean {
+    const [ia, ib] = [this.canonicalConceptId(a.id), this.canonicalConceptId(b.id)];
+    const x = ia === a.id ? a : { ...a, id: ia };
+    const y = ib === b.id ? b : { ...b, id: ib };
+    return this.sameQuestionRule ? this.sameQuestionRule(x, y) : this.sameQuestionFallback(x, y);
+  }
+
+  /**
+   * Whether {@link sameQuestion} can find two different concepts answering one question: a rule is
+   * injected, or concept merges give the fallback its vectors. Callers skip asking otherwise.
+   */
+  answersSameQuestions(): boolean {
+    return this.sameQuestionRule !== null || this.similarityProvider !== null;
+  }
+
+  /** The fallback rule (`sameQuestionByVectors`): concept vectors close, a telling name word in common; none without vectors. */
+  sameQuestionFallback(a: SameQuestionConcept, b: SameQuestionConcept): boolean {
+    const similarity = this.similarityProvider;
+    if (!similarity) return a.id === b.id;
+    return sameQuestionByVectors(a, b, similarity, this.commonConceptWords());
+  }
+
+  /** The words of many of the loaded concept names (`commonNameWords`: "tiktok", "account"), remembered per load. */
+  commonConceptWords(): ReadonlySet<string> {
+    if (this.commonWords?.load !== this.appliedLoad) {
+      this.commonWords = { load: this.appliedLoad, words: commonNameWords([...this.base.concepts.values()].map((concept) => concept.name)) };
+    }
+    return this.commonWords.words;
   }
 
   /** What the backing provider answers may have changed (its vectors were computed). */

@@ -7,7 +7,7 @@ import { KnowledgeGraph } from "./graph.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
 import type { KnowledgePairCheck } from "../ports.ts";
 import { FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
-import { knowledgeScope, visibleCollections } from "./visibility.ts";
+import { type KnowledgeScope, knowledgeScope, visibleCollections } from "./visibility.ts";
 
 // Thresholds of the fake index: minimum 0.3, good 0.5, strong 0.7, duplicate 0.9.
 const DIMS = 16;
@@ -906,6 +906,44 @@ test("novelty: a concept another visible entry says in other words (a backing co
   s.graph.setBackingConcepts((id) => (id === "tactic-unique" ? ["tactic-reworded"] : id === "tactic-other" ? ["tactic-hidden-reworded"] : []));
   assert.deepEqual(s.similarity.novelty(ke("p1"), s.seoOnly)!.newConcepts.map((c) => c.id), ["tactic-other"], "a hidden entry backs nothing");
   assert.deepEqual(s.similarity.novelty(ke("p1"), s.all)!.newConcepts, []);
+});
+
+test("novelty: a claim another visible entry answers the same question of, or names the main step of, is not new; a hidden entry answers nothing", async () => {
+  const s = graphFixture();
+  await loadGraph(s.graph, [
+    node("tactic-warm48", "Warm up for 48 hours", files([ke("p1")])),
+    node("tactic-warm35", "3-5 days of warming up", files([ke("p2")])),
+    node("tactic-simvpn", "Remove the SIM card and stay on VPN 24/7", files([ke("p1")])),
+    node("tactic-nosim", "No SIM card in the phone", files([ke("hidden")])),
+    node("tactic-gmail", "Create a new iCloud account with fresh Gmail and Apple ID", files([ke("p1")])),
+    node("tactic-textme", "Create a new US iCloud account via TextMe", files([ke("p3")])),
+    node("tool-shadowrocket", "Shadowrocket", files([ke("p1")]), { type: "Tool" })
+  ]);
+  const names = (scope: KnowledgeScope) => s.similarity.novelty(ke("p1"), scope)!.newConcepts.map((c) => c.name);
+  assert.deepEqual(names(s.seoOnly), ["Warm up for 48 hours", "Remove the SIM card and stay on VPN 24/7", "Shadowrocket"], "no rule yet; P3 names the iCloud account step");
+  // Injected (concept families): the two warm-up lengths answer one question; a tool is asked nothing.
+  s.graph.setSameQuestion((a, b) => a.id === b.id || [a.id, b.id].sort().join() === "tactic-warm35,tactic-warm48" || a.type === "Tool");
+  assert.deepEqual(names(s.seoOnly), ["Remove the SIM card and stay on VPN 24/7", "Shadowrocket"], "the hidden entry's no-SIM step answers nothing");
+  assert.deepEqual(names(s.all), ["Shadowrocket"]);
+  // The two warm-ups' vectors make the same answer without the rule (the fallback: close, "warm" in common).
+  s.graph.setSameQuestion(null);
+  s.graph.setConceptSimilarity((a, b) => ([a, b].sort().join() === "tactic-warm35,tactic-warm48" ? 0.95 : 0.5));
+  assert.deepEqual(names(s.seoOnly), ["Remove the SIM card and stay on VPN 24/7", "Shadowrocket"]);
+});
+
+test("novelty: a concept that names the entry's title or its cluster's topic is not new", async () => {
+  const s = graphFixture();
+  await loadGraph(s.graph, [
+    node("topic-tables", "Competitor tables", files([ke("p1"), ke("p2"), ke("p3")])),
+    node("tactic-title", "Build a comparison page for SaaS tools", files([ke("p1")])),
+    node("tactic-tables", "Competitor tables in every review", files([ke("p1")])),
+    node("tactic-claim", "Warm up for 48 hours", files([ke("p1")]))
+  ]);
+  const names = () => s.similarity.novelty(ke("p1"), s.seoOnly)!.newConcepts.map((c) => c.name);
+  assert.deepEqual(names(), ["Competitor tables in every review", "Warm up for 48 hours"], "P1's title, \"Comparison page for SaaS\"; no cluster drawn yet");
+  await s.similarity.graph({}, s.seoOnly);
+  assert.deepEqual(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster, { label: "Competitor tables", size: 3 });
+  assert.deepEqual(names(), ["Warm up for 48 hours"], "the cluster's topic, on all of its entries");
 });
 
 test("novelty reads the latest graph drawn for the scope at any k and limit (insights' graph counts)", async () => {
