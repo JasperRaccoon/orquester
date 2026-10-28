@@ -18,16 +18,20 @@
  *   one when a port is gone meanwhile, so each forward is listened again; one the box now refuses is
  *   dropped (the next `box_forward_port` makes a new one) rather than handed out as a URL that may
  *   reach another process.
- * - Calls for one project box run one at a time; a destroyed project box's forwards are dropped.
+ * - Calls for one project box run one at a time. A project box's forwards are dropped once it is
+ *   destroyed, or no longer the box of the project they were made for (a bring-your-own machine
+ *   given back to its owner, or lent to another project): the box is told to stop listening.
  */
 
 import { randomBytes, randomInt } from "node:crypto";
 import type { Duplex } from "node:stream";
 
 import type { BoxChannelSpec, BoxForwardSpec } from "@orquester/api";
+import type { StoredBox } from "@orquester/config";
 
 import { BOX_DISCONNECTED } from "../client/mux.ts";
 import type { BoxHub, BoxRegistry } from "../contracts.ts";
+import { BoxFsUnavailableError } from "../remote/fs/errors.ts";
 
 /** Ports tried in all (the preferred one first) before giving up. */
 const MAX_LISTEN_ATTEMPTS = 8;
@@ -38,7 +42,7 @@ const MIN_PREFERRED_PORT = 1024;
 /** Where a replacement port is drawn from (above the usual dev-server ports, below Linux's ephemeral range). */
 const FALLBACK_PORTS = { min: 20_000, max: 32_000 };
 
-export type ProjectBoxForwardErrorCode = "PROJECT_BOX_NOT_CONNECTED" | "PROJECT_BOX_LISTEN_FAILED";
+type ProjectBoxForwardErrorCode = "PROJECT_BOX_NOT_CONNECTED" | "PROJECT_BOX_LISTEN_FAILED";
 
 export class ProjectBoxForwardError extends Error {
   constructor(
@@ -55,8 +59,6 @@ export interface ProjectBoxForward {
   readonly projectBoxId: string;
   /** The port on the project box's 127.0.0.1. */
   readonly boxPort: number;
-  /** False once closed or dropped with its project box. */
-  active(): boolean;
   /** Once the checks of its project box queued before it are done (a reconnect's): whether it still listens. */
   alive(): Promise<boolean>;
   /** Stop listening. Idempotent. */
@@ -73,6 +75,8 @@ interface Entry {
   readonly projectBoxId: string;
   readonly boxPort: number;
   readonly target: string;
+  /** The project it was made for: the project box's record named it then. */
+  readonly projectPath: string;
   /** A fresh stream to the temporary box's port. */
   readonly upstream: () => Promise<Duplex>;
 }
@@ -91,8 +95,19 @@ export class ProjectBoxForwards {
     deps.hub.handleChannel("host-tcp", (context, spec, stream) => this.serve(context.boxId, spec, stream));
     this.unsubscribe = [
       deps.registry.onChange((boxId) => {
+        const [entry] = this.byBox.get(boxId)?.values() ?? [];
+        if (!entry) return;
         const record = deps.registry.get(boxId);
+        // Destroyed: the hub dropped its list on revoke.
         if (!record || record.state === "destroyed") this.forget(boxId);
+        else if (projectOf(record) !== entry.projectPath) {
+          // Its machine is not this project's box any more: no target is served from now on, and it stops listening.
+          this.forget(boxId);
+          void this.serial(boxId, async () => {
+            this.forget(boxId);
+            await this.publish(boxId);
+          }).catch(() => undefined);
+        }
       }),
       deps.hub.onConnectionChange((boxId, connected) => {
         if (connected && this.byBox.has(boxId)) void this.serial(boxId, () => this.recheck(boxId));
@@ -107,7 +122,8 @@ export class ProjectBoxForwards {
   /**
    * Listen on the project box (`preferredPort` when it is free there) and pipe each connection to
    * `upstream()`. Rejects with a {@link ProjectBoxForwardError} when the box is not connected or no
-   * port could be listened on.
+   * port could be listened on, and with a `BOX_DESTROYED` {@link BoxFsUnavailableError} when it is no
+   * project's box any more.
    */
   open(projectBoxId: string, preferredPort: number, upstream: () => Promise<Duplex>): Promise<ProjectBoxForward> {
     return this.serial(projectBoxId, async () => {
@@ -124,7 +140,11 @@ export class ProjectBoxForwards {
       for (let attempt = 0; attempt < MAX_LISTEN_ATTEMPTS; attempt += 1) {
         const boxPort = attempt === 0 && preferredPort >= MIN_PREFERRED_PORT && !taken.has(preferredPort) ? preferredPort : freePort(taken);
         taken.add(boxPort);
-        const entry: Entry = { projectBoxId, boxPort, target: `fwd-${randomBytes(18).toString("base64url")}`, upstream };
+        // Read where it is added: a later record change finds the entry and drops it.
+        const record = this.deps.registry.get(projectBoxId);
+        const projectPath = record && record.state !== "destroyed" && record.state !== "destroying" ? projectOf(record) : null;
+        if (projectPath === null) throw new BoxFsUnavailableError("BOX_DESTROYED", projectBoxId, "This project's box was destroyed (or its machine given back); nothing can be forwarded into it.");
+        const entry: Entry = { projectBoxId, boxPort, target: `fwd-${randomBytes(18).toString("base64url")}`, projectPath, upstream };
         this.add(entry);
         const outcome = (await this.publish(projectBoxId)).find((candidate) => candidate.boxPort === boxPort);
         if (outcome && outcome.error === null) return this.handle(entry);
@@ -170,7 +190,6 @@ export class ProjectBoxForwards {
     return {
       projectBoxId: entry.projectBoxId,
       boxPort: entry.boxPort,
-      active: () => this.targets.get(entry.target) === entry,
       alive: () => this.serial(entry.projectBoxId, async () => this.targets.get(entry.target) === entry),
       close: () =>
         this.serial(entry.projectBoxId, async () => {
@@ -221,7 +240,7 @@ export class ProjectBoxForwards {
     if (entries?.size === 0) this.byBox.delete(entry.projectBoxId);
   }
 
-  /** A destroyed project box: its forwards are gone with it (the hub dropped its list on revoke). */
+  /** A project box that is gone (or no longer this project's): its forwards are forgotten. */
   private forget(projectBoxId: string): void {
     for (const entry of this.byBox.get(projectBoxId)?.values() ?? []) this.targets.delete(entry.target);
     this.byBox.delete(projectBoxId);
@@ -239,6 +258,11 @@ export class ProjectBoxForwards {
     });
     return result;
   }
+}
+
+/** The project a record makes its box the box of; null when it is no project's box. */
+function projectOf(record: StoredBox): string | null {
+  return record.purpose === "project" ? (record.project?.path ?? null) : null;
 }
 
 /** A random port in {@link FALLBACK_PORTS} not in `taken`. */

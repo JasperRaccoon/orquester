@@ -833,8 +833,15 @@ export class TemporaryBoxTools {
     const ready = this.readyConnection(principal, boxId);
     if (!ready.ok) return ready;
     const projectPath = principal.kind === "agent" ? principal.projectPath : "";
-    const location = projectPath !== "" ? this.connection?.registry?.locate(projectPath) : undefined;
-    if (location?.kind !== "box") {
+    let location: ProjectFsLocation;
+    try {
+      location = locateProjectFs(this.connection?.registry, projectPath);
+    } catch (error) {
+      // The project's box is gone or away: no URL in it, and a host one would not be reachable from it.
+      if (error instanceof BoxFsUnavailableError) return projectBoxRefusal(error);
+      throw error;
+    }
+    if (location.kind !== "box") {
       const host = await this.hostForward(principal, boxId, ready.value, port);
       return host.ok ? done({ url: loopbackUrl(host.value.hostPort), hostPort: host.value.hostPort, boxPort: host.value.boxPort }) : host;
     }
@@ -897,6 +904,7 @@ export class TemporaryBoxTools {
       const still = this.stillForwardable(principal, boxId);
       return still.ok ? done(opened) : still;
     } catch (error) {
+      if (error instanceof BoxFsUnavailableError) return projectBoxRefusal(error);
       if (error instanceof ProjectBoxForwardError && error.code === "PROJECT_BOX_NOT_CONNECTED") {
         return refuse(409, "BOX_NOT_READY", "This chat's project runs in a box of its own, which is not connected right now (reconnecting…): the port could not be forwarded into it. Try again shortly.");
       }
