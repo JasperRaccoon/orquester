@@ -9,13 +9,13 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { SessionSummary } from "@orquester/api";
+import { boxPathMapFor, hostToBoxPath, type SessionSummary } from "@orquester/api";
 import { agentChatRoutes, parseThreadMessage, THREAD_MESSAGE_CONTEXT_KIND, UNTRUSTED_NOTICE, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 
 import { registerWait, waitsOn } from "../../agent-chat/waits.ts";
@@ -276,6 +276,18 @@ test("send_message implementPlan: the plan as the GUI's Implement sends it (no h
   assert.equal(turnBody!.interactionMode, "default");
   assert.deepEqual(turnBody!.context.map((c: { kind: string }) => c.kind), [THREAD_MESSAGE_CONTEXT_KIND]);
   assert.equal(turnBody!.causedBy.hop, 1);
+});
+
+test("send_message from a chat in a Windows box: its C:\\orq\\… and backslash attachment paths upload the host files", async () => {
+  const r = rig();
+  replyRoutes(r.api, "peer");
+  writeFileSync(join(OWN, "src", "shot.png"), "png-bytes");
+  const boxPaths = boxPathMapFor("win32");
+  const boxed = hostToBoxPath(boxPaths, join(OWN, "src", "shot.png"));
+  const attachments = [{ path: boxed }, { path: `c:${boxed.slice(2).replace(/\\/g, "/")}` }, { path: "w\\jaspersito\\orquester\\src\\shot.png" }];
+  const sent = await r.call("send_message", { sessionId: "peer", text: "see", reply: "notify", attachments }, { boxPaths });
+  assert.equal(sent.isError, undefined, JSON.stringify(body(sent)));
+  assert.deepEqual(r.api.uploads.map((u) => [u.meta.name, u.bytes.toString("utf8")]), Array.from({ length: 3 }, () => ["shot.png", "png-bytes"]));
 });
 
 test("send_message across projects: Full access acts in its workspace; a supervised caller gets a composed boundary card, never raw arguments", async () => {

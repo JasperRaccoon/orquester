@@ -21,7 +21,7 @@ const VIEWS = ["status", "branches", "log", "diff"] as const;
 
 /** The project a call reads: the named one, else the chat caller's own; an external caller must name one. */
 async function gitProject(project: string | undefined, ctx: Pick<ScopeContext, "api" | "caller">): Promise<ProjectRef> {
-  if (project !== undefined) return resolveProject(ctx.api, project);
+  if (project !== undefined) return resolveProject(ctx.api, project, ctx.caller);
   if (ctx.caller.kind === "thread" && ctx.caller.projectPath) return resolveProject(ctx.api, `${ctx.caller.workspace}/${basename(ctx.caller.projectPath)}`);
   throw new ToolError(ctx.caller.kind === "thread" ? "PROJECT_NOT_FOUND" : "INVALID_ARGUMENT", ctx.caller.kind === "thread" ? "This chat has no project: pass project (list_projects)." : "project is required: an absolute path or \"<workspace>/<project>\".");
 }

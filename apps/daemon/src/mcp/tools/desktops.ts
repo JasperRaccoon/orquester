@@ -134,7 +134,7 @@ async function projectOf(project: string | undefined, ctx: ScopeContext): Promis
   if (ref === undefined && ctx.caller.kind === "thread" && ctx.caller.projectPath && ctx.caller.workspace) {
     ref = `${ctx.caller.workspace}/${basename(ctx.caller.projectPath)}`;
   }
-  return ref === undefined ? null : (await resolveProject(ctx.api, ref)).path;
+  return ref === undefined ? null : (await resolveProject(ctx.api, ref, ctx.caller)).path;
 }
 
 /** `ws/p` of a project path, for cards (the path itself when it names no project). */

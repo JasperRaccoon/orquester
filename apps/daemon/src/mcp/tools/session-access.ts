@@ -149,7 +149,7 @@ export async function sessionCard(
 
 /** The boundary card of a call naming a project (list or search in another project). */
 export async function projectCard(ctx: ScopeContext, project: string, action: string, rows: { label: string; value: string }[] = []): Promise<ApprovalPreview> {
-  const ref = await resolveProject(ctx.api, project);
+  const ref = await resolveProject(ctx.api, project, ctx.caller);
   const where = await projectLabel(ctx.api, ref.path);
   return {
     title: `${agentLabel(ctx.caller)} wants to ${action} ${where}`,

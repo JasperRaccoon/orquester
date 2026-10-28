@@ -138,7 +138,7 @@ const listSessionsTool = defineTool({
     // "all" is narrowed in run, never carded (a fan-out over unknown projects cannot be judged on one card, §13 b).
     if (caller.kind !== "thread" || args.project === "all") return claim;
     if (args.project === undefined) return { ...claim, projects: caller.projectPath ? [caller.projectPath] : [] };
-    return { ...claim, projects: [(await resolveProject(ctx.api, args.project)).path] };
+    return { ...claim, projects: [(await resolveProject(ctx.api, args.project, ctx.caller)).path] };
   },
   approval: (args, ctx) => projectCard(ctx, args.project ?? "", "list the chats of"),
   annotations: READ_ONLY,
@@ -146,7 +146,7 @@ const listSessionsTool = defineTool({
   async run(args, { api, caller }) {
     const all = args.project === "all";
     // `!== undefined`, as wait_for_session tests it: an empty project is refused by resolveProject, never "every project".
-    const projectPath = args.project !== undefined && !all ? (await resolveProject(api, args.project)).path : undefined;
+    const projectPath = args.project !== undefined && !all ? (await resolveProject(api, args.project, caller)).path : undefined;
     const view = await buildViewContext(api);
     let sessions = await listSessions(api, projectPath);
     const frame: Record<string, unknown> = {};

@@ -90,7 +90,7 @@ async function placeOf(project: string | undefined, ctx: ScopeContext): Promise<
     ref = `${ctx.caller.workspace}/${basename(ctx.caller.projectPath)}`;
   }
   if (ref === undefined) return GLOBAL;
-  const names = await resolveProject(ctx.api, ref);
+  const names = await resolveProject(ctx.api, ref, ctx.caller);
   if (!names.workspace || !names.name) throw new ToolError("PROJECT_NOT_FOUND", "Saved prompts belong to a project inside a workspace.");
   return { projectPath: join(ctx.api.workspacesDir, names.workspace, names.name), label: `${names.workspace}/${names.name}` };
 }

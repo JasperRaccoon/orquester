@@ -32,13 +32,17 @@ async function isDirectory(path: string): Promise<boolean> {
 /**
  * Resolve a `project` argument: an absolute path inside the sandbox, or
  * `"<workspace>/<project>"`. The canonical path is the plain joined path (names)
- * or `path.resolve(input)` (path) — the exact string the GUI uses.
+ * or `path.resolve(input)` (path) — the exact string the GUI uses. A Windows box
+ * chat's own absolute spelling (`C:\orq\…`, `\orq\…`: never a name pair) is its
+ * host path first (`callerHostPath`).
  */
-export async function resolveProject(api: { fsRoot: string; workspacesDir: string }, input: string): Promise<ProjectRef> {
+export async function resolveProject(api: { fsRoot: string; workspacesDir: string }, input: string, caller?: ToolCaller): Promise<ProjectRef> {
   const raw = input.trim();
   if (!raw) throw new ToolError("PROJECT_NOT_FOUND", "project is required: an absolute path or \"<workspace>/<project>\".");
   let path: string;
-  if (isAbsolute(raw)) {
+  if (caller?.kind === "thread" && caller.boxPaths && !raw.startsWith("/") && win32.isAbsolute(raw)) {
+    path = callerHostPath(caller, raw, caller.cwd || "/");
+  } else if (isAbsolute(raw)) {
     path = resolve(raw);
   } else {
     const parts = raw.split("/");

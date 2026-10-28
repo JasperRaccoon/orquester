@@ -861,7 +861,7 @@ async function postCreate(api: ScopeContext["api"], body: CreateSessionRequest, 
 
 /** The project a create opens in: the named one, else (chat) the caller's own. */
 async function createTarget(api: ScopeContext["api"], caller: ThreadCaller | null, project: string | undefined): Promise<string> {
-  if (project !== undefined) return (await resolveProject(api, project)).path;
+  if (project !== undefined) return (await resolveProject(api, project, caller ?? undefined)).path;
   if (caller === null) throw new ToolError("INVALID_ARGUMENT", "project is required: an absolute path or \"<workspace>/<project>\".");
   if (caller.projectPath === "") throw new ToolError("INVALID_ARGUMENT", "This chat belongs to no project: name the project to open the chat in (list_projects).");
   return caller.projectPath;
