@@ -11,7 +11,7 @@
 // `stop_app`, `close_window` and `close` only stop things — Act. A desktop's project is its target
 // (§5.2); a chat caller's `cwd` must lie inside a project (ruling S6).
 
-import { basename, isAbsolute, resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { z } from "zod";
 import { DESKTOP_MAX_HEIGHT, DESKTOP_MAX_WIDTH, DESKTOP_MIN_HEIGHT, DESKTOP_MIN_WIDTH } from "@orquester/config";
 import {
@@ -26,11 +26,11 @@ import {
   type DesktopSummary,
   type LaunchAppRequest
 } from "@orquester/api";
-import { projectNamesFor, resolveProject } from "../addressing.ts";
+import { callerHostPath, projectNamesFor, resolveProject } from "../addressing.ts";
 import type { DaemonApi, DaemonResponse } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { clipText, jsonBytes, MAX_ECHO_CHARS } from "../result.ts";
-import { defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeClaim, type ScopeContext } from "../catalog/contract.ts";
+import { defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeClaim, type ScopeContext, type ToolCaller } from "../catalog/contract.ts";
 import { desktopPreview } from "./desktop-preview.ts";
 
 /** What an app's log returns at most: its tail, well under ok()'s 60 000-byte cap once JSON-escaped. */
@@ -143,8 +143,8 @@ function labelOf(api: DaemonApi, projectPath: string): string {
   return names.workspace && names.name ? `${names.workspace}/${names.name}` : projectPath;
 }
 
-/** A launch's working directory as the daemon runs it: absolute, or relative to the desktop's project. */
-const cwdIn = (projectPath: string, cwd: string): string => (isAbsolute(cwd) ? resolve(cwd) : resolve(projectPath, cwd));
+/** A launch's working directory as the daemon runs it: absolute, or relative to the desktop's project (as the caller spells it, `callerHostPath`). */
+const cwdIn = (caller: ToolCaller, projectPath: string, cwd: string): string => resolve(callerHostPath(caller, cwd, projectPath));
 
 // ---------------------------------------------------------------------------
 // get_desktops
@@ -317,7 +317,7 @@ const controlDesktop = defineTool({
       writes: true,
       causesTurnIn: [],
       // Ruling S6: a chat caller's working directory must lie inside a project.
-      ...(args.cwd !== undefined ? { paths: [cwdIn(projectPath, args.cwd)] } : {})
+      ...(args.cwd !== undefined ? { paths: [cwdIn(ctx.caller, projectPath, args.cwd)] } : {})
     };
   },
   async approval(args, ctx) {
@@ -331,7 +331,7 @@ const controlDesktop = defineTool({
       ...(args.size !== undefined ? { size: args.size } : {}),
       ...(args.renderThreads !== undefined ? { renderThreads: args.renderThreads } : {}),
       ...(args.command !== undefined ? { command: args.command } : {}),
-      ...(args.cwd !== undefined ? { cwd: cwdIn(projectPath, args.cwd) } : {}),
+      ...(args.cwd !== undefined ? { cwd: cwdIn(ctx.caller, projectPath, args.cwd) } : {}),
       ...(args.env !== undefined ? { env: args.env } : {}),
       ...(args.appId !== undefined ? { appId: args.appId } : {}),
       ...(args.windowId !== undefined ? { windowId: args.windowId } : {}),
@@ -344,6 +344,8 @@ const controlDesktop = defineTool({
   async run(args, ctx) {
     checkAction(args, ctx.caller.kind === "external");
     const { api } = ctx;
+    // A Windows box chat's cwd (`C:\orq\…`, `sub\dir`) goes as the host path its scope claimed; any other caller's as given.
+    const cwd = args.cwd !== undefined && ctx.caller.kind === "thread" && ctx.caller.boxPaths ? cwdIn(ctx.caller, (await targetOf(args, ctx)).projectPath, args.cwd) : args.cwd;
     switch (args.action) {
       case "open": {
         const { projectPath } = await targetOf(args, ctx);
@@ -351,12 +353,12 @@ const controlDesktop = defineTool({
         if (args.title !== undefined) body.title = args.title;
         if (args.size !== undefined) body.size = { ...args.size };
         if (args.renderThreads !== undefined) body.renderThreads = args.renderThreads;
-        if (args.command !== undefined) body.app = launchRequest({ command: args.command, cwd: args.cwd, env: args.env });
+        if (args.command !== undefined) body.app = launchRequest({ command: args.command, cwd, env: args.env });
         return { desktop: expectDesktopOk<DesktopSummary>(await api.request("POST", desktopRoutes.create, { body })) };
       }
       case "launch_app": {
         const app = expectDesktopOk<DesktopAppSummary>(
-          await api.request("POST", desktopRoutes.apps(args.desktopId!), { body: launchRequest({ command: args.command!, cwd: args.cwd, env: args.env }) })
+          await api.request("POST", desktopRoutes.apps(args.desktopId!), { body: launchRequest({ command: args.command!, cwd, env: args.env }) })
         );
         return { app };
       }

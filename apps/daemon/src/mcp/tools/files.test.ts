@@ -4,6 +4,7 @@ import { mkdir,mkdtemp,realpath,rm,symlink,writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { boxPathMapFor, hostToBoxPath } from "@orquester/api";
 import { FsSandboxError } from "@orquester/config/fs";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AnyOrquesterTool, CallContext, ThreadCaller } from "../catalog/contract.ts";
@@ -150,6 +151,25 @@ test("read_file for a chat: a path inside its project reads (relative to its dir
     assert.equal(r.isError, true, path);
     assert.equal(answer(r).code, "PERMISSION_DENIED", path);
   }
+});
+
+test("read_file for a chat in a Windows box: its C:\\orq\\… and backslash paths read the host file; another drive is refused; a host chat's backslash is a filename character", async (t) => {
+  const { sandbox, ctx } = await harness(t);
+  await mkdir(join(sandbox, "acme", "api", "src"), { recursive: true });
+  await writeFile(join(sandbox, "acme", "api", "src", "a.ts"), "export const a = 1;\n");
+  await writeFile(join(sandbox, "acme", "api", "src\\b.ts"), "a backslash in its name");
+  const boxPaths = boxPathMapFor("win32");
+  const windows = chatCaller(sandbox, { boxPaths });
+  const boxed = hostToBoxPath(boxPaths, join(sandbox, "acme", "api", "src", "a.ts"));
+  for (const path of ["src\\a.ts", boxed, `c:${boxed.slice(2).replace(/\\/g, "/")}`]) {
+    const r = await chatRead(ctx.api, windows, { path });
+    assert.equal(answer(r).text, "export const a = 1;\n", path);
+  }
+  for (const path of ["D:\\acme\\api\\src\\a.ts", "C:\\Users\\me\\a.ts", `${"..\\".repeat(20)}a.ts`]) {
+    const r = await chatRead(ctx.api, windows, { path });
+    assert.equal(answer(r).code, "PERMISSION_DENIED", path);
+  }
+  assert.equal(answer(await chatRead(ctx.api, chatCaller(sandbox), { path: "src\\b.ts" })).text, "a backslash in its name");
 });
 
 test("read_file for a chat: another project's content follows the gate (same workspace under auto: allowed; another workspace: a card, refused without a port)", async (t) => {

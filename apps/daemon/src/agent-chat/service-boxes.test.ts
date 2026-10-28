@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import Fastify from "fastify";
-import type { RegistryEntry } from "@orquester/api";
+import { boxPathMapFor, type RegistryEntry } from "@orquester/api";
 import { agentHostSocketPath, agentHostTokenPath, boxSocketPath } from "@orquester/config";
 
 import { agentHostAuthValue, daemonRoutesForHost, type CreateHostThreadRequest } from "../agent-host/host-protocol.ts";
@@ -193,6 +193,24 @@ test("a turn in a chat whose box was destroyed since is refused (409), never for
     assert.notEqual(interrupt.statusCode, 409);
   } finally {
     await app.close();
+    await f.cleanup();
+  }
+});
+
+test("a session-tool call from a Windows box chat carries the box's path map (from its record while it is not connected); a POSIX box or host chat carries none", async () => {
+  const windows = localBoxConnection({ boxId: "box-1", sys: { os: "win32" }, paths: boxPathMapFor("win32") });
+  let location: ProjectLocation = { kind: "box", boxId: "box-1", record: { id: "box-1", state: "ready", kind: "windows" } as never, connection: windows };
+  const f = await makeFixture({ location: (path) => (path.startsWith("/w/boxed") ? location : inBox()(path)) });
+  try {
+    const tab = (await create(f)) as { id: string };
+    assert.deepEqual(f.service.sessionToolThread(tab.id)?.boxPaths, boxPathMapFor("win32"));
+    location = { ...location, connection: undefined };
+    assert.deepEqual(f.service.sessionToolThread(tab.id)?.boxPaths, boxPathMapFor("win32"), "a dropped box still maps its chat's paths");
+    location = inBox()("/w/boxed");
+    assert.equal(f.service.sessionToolThread(tab.id)?.boxPaths, undefined, "a POSIX box's paths are the host's");
+    const host = (await create(f, { projectPath: "/w/host", cwd: "/w/host" })) as { id: string };
+    assert.equal(f.service.sessionToolThread(host.id)?.boxPaths, undefined);
+  } finally {
     await f.cleanup();
   }
 });

@@ -1,8 +1,11 @@
 import { stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
+import { boxToHostPath, hostToBoxPath } from "@orquester/api";
 import { isValidName } from "@orquester/config";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
+import type { ToolCaller } from "./catalog/contract.ts";
 import { ToolError } from "./errors.ts";
+import { clipText, MAX_ECHO_CHARS } from "./result.ts";
 
 export interface ProjectRef { workspace: string | null; name: string | null; path: string }
 
@@ -129,6 +132,25 @@ export async function canonicalProject(api: { fsRoot: string; workspacesDir: str
 /** The workspace a project path lies in ("" when it is no project). */
 export async function workspaceOfProject(api: { fsRoot: string; workspacesDir: string }, projectPath: string): Promise<string> {
   return (await canonicalProject(api, projectPath))?.workspace ?? "";
+}
+
+/**
+ * The host path a caller means by a path argument; a relative one is taken from `base` (an absolute
+ * host path). A chat whose CLI runs in a Windows box (`boxPaths`) spells paths as the box does —
+ * `C:\orq\…`, `build\out.zip`, either slash, any drive-letter case — and those are mapped back to
+ * the host path; a POSIX absolute path stays a host path. One outside the box's view of the host
+ * (another drive, `C:\Users\…`, a share) is refused, never re-read as something else. Without a
+ * map: POSIX, as always (a backslash is a filename character, an absolute path is returned as
+ * given). Containment stays the caller's check, after realpath.
+ */
+export function callerHostPath(caller: ToolCaller, path: string, base: string): string {
+  const map = caller.kind === "thread" ? caller.boxPaths : undefined;
+  if (map === undefined || map.kind === "identity" || path.startsWith("/")) return isAbsolute(path) ? path : resolve(base, path);
+  const host = boxToHostPath(map, win32.resolve(hostToBoxPath(map, posix.resolve(base)), path));
+  if (host === null) {
+    throw new ToolError("PERMISSION_DENIED", `"${clipText(path, MAX_ECHO_CHARS)}" is outside ${map.prefix}, where this box sees the host's files: paths must lie inside a project.`);
+  }
+  return posix.normalize(host);
 }
 
 /**
