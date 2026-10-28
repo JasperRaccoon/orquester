@@ -255,9 +255,15 @@ const GIT_TREE_REFUSAL =
   "The directory holds git metadata (a .git entry, a git directory, or part of one: a HEAD git reads, a commondir, objects with refs): box_download never copies that. Send a git bundle or a patch instead, or download the files without .git.";
 const NOT_A_DIRECTORY_REFUSAL = "remote_path is a symbolic link to a directory, not the directory itself: name the directory it points to.";
 
-/** A path segment git reads as `.git`: any case (case-insensitive file systems), trailing dots or spaces dropped (as Windows does). */
+/** A file name as a Windows box resolves it: an NTFS stream suffix (`::$INDEX_ALLOCATION`) and trailing dots or spaces dropped, lower-cased. */
+function plainName(name: string): string {
+  const colon = name.indexOf(":");
+  return (colon === -1 ? name : name.slice(0, colon)).replace(/[. ]+$/, "").toLowerCase();
+}
+
+/** A path segment git reads as `.git`: any case (case-insensitive file systems), spelled as {@link plainName} reads it. */
 export function isGitSegment(segment: string): boolean {
-  return segment.replace(/[. ]+$/, "").toLowerCase() === ".git";
+  return plainName(segment) === ".git";
 }
 
 /**
@@ -336,9 +342,9 @@ function boxGitMetadataFs(fs: BoxProjectFs): GitMetadataFs {
 const GIT_DIR_ENTRIES = ["HEAD", "objects", "refs", "commondir"] as const;
 type GitDirEntry = (typeof GIT_DIR_ENTRIES)[number];
 
-/** The git-directory entry a file name would be, spelled as {@link isGitSegment} reads `.git` (any case, trailing dots or spaces dropped). */
+/** The git-directory entry a file name would be, spelled as {@link plainName} reads it. */
 function gitDirEntry(name: string): GitDirEntry | null {
-  const plain = name.replace(/[. ]+$/, "").toLowerCase();
+  const plain = plainName(name);
   return GIT_DIR_ENTRIES.find((entry) => entry.toLowerCase() === plain) ?? null;
 }
 

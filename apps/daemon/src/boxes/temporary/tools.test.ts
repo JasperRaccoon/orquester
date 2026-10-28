@@ -784,6 +784,8 @@ test("download: never into git metadata — a .git path (any spelling), through 
     join(repo, ".git", "hooks", "pre-commit"),
     join(repo, ".GIT", "hooks", "post-checkout"),
     join(repo, ".git. ", "config"),
+    // How a Windows box spells the `.git` directory through an NTFS stream.
+    join(repo, ".git::$INDEX_ALLOCATION", "config"),
     join(repo, ".git"),
     "repo/.git/hooks/pre-push",
     join(PROJECT, "meta-link", "hooks", "pre-commit"),
