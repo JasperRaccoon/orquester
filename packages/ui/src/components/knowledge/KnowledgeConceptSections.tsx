@@ -100,6 +100,33 @@ export const MergedFrom: React.FC<{
   );
 };
 
+/**
+ * "Positions": what each entry behind the concept says about it (the neutral summary's positions,
+ * `KnowledgeConceptDetail.summary`), attributed; each opens its entry. Nothing without a summary.
+ */
+export const ConceptPositions: React.FC<{
+  detail: Pick<KnowledgeConceptDetail, "summary">;
+  onOpenEntry: (id: string) => void;
+}> = ({ detail, onOpenEntry }) => {
+  const positions = detail.summary?.positions ?? [];
+  if (positions.length === 0) return null;
+  return (
+    <section aria-label="Positions">
+      <SectionLabel>What each entry says</SectionLabel>
+      <ul className="space-y-1.5">
+        {positions.map((position) => (
+          <li key={position.entryId} data-knowledge-position={position.entryId} className="rounded-md px-2 py-1">
+            <button type="button" className="block w-full truncate text-left text-[11px] text-neutral-500 hover:underline" onClick={() => onOpenEntry(position.entryId)}>
+              {position.author ?? "Unknown author"} · {position.title || "Untitled"}
+            </button>
+            <p className="text-xs leading-relaxed text-neutral-200">{position.claim}</p>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+};
+
 /** "Similar concepts": the same type, close in meaning but below the merge bar; each opens. Nothing from an older daemon. */
 export const SimilarConcepts: React.FC<{
   detail: Pick<KnowledgeConceptDetail, "similarConcepts">;

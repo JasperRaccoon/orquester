@@ -23,6 +23,7 @@ import {
   type KnowledgeColor,
   type KnowledgeConcept,
   type KnowledgeConceptDetail,
+  type KnowledgeConceptSummary,
   type KnowledgeConceptRef,
   type KnowledgeDisagreement,
   type KnowledgeEdge,
@@ -408,7 +409,24 @@ function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
   }
   // Every visible entry id (newest first), where `entries` holds the newest 50 in full.
   if (Array.isArray(value.entryIds)) detail.entryIds = [...new Set(strings(value.entryIds).filter((id) => id !== ""))];
+  // The neutral summary (absent from an older daemon, or before it is written).
+  const summary = parseConceptSummary(value.summary);
+  if (summary) detail.summary = summary;
   return detail;
+}
+
+/** A concept summary: text required; a malformed position (or a second one of an entry) is left out. */
+function parseConceptSummary(value: unknown): KnowledgeConceptSummary | null {
+  if (!isRecord(value) || typeof value.text !== "string" || value.text.trim() === "") return null;
+  const seen = new Set<string>();
+  const positions =
+    list(value.positions, (item) => {
+      if (!isRecord(item) || typeof item.entryId !== "string" || item.entryId === "" || typeof item.claim !== "string" || item.claim.trim() === "") return null;
+      if (seen.has(item.entryId)) return null;
+      seen.add(item.entryId);
+      return { entryId: item.entryId, title: str(item.title), author: nullableStr(item.author), claim: item.claim };
+    }) ?? [];
+  return { text: value.text, positions };
 }
 
 function parseSimilarConcept(value: unknown): { concept: KnowledgeConceptRef; similarity: number } | null {

@@ -257,3 +257,67 @@ test("conceptTypes counts the concepts of each type in the whole graph", async (
   await loadGraph(graph, [], []);
   assert.equal(graph.conceptTypes().size, 0);
 });
+
+test("a person's links that only surveys make are not its own position: left out of both concepts' neighbours", async () => {
+  const store = new FakeStore();
+  store.collection(A, "TikTok");
+  store.collection(B, "SEO");
+  const post = "ke_pppppppppppp";
+  const synthesis = "ke_ssssssssssss";
+  const audit = "ke_tttttttttttt";
+  store.put(post, "jason's guide", [A], { title: "Make any phone hit a US audience", kind: "post" }, true);
+  store.put(synthesis, "blend", [A, B], { title: "US TikTok setup across guides", kind: "synthesis" }, true);
+  store.put(audit, "claims", [A], { title: "Claims audit", kind: "research note" }, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  await loadGraph(
+    graph,
+    [
+      node("person-jason", "jason", [`${post}.md`, `${synthesis}.md`], { type: "Person" }),
+      node("tactic-setup", "US TikTok account setup (organic)", [`${synthesis}.md`]),
+      node("tactic-proxy", "ISP proxy", [`${post}.md`, `${synthesis}.md`]),
+      node("tactic-gmail", "Gmail only", [`${audit}.md`])
+    ],
+    [
+      edge("e1", "person-jason", "tactic-setup", [`${synthesis}.md`], "recommends"), // a synthesis only: left out
+      edge("e2", "person-jason", "tactic-proxy", [`${post}.md`, `${synthesis}.md`], "recommends"), // his own post too: kept
+      edge("e3", "person-jason", "tactic-gmail", [`${audit}.md`], "recommends"), // an audit note only: left out
+      edge("e4", "tactic-setup", "tactic-proxy", [`${synthesis}.md`]), // no person: kept
+      edge("e5", "person-jason", "tactic-gmail", null, "mentions") // no provenance: kept
+    ]
+  );
+  const all = knowledgeScope({ kind: "all" }, [A, B]);
+  const ids = (id: string) => graph.concept(id, all)!.neighbors.map((n) => n.edge.id).sort();
+  assert.deepEqual(ids("person-jason"), ["e2", "e5"]);
+  assert.deepEqual(ids("tactic-setup"), ["e4"]);
+  assert.deepEqual(ids("tactic-gmail"), ["e5"]);
+  // Only the visible provenance counts: without his post, the proxy link is a survey's too.
+  const seoOnly = knowledgeScope({ kind: "collections", ids: [B] }, [A, B]);
+  assert.deepEqual(graph.concept("person-jason", seoOnly)!.neighbors.map((n) => n.edge.id), []);
+});
+
+test("a concept's collections leave out surveys when another entry has it: an all-collection synthesis does not tag it everywhere", async () => {
+  const store = new FakeStore();
+  store.collection(A, "TikTok");
+  store.collection(B, "SEO");
+  const C = "kc_cccccccccc";
+  store.collection(C, "Agents");
+  const post = "ke_pppppppppppp";
+  const synthesis = "ke_ssssssssssss";
+  const map = "ke_mmmmmmmmmmmm";
+  store.put(post, "proxy check", [A], { kind: "post" }, true);
+  store.put(synthesis, "everything", [A, B, C], { kind: "synthesis" }, true);
+  store.put(map, "a map", [C], { kind: "note", title: "Knowledge map of the base" }, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  await loadGraph(graph, [
+    node("tool-ipqs", "IPQualityScore", [`${post}.md`, `${synthesis}.md`, `${map}.md`]),
+    node("term-everything", "Cross-domain patterns", [`${synthesis}.md`, `${map}.md`])
+  ]);
+  const all = knowledgeScope({ kind: "all" }, [A, B, C]);
+  assert.deepEqual(graph.concept("tool-ipqs", all)!.collections, [A], "its own entry's collections only");
+  assert.deepEqual(graph.graph(all)!.nodes.find((n) => n.id === "tool-ipqs")!.collections, [A], "the graph's colouring too");
+  assert.deepEqual(graph.concept("term-everything", all)!.collections.sort(), [A, B, C].sort(), "only surveys have it: theirs");
+  // A caller who cannot see the post sees the surveys' collections (as visible to it).
+  const seo = knowledgeScope({ kind: "collections", ids: [B] }, [A, B, C]);
+  assert.deepEqual(graph.concept("tool-ipqs", seo)!.collections, [B]);
+  assert.equal(graph.concept("tool-ipqs", all)!.entryIds.length, 3, "its entries are all still behind it");
+});

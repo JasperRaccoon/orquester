@@ -12,6 +12,7 @@ import {
   CONCEPT_CHECK_SYSTEM,
   ConceptMergeCheckSource,
   E5_SMALL_CONCEPT_CHECK_BARS,
+  conceptAnchors,
   conceptCheckCandidates,
   conceptCheckInput,
   conceptExcerpt,
@@ -292,6 +293,103 @@ test("candidates: names that nearly coincide are asked about at the lower `alike
   assert.equal(E5_SMALL_CONCEPT_CHECK_BARS.alikeNames, 0.94);
 });
 
+test("anchors: distinctive Tool / Organization / Product concepts a concept links to or names (an alias too); a common one anchors nothing", () => {
+  // 40 entries: an anchor is distinctive at ≤ 3 of them (8%).
+  const filler = Array.from({ length: 40 }, (_, i) => `ke_f${i}`);
+  const concepts = [
+    concept("tool-ipqs", "IPQualityScore", ["ke_1", "ke_2"], "Tool", { aliases: ["IPQS"] }),
+    concept("tool-scam", "Scamalytics", ["ke_1", "ke_2"], "Tool"),
+    concept("tool-gmail", "Gmail", ["ke_3", "ke_4"], "Tool"),
+    concept("organization-apple", "Apple", filler, "Organization"), // in every entry: not distinctive
+    concept("tactic-a", "Buy a clean ISP proxy with an IPQS/Scamalytics check", ["ke_1"]),
+    concept("tactic-b", "Proxy fraud check", ["ke_2"]), // linked, not named
+    concept("tactic-c", "Use Gmail only", ["ke_3"]),
+    concept("tactic-d", "Sign in with Apple", ["ke_5"])
+  ];
+  const edges = [
+    { from: "tactic-b", to: "tool-scam" },
+    { from: "tactic-d", to: "organization-apple" },
+    { from: "tool-gmail", to: "tool-scam" } // anchors link anchors: each is the other's
+  ];
+  const anchors = conceptAnchors(concepts, edges, (id) => id);
+  const of = (id: string) => [...(anchors.get(id) ?? [])].sort();
+  assert.deepEqual(of("tactic-a"), ["tool-ipqs", "tool-scam"], "named, an alias included");
+  assert.deepEqual(of("tactic-b"), ["tool-scam"], "linked");
+  assert.deepEqual(of("tactic-c"), ["tool-gmail"]);
+  assert.deepEqual(of("tactic-d"), [], "Apple is in too many entries");
+  assert.deepEqual(of("tool-gmail"), ["tool-scam"]);
+  assert.deepEqual(of("tool-ipqs"), [], "never its own anchor");
+  // Merged anchors count as one.
+  const merged = conceptAnchors(concepts, edges, (id) => (id === "tool-scam" ? "tool-ipqs" : id));
+  assert.deepEqual([...(merged.get("tactic-a") ?? [])], ["tool-ipqs"]);
+});
+
+test("candidates: tactics of different entries that share an anchor are asked about at the `anchored` bar (the live IPQS and Gmail groups); a shared entry, one-sided numbers or the anchors themselves are not", async () => {
+  const concepts = [
+    concept("tool-ipqs", "IPQualityScore", ["ke_1", "ke_2", "ke_3"], "Tool", { aliases: ["IPQS"] }),
+    concept("tool-scam", "Scamalytics", ["ke_1", "ke_2", "ke_9"], "Tool"),
+    concept("tool-gmail", "Gmail", ["ke_4", "ke_5", "ke_6"], "Tool"),
+    concept("tool-outlook", "Outlook", ["ke_4", "ke_5"], "Tool"),
+    // The live IPQS group (names from the live graph of 2026-10-28, cosines about as close).
+    concept("tactic-buy-clean", "Buy a clean ISP proxy with an IPQS/Scamalytics check", ["ke_1"]),
+    concept("tactic-passes", "ISP proxy that passes IPQS and Scamalytics", ["ke_2"]),
+    concept("tactic-check-ip", "Check IP quality on IPQS/Scamalytics before creating the account", ["ke_3"]),
+    concept("tactic-us-vpn", "US VPN with IP check on Scamalytics (<60)", ["ke_9"]), // numbers on one side: not on this path
+    // The live Gmail group.
+    concept("tactic-only-safe", "Only Gmail is safe", ["ke_4"]),
+    concept("tactic-use-only", "Use Gmail only", ["ke_5"]),
+    concept("tactic-gmail-tiktok", "Gmail only for TikTok account", ["ke_6"]),
+    concept("tactic-strip", "Strip dots for Gmail addresses", ["ke_4", "ke_5", "ke_6"]) // shares an entry with each: the name paths' business
+  ];
+  const vectors = new Map<string, Float32Array>([
+    ["tool-ipqs", vec(20)],
+    ["tool-scam", vec(20, 0.95)], // anchor types: never paired on this path
+    ["tool-gmail", vec(22)],
+    ["tool-outlook", vec(22, 0.97)],
+    ["tactic-buy-clean", vec(0)],
+    ["tactic-passes", vec(0, 0.946)],
+    ["tactic-check-ip", vec(0, 0.96, 2)],
+    ["tactic-us-vpn", vec(0, 0.93, 3)],
+    ["tactic-only-safe", vec(5)],
+    ["tactic-use-only", vec(5, 0.957)],
+    ["tactic-gmail-tiktok", vec(5, 0.955, 7)],
+    ["tactic-strip", vec(5, 0.95, 8)]
+  ]);
+  const edges = [{ from: "tactic-passes", to: "tool-ipqs" }];
+  const input = { concepts, vectors, edges, thresholds: BARS, rejected: [], checks: [], canonical: (id: string) => id, limit: 40, pause: noPause };
+  assert.deepEqual(await conceptCheckCandidates({ ...input, bars: CHECK_BARS }), [], "without the bar: none of them is close enough for the name paths");
+  const found = await conceptCheckCandidates({ ...input, bars: { ...CHECK_BARS, anchored: 0.9 } });
+  const pairs = found.map((c) => [c.a.id, c.b.id, c.refusal, c.anchors]);
+  assert.deepEqual(
+    pairs.filter(([a]) => String(a).includes("ipqs") || ["tactic-buy-clean", "tactic-check-ip", "tactic-passes"].includes(String(a))),
+    [
+      ["tactic-buy-clean", "tactic-check-ip", "lexical", ["tool-ipqs", "tool-scam"]],
+      ["tactic-buy-clean", "tactic-passes", "lexical", ["tool-ipqs", "tool-scam"]],
+      ["tactic-check-ip", "tactic-passes", "lexical", ["tool-ipqs", "tool-scam"]]
+    ]
+  );
+  assert.deepEqual(
+    found.filter((c) => c.anchors?.includes("tool-gmail")).map((c) => [c.a.id, c.b.id]),
+    [
+      ["tactic-only-safe", "tactic-use-only"],
+      ["tactic-gmail-tiktok", "tactic-only-safe"],
+      ["tactic-gmail-tiktok", "tactic-use-only"]
+    ]
+  );
+  assert.ok(!found.some((c) => c.a.id === "tactic-us-vpn" || c.b.id === "tactic-us-vpn"), "one name has numbers");
+  assert.ok(!found.some((c) => c.a.id === "tactic-strip" || c.b.id === "tactic-strip"), "a shared entry, below its bar");
+  assert.ok(!found.some((c) => c.a.type === "Tool"), "the anchor types themselves");
+  // Below the merge bar and past every name guard: still asked (the rule would not merge them).
+  const plain = await conceptCheckCandidates({
+    ...input,
+    concepts: [concepts[2]!, concept("tactic-g1", "Gmail account", ["ke_4"]), concept("tactic-g2", "Gmail accounts", ["ke_5"])],
+    vectors: new Map([...vectors, ["tactic-g1", vec(10)], ["tactic-g2", vec(10, 0.905)]]),
+    bars: { ...CHECK_BARS, anchored: 0.9 }
+  });
+  assert.deepEqual(plain.map((c) => [c.a.id, c.b.id, c.refusal]), [["tactic-g1", "tactic-g2", "similarity"]]);
+  assert.equal(E5_SMALL_CONCEPT_CHECK_BARS.anchored, 0.9);
+});
+
 // ---------------------------------------------------------------------------
 // The task and its answers
 // ---------------------------------------------------------------------------
@@ -307,6 +405,11 @@ test("the task shows both concepts with type, aliases, description and an excerp
   assert.match(CONCEPT_CHECK_SYSTEM, /different numbers/);
   assert.match(CONCEPT_CHECK_SYSTEM, /negation/);
   assert.match(CONCEPT_CHECK_SYSTEM, /scope/);
+  // The same action with the same tools is the same, however phrased; numbers, conditions and tools keep them apart.
+  assert.match(CONCEPT_CHECK_SYSTEM, /same action with the same tools[^\n]*ARE the same, however each is phrased/);
+  assert.match(CONCEPT_CHECK_SYSTEM, /"Buy a clean ISP proxy with an IPQS\/Scamalytics check" and "Check the proxy on IPQS and Scamalytics" are the same/);
+  assert.match(CONCEPT_CHECK_SYSTEM, /different conditions/);
+  assert.match(CONCEPT_CHECK_SYSTEM, /different or additional tools/);
   assert.match(CONCEPT_CHECK_SYSTEM, /\{"same": true \| false, "keep": "a" \| "b", "reason"/);
 
   const body = "Intro line about phones.\n\n7) Proxy risk check: run it on ipqualityscore and scamalytics, both must read low risk. Then continue.\n\n8) Warm up.";

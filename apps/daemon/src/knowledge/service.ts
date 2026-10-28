@@ -33,7 +33,7 @@ import {
   type KnowledgeStatus,
   type SessionOwner
 } from "@orquester/api";
-import { knowledgeClusterLabelsPath, knowledgeConceptMergesPath, knowledgeIndexDir } from "@orquester/config";
+import { knowledgeClusterLabelsPath, knowledgeConceptMergesPath, knowledgeConceptSummariesPath, knowledgeIndexDir } from "@orquester/config";
 
 import { profileKnowledgeCollections, profilesForCollection } from "../session-profiles/knowledge.ts";
 import type { SessionProfileStore } from "../session-profiles/store.ts";
@@ -47,6 +47,7 @@ import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLin
 import { KnowledgeClusterLabels, type ClusterDescription } from "./search/cluster-labels.ts";
 import { ConceptMergeCheckSource } from "./search/concept-merge-checks.ts";
 import { KnowledgeConceptMerges } from "./search/concept-merges.ts";
+import { KnowledgeConceptSummaries } from "./search/concept-summaries.ts";
 import { findContradictions } from "./search/contradictions.ts";
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
 import { KnowledgeGraph } from "./search/graph.ts";
@@ -85,7 +86,7 @@ export type KnowledgeLinkingFactory = (ports: {
   settings: KnowledgeSettingsPort;
   /** Search and the concept graph as phase 2 linking reads them (`linkGraphView`). */
   graphView: KnowledgeLinkGraphView;
-  /** LLM work for linking's idle rounds: concept merge checks and cluster names (`KnowledgeLinkingOptions.roundTasks`). */
+  /** LLM work for linking's idle rounds: concept merge checks, cluster names and concept summaries (`KnowledgeLinkingOptions.roundTasks`). */
   roundTasks: readonly KnowledgeRoundTaskSource[];
 }) => KnowledgeLinking;
 
@@ -494,10 +495,33 @@ export class KnowledgeService {
         return entry ? { title: entry.title, body: entry.body } : null;
       }
     });
-    const linking = this.buildLinking(store, graph, search, [conceptChecks, clusterLabels]);
+    // Neutral, attributed summaries of concepts with several entries (read by concept details).
+    const conceptSummaries = new KnowledgeConceptSummaries({
+      path: knowledgeConceptSummariesPath(appdir),
+      concepts: () => graph.currentConcepts(),
+      meta: (id) => store.getMeta(id),
+      body: async (id) => (await store.getEntry(id))?.body ?? null,
+      contradicting: () =>
+        findContradictions({ graph, scope: everything(), pairChecks: this.pairChecks(), accept: () => true, entryMeta: (id) => store.getMeta(id) }).values(),
+      onConceptsChange: (listener) => {
+        const offLoad = graph.onLoad(listener);
+        const offMerges = conceptMerges.onChange(listener);
+        return () => {
+          offLoad();
+          offMerges();
+        };
+      },
+      logger: this.logger
+    });
+    await conceptSummaries.load();
+    search.connectConceptSummaries(conceptSummaries);
+    const linking = this.buildLinking(store, graph, search, [conceptChecks, clusterLabels, conceptSummaries]);
     await conceptMerges.start();
     const opening: Opening = { store, graph, search, embedders, linking, conceptMerges, clusterLabels, unsubscribe: [] };
     opening.unsubscribe.push(() => search.similarity.connectClusterLabels(null));
+    opening.unsubscribe.push(() => search.connectConceptSummaries(null));
+    // A new concept summary changes concept details.
+    opening.unsubscribe.push(conceptSummaries.onChange(() => this.publishChanged({ graph: true })));
     // A new cluster name redraws the similarity layer.
     opening.unsubscribe.push(clusterLabels.onChange(() => this.publishChanged({ graph: true })));
     // Insights and similar entries read linking's pair checks and queued link gaps (phase 2 spec,

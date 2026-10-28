@@ -151,6 +151,41 @@ describe("phase 2 wire validation", () => {
       ]);
     });
 
+    it("reads a concept's summary: text required, malformed or repeated positions left out, absent from an older daemon", () => {
+      const older = parseKnowledgeItemResponse(conceptItem({}));
+      assert.ok(older?.kind === "concept" && !("summary" in older.concept));
+      const read = parseKnowledgeItemResponse(
+        conceptItem({
+          summary: {
+            text: "Using a new account normally before posting.",
+            positions: [
+              { entryId: "ke_a", title: "Guide", author: "Alex", claim: "First video after 1–2 days." },
+              { entryId: "ke_b", title: 7, author: "", claim: "Warm up 3–5 days." },
+              { entryId: "ke_a", title: "Again", author: null, claim: "A second position of one entry." },
+              { entryId: "ke_c", title: "No claim", author: null, claim: " " },
+              { title: "No id", claim: "x" },
+              "ke_d"
+            ]
+          }
+        })
+      );
+      assert.ok(read?.kind === "concept");
+      assert.deepEqual(read.concept.summary, {
+        text: "Using a new account normally before posting.",
+        positions: [
+          { entryId: "ke_a", title: "Guide", author: "Alex", claim: "First video after 1–2 days." },
+          { entryId: "ke_b", title: "", author: null, claim: "Warm up 3–5 days." }
+        ]
+      });
+      for (const broken of [{ text: "" }, { positions: [] }, "text", { text: 5, positions: [] }]) {
+        const item = parseKnowledgeItemResponse(conceptItem({ summary: broken }));
+        assert.ok(item?.kind === "concept" && !("summary" in item.concept), JSON.stringify(broken));
+      }
+      const noPositions = parseKnowledgeItemResponse(conceptItem({ summary: { text: "Google's email service.", positions: "none" } }));
+      assert.ok(noPositions?.kind === "concept");
+      assert.deepEqual(noPositions.concept.summary, { text: "Google's email service.", positions: [] });
+    });
+
     it("reads every visible entry id of a concept, each once, absent from an older daemon", () => {
       const older = parseKnowledgeItemResponse(conceptItem({}));
       assert.ok(older?.kind === "concept" && !("entryIds" in older.concept));
