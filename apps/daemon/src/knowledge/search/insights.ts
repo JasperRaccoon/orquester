@@ -7,7 +7,8 @@
  *   by closeness in meaning plus {@link CENTRALITY_WEIGHT} × how central the contradicting
  *   concepts are to both entries ({@link conceptCentrality}). One that makes the same point against
  *   the same entry as one ranked above it ({@link samePoint}) is folded into it as `also`, each
- *   entry once, and by the side it joins (`alsoJoins`).
+ *   entry once, and by the side it joins (`alsoJoins`): the side it does not disagree with as well
+ *   (an entry that disagrees with both sides joins neither, and its disagreements are shown).
  * - Bridges: entries (never a survey: {@link isSurveyEntry}) whose distinctive concepts
  *   ({@link distinctiveLimit}, by id and by name in any type; never a person, an organization, a
  *   product or an app: a named example) are shared with non-survey entries in at least 2 other
@@ -55,7 +56,7 @@ import {
   type KnowledgeSingleSource
 } from "@orquester/api";
 import type { KnowledgePairChecksPort, KnowledgeStorePort, KnowledgeVectorIndex } from "../ports.ts";
-import { type ContradictionGraph, type KnowledgeContradictionFound, findContradictions, isSurveyEntry } from "./contradictions.ts";
+import { type ContradictionGraph, type KnowledgeContradictionFound, findContradictions, isSurveyEntry, pairKeyOf } from "./contradictions.ts";
 import { type KnowledgeLinkGapPair, findLinkGaps, linkGapConceptKey } from "./gaps.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import {
@@ -304,11 +305,12 @@ export class KnowledgeInsights {
       return set;
     };
     const centrality = (conceptId: string, entryId: string): number => conceptCentrality(graph.canonicalConceptId(conceptId), ownOf(entryId), neighbours);
+    const pairChecks = this.options.pairChecks?.() ?? null;
     const contradictions = [
       ...findContradictions({
         graph,
         scope,
-        pairChecks: this.options.pairChecks?.() ?? null,
+        pairChecks,
         accept: (id) => metaOf.has(id),
         entryMeta: (id) => metaOf.get(id) ?? null
       }).values()
@@ -331,20 +333,29 @@ export class KnowledgeInsights {
         y.rank - x.rank ||
         (x.a < y.a ? -1 : x.a > y.a ? 1 : x.b < y.b ? -1 : x.b > y.b ? 1 : 0)
     );
-    // The same point against the same entry, made by several: shown once, the others as "also",
-    // each once per side it joins (the side of the pair it does not disagree with).
+    // The same point against the same entry, made by several: shown once, the others as "also".
+    // `found` (X against O) joins a kept pair (S against O) on S's side only when X does not
+    // disagree with S too: an entry that disagrees with both sides joins neither (its own
+    // disagreements are shown as they are). A pair check that found X and S consistent says they
+    // agree: then fewer note words in common make the same point ({@link samePoint}'s `agreed`).
+    const disagree = new Set(contradictions.map((found) => pairKeyOf(found.a, found.b)));
+    const agreed = (x: string, y: string): boolean => pairChecks?.get(x, y)?.verdict === "consistent";
     const shown: ((typeof contradictions)[number] & { joins: { a: string[]; b: string[] } })[] = [];
     for (const found of contradictions) {
-      const twin = shown.find((kept) => samePoint(kept, found, (id) => metaOf.get(id) ?? null));
-      if (!twin) {
-        shown.push({ ...found, joins: { a: [], b: [] } });
-        continue;
+      let folded = false;
+      for (const twin of shown) {
+        const shared = twin.a === found.a || twin.a === found.b ? twin.a : twin.b === found.a || twin.b === found.b ? twin.b : null;
+        if (shared === null) continue;
+        const other = found.a === shared ? found.b : found.a;
+        const joined = shared === twin.a ? twin.b : twin.a;
+        if (disagree.has(pairKeyOf(other, joined))) continue;
+        if (!samePoint(twin, found, (id) => metaOf.get(id) ?? null, { agreed: agreed(other, joined) })) continue;
+        const side = joined === twin.a ? twin.joins.a : twin.joins.b;
+        if (!side.includes(other)) side.push(other);
+        folded = true;
+        break;
       }
-      // `found` shares one side with the twin; its other entry disagrees with that side, so it joins the twin's other one.
-      const shared = twin.a === found.a || twin.a === found.b ? twin.a : twin.b;
-      const other = found.a === shared ? found.b : found.a;
-      const side = shared === twin.a ? twin.joins.b : twin.joins.a;
-      if (!side.includes(other)) side.push(other);
+      if (!folded) shown.push({ ...found, joins: { a: [], b: [] } });
     }
     await pause();
 
@@ -592,6 +603,12 @@ function noteTier(meta: Pick<KnowledgeEntryMeta, "kind">): number {
  * against daniel share 0.3 or less with them.
  */
 const SAME_POINT_NOTE_OVERLAP = 0.5;
+/**
+ * The same, when a pair check found the two entries against the one consistent (they agree). 126
+ * real entries: Claude (research)'s and Alex Nguyen's notes against yanme's 5 accounts per device
+ * share 0.46 (Alex's also speaks of warm-up); consistent pairs at 0.4 or more make one point.
+ */
+const SAME_POINT_AGREED_OVERLAP = 0.4;
 /** Words every note uses to say who claims what: no part of the point. */
 const NOTE_FILLER: ReadonlySet<string> = new Set(tokenize("say says said claim claims recommend recommends argue argues state states report reports note research entry side both while whereas"));
 
@@ -608,12 +625,14 @@ function pointWords(note: string, names: ReadonlySet<string>): Set<string> {
 /**
  * Whether two contradictions make the same point against the same entry: they share exactly one
  * side, and either share a concept pair (the same two concepts, either way round) or their notes say
- * much the same ({@link SAME_POINT_NOTE_OVERLAP}, the four entries' authors' and handles' words aside).
+ * much the same ({@link SAME_POINT_NOTE_OVERLAP}, the four entries' authors' and handles' words aside;
+ * {@link SAME_POINT_AGREED_OVERLAP} when `agreed`: a pair check found their other two entries consistent).
  */
 export function samePoint(
   x: Pick<KnowledgeContradictionFound, "a" | "b" | "pairs" | "note">,
   y: Pick<KnowledgeContradictionFound, "a" | "b" | "pairs" | "note">,
-  metaOf: (id: string) => Pick<KnowledgeEntryMeta, "author" | "handle"> | null
+  metaOf: (id: string) => Pick<KnowledgeEntryMeta, "author" | "handle"> | null,
+  options: { agreed?: boolean } = {}
 ): boolean {
   if ([x.a, x.b].filter((id) => id === y.a || id === y.b).length !== 1) return false;
   const key = (pair: { from: KnowledgeConceptRef; to: KnowledgeConceptRef }): string => [pair.from.id, pair.to.id].sort().join("\u0000");
@@ -629,7 +648,7 @@ export function samePoint(
   if (wx.size === 0 || wy.size === 0) return false;
   let shared = 0;
   for (const word of wx) if (wy.has(word)) shared += 1;
-  return shared >= SAME_POINT_NOTE_OVERLAP * Math.min(wx.size, wy.size);
+  return shared >= (options.agreed ? SAME_POINT_AGREED_OVERLAP : SAME_POINT_NOTE_OVERLAP) * Math.min(wx.size, wy.size);
 }
 
 /** A deep copy of a cached, JSON-shaped value (callers may change what they are given). */

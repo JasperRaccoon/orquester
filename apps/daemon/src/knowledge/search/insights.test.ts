@@ -37,7 +37,11 @@ async function setup() {
     linkCount: graph.linkCount(meta.id),
     citation: knowledgeCitation(meta)
   });
-  const port = () => ({ all: () => pairChecks, get: () => null, onChange: () => () => undefined });
+  const port = () => ({
+    all: () => pairChecks,
+    get: (a: string, b: string) => [...pairChecks].reverse().find((check) => (check.a === a && check.b === b) || (check.a === b && check.b === a)) ?? null,
+    onChange: () => () => undefined
+  });
   const similarity = new KnowledgeSimilarity({
     store,
     graph,
@@ -472,7 +476,7 @@ test("contradictions that make the same point against one entry are shown once, 
   const s = await setup();
   const at = "2026-10-27T00:00:00.000Z";
   s.pairChecks.push({ a: ke("p1"), b: ke("q2"), verdict: "contradicts", note: "P1 claims a self-hosted Hetzner VPS makes TikTok see a normal home user. Q2 claims such an IP is labelled datacenter by IP vendors.", checkedAt: at });
-  s.pairChecks.push({ a: ke("p1"), b: ke("r3"), verdict: "contradicts", note: "R3 says a residential IP beats a datacenter one. P1 says a self-hosted Hetzner VPS makes TikTok see a normal home user.", checkedAt: at });
+  s.pairChecks.push({ a: ke("p1"), b: ke("r2"), verdict: "contradicts", note: "R2 says a residential IP beats a datacenter one. P1 says a self-hosted Hetzner VPS makes TikTok see a normal home user.", checkedAt: at });
   s.pairChecks.push({ a: ke("p1"), b: ke("q1"), verdict: "contradicts", note: "P1 says to post daily; Q1 says weekly is enough.", checkedAt: at });
   s.checksChanged();
   const seo = await s.insights.list({}, s.seoOnly);
@@ -481,13 +485,13 @@ test("contradictions that make the same point against one entry are shown once, 
     p1s.map((item) => [pairOf(item), (item.also ?? []).map((entry) => entry.id)]),
     [
       [[ke("p1"), ke("q1")], []],
-      [[ke("p1"), ke("q2")], [ke("r3")]]
+      [[ke("p1"), ke("q2")], [ke("r2")]]
     ]
   );
   assert.deepEqual(
     p1s.map((item) => item.alsoJoins && [item.alsoJoins.a.map((e) => e.id), item.alsoJoins.b.map((e) => e.id)]),
-    [undefined, [[], [ke("r3")]]],
-    "R3 makes Q2's point against P1: it joins Q2's side"
+    [undefined, [[], [ke("r2")]]],
+    "R2 makes Q2's point against P1: it joins Q2's side"
   );
   assert.equal(seo.totals.contradictions, seo.contradictions.length, "counted once");
   // Unit: one side in common, and the same note words or a concept pair in common.
@@ -498,30 +502,84 @@ test("contradictions that make the same point against one entry are shown once, 
   assert.equal(samePoint({ a: "x", b: "y", pairs: [], note: "x says daily" }, { a: "x", b: "z", pairs: [], note: null }, none), false);
 });
 
-test("`also` lists an entry once per side it joins, though it makes the same point against the pair twice", async () => {
+/** Three positions on one question, as checks between P1, Q2 and Q3 (each a pair check with its verdict). */
+async function threePositions(checks: [string, string, "contradicts" | "consistent", string][]) {
   const s = await setup();
   const at = "2026-10-27T00:00:00.000Z";
-  const pair = (a: string, b: string) => [ke(a), ke(b)].sort() as [string, string];
-  const check = (a: string, b: string, note: string) => {
-    const [x, y] = pair(a, b);
-    s.pairChecks.push({ a: x, b: y, verdict: "contradicts", note, checkedAt: at });
-  };
-  // P1, Q2 and Q3 each give their own accounts per device and warm-up length: every pair disagrees on
-  // that one point, so each entry makes it against both others.
-  const note = "Each gives its own number of accounts per device (2-3, one, five) and its own warm-up length (1-2 days, a few days, 3 days).";
-  check("p1", "q2", note);
-  check("q3", "p1", note);
-  check("q3", "q2", note);
+  for (const [a, b, verdict, note] of checks) {
+    const [x, y] = [ke(a), ke(b)].sort() as [string, string];
+    s.pairChecks.push({ a: x, b: y, verdict, note, checkedAt: at });
+  }
   s.checksChanged();
   const seo = await s.insights.list({}, s.seoOnly);
   const three = new Set([ke("p1"), ke("q2"), ke("q3")]);
   const ours = seo.contradictions.filter((item) => three.has(item.a.id) && three.has(item.b.id));
-  assert.equal(ours.length, 1, "the three checks make one point: folded into the first");
-  const [top] = ours;
-  const third = [ke("p1"), ke("q2"), ke("q3")].find((id) => !pairOf(top!).includes(id))!;
-  assert.deepEqual(top!.also!.map((e) => e.id), [third], "the third entry once");
-  // It disagrees with each side of the pair: it joins each one, against the other.
-  assert.deepEqual([top!.alsoJoins!.a.map((e) => e.id), top!.alsoJoins!.b.map((e) => e.id)], [[third], [third]]);
+  return ours.map((item) => ({
+    pair: pairOf(item).sort(),
+    joins: item.alsoJoins ? { [item.a.id]: item.alsoJoins.a.map((e) => e.id), [item.b.id]: item.alsoJoins.b.map((e) => e.id) } : null
+  }));
+}
+
+/** One contradiction against `against`: its other side is joined by the third entry, its own side by none. */
+function foldedAgainst(result: Awaited<ReturnType<typeof threePositions>>, against: string, message?: string): void {
+  assert.equal(result.length, 1, message);
+  const [{ pair, joins }] = result as [(typeof result)[number]];
+  assert.ok(pair.includes(ke(against)), message);
+  const side = pair.find((id) => id !== ke(against))!;
+  const third = [ke("p1"), ke("q2"), ke("q3")].find((id) => !pair.includes(id))!;
+  assert.deepEqual(joins, { [ke(against)]: [], [side]: [third] }, message);
+}
+
+test("`also`, three positions: an entry that disagrees with both sides joins neither; one that agrees with a side joins it, once", async () => {
+  // Warm up for 5–7 days (Q2), 3–5 days (P1) and 48 hours (Q3): every pair disagrees. Q3 is with
+  // neither Q2 nor P1, so no pair lists it as "also"; each of its disagreements is shown.
+  const triangle = await threePositions([
+    ["q2", "p1", "contradicts", "Q2 says to warm up the account for 5-7 days; P1 says 3-5 days of warming up."],
+    ["q3", "q2", "contradicts", "Q3 says to warm up the account for 48 hours; Q2 says to warm up for 5-7 days."],
+    ["q3", "p1", "contradicts", "Q3 says to warm up the account for 48 hours; P1 says 3-5 days of warming up."]
+  ]);
+  assert.equal(triangle.length, 3, "three disagreements, none folded");
+  assert.ok(triangle.every((item) => item.joins === null), JSON.stringify(triangle));
+
+  // Q3 warms up for 3 days: with P1 (3–5 days; checked consistent), against Q2's 5–7. It joins P1's
+  // side against Q2 (or P1 joins Q3's, whichever pair ranks first), and only that side.
+  const agreeing = await threePositions([
+    ["q2", "p1", "contradicts", "Q2 says to warm up the account for 5-7 days; P1 says 3-5 days of warming up."],
+    ["q3", "q2", "contradicts", "Q3 says to warm up the account for 3 days; Q2 says to warm up for 5-7 days."],
+    ["q3", "p1", "consistent", "Both warm up for about three days."]
+  ]);
+  foldedAgainst(agreeing, "q2");
+
+  // Unchecked between Q3 and P1: Q3 still disagrees only with Q2, so it joins P1 the same way.
+  const unchecked = await threePositions([
+    ["q2", "p1", "contradicts", "Q2 says to warm up the account for 5-7 days; P1 says 3-5 days of warming up."],
+    ["q3", "q2", "contradicts", "Q3 says to warm up the account for 3 days; Q2 says to warm up for 5-7 days."]
+  ]);
+  foldedAgainst(unchecked, "q2");
+});
+
+test("`also`: the same point against one entry made in fewer common words folds when a pair check found the two others consistent", async () => {
+  // Q2 (2–3 accounts per device, and a warm-up point) and Q3 (a research note backing 2–3 per device)
+  // against P1's 5 accounts per device: their notes share under half their words.
+  const p1Q2 = "Q2 says to create only 2-3 TikTok accounts maximum per device, while P1 recommends 5 accounts on each iPhone. They also differ on warm-up: Q2 says to start posting after 1-2 days, P1 says to warm up for 3 days.";
+  const p1Q3 = "Q3 backs the rule of 2-3 accounts per device, since a ban follows the device. P1 says to run 5 TikTok accounts on each used iPhone.";
+  const apart = await threePositions([
+    ["q2", "p1", "contradicts", p1Q2],
+    ["q3", "p1", "contradicts", p1Q3]
+  ]);
+  assert.equal(apart.length, 2, "not checked as agreeing: two points");
+  const folded = await threePositions([
+    ["q2", "p1", "contradicts", p1Q2],
+    ["q3", "p1", "contradicts", p1Q3],
+    ["q3", "q2", "consistent", "Both say 2-3 accounts per device."]
+  ]);
+  foldedAgainst(folded, "p1", "Q3 agrees with Q2: the same point against P1");
+  // samePoint itself: under the usual overlap, over the agreed one.
+  const none = () => null;
+  const x = { a: ke("p1"), b: ke("q2"), pairs: [], note: p1Q2 };
+  const y = { a: ke("p1"), b: ke("q3"), pairs: [], note: p1Q3 };
+  assert.equal(samePoint(x, y, none), false);
+  assert.equal(samePoint(x, y, none, { agreed: true }), true);
 });
 
 test("single-source: never the entry's own title restated, a metric that states nothing, or a figure another visible entry states", async () => {
