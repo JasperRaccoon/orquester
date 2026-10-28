@@ -5,7 +5,7 @@ import { knowledgeCitation, type KnowledgeEntryMeta, type KnowledgeInsightsRespo
 import type { KnowledgePairCheck } from "../ports.ts";
 import { FakeVectorIndex, around } from "./fake-vector-index.ts";
 import { KnowledgeGraph } from "./graph.ts";
-import { KnowledgeInsights, conceptCentrality, samePoint, statesNoClaim } from "./insights.ts";
+import { KnowledgeInsights, conceptCentrality, noteStrength, samePoint, statesNoClaim } from "./insights.ts";
 import { namesTopic } from "./same-question.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
 import { FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
@@ -602,4 +602,73 @@ test("single-source: never the entry's own title restated, a metric that states 
   assert.equal(namesTopic("Start an app from zero with $300 using used iPhones and TikTok accounts", "Starting an app from zero with $300: 3 used iPhones × 5 TikTok accounts"), true);
   assert.equal(namesTopic("Making a US-based TikTok account", "How to create a US TikTok account and target only the US (7 steps)"), true);
   assert.equal(namesTopic("Get keywords from 1-2 star reviews", "SEO playbook for mobile app founders"), false);
+});
+
+test("noteStrength: figures apart or opposing words are concrete; figures that meet or a vague amount are vague (real notes)", () => {
+  // The live knowledge base's checked notes (2026-10-28).
+  const concrete = [
+    "jason says to create the TikTok account with an Outlook or Proton email, while Alex Nguyen says to use only Gmail and that Outlook, Yahoo and ProtonMail carry a significantly higher risk of the account being flagged or banned.",
+    "Emanuele Totaro recommends using NordVPN (connected to Los Angeles or San Francisco) for a US TikTok account, while daniel says not to use NordVPN because it gets you shadow banned instantly, and to self-host Outline VPN instead.",
+    "Alex Nguyen says to create only 2-3 TikTok accounts maximum per device, while yanme recommends 5 accounts on each iPhone.",
+    "jason says to warm up an account for 48 hours before posting, while yanme says to warm up each account for 3 days.",
+    "Evgeniy Mikholap says to warm up the account for 3-5 days before filling the profile and posting daily; Alex Nguyen says not to post on day one and to start posting your first video after 1-2 days of casual usage.",
+    "Erikas Mališauskas says to post no more than 1 video per day in the first week, and only then up to 3 per day. yanme says to post 2 videos per account per day after a 3-day warm-up, which is during that first week."
+  ];
+  for (const note of concrete) assert.equal(noteStrength(note), "concrete", note);
+  const vague = [
+    "Alex Nguyen says to post nothing on day one and start posting the first video after 1–2 days of casual use. Erikas Mališauskas says to wait a few days before uploading the first video.",
+    "Emanuele Totaro says to warm up the account for 5-7 days; Evgeniy Mikholap says 3-5 days of warming up before filling the profile and posting.",
+    "One says 2-4 accounts per device, the other 3 to 5 accounts.",
+    "One posts several videos a day, the other some days."
+  ];
+  for (const note of vague) assert.equal(noteStrength(note), "vague", note);
+  assert.equal(
+    noteStrength("daniel says a self-hosted Outline VPN on a Hetzner VPS makes TikTok see a normal US home user, while Claude (research) says that IP is labelled datacenter/hosting, not residential, so the VPS swaps one red flag for another."),
+    "plain"
+  );
+  assert.equal(noteStrength(null), "plain");
+  // Numbers of different units, or not of a unit, are no figures to compare ("App Store 2.3.14", "up to 3 per day").
+  assert.equal(noteStrength("Swipe 15-30 minutes a day; warm up for 3 days. App Store 2.3.14 forbids it."), "plain");
+});
+
+test("contradictions rank by strength: saved posts by different authors with concrete claims first, a note's side after, vague figures last", async () => {
+  const s = await setup();
+  const at = "2026-10-27T00:00:00.000Z";
+  const post = (name: string, author: string, kind = "post") => s.store.put(ke(name), `body ${name}`, ["kc_seo"], { title: `${name} guide`, author, kind }, true);
+  const contradicts = (a: string, b: string, note: string) => {
+    const [x, y] = [ke(a), ke(b)].sort() as [string, string];
+    s.pairChecks.push({ a: x, b: y, verdict: "contradicts", note, checkedAt: at });
+  };
+  for (const [name, author, kind] of [
+    ["q1", "Alex Nguyen"],
+    ["q2", "Erikas"],
+    ["q3", "jason"],
+    ["q4", "Alex Nguyen"],
+    ["p1", "Claude (research)", "research note"],
+    ["p2", "daniel"],
+    ["p3", "Emanuele Totaro"],
+    ["p4", "Evgeniy Mikholap"],
+    ["r1", "jason"],
+    ["r2", "yanme"]
+  ] as [string, string, string?][]) {
+    post(name, author, kind);
+  }
+  // Weakest first as asked: the vague and the meeting figures, the note's side, then the clear ones.
+  contradicts("q1", "q2", "Alex Nguyen says to start posting after 1–2 days. Erikas says to wait a few days.");
+  contradicts("p3", "p4", "Emanuele Totaro says to warm up for 5-7 days; Evgeniy Mikholap says 3-5 days.");
+  contradicts("p1", "p2", "daniel says a VPS looks like a home user; Claude (research) says that IP is labelled datacenter.");
+  contradicts("q3", "q4", "jason says to sign up with Outlook; Alex Nguyen says to use only Gmail.");
+  contradicts("r1", "r2", "jason says to warm up for 48 hours; yanme says to warm up for 3 days.");
+  s.checksChanged();
+  const ours = new Set(["q1", "q2", "q3", "q4", "p1", "p2", "p3", "p4", "r1", "r2"].map(ke));
+  const order = (await s.insights.list({}, s.seoOnly)).contradictions.filter((item) => ours.has(item.a.id) && ours.has(item.b.id)).map((item) => pairOf(item).sort().join(" "));
+  const key = (a: string, b: string) => [ke(a), ke(b)].sort().join(" ");
+  assert.equal(order.length, 5);
+  assert.deepEqual(new Set(order.slice(0, 2)), new Set([key("q3", "q4"), key("r1", "r2")]), "two saved posts, concrete opposing claims");
+  assert.equal(order[2], key("p1", "p2"), "a research note's side");
+  assert.deepEqual(new Set(order.slice(3)), new Set([key("q1", "q2"), key("p3", "p4")]), "vague, or figures that meet");
+  // Deterministic: the same order again, from a fresh computation.
+  s.checksChanged();
+  const again = (await s.insights.list({}, s.seoOnly)).contradictions.filter((item) => ours.has(item.a.id) && ours.has(item.b.id)).map((item) => pairOf(item).sort().join(" "));
+  assert.deepEqual(again, order);
 });
