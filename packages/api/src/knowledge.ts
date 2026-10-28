@@ -373,6 +373,23 @@ export interface KnowledgeConceptDetail {
    * for a concept with one entry, or before it is written.
    */
   summary?: KnowledgeConceptSummary;
+  /**
+   * The concept family this concept belongs to (quality round 5): concepts of one type that answer
+   * the same question in different ways ("Warm up for 48 hours", "… 5-7 days"), with one neutral
+   * summary of every member's positions. Absent from an older daemon or for a concept with no family.
+   */
+  family?: KnowledgeConceptFamily;
+}
+
+export interface KnowledgeConceptFamily {
+  /** Stable id of the family. */
+  id: string;
+  /** The question the members answer, e.g. "Warm-up length before the first post". */
+  name: string;
+  /** The visible member concepts, this one included. */
+  concepts: KnowledgeConceptRef[];
+  /** Every visible member entry's position, attributed; absent until written. */
+  summary?: KnowledgeConceptSummary;
 }
 
 export interface KnowledgeConceptSummary {
