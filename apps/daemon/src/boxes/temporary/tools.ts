@@ -12,7 +12,10 @@
  * - **Files are streamed**: a file as its bytes, a directory as a tar stream made and unpacked by
  *   the host's `tar`; host paths are checked against the calling chat's project after realpath. A
  *   download never writes git metadata (a `.git` path, a git directory, or a directory carrying
- *   either): its config or hooks would run on the host.
+ *   either): its config or hooks would run on the host. A box project's files live in its own
+ *   box, so they are relayed through the daemon (project box ⇄ daemon ⇄ temporary box) with the
+ *   same rules, checked by the project box's file system (`BoxProjectFs`): the tar is made by the
+ *   project box's `tar` and unpacked by its `writeTar`.
  * - **Background jobs** run detached in the box (they survive link drops; the output is followed
  *   again from the offset last seen when the box reconnects) and their output tail is kept here.
  * - **Lifetime.** A closed chat's boxes are destroyed (`chat-closed`, {@link chatClosed}); a
@@ -27,7 +30,7 @@ import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { lstat, mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
-import { PassThrough, Transform } from "node:stream";
+import { PassThrough, Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import {
@@ -47,6 +50,8 @@ import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 
 import type { BoxConnection, BoxHub, BoxProcess, BoxRegistry } from "../contracts.ts";
+import { BoxFsUnavailableError } from "../remote/fs/errors.ts";
+import { locateProjectFs, type BoxProjectFs, type ProjectFsLocation } from "../remote/fs/project-fs.ts";
 import type {
   BoxExecRequest,
   BoxExecResult,
@@ -238,6 +243,8 @@ function boxBasename(path: string): string {
 
 const GIT_METADATA_REFUSAL =
   "local_path is inside git metadata (a .git directory or a git directory): box_download never writes there. Choose a path in the project's working files.";
+const GIT_TREE_REFUSAL =
+  "The directory holds git metadata (a .git entry or a git directory): box_download never copies that. Send a git bundle or a patch instead, or download the files without .git.";
 
 /** A path segment git reads as `.git`: any case (case-insensitive file systems), trailing dots or spaces dropped (as Windows does). */
 export function isGitSegment(segment: string): boolean {
@@ -245,15 +252,61 @@ export function isGitSegment(segment: string): boolean {
 }
 
 /**
+ * How the git-metadata rules read the file system the project's files live on (paths are host
+ * paths): this host's, or a box project's over its link ({@link boxGitMetadataFs}). Nothing here
+ * follows a symlink.
+ */
+export interface GitMetadataFs {
+  /** An entry's kind (null when nothing readable is there). */
+  kind(path: string): Promise<"file" | "dir" | "other" | null>;
+  /** A directory's entries. */
+  list(dir: string): Promise<{ name: string; dir: boolean }[]>;
+}
+
+const HOST_GIT_METADATA_FS: GitMetadataFs = {
+  kind: async (path) => {
+    const stats = await lstat(path).catch(() => null);
+    return stats === null ? null : stats.isDirectory() ? "dir" : stats.isFile() ? "file" : "other";
+  },
+  list: async (dir) => (await readdir(dir, { withFileTypes: true })).map((entry) => ({ name: entry.name, dir: entry.isDirectory() }))
+};
+
+/** The git-metadata rules' view of a box project (one `fs.stat` / `fs.readdir` per question, never through a symlink). */
+function boxGitMetadataFs(fs: BoxProjectFs): GitMetadataFs {
+  const windows = fs.connection.paths.kind === "windows-prefix";
+  return {
+    kind: async (path) => {
+      try {
+        const stats = await fs.stat(path, { followSymlinks: false });
+        return stats === null ? null : stats.kind === "dir" ? "dir" : stats.kind === "file" ? "file" : "other";
+      } catch (error) {
+        // An unreadable entry reads as absent, like the host's lstat; a dropped link fails the transfer.
+        if (error instanceof BoxFsUnavailableError) throw error;
+        return null;
+      }
+    },
+    list: async (dir) => {
+      // The box's own answer, unfiltered: an entry skipped here could hide a `.git` below it.
+      const entries = await fs.connection.request("fs.readdir", { path: fs.toBox(dir) });
+      return entries.map((entry) => {
+        if (entry.name === "" || entry.name === "." || entry.name === ".." || /[/\0]/.test(entry.name) || (windows && entry.name.includes("\\"))) {
+          throw new Error("The project's box listed an entry that is not a file name.");
+        }
+        return { name: entry.name, dir: entry.kind === "dir" };
+      });
+    }
+  };
+}
+
+/**
  * Whether `dir` is laid out as a git directory (what git's discovery accepts as one: `HEAD` with
  * `objects`/`refs`/`commondir`, or `objects` and `refs` a `HEAD` would complete). Not followed
  * through symlinks.
  */
-async function looksLikeGitDir(dir: string): Promise<boolean> {
-  const [head, objects, refs, commondir] = await Promise.all(["HEAD", "objects", "refs", "commondir"].map((name) => lstat(join(dir, name)).catch(() => null)));
-  const isDir = (entry: Awaited<ReturnType<typeof lstat>> | null): boolean => entry?.isDirectory() === true;
-  if (isDir(objects) && isDir(refs)) return true;
-  return head?.isFile() === true && (isDir(objects) || isDir(refs) || commondir?.isFile() === true);
+async function looksLikeGitDir(dir: string, fs: GitMetadataFs): Promise<boolean> {
+  const [head, objects, refs, commondir] = await Promise.all(["HEAD", "objects", "refs", "commondir"].map((name) => fs.kind(join(dir, name))));
+  if (objects === "dir" && refs === "dir") return true;
+  return head === "file" && (objects === "dir" || refs === "dir" || commondir === "file");
 }
 
 /**
@@ -261,26 +314,38 @@ async function looksLikeGitDir(dir: string): Promise<boolean> {
  * resolved (realpath, inside `projectRoot`), or a directory from its parent up to the project root
  * that is a git directory (a bare repository, a worktree's or submodule's gitdir).
  */
-export async function insideGitMetadata(projectRoot: string, requested: string, resolved: string): Promise<boolean> {
+export async function insideGitMetadata(projectRoot: string, requested: string, resolved: string, fs: GitMetadataFs = HOST_GIT_METADATA_FS): Promise<boolean> {
   if (requested.split(/[\\/]+/).some(isGitSegment)) return true;
   const rel = relative(projectRoot, resolved);
   if (rel.split(sep).some(isGitSegment)) return true;
   for (let dir = dirname(resolved); ; dir = dirname(dir)) {
-    if (await looksLikeGitDir(dir)) return true;
+    if (await looksLikeGitDir(dir, fs)) return true;
     if (dir === projectRoot || dirname(dir) === dir || relative(projectRoot, dir).startsWith("..")) return false;
   }
 }
 
+/** Directories of one tree level checked at once (a box project answers each over its link). */
+const GIT_SCAN_PARALLEL = 16;
+
 /** Whether an unpacked tree holds a `.git` entry anywhere or a directory laid out as a git directory (symlinks are not followed). */
-export async function containsGitMetadata(root: string): Promise<boolean> {
-  const pending = [root];
-  while (pending.length > 0) {
-    const dir = pending.pop()!;
-    if (await looksLikeGitDir(dir)) return true;
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
-      if (isGitSegment(entry.name)) return true;
-      if (entry.isDirectory()) pending.push(join(dir, entry.name));
+export async function containsGitMetadata(root: string, fs: GitMetadataFs = HOST_GIT_METADATA_FS): Promise<boolean> {
+  let level = [root];
+  while (level.length > 0) {
+    const next: string[] = [];
+    for (let start = 0; start < level.length; start += GIT_SCAN_PARALLEL) {
+      const found = await Promise.all(
+        level.slice(start, start + GIT_SCAN_PARALLEL).map(async (dir) => {
+          if (await looksLikeGitDir(dir, fs)) return true;
+          for (const entry of await fs.list(dir)) {
+            if (isGitSegment(entry.name)) return true;
+            if (entry.dir) next.push(join(dir, entry.name));
+          }
+          return false;
+        })
+      );
+      if (found.includes(true)) return true;
     }
+    level = next;
   }
   return false;
 }
@@ -583,7 +648,8 @@ export class TemporaryBoxTools {
     const ready = this.readyConnection(principal, boxId);
     if (!ready.ok) return ready;
     const connection = ready.value;
-    const local = await this.insideProject(project.value, request.localPath);
+    if (project.value.box) return await this.uploadFromBoxProject(project.value.box, project.value.root, connection, request, options.signal);
+    const local = await this.insideProject(project.value.root, request.localPath);
     if (!local.ok) return local;
     const remote = boxPathFor(connection.sys, request.remotePath);
     if (remote === null || request.remotePath.trim() === "") return refuse(400, "INVALID_ARGUMENT", "remote_path is not a usable path.");
@@ -636,9 +702,10 @@ export class TemporaryBoxTools {
     const ready = this.readyConnection(principal, boxId);
     if (!ready.ok) return ready;
     const connection = ready.value;
-    const target = await this.insideProject(project.value, request.localPath);
+    if (project.value.box) return await this.downloadIntoBoxProject(project.value.box, project.value.root, connection, request, options.signal);
+    const target = await this.insideProject(project.value.root, request.localPath);
     if (!target.ok) return target;
-    const projectRoot = await assertInsideFsRoot(project.value, project.value);
+    const projectRoot = await assertInsideFsRoot(project.value.root, project.value.root);
     if (target.value === projectRoot) return refuse(400, "INVALID_ARGUMENT", "local_path is the project itself: name a new file or directory inside it.");
     // A box's bytes never land in git metadata: a planted config (core.fsmonitor) or hook would
     // run on the host the next time anything runs git in the project.
@@ -717,7 +784,7 @@ export class TemporaryBoxTools {
       // A directory that carries git metadata (a `.git`, or is itself a git directory) would bring
       // its config and hooks onto the host: refused whole, nothing is moved into the project.
       if (await containsGitMetadata(item)) {
-        return refuse(403, "PERMISSION_DENIED", "The directory holds git metadata (a .git entry or a git directory): box_download never copies that. Send a git bundle or a patch instead, or download the files without .git.");
+        return refuse(403, "PERMISSION_DENIED", GIT_TREE_REFUSAL);
       }
       await rename(item, target.value);
       if (item !== staging) await rm(staging, { recursive: true, force: true });
@@ -785,14 +852,21 @@ export class TemporaryBoxTools {
     return done(connection);
   }
 
-  /** The calling chat's project root, for file transfers. */
-  private chatProject(principal: CallerPrincipal): BoxOutcome<string> {
+  /**
+   * The calling chat's project, for file transfers: its root (a host path) and, for a box project,
+   * the file system of its box (which must be connected).
+   */
+  private chatProject(principal: CallerPrincipal): BoxOutcome<{ root: string; box: BoxProjectFs | null }> {
     if (principal.kind !== "agent") return refuse(403, "PERMISSION_DENIED", "Files move between a box and the project of the agent chat that owns it.");
     if (principal.projectPath === "") return refuse(400, "NO_PROJECT", "This chat has no project, so there is nowhere on the host to move files from or to.");
-    if (this.connection?.registry?.locate(principal.projectPath).kind === "box") {
-      return refuse(400, "BOX_UNSUPPORTED", "This chat's project runs in a box of its own: its files are not on this host, so they cannot be moved to or from a temporary box here.");
+    let location: ProjectFsLocation;
+    try {
+      location = locateProjectFs(this.connection?.registry, principal.projectPath);
+    } catch (error) {
+      if (error instanceof BoxFsUnavailableError) return projectBoxRefusal(error);
+      throw error;
     }
-    return done(principal.projectPath);
+    return done({ root: principal.projectPath, box: location.kind === "box" ? location.fs : null });
   }
 
   /** `path` resolved (realpath, symlinks included) inside `project`, or a refusal. */
@@ -812,17 +886,166 @@ export class TemporaryBoxTools {
    * the directory's name is the directory, unless the box's listing says that name is its only
    * child — then two levels of that name mean the directory itself was packed.
    */
-  private async unpackedItem(connection: BoxConnection, remote: string, staging: string, signal: AbortSignal | undefined): Promise<string> {
-    const names = await readdir(staging);
+  private async unpackedItem(
+    connection: BoxConnection,
+    remote: string,
+    staging: string,
+    signal: AbortSignal | undefined,
+    fs: GitMetadataFs = HOST_GIT_METADATA_FS
+  ): Promise<string> {
+    const names = (await fs.list(staging)).map((entry) => entry.name);
     const name = boxBasename(remote);
     if (names.length !== 1 || names[0] !== name) return staging;
     const listing = await connection.request("fs.readdir", { path: remote }, { ...(signal ? { signal } : {}) });
     const ownOnlyChild = listing.length === 1 && listing[0]!.name === name;
     if (ownOnlyChild) {
-      const inner = await readdir(join(staging, name)).catch(() => []);
-      return inner.length === 1 && inner[0] === name ? join(staging, name) : staging;
+      const inner = await fs.list(join(staging, name)).catch(() => []);
+      return inner.length === 1 && inner[0]!.name === name ? join(staging, name) : staging;
     }
     return join(staging, name);
+  }
+
+  /**
+   * {@link upload} from a box project: the source is read in the project box (a file as its bytes,
+   * a directory as the project box's `tar` of its contents) and streamed on into the temporary box.
+   */
+  private async uploadFromBoxProject(
+    fs: BoxProjectFs,
+    root: string,
+    connection: BoxConnection,
+    request: { localPath: string; remotePath: string },
+    signal: AbortSignal | undefined
+  ): Promise<BoxOutcome<BoxTransferResult>> {
+    try {
+      const local = await this.insideBoxProject(fs, root, request.localPath);
+      if (!local.ok) return local;
+      const remote = boxPathFor(connection.sys, request.remotePath);
+      if (remote === null || request.remotePath.trim() === "") return refuse(400, "INVALID_ARGUMENT", "remote_path is not a usable path.");
+      const stats = await fs.stat(local.value, { followSymlinks: false });
+      if (stats === null) return refuse(404, "NOT_FOUND", `Nothing at local_path ${clip(request.localPath, 200)}.`);
+      if (stats.kind !== "file" && stats.kind !== "dir") return refuse(400, "INVALID_ARGUMENT", "local_path must be a file or a directory.");
+      const counter = byteCounter(Number.POSITIVE_INFINITY);
+      try {
+        if (stats.kind === "file") {
+          const source = await fs.readStream(local.value, signal ? { signal } : {});
+          abortWith(signal, () => source.destroy(new Error("cancelled")));
+          await relay(source, counter.stream, connection.writeFile(remote, counter.stream, { mkdirs: true, mode: stats.mode & 0o777 }));
+          return done({ kind: "file", bytes: counter.bytes(), localPath: local.value, remotePath: remote });
+        }
+        // The directory's CONTENTS (`tar -cf - .` in it, as on the host): unpacked into `remote`, which becomes the copy.
+        const tar = fs.exec({ command: fs.connection.sys.os === "win32" ? "tar.exe" : "tar", args: ["-cf", "-", "."], cwd: local.value });
+        tar.stdin.end();
+        const exited = boxProcessExit(tar);
+        abortWith(signal, () => {
+          tar.kill("SIGTERM");
+          counter.stream.destroy(new Error("cancelled"));
+        });
+        try {
+          await relay(tar.stdout, counter.stream, connection.writeTar(remote, counter.stream));
+        } catch (error) {
+          tar.kill("SIGTERM");
+          await exited.catch(() => undefined);
+          throw error;
+        }
+        const { code, stderr } = await exited;
+        if (code !== 0) {
+          if (!fs.connection.connected) return projectBoxRefusal(fs.notConnected());
+          return refuse(500, "BOX_TRANSFER_FAILED", `tar could not read the directory${stderr ? `: ${clip(stderr, 300)}` : ""}.`);
+        }
+        return done({ kind: "directory", bytes: counter.bytes(), localPath: local.value, remotePath: remote });
+      } catch (error) {
+        if (signal?.aborted) return refuse(499, "CANCELLED", "The upload was cancelled; the box may hold part of it.");
+        throw error;
+      }
+    } catch (error) {
+      if (error instanceof BoxFsUnavailableError) return projectBoxRefusal(error);
+      if (!fs.connection.connected) return projectBoxRefusal(fs.notConnected());
+      return refuse(502, "BOX_TRANSFER_FAILED", `The upload failed: ${clip(transferMessage(error), 300)}`);
+    }
+  }
+
+  /**
+   * {@link download} into a box project, with the host's rules checked in the project box: a file
+   * streamed into a staging sibling there, a directory unpacked there by its `writeTar`, then
+   * renamed into place (the staging is removed on every failure).
+   */
+  private async downloadIntoBoxProject(
+    fs: BoxProjectFs,
+    root: string,
+    connection: BoxConnection,
+    request: { remotePath: string; localPath: string },
+    signal: AbortSignal | undefined
+  ): Promise<BoxOutcome<BoxTransferResult>> {
+    const gitFs = boxGitMetadataFs(fs);
+    let staging: string | null = null;
+    const counter = byteCounter(BOX_DOWNLOAD_MAX_BYTES);
+    try {
+      const target = await this.insideBoxProject(fs, root, request.localPath);
+      if (!target.ok) return target;
+      const projectRoot = await fs.assertInside(root, root);
+      if (target.value === projectRoot) return refuse(400, "INVALID_ARGUMENT", "local_path is the project itself: name a new file or directory inside it.");
+      // Git in the project box runs that config and those hooks just the same.
+      if (await insideGitMetadata(projectRoot, request.localPath, target.value, gitFs)) return refuse(403, "PERMISSION_DENIED", GIT_METADATA_REFUSAL);
+      const remote = boxPathFor(connection.sys, request.remotePath);
+      if (remote === null || request.remotePath.trim() === "") return refuse(400, "INVALID_ARGUMENT", "remote_path is not a usable path.");
+      let remoteStat;
+      try {
+        remoteStat = await connection.request("fs.stat", { path: remote }, { ...(signal ? { signal } : {}) });
+      } catch (error) {
+        return refuse(502, "BOX_TRANSFER_FAILED", `The box could not read remote_path: ${clip(transferMessage(error), 300)}`);
+      }
+      if (remoteStat === null) return refuse(404, "NOT_FOUND", `Nothing at remote_path ${clip(remote, 200)} in the box.`);
+      if (remoteStat.kind !== "file" && remoteStat.kind !== "dir") return refuse(400, "INVALID_ARGUMENT", "remote_path must be a file or a directory.");
+      const existing = await gitFs.kind(target.value);
+      if (existing !== null && (remoteStat.kind === "dir" || existing !== "file")) {
+        return refuse(409, "ALREADY_EXISTS", `local_path already exists${existing === "dir" ? " as a directory" : ""}: name a new path, or remove it first.`);
+      }
+      const parent = dirname(target.value);
+      staging = join(parent, `.orq-download-${(this.deps.newId ?? randomUUID)()}`);
+      await fs.mkdir(parent, { recursive: true });
+      if (remoteStat.kind === "file") {
+        // A bounded read: the stat's size, at most one byte past the cap (so the counter trips on it).
+        const length = Math.min(remoteStat.size, BOX_DOWNLOAD_MAX_BYTES + 1);
+        const source = await connection.readFile(remote, { length, ...(signal ? { signal } : {}) });
+        abortWith(signal, () => source.destroy(new Error("cancelled")));
+        await relay(source, counter.stream, fs.writeFile(staging, counter.stream, { mode: (remoteStat.mode & 0o111) !== 0 ? 0o755 : 0o644 }));
+        await fs.rename(staging, target.value);
+        staging = null;
+        return done({ kind: "file", bytes: counter.bytes(), localPath: target.value, remotePath: remote });
+      }
+      await fs.mkdir(staging);
+      const source = await connection.readTar(remote);
+      abortWith(signal, () => source.destroy(new Error("cancelled")));
+      // Unpacked by the project box's tar into the fresh staging directory (the host's rules: no
+      // members out of it, links cannot redirect writes into existing paths there).
+      await relay(source, counter.stream, fs.connection.writeTar(fs.toBox(staging), counter.stream));
+      const item = await this.unpackedItem(connection, remote, staging, signal, gitFs);
+      if (await containsGitMetadata(item, gitFs)) return refuse(403, "PERMISSION_DENIED", GIT_TREE_REFUSAL);
+      await fs.rename(item, target.value);
+      if (item !== staging) await fs.rm(staging, { recursive: true, force: true });
+      staging = null;
+      return done({ kind: "directory", bytes: counter.bytes(), localPath: target.value, remotePath: remote });
+    } catch (error) {
+      if (signal?.aborted) return refuse(499, "CANCELLED", "The download was cancelled; nothing was written.");
+      if (counter.over()) return refuse(413, "TOO_LARGE", `The download is over ${BOX_DOWNLOAD_MAX_BYTES / 1024 ** 3} GiB; pack or split it in the box first.`);
+      if (error instanceof BoxFsUnavailableError) return projectBoxRefusal(error);
+      if (!fs.connection.connected) return projectBoxRefusal(fs.notConnected());
+      return refuse(502, "BOX_TRANSFER_FAILED", `The download failed: ${clip(transferMessage(error), 300)}`);
+    } finally {
+      if (staging !== null) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  /** `path` resolved in the project box (realpath there, symlinks included) inside `root`, or a refusal. */
+  private async insideBoxProject(fs: BoxProjectFs, root: string, path: string): Promise<BoxOutcome<string>> {
+    if (path.trim() === "" || path.includes("\0")) return refuse(400, "INVALID_ARGUMENT", "local_path is not a usable path.");
+    if (!path.startsWith("/")) return refuse(403, "PERMISSION_DENIED", "local_path must lie inside this chat's project.");
+    try {
+      return done(await fs.assertInside(root, path));
+    } catch (error) {
+      if (error instanceof FsSandboxError) return refuse(403, "PERMISSION_DENIED", "local_path must lie inside this chat's project.");
+      throw error;
+    }
   }
 
   private async runForeground(
@@ -1274,6 +1497,47 @@ function processExit(child: ReturnType<typeof spawn>): Promise<{ code: number | 
   // Awaited later, after the stream it feeds: a spawn failure meanwhile must not be an unhandled rejection.
   exited.catch(() => undefined);
   return exited;
+}
+
+/**
+ * Stream `source` through `through` into `write` (the box write consuming `through`). Settles once
+ * both ended: a box that commits before the source ends still waits for it (a later source error or
+ * the byte cap fails the transfer); a failure on either side destroys the other.
+ */
+async function relay(source: Readable, through: Transform, write: Promise<void>): Promise<void> {
+  const piped = pipeline(source, through);
+  piped.catch(() => undefined);
+  try {
+    await Promise.all([write, piped]);
+  } catch (error) {
+    source.destroy();
+    through.destroy();
+    throw error;
+  }
+}
+
+/** A box process's exit (a link drop ends it with SIGHUP) and the start of its stderr (for the message). */
+function boxProcessExit(process: BoxProcess): Promise<{ code: number | null; stderr: string }> {
+  const exited = new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const stderr: Buffer[] = [];
+    let held = 0;
+    process.stderr.on("data", (chunk: Buffer | string) => {
+      if (held < 4096) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        stderr.push(bytes);
+        held += bytes.length;
+      }
+    });
+    process.once("error", reject);
+    process.once("exit", (code) => resolve({ code, stderr: Buffer.concat(stderr).toString("utf8").trim() }));
+  });
+  exited.catch(() => undefined);
+  return exited;
+}
+
+/** The project box cannot be reached: the refusal names the chat's project box, not the temporary one. */
+function projectBoxRefusal(error: BoxFsUnavailableError): { ok: false; code: string; message: string; status: number } {
+  return refuse(error.status, error.code, `This chat's project lives in its own box (${error.boxId}). ${error.message}`);
 }
 
 /** A transfer error's message (the box's or a stream's), without anything that is not text. */
