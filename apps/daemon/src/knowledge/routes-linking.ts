@@ -13,7 +13,8 @@
  *   client, and nothing on the remote transport could ever be a worker. The calling session is ONLY the request's agent principal (the identity the daemon stamps on
  *   an in-chat tool call); a body `sessionId` is never trusted. It must be a session whose `owner`
  *   is `{kind: "knowledge-indexer"}` for the run in flight, else 403 `KNOWLEDGE_NOT_A_WORKER`. `workerNext` long-polls (see `linking/inbox.ts`);
- *   a client that goes away ends the wait.
+ *   a client that goes away ends the wait. `workerNext` with a body `taskId` (`KnowledgeWorkerNextRequest`)
+ *   answers the task the chat holds at once, for a later part of it, or 400 `KNOWLEDGE_INVALID`.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -21,6 +22,7 @@ import {
   knowledgeRoutes,
   type KnowledgeRebuildEstimate,
   type KnowledgeStatus,
+  type KnowledgeWorkerNextRequest,
   type KnowledgeWorkerNextResponse,
   type KnowledgeWorkerSubmitResponse,
   type SessionOwner
@@ -151,9 +153,14 @@ export function registerKnowledgeLinkingRoutes(app: FastifyInstance, deps: Knowl
 
   app.post(knowledgeRoutes.workerNext, async (request, reply): Promise<KnowledgeWorkerNextResponse | void> => {
     try {
+      const taskId: unknown = (bodyOf(request) as { [K in keyof KnowledgeWorkerNextRequest]?: unknown }).taskId;
       const sessionId = callerSession(request);
       requireWorker(sessionId);
-      return await linking.workerNext(sessionId, clientGone(reply));
+      if (taskId === undefined) return await linking.workerNext(sessionId, clientGone(reply));
+      if (typeof taskId !== "string" || taskId.trim() === "" || taskId.length > 200) {
+        throw new KnowledgeError("KNOWLEDGE_INVALID", "taskId must be the id of the task you hold.");
+      }
+      return await linking.workerNext(sessionId, clientGone(reply), taskId.trim());
     } catch (error) {
       return fail(reply, error);
     }

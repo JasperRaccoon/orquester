@@ -117,6 +117,7 @@ import type {
   KnowledgeSettingsPort,
   KnowledgeStorePort
 } from "../ports.ts";
+import { KnowledgeError } from "../store/errors.ts";
 import { contextReady, EntryDocumentLocator, LINK_CONTEXT_VERSION, linkContextProvider, type KnowledgeLinkGraphView } from "./context.ts";
 import { linkGapConceptKey } from "../search/gaps.ts";
 import { clearUnansweredTasks, InboxBroker } from "./inbox.ts";
@@ -535,10 +536,18 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     return (this.active !== null && owner.runId === this.active.record.id) || (this.pairRound !== null && owner.runId === this.pairRound.id);
   }
 
-  workerNext(sessionId: string, signal?: AbortSignal): Promise<KnowledgeWorkerNextResponse> {
+  /**
+   * The chat's next task (long-polling), or with `taskId` the task it holds read again, for a later
+   * part (`InboxBroker.held`: no wait, no lease, nothing counted); a task it does not hold is
+   * refused with `KNOWLEDGE_INVALID`.
+   */
+  async workerNext(sessionId: string, signal?: AbortSignal, taskId?: string): Promise<KnowledgeWorkerNextResponse> {
     const broker = this.brokerFor(sessionId);
-    if (!broker) return Promise.resolve({ kind: "done", reason: "run-finished" });
-    return broker.next(sessionId, signal);
+    if (!broker) return { kind: "done", reason: "run-finished" };
+    if (taskId === undefined) return broker.next(sessionId, signal);
+    const held = broker.held(sessionId, taskId);
+    if ("error" in held) throw new KnowledgeError("KNOWLEDGE_INVALID", held.error);
+    return held;
   }
 
   workerSubmit(sessionId: string, taskId: string, answer: string, signal?: AbortSignal): Promise<KnowledgeWorkerSubmitResponse> {

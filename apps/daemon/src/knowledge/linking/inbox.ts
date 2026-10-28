@@ -46,6 +46,9 @@
  *
  * What a worker sees of a task (`view`) may say more than myKG's prompt: `contextFor` adds a block
  * after it (phase 2 spec, "Neighbour context": the concepts of similar entries for a Pass 2 task).
+ * The block only gets the room the task leaves in one worker tool result (`contextRoom`): it is
+ * shortened to fit, and a task too large for one result gets none (the worker tool shows such a
+ * task in parts; `held` reads the held task again for them, with no side effect on leases or budgets).
  * The task file, its id and so myKG's cache key stay as myKG wrote them. A step can have a stricter
  * answer check than "parses as JSON" (`validate`: the daemon's own pair-check tasks).
  */
@@ -55,7 +58,7 @@ import { EventEmitter } from "node:events";
 import { watch as fsWatch } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { KnowledgeWorkerNextResponse, KnowledgeWorkerSubmitResponse, KnowledgeWorkerTask } from "@orquester/api";
+import { KNOWLEDGE_WORKER_PART_MAX, knowledgeWorkerTextSize, type KnowledgeWorkerNextResponse, type KnowledgeWorkerSubmitResponse, type KnowledgeWorkerTask } from "@orquester/api";
 import type { Clock } from "../../workflows/contracts.ts";
 
 export const INBOX_DIR = "agent_inbox";
@@ -75,7 +78,10 @@ export const REUSE_INDEX_FILE = "orquester-answer-reuse.ndjson";
  * window.
  */
 export const DEFAULT_SESSION_BUDGET = { tasks: 12, tokens: 60_000 };
-/** A task view above this estimate is logged: it may not fit the worker's tool-result limit (60k, see the Claude launch). */
+/**
+ * A task view above this estimate is logged: the worker tool shows it in many parts (each result
+ * stays under `KNOWLEDGE_WORKER_RESULT_MAX`), and myKG's chunk and batch sizes should not make one.
+ */
 export const MAX_TASK_TOKENS = 45_000;
 /** Answers of one task a chat may have refused before it is retired and the task handed on. */
 export const MAX_REFUSALS = 3;
@@ -142,9 +148,12 @@ export interface InboxBrokerOptions {
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
   /**
    * Extra input shown to the worker after myKG's prompt (`null`: none), computed once per task
-   * before it is first handed out. Never changes the task file, its id, or myKG's cache.
+   * before it is first handed out. Never changes the task file, its id, or myKG's cache. `room`:
+   * the most the block may take (`knowledgeWorkerTextSize`, see {@link contextRoom}) — a larger one
+   * would put the task in parts; it is not asked at all when the task leaves no room. The block it
+   * answers is the one shown.
    */
-  contextFor?: (envelope: InboxTaskEnvelope) => Promise<string | null>;
+  contextFor?: (envelope: InboxTaskEnvelope, room: number) => Promise<string | null>;
   /** A stricter check of a parsed answer for some steps (or tasks): an error message refuses it like a parse error. */
   validate?: (step: string, value: unknown, taskId: string) => string | null;
   /**
@@ -440,6 +449,25 @@ export class InboxBroker {
     }
   }
 
+  /**
+   * The task this chat holds, read again for a later part of a task shown in parts: it never
+   * waits, leases, re-leases or counts anything (a chat still holds its lease until it answers or
+   * ends). `{error}` when the chat does not hold that task; `done` once the run ended or the chat
+   * was retired, as `next` would answer.
+   */
+  held(sessionId: string, taskId: string): KnowledgeWorkerNextResponse | { error: string } {
+    if (this.finished) return { kind: "done", reason: this.finished };
+    const session = this.sessions.get(sessionId);
+    if (session?.retired) return { kind: "done", reason: "session-budget" };
+    const task = session?.lease === taskId ? this.tasks.get(taskId) : undefined;
+    if (session && task && !task.done && task.envelope && task.instructionsHash !== null && task.leasedTo === session.id) {
+      return { kind: "task", task: this.view(session, task, false) };
+    }
+    const quoted = `"${taskId.slice(0, 80)}"`;
+    const yours = session && session.lease !== null && session.lease !== taskId ? ` Your task is ${session.lease}.` : "";
+    return { error: `You do not hold task ${quoted}, so it has no parts to read.${yours} Call knowledge_worker_next_task without a taskId for your task.` };
+  }
+
   /** Validates and writes one answer, then hands out the next task (see the module header). */
   async submit(sessionId: string, taskId: string, answer: string, signal?: AbortSignal): Promise<KnowledgeWorkerSubmitResponse> {
     this.register(sessionId);
@@ -503,21 +531,27 @@ export class InboxBroker {
 
   // --- internals ---------------------------------------------------------------------------------
 
-  /** Computes what the worker is shown (`contextFor`); a context that fails costs only the context. */
+  /**
+   * Computes what the worker is shown (`contextFor`); a context that fails costs only the context.
+   * The context gets only the room the task leaves in one worker tool result: it never puts a task
+   * in parts, and a task already in parts gets none (`contextFor` is not asked).
+   */
   private async prepare(task: TaskEntry): Promise<void> {
     const envelope = task.envelope!;
     let extra: string | null = null;
-    if (this.contextFor) {
+    const room = contextRoom(envelope);
+    if (this.contextFor && room > 0) {
       try {
-        extra = await this.contextFor(envelope);
+        extra = await this.contextFor(envelope, room);
       } catch (error) {
         this.logger?.warn("knowledge inbox: a task's context could not be built", { taskId: task.id, error: String(error) });
       }
     }
-    task.input ??= extra ? `${envelope.user}\n\n${extra}` : envelope.user;
+    task.input ??= extra ? `${envelope.user}${CONTEXT_SEPARATOR}${extra}` : envelope.user;
   }
 
-  private view(session: SessionEntry, task: TaskEntry): KnowledgeWorkerTask {
+  /** What the chat is shown of a task; `record` (handing it out): note the instructions as sent and count them. */
+  private view(session: SessionEntry, task: TaskEntry, record = true): KnowledgeWorkerTask {
     const envelope = task.envelope!;
     const hash = task.instructionsHash!;
     const first = session.seen.get(hash);
@@ -526,15 +560,15 @@ export class InboxBroker {
     if (first !== undefined && first !== task.id) {
       instructions = null;
       sameAs = first;
-    } else if (first === undefined) {
+    } else if (first === undefined && record) {
       session.seen.set(hash, task.id);
       session.tokens += estimateTokens(envelope.system);
     }
     const input = task.input ?? envelope.user;
     const size = estimateTokens(input) + (instructions ? estimateTokens(instructions) : 0);
-    if (size > MAX_TASK_TOKENS) {
+    if (record && size > MAX_TASK_TOKENS) {
       // myKG's chunk and batch sizes (`mykg-config.ts`) keep tasks far below this; say so if one is not.
-      this.logger?.warn("knowledge inbox: a task is larger than a worker's tool result should be", { taskId: task.id, step: envelope.step, tokens: size });
+      this.logger?.warn("knowledge inbox: a task is far larger than one worker tool result (it is shown in many parts)", { taskId: task.id, step: envelope.step, tokens: size });
     }
     const { pending } = this.counts();
     return {
@@ -807,6 +841,21 @@ export function readEnvelope(value: unknown, id: string): InboxTaskEnvelope | nu
 /** What the model is shown (myKG's task id adds the label to it). */
 function promptHash(envelope: InboxTaskEnvelope): string {
   return createHash("sha256").update(`${envelope.system}\n--user--\n${envelope.user}`).digest("hex");
+}
+
+/** Between myKG's prompt and the context block in a worker's input. */
+const CONTEXT_SEPARATOR = "\n\n";
+/** The labels the worker tool puts around a task's instructions and input (`workerTaskBody` in `mcp/tools/knowledge.ts`), as a size. */
+const VIEW_LABELS_SIZE = knowledgeWorkerTextSize("Instructions:\n\n\nInput:\n");
+
+/**
+ * The most a context block may take (`knowledgeWorkerTextSize`) so that the task — its
+ * instructions sent in full, its input and the block — still fits one worker tool result
+ * (`KNOWLEDGE_WORKER_PART_MAX`); 0 or less: no room.
+ */
+export function contextRoom(envelope: Pick<InboxTaskEnvelope, "system" | "user">): number {
+  const base = knowledgeWorkerTextSize(envelope.system) + knowledgeWorkerTextSize(envelope.user) + VIEW_LABELS_SIZE;
+  return KNOWLEDGE_WORKER_PART_MAX - base - knowledgeWorkerTextSize(CONTEXT_SEPARATOR);
 }
 
 /** A rough token count (4 characters a token) for the session budget. */

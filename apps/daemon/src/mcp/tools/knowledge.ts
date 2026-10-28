@@ -22,6 +22,10 @@
  *   absent is left out of the text, never guessed; a daemon without the insights route says so.
  * - **No card**: saving, editing, deleting and merging are Act; they change only the knowledge base,
  *   and saving must stay fast. Editing, deleting and merging reach the same routes as the Knowledge tab.
+ * - **Worker tasks in parts**: a task whose instructions and input would make a result larger than
+ *   `KNOWLEDGE_WORKER_RESULT_MAX` (Claude Code moves a larger one out of the model's sight) is shown
+ *   in parts; `knowledge_worker_next_task` with `taskId` and `part` reads a part of the task the
+ *   chat holds, which the daemon answers without waiting, leasing or counting anything.
  *
  * Everything goes through `DaemonApi` (D-1): this module imports types and pure contracts only.
  */
@@ -38,7 +42,10 @@ import {
   KNOWLEDGE_SEARCH_MAX_LIMIT,
   KNOWLEDGE_SIMILAR_MAX_EXAMPLES,
   KNOWLEDGE_TITLE_MAX,
+  KNOWLEDGE_WORKER_PART_MAX,
   knowledgeRoutes,
+  knowledgeWorkerCharSize,
+  knowledgeWorkerTextSize,
   type KnowledgeCollectionsResponse,
   type KnowledgeConceptDetail,
   type KnowledgeConceptRef,
@@ -60,8 +67,10 @@ import {
   type KnowledgeSearchFilters,
   type KnowledgeSearchResponse,
   type KnowledgeSimilarEntry,
+  type KnowledgeWorkerNextRequest,
   type KnowledgeWorkerNextResponse,
   type KnowledgeWorkerSubmitRequest,
+  type KnowledgeWorkerTask,
   type KnowledgeWorkerSubmitResponse,
   type UpdateKnowledgeEntryRequest
 } from "@orquester/api";
@@ -696,15 +705,95 @@ function renderInsights(response: KnowledgeInsightsResponse, over: readonly stri
   ].join("\n");
 }
 
-/** A worker's next task (or the word to stop). */
+/** A worker's next task (or the word to stop): a task in parts shows its first part. */
 function renderWorkerNext(next: KnowledgeWorkerNextResponse): string {
   if (next.kind === "done") return `No task (${next.reason}). End your turn now.`;
-  const task = next.task;
-  const lines = [`Task ${task.taskId} · step ${task.step} · answer ≤ ${task.maxTokens} tokens · ${task.remaining} more waiting`];
-  if (task.instructions === null) lines.push(`Instructions: the same as task ${task.sameInstructionsAs ?? "before"}.`);
-  else lines.push("Instructions:", task.instructions);
-  lines.push("", "Input:", task.input, "", `Reply with knowledge_worker_submit: taskId "${task.taskId}" and the answer — only the JSON text the instructions ask for.`);
+  return renderWorkerTask(next.task, workerTaskParts(next.task), 1);
+}
+
+/** One part of a worker task's instructions and input; `midLine`: it stops inside a line the next part continues. */
+export interface WorkerTaskPart {
+  text: string;
+  midLine: boolean;
+}
+
+/** A task's instructions and input as the worker reads them: what is cut into parts. */
+function workerTaskBody(task: KnowledgeWorkerTask): string {
+  const lines = task.instructions === null ? [`Instructions: the same as task ${task.sameInstructionsAs ?? "before"}.`] : ["Instructions:", task.instructions];
+  lines.push("", "Input:", task.input);
   return lines.join("\n");
+}
+
+/** The task's body as one part when it fits one result, else in parts of at most `KNOWLEDGE_WORKER_PART_MAX`. */
+export function workerTaskParts(task: KnowledgeWorkerTask): WorkerTaskPart[] {
+  const body = workerTaskBody(task);
+  return knowledgeWorkerTextSize(body) <= KNOWLEDGE_WORKER_PART_MAX ? [{ text: body, midLine: false }] : splitWorkerText(body, KNOWLEDGE_WORKER_PART_MAX);
+}
+
+/**
+ * `text` cut into parts of at most `max` serialized size (`knowledgeWorkerTextSize`): at line
+ * boundaries (the line break between two parts falls away), and a line longer than a part at a
+ * character boundary (never inside a surrogate pair).
+ */
+export function splitWorkerText(text: string, max: number): WorkerTaskPart[] {
+  const parts: WorkerTaskPart[] = [];
+  let lines: string[] = [];
+  let size = 0;
+  const flush = (midLine: boolean): void => {
+    parts.push({ text: lines.join("\n"), midLine });
+    lines = [];
+    size = 0;
+  };
+  for (const line of text.split("\n")) {
+    const lineSize = knowledgeWorkerTextSize(line);
+    // A line break takes 2 serialized ("\n").
+    const joined = lines.length > 0 ? size + 2 + lineSize : lineSize;
+    if (joined <= max) {
+      lines.push(line);
+      size = joined;
+      continue;
+    }
+    if (lines.length > 0) flush(false);
+    if (lineSize <= max) {
+      lines.push(line);
+      size = lineSize;
+      continue;
+    }
+    let start = 0;
+    let chunk = 0;
+    for (let i = 0; i < line.length; ) {
+      const charSize = knowledgeWorkerCharSize(line, i);
+      // A surrogate pair counts 4 on its first unit and is never cut.
+      const units = charSize === 4 && line.charCodeAt(i) >= 0xd800 && line.charCodeAt(i) <= 0xdbff ? 2 : 1;
+      if (chunk + charSize > max) {
+        lines.push(line.slice(start, i));
+        flush(true);
+        start = i;
+        chunk = 0;
+      }
+      chunk += charSize;
+      i += units;
+    }
+    lines.push(line.slice(start));
+    size = chunk;
+  }
+  if (lines.length > 0 || parts.length === 0) flush(false);
+  return parts;
+}
+
+/** Part `part` (1-based, in range) of a task; a task in one part is the whole task, with no part line. */
+function renderWorkerTask(task: KnowledgeWorkerTask, parts: readonly WorkerTaskPart[], part: number): string {
+  // The step is myKG's label of the call, clipped so a part's frame stays within KNOWLEDGE_WORKER_FRAME_MAX.
+  const head = `Task ${task.taskId} · step ${clipText(task.step, 100)} · answer ≤ ${task.maxTokens} tokens · ${task.remaining} more waiting`;
+  const submit = `knowledge_worker_submit: taskId "${task.taskId}" and the answer — only the JSON text the instructions ask for.`;
+  if (parts.length === 1) return [head, parts[0]!.text, "", `Reply with ${submit}`].join("\n");
+  const n = parts.length;
+  const current = parts[part - 1]!;
+  const after =
+    part < n
+      ? `End of part ${part} of ${n}${current.midLine ? ` (it stops mid-line: part ${part + 1} continues that line)` : ""}. This task is in ${n} parts. Call knowledge_worker_next_task with {"taskId": "${task.taskId}", "part": ${part + 1}}, and so on until you have all ${n} parts; only then answer the whole task with ${submit}`
+      : `End of part ${n} of ${n}: you now have the whole task. Answer it with ${submit}`;
+  return [head, `This task is in ${n} parts. Part ${part} of ${n}:`, "", current.text, "", after].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,8 +1227,11 @@ const workerNextTask = defineTool({
   name: "knowledge_worker_next_task",
   title: "Next indexing task",
   description:
-    "Knowledge Graph indexing sessions only: the next extraction task — its instructions (sent once per step; later \"the same as task N\") and its input — or none left, and then you end your turn.",
-  input: {},
+    "Knowledge Graph indexing sessions only: the next extraction task — its instructions (sent once per step; later \"the same as task N\") and its input — or none left, and then you end your turn. A long task comes in parts: taskId and part read one.",
+  input: {
+    taskId: z.string().trim().min(1).max(200).optional(),
+    part: z.number().int().min(1).optional()
+  },
   audiences: ["chat"],
   toolset: "knowledge",
   tier: "act",
@@ -1147,9 +1239,23 @@ const workerNextTask = defineTool({
   scope: async () => knowledgeScope("none", true),
   annotations: closedWorld(MUTATING),
   resultKind: "text",
-  async run(_args, { api, caller }: CallContext) {
+  async run(args, { api, caller }: CallContext) {
     const sessionId = sessionIdOf(caller, "knowledge_worker_next_task");
-    return text(renderWorkerNext(await call<KnowledgeWorkerNextResponse>(api, "POST", knowledgeRoutes.workerNext, { body: { sessionId } })));
+    if (args.taskId === undefined) {
+      if (args.part !== undefined) throw new ToolError("INVALID_ARGUMENT", "A part needs the taskId of the task it belongs to.");
+      return text(renderWorkerNext(await call<KnowledgeWorkerNextResponse>(api, "POST", knowledgeRoutes.workerNext, { body: { sessionId } })));
+    }
+    // A part of the task this chat holds: the daemon reads it again without waiting, leasing or counting anything.
+    const body: KnowledgeWorkerNextRequest = { sessionId, taskId: args.taskId };
+    const next = await call<KnowledgeWorkerNextResponse>(api, "POST", knowledgeRoutes.workerNext, { body });
+    if (next.kind === "done") return text(renderWorkerNext(next));
+    const parts = workerTaskParts(next.task);
+    const part = args.part ?? 1;
+    if (part > parts.length) {
+      const range = parts.length === 1 ? "it is not in parts, ask for part 1" : `ask for a part from 1 to ${parts.length}`;
+      throw new ToolError("INVALID_ARGUMENT", `Task ${clipText(args.taskId, 100)} has ${parts.length} part${parts.length === 1 ? "" : "s"}: ${range}.`);
+    }
+    return text(renderWorkerTask(next.task, parts, part));
   }
 });
 

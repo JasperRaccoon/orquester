@@ -29,7 +29,7 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { KnowledgeConceptRef } from "@orquester/api";
+import { knowledgeWorkerTextSize, type KnowledgeConceptRef } from "@orquester/api";
 import type { KnowledgeStorePort, KnowledgeVectorIndex } from "../ports.ts";
 import type { InboxTaskEnvelope } from "./inbox.ts";
 import { MYKG_CHUNK_TOKENS } from "./mykg-config.ts";
@@ -109,8 +109,12 @@ export function nearestNeighbours(index: KnowledgeVectorIndex, entryId: string, 
   return out.slice(0, k);
 }
 
-/** The context block for an entry's Pass 2 task, or null when it has no embedded neighbour with concepts. */
-export function neighbourContextBlock(entryId: string, view: KnowledgeLinkGraphView): string | null {
+/**
+ * The context block for an entry's Pass 2 task, or null when it has no embedded neighbour with
+ * concepts. `room`: the most the block may take (`knowledgeWorkerTextSize`; the broker's
+ * `contextRoom`): the lowest-ranked concepts are left out to fit, and null when not even one fits.
+ */
+export function neighbourContextBlock(entryId: string, view: KnowledgeLinkGraphView, room = Number.POSITIVE_INFINITY): string | null {
   const index = view.vectors();
   const thresholds = index.thresholds();
   if (!thresholds) return null;
@@ -129,15 +133,23 @@ export function neighbourContextBlock(entryId: string, view: KnowledgeLinkGraphV
     .sort((a, b) => b.score - a.score || a.order - b.order || (a.ref.name < b.ref.name ? -1 : 1))
     .slice(0, CONTEXT_CONCEPTS_MAX);
   const lines = concepts.map(({ ref }) => `- ${oneLine(ref.type)}: ${oneLine(ref.name)}`);
-  return [
+  const head = [
     CONTEXT_HEADING,
     "=".repeat(CONTEXT_HEADING.length),
     "These concepts are already in the knowledge graph, taken from the entries most similar to the document above.",
     "Reuse a listed type and name only when the document states the same thing at the same specificity: then extract it under exactly that type and name instead of a variant of the name.",
     'Keep a concept of its own, named for what the document says, when the document states a different number, duration, quantity, tool or condition, or a more specific or more general version ("Warm up the account for 48 hours" is not "Post the first video after 1-2 days").',
-    "Never reuse a listed name whose claim differs from the document's, and never extract a listed concept the document does not mention.",
-    ...lines
+    "Never reuse a listed name whose claim differs from the document's, and never extract a listed concept the document does not mention."
   ].join("\n");
+  // Each concept line adds its own size and a line break (2 serialized).
+  let size = knowledgeWorkerTextSize(head);
+  let fit = 0;
+  for (const line of lines) {
+    size += 2 + knowledgeWorkerTextSize(line);
+    if (size > room) break;
+    fit += 1;
+  }
+  return fit === 0 ? null : [head, ...lines.slice(0, fit)].join("\n");
 }
 
 function oneLine(text: string): string {
@@ -283,29 +295,31 @@ export class EntryDocumentLocator {
 }
 
 /**
- * The broker's `contextFor` for one run: the block for Pass 2 tasks whose entry is found, else null.
- * `onContext`: called with each entry a task was shown a block for (only those record
- * {@link LINK_CONTEXT_VERSION} when the run links them).
+ * The broker's `contextFor` for one run: the block for Pass 2 tasks whose entry is found, else null;
+ * fitted to `room` (the broker's `contextRoom`; no block when nothing fits). `onContext`: called
+ * with each entry a task was shown a block for — only for a block it answers, and the broker shows
+ * every block it is answered (only those entries record {@link LINK_CONTEXT_VERSION} when the run
+ * links them).
  */
 export function linkContextProvider(
   store: Pick<KnowledgeStorePort, "listMeta" | "mykgInputDir">,
   view: KnowledgeLinkGraphView,
   onContext?: (entryId: string) => void
-): (envelope: InboxTaskEnvelope) => Promise<string | null> {
+): (envelope: InboxTaskEnvelope, room?: number) => Promise<string | null> {
   const locator = new EntryDocumentLocator(store);
   // Once per task: a task handed out again (a released lease) gets the same block.
   const blocks = new Map<string, Promise<string | null>>();
-  const blockFor = async (envelope: InboxTaskEnvelope): Promise<string | null> => {
+  const blockFor = async (envelope: InboxTaskEnvelope, room: number): Promise<string | null> => {
     const entryId = await locator.entryOf(envelope.user);
-    const block = entryId ? neighbourContextBlock(entryId, view) : null;
+    const block = entryId ? neighbourContextBlock(entryId, view, room) : null;
     if (entryId && block !== null) onContext?.(entryId);
     return block;
   };
-  return (envelope) => {
-    if (!CONTEXT_STEPS.has(envelope.step) || !contextReady(view)) return Promise.resolve(null);
+  return (envelope, room = Number.POSITIVE_INFINITY) => {
+    if (!CONTEXT_STEPS.has(envelope.step) || !contextReady(view) || room <= 0) return Promise.resolve(null);
     let block = blocks.get(envelope.task_id);
     if (!block) {
-      block = blockFor(envelope);
+      block = blockFor(envelope, room);
       blocks.set(envelope.task_id, block);
       // A failure is not remembered: the next lease tries again.
       block.catch(() => blocks.delete(envelope.task_id));
