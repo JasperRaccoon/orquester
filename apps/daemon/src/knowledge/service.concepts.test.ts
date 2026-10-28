@@ -13,7 +13,7 @@ import { test, type TestContext } from "node:test";
 
 import Fastify from "fastify";
 import { KNOWLEDGE_CHANGED_EVENT, KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, knowledgeRoutes, type KnowledgeConceptMergesResponse, type KnowledgeStatus } from "@orquester/api";
-import { knowledgeClusterLabelsPath, knowledgeConceptMergesPath, knowledgeGraphPluginDir } from "@orquester/config";
+import { knowledgeClusterLabelsPath, knowledgeConceptMergesPath, knowledgeConceptSummariesPath, knowledgeGraphPluginDir } from "@orquester/config";
 
 import { FAKE_RUNTIME } from "./linking/testing.ts";
 import { loadGraph, node, silentLogger } from "./search/test-fakes.ts";
@@ -145,7 +145,7 @@ test("linking is handed the LLM quality sources; a cluster name recorded through
   const h = await harness(t, undefined, (given) => (sources = given));
   assert.deepEqual(
     sources.map((source) => source.step),
-    ["concept-check", "cluster-name"]
+    ["concept-check", "cluster-name", "concept-summary"]
   );
   const names = sources.find((source) => source.step === "cluster-name")!;
   const before = graphChanges(h.events);
@@ -153,4 +153,14 @@ test("linking is handed the LLM quality sources; a cluster name recorded through
   assert.equal(graphChanges(h.events) - before, 1);
   const file = JSON.parse(await readFile(knowledgeClusterLabelsPath(h.appdir), "utf8")) as { labels: { label: string }[] };
   assert.deepEqual(file.labels.map((l) => l.label), ["Account warm-up"]);
+  // A concept summary recorded through its source is persisted and announced (concept details change).
+  const summaries = sources.find((source) => source.step === "concept-summary")!;
+  const beforeSummary = graphChanges(h.events);
+  await summaries.record(
+    { conceptId: "tactic-x", hash: "h", members: [{ id: "ke_a", contentHash: "c" }], inputs: ["ke_a"], names: ["X"] },
+    JSON.stringify({ text: "A thing.", positions: [{ entryId: "ke_a", claim: "It works." }] })
+  );
+  assert.equal(graphChanges(h.events) - beforeSummary, 1);
+  const written = JSON.parse(await readFile(knowledgeConceptSummariesPath(h.appdir), "utf8")) as { summaries: { conceptId: string; text: string }[] };
+  assert.deepEqual(written.summaries.map((s) => [s.conceptId, s.text]), [["tactic-x", "A thing."]]);
 });

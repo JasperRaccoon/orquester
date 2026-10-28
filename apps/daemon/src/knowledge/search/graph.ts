@@ -795,6 +795,14 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     return [...this.base.concepts.values()];
   }
 
+  /**
+   * The concepts of the current graph, after the merge overlay (a merged concept under its kept id,
+   * with every source's entries and names); unscoped. What concept summaries are written for.
+   */
+  currentConcepts(): readonly GraphConcept[] {
+    return [...this.snapshot.concepts.values()];
+  }
+
   /** myKG's edges as last loaded, before the merge overlay (the concept checks' neighbour anchors). */
   baseEdges(): readonly GraphEdge[] {
     return this.base.edges;

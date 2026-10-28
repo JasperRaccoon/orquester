@@ -34,6 +34,7 @@ import type { KnowledgeEmbedderSource } from "./embedder.ts";
 import { type KnowledgeEntryFilter, entryMatchesFilter, filterKey, parseKnowledgeFilters, splitFilterList } from "./filters.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import { computeKnowledgeFacets } from "./facets.ts";
+import type { KnowledgeConceptSummariesPort } from "./concept-summaries.ts";
 import { findContradictions, isSurveyEntry } from "./contradictions.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
 import { KnowledgeInsights } from "./insights.ts";
@@ -148,6 +149,8 @@ export class KnowledgeSearch {
     revision: number;
     unsubscribe: (() => void) | null;
   } = { pairChecks: null, linkGapQueued: null, revision: 0, unsubscribe: null };
+  /** Neutral concept summaries (`concept-summaries.ts`); null: none ({@link connectConceptSummaries}). */
+  private conceptSummaries: KnowledgeConceptSummariesPort | null = null;
 
   constructor(options: KnowledgeSearchOptions) {
     this.store = options.store;
@@ -198,6 +201,11 @@ export class KnowledgeSearch {
     connected.unsubscribe = pairChecks?.onChange(() => {
       connected.revision += 1;
     }) ?? null;
+  }
+
+  /** Where concept details read their summaries from (null: none). */
+  connectConceptSummaries(port: KnowledgeConceptSummariesPort | null): void {
+    this.conceptSummaries = port;
   }
 
   /** Subscribe to the store and index every entry's text (in the background; queries wait for it). */
@@ -751,6 +759,14 @@ export class KnowledgeSearch {
       .map((entryId) => this.store.getMeta(entryId))
       .filter((m): m is KnowledgeEntryMeta => m !== null)
       .sort(newestFirst);
+    // Served only to a caller who can see every entry it was written from (`concept-summaries.ts`).
+    const summary = this.conceptSummaries?.summaryFor(this.graph.canonicalConceptId(id), {
+      visible: (entryId) => {
+        const meta = this.store.getMeta(entryId);
+        return meta && entryInScope(meta, scope) ? meta : null;
+      },
+      behind: new Set(view.entryIds)
+    });
     return {
       concept: view.concept,
       collections: view.collections,
@@ -758,7 +774,8 @@ export class KnowledgeSearch {
       neighbors: view.neighbors,
       mergedFrom: view.mergedFrom,
       similarConcepts: view.similarConcepts,
-      entryIds: newest.slice(0, CONCEPT_ENTRY_IDS_LIMIT).map((m) => m.id)
+      entryIds: newest.slice(0, CONCEPT_ENTRY_IDS_LIMIT).map((m) => m.id),
+      ...(summary ? { summary } : {})
     };
   }
 
