@@ -484,6 +484,11 @@ test("contradictions that make the same point against one entry are shown once, 
       [[ke("p1"), ke("q2")], [ke("r3")]]
     ]
   );
+  assert.deepEqual(
+    p1s.map((item) => item.alsoJoins && [item.alsoJoins.a.map((e) => e.id), item.alsoJoins.b.map((e) => e.id)]),
+    [undefined, [[], [ke("r3")]]],
+    "R3 makes Q2's point against P1: it joins Q2's side"
+  );
   assert.equal(seo.totals.contradictions, seo.contradictions.length, "counted once");
   // Unit: one side in common, and the same note words or a concept pair in common.
   const pair = { from: { id: "c1", name: "C1", type: "Tactic" }, to: { id: "c2", name: "C2", type: "Tactic" } };
@@ -491,6 +496,32 @@ test("contradictions that make the same point against one entry are shown once, 
   assert.equal(samePoint({ a: "x", b: "y", pairs: [pair], note: null }, { a: "x", b: "z", pairs: [{ from: pair.to, to: pair.from }], note: null }, none), true, "the same concept pair, either way round");
   assert.equal(samePoint({ a: "x", b: "y", pairs: [pair], note: null }, { a: "w", b: "z", pairs: [pair], note: null }, none), false, "no side in common");
   assert.equal(samePoint({ a: "x", b: "y", pairs: [], note: "x says daily" }, { a: "x", b: "z", pairs: [], note: null }, none), false);
+});
+
+test("`also` lists an entry once per side it joins, though it makes the same point against the pair twice", async () => {
+  const s = await setup();
+  const at = "2026-10-27T00:00:00.000Z";
+  const pair = (a: string, b: string) => [ke(a), ke(b)].sort() as [string, string];
+  const check = (a: string, b: string, note: string) => {
+    const [x, y] = pair(a, b);
+    s.pairChecks.push({ a: x, b: y, verdict: "contradicts", note, checkedAt: at });
+  };
+  // P1, Q2 and Q3 each give their own accounts per device and warm-up length: every pair disagrees on
+  // that one point, so each entry makes it against both others.
+  const note = "Each gives its own number of accounts per device (2-3, one, five) and its own warm-up length (1-2 days, a few days, 3 days).";
+  check("p1", "q2", note);
+  check("q3", "p1", note);
+  check("q3", "q2", note);
+  s.checksChanged();
+  const seo = await s.insights.list({}, s.seoOnly);
+  const three = new Set([ke("p1"), ke("q2"), ke("q3")]);
+  const ours = seo.contradictions.filter((item) => three.has(item.a.id) && three.has(item.b.id));
+  assert.equal(ours.length, 1, "the three checks make one point: folded into the first");
+  const [top] = ours;
+  const third = [ke("p1"), ke("q2"), ke("q3")].find((id) => !pairOf(top!).includes(id))!;
+  assert.deepEqual(top!.also!.map((e) => e.id), [third], "the third entry once");
+  // It disagrees with each side of the pair: it joins each one, against the other.
+  assert.deepEqual([top!.alsoJoins!.a.map((e) => e.id), top!.alsoJoins!.b.map((e) => e.id)], [[third], [third]]);
 });
 
 test("single-source: never the entry's own title restated, a metric that states nothing, or a figure another visible entry states", async () => {

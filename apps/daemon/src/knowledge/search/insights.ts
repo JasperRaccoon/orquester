@@ -6,7 +6,8 @@
  * - Contradictions: {@link findContradictions} over every visible pair; checked ones first, then
  *   by closeness in meaning plus {@link CENTRALITY_WEIGHT} × how central the contradicting
  *   concepts are to both entries ({@link conceptCentrality}). One that makes the same point against
- *   the same entry as one ranked above it ({@link samePoint}) is folded into it as `also`.
+ *   the same entry as one ranked above it ({@link samePoint}) is folded into it as `also`, each
+ *   entry once, and by the side it joins (`alsoJoins`).
  * - Bridges: entries (never a survey: {@link isSurveyEntry}) whose distinctive concepts
  *   ({@link distinctiveLimit}, by id and by name in any type; never a person, an organization, a
  *   product or an app: a named example) are shared with non-survey entries in at least 2 other
@@ -330,12 +331,20 @@ export class KnowledgeInsights {
         y.rank - x.rank ||
         (x.a < y.a ? -1 : x.a > y.a ? 1 : x.b < y.b ? -1 : x.b > y.b ? 1 : 0)
     );
-    // The same point against the same entry, made by several: shown once, the others as "also".
-    const shown: ((typeof contradictions)[number] & { also: string[] })[] = [];
+    // The same point against the same entry, made by several: shown once, the others as "also",
+    // each once per side it joins (the side of the pair it does not disagree with).
+    const shown: ((typeof contradictions)[number] & { joins: { a: string[]; b: string[] } })[] = [];
     for (const found of contradictions) {
       const twin = shown.find((kept) => samePoint(kept, found, (id) => metaOf.get(id) ?? null));
-      if (twin) twin.also.push(twin.a === found.a || twin.b === found.a ? found.b : found.a);
-      else shown.push({ ...found, also: [] });
+      if (!twin) {
+        shown.push({ ...found, joins: { a: [], b: [] } });
+        continue;
+      }
+      // `found` shares one side with the twin; its other entry disagrees with that side, so it joins the twin's other one.
+      const shared = twin.a === found.a || twin.a === found.b ? twin.a : twin.b;
+      const other = found.a === shared ? found.b : found.a;
+      const side = shared === twin.a ? twin.joins.b : twin.joins.a;
+      if (!side.includes(other)) side.push(other);
     }
     await pause();
 
@@ -496,7 +505,12 @@ export class KnowledgeInsights {
           source: found.source,
           pairs: found.pairs,
           note: found.note,
-          ...(found.also.length > 0 ? { also: found.also.map(summaryOf) } : {})
+          ...(found.joins.a.length + found.joins.b.length > 0
+            ? {
+                also: [...new Set([...found.joins.a, ...found.joins.b])].map(summaryOf),
+                alsoJoins: { a: found.joins.a.map(summaryOf), b: found.joins.b.map(summaryOf) }
+              }
+            : {})
         })
       ),
       bridges: bridges.slice(0, limit).map(

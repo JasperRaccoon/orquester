@@ -1,7 +1,7 @@
 // The Insights view's pure parts (phase 2 spec, "Insights"): the request, the section heads and
 // their counts, and the empty state. No React.
 
-import type { KnowledgeInsightsQuery, KnowledgeInsightsResponse } from "@orquester/api";
+import type { KnowledgeContradiction, KnowledgeEntrySummary, KnowledgeInsightsQuery, KnowledgeInsightsResponse } from "@orquester/api";
 
 /** The insights a view asks for: the collections filtered to (empty = every one), the daemon's default list size. */
 export function insightsQueryOf(collections: readonly string[]): KnowledgeInsightsQuery {
@@ -57,4 +57,28 @@ export function insightsCountText(total: number, shown: number): string {
 export function insightsAreEmpty(insights: Pick<KnowledgeInsightsResponse, "totals">): boolean {
   const { contradictions, bridges, singleSource, gaps } = insights.totals;
   return contradictions + bridges + singleSource + gaps === 0;
+}
+
+/** How a contradiction's side is named: its author, else its handle, else its title. */
+function sideName(entry: Pick<KnowledgeEntrySummary, "author" | "handle" | "title">): string {
+  const author = entry.author?.replace(/\s+/g, " ").trim();
+  if (author) return author;
+  const handle = entry.handle?.trim().replace(/^@+/, "");
+  return handle ? `@${handle}` : entry.title || "Untitled";
+}
+
+/**
+ * A contradiction's "also" lines: each entry once per side it joins ("Also with jason, against Alex
+ * Nguyen:"), or one "also:" line of entries without sides (an older daemon).
+ */
+export function alsoRows(item: Pick<KnowledgeContradiction, "a" | "b" | "also" | "alsoJoins">): { key: string; label: string; entries: KnowledgeEntrySummary[] }[] {
+  const joins = item.alsoJoins;
+  if (joins && joins.a.length + joins.b.length > 0) {
+    const [a, b] = [sideName(item.a), sideName(item.b)];
+    return [
+      ...(joins.a.length > 0 ? [{ key: "a", label: `Also with ${a}, against ${b}:`, entries: joins.a }] : []),
+      ...(joins.b.length > 0 ? [{ key: "b", label: `Also with ${b}, against ${a}:`, entries: joins.b }] : [])
+    ];
+  }
+  return item.also && item.also.length > 0 ? [{ key: "also", label: "also:", entries: item.also }] : [];
 }

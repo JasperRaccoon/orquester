@@ -25,7 +25,7 @@ import { CollectionChip, Centered, ErrorLine, PHONE_CHIP, PHONE_CHIP_ROW } from 
 import { isMissingRoute } from "./graph.logic";
 import { entryByline, knowledgeErrorText } from "./knowledge.logic";
 import { clusterText, contradictionSourceText, similarityPercent } from "./panel.logic";
-import { INSIGHTS_SECTIONS, insightsAreEmpty, insightsCountText, insightsQueryOf, type InsightsSectionKey } from "./insights.logic";
+import { INSIGHTS_SECTIONS, alsoRows, insightsAreEmpty, insightsCountText, insightsQueryOf, type InsightsSectionKey } from "./insights.logic";
 import type { KnowledgeSelection } from "./KnowledgePanel";
 
 export interface KnowledgeInsightsApi {
@@ -340,14 +340,14 @@ const ContradictionItem: React.FC<{ item: KnowledgeContradiction } & LinkProps> 
   <li data-insight="contradiction" className={cn(ITEM, "border-danger/30")}>
     <EntryPair a={item.a} b={item.b} between={<span className="text-danger">disagrees with</span>} {...link} />
     {item.note && <p className="text-xs leading-relaxed text-neutral-300">{item.note}</p>}
-    {item.also && item.also.length > 0 && (
-      <p data-insight-also className="flex min-w-0 flex-wrap items-center gap-1 text-[11.5px] text-neutral-400">
-        <span>also:</span>
-        {item.also.map((entry) => (
+    {alsoRows(item).map((row) => (
+      <p key={row.key} data-insight-also={row.key} className="flex min-w-0 flex-wrap items-center gap-1 text-[11.5px] text-neutral-400">
+        <span>{row.label}</span>
+        {row.entries.map((entry) => (
           <EntryLink key={entry.id} entry={entry} selected={link.selected} onOpen={link.openEntry} />
         ))}
       </p>
-    )}
+    ))}
     {item.pairs.length > 0 && (
       <ul aria-label="Clashing concepts" className="space-y-0.5">
         {item.pairs.map((pair) => (

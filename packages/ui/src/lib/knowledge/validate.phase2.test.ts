@@ -300,6 +300,18 @@ describe("phase 2 wire validation", () => {
       assert.deepEqual(read([C, A, { title: "no id" }]).also, [C], "a side of the pair or a broken summary is dropped");
       assert.equal("also" in read([]), false);
       assert.equal("also" in read("x"), false);
+      assert.deepEqual(read([C, C]).also, [C], "each entry once");
+    });
+
+    it("reads the side each folded entry joins (`alsoJoins`), each once per side, never a side of the pair; none as absent", () => {
+      const C = { ...A, id: "ke_cccccccccccc", title: "Third" };
+      const D = { ...A, id: "ke_dddddddddddd", title: "Fourth" };
+      const read = (alsoJoins: unknown) => parseKnowledgeInsightsResponse({ ...full, contradictions: [{ ...full.contradictions[0], also: [C, D], alsoJoins }] })!.contradictions[0]!;
+      assert.deepEqual(read({ a: [C, D], b: [C] }).alsoJoins, { a: [C, D], b: [C] }, "one entry may join each side");
+      assert.deepEqual(read({ a: [C, C, B], b: "x" }).alsoJoins, { a: [C], b: [] });
+      assert.equal("alsoJoins" in read({ a: [], b: [] }), false);
+      assert.equal("alsoJoins" in read(null), false);
+      assert.deepEqual(read(undefined).also, [C, D], "an older daemon: the list alone");
     });
 
     it("reads a missing list as empty, and refuses a broken envelope", () => {
