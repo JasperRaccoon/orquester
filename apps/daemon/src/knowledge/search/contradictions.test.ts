@@ -11,7 +11,8 @@ import {
   nameNoteSides,
   noteInvolves,
   noteUsesSideLetters,
-  sideNames
+  sideNames,
+  stripNonConflictSentences
 } from "./contradictions.ts";
 import type { GraphEdge } from "./graph.ts";
 import { knowledgeScope } from "./visibility.ts";
@@ -271,4 +272,60 @@ test("a note from before input version 4 names its sides: A is the check's `a` e
   assert.equal(found!.note, "jason says Outlook. Alex Nguyen says Gmail.");
   const [page] = [...findContradictions({ graph, scope, pairChecks: port, accept: () => true, entryId: "ke_b", entryMeta: (id) => meta[id] ?? null }).values()];
   assert.equal(page!.note, "jason says Outlook. Alex Nguyen says Gmail.", "the same on either entry's page");
+});
+
+/**
+ * The `contradicts` notes stored in the live knowledge base's pair-checks.json (2026-10-28, read from
+ * a copy): only jason ↔ Emanuele Totaro's ends in a sentence about a mere difference of choice.
+ */
+const STORED_NOTES = [
+  "Alex Nguyen says to post nothing on day one and start posting the first video after 1–2 days of casual use. Erikas Mališauskas says to wait a few days before uploading the first video.",
+  'Agent skill recommends a permission-priming screen with Enable and Not now, and placeholder "aspirational" testimonials and projected stats. Claude (research) says Apple\'s HIG allows only one Continue button with no way out, and that such testimonials and stats fall foul of the FTC fake-review rule and App Store 2.3.14.',
+  "jason says to create the TikTok account with an Outlook or Proton email, while Alex Nguyen says to use only Gmail and that Outlook, Yahoo and ProtonMail carry a significantly higher risk of the account being flagged or banned.",
+  "Evgeniy Mikholap says to warm up the account for 3-5 days before filling the profile and posting daily; Alex Nguyen says not to post on day one and to start posting your first video after 1-2 days of casual usage.",
+  "Emanuele Totaro says to warm up the account for 5-7 days; Evgeniy Mikholap says 3-5 days of warming up before filling the profile and posting.",
+  "Alex Nguyen says to create only 2-3 TikTok accounts maximum per device, while yanme recommends 5 accounts on each iPhone. They also differ on warm-up: Alex Nguyen says to start posting after 1-2 days, yanme says to warm up for 3 days.",
+  "jason says to warm up for 48 hours before posting; Evgeniy Mikholap says 3-5 days of warming up before filling the profile and posting.",
+  "daniel says a self-hosted Outline VPN on a Hetzner VPS makes TikTok see a normal US home user, while Claude (research) says that IP is labelled datacenter/hosting, not residential, so the VPS swaps one red flag for another.",
+  "jason says to warm up an account for 48 hours before posting, while yanme says to warm up each account for 3 days.",
+  "Emanuele Totaro recommends using NordVPN (connected to Los Angeles or San Francisco) for a US TikTok account, while daniel says not to use NordVPN because it gets you shadow banned instantly, and to self-host Outline VPN instead.",
+  "Erikas Mališauskas says to post no more than 1 video per day in the first week, and only then up to 3 per day. yanme says to post 2 videos per account per day after a 3-day warm-up, which is during that first week.",
+  "“Agent skill” tells the user to write aspirational testimonials with persona tags when the app has no real ones, and to replace them later. Claude (research) says that if such placeholders ship, they are fake testimonials banned by the FTC rule, and it calls this advice the clearest conflict with the rule. It recommends real quotes or no testimonial instead.",
+  "Emanuele Totaro says to warm up the account for 5-7 days; yanme says to warm up each account for 3 days.",
+  "Claude (research) says to keep to 2-3 accounts per device because bans follow device IDs, while yanme says to run 5 TikTok accounts on each iPhone.",
+  'Claude (research) backs the "2–3 accounts per device" rule, since a ban follows the device. yanme says to run 5 TikTok accounts on each used iPhone.'
+];
+const PADDED =
+  "jason says to warm up the account for 48 hours before posting, while Emanuele Totaro says to warm up for 5-7 days. The tool choices differ (ISP proxy with Shadowrocket versus NordVPN), but that is a difference of choice, not a conflict.";
+const PADDED_CLAIMS = "jason says to warm up the account for 48 hours before posting, while Emanuele Totaro says to warm up for 5-7 days.";
+
+test("stripNonConflictSentences: a sentence that only says what does not conflict goes; a side's claim always stays (real stored notes)", () => {
+  assert.equal(stripNonConflictSentences(PADDED), PADDED_CLAIMS);
+  for (const note of STORED_NOTES) assert.equal(stripNonConflictSentences(note), note);
+  const claim = "jason says to warm up for 48 hours; Ema Totaro says 5-7 days.";
+  for (const padding of [
+    "They otherwise agree on the setup.",
+    "The rest of their steps are compatible.",
+    "Both can hold for different niches.",
+    "The VPN choice is compatible.",
+    "Their proxies do not conflict.",
+    "Using different VPN apps is not a disagreement."
+  ]) {
+    assert.equal(stripNonConflictSentences(`${claim} ${padding}`), claim, padding);
+    assert.equal(stripNonConflictSentences(`${padding} ${claim}`), claim, padding);
+  }
+  // A sentence that states a side's claim stays, whatever else it says.
+  const stated = "Alex Nguyen says to use only Gmail, which is not a difference of choice: he warns Outlook gets flagged.";
+  assert.equal(stripNonConflictSentences(`${claim} ${stated}`), `${claim} ${stated}`);
+  // A note of nothing else stays whole (never an empty note); "e.g." does not end a sentence.
+  assert.equal(stripNonConflictSentences("A difference of choice, not a conflict."), "A difference of choice, not a conflict.");
+  assert.equal(stripNonConflictSentences("Alex Nguyen says to use one app, e.g. Gmail. The rest is compatible."), "Alex Nguyen says to use one app, e.g. Gmail.");
+});
+
+test("a stored checked note is read without its padding sentences; the stored text is not changed", () => {
+  const graph = graphOf({ x: ["ke_a"], y: ["ke_b"] }, []);
+  const stored = check("ke_a", "ke_b", "contradicts", PADDED);
+  const [found] = [...findContradictions({ graph, scope, pairChecks: checks([stored]), accept: () => true }).values()];
+  assert.equal(found!.note, PADDED_CLAIMS);
+  assert.equal(stored.note, PADDED);
 });

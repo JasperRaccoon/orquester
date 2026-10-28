@@ -39,7 +39,9 @@
  * tools, between linking runs only (`service.ts`): never while a run or a save waits, and only
  * while an account can take it (a pool that pauses ends the round). The answer must be exactly
  * `{verdict, note}` ({@link validatePairCheckAnswer}); anything else is refused like an answer that
- * does not parse. Results persist in `pair-checks.json` (`knowledgePairChecksPath`, tolerant, see
+ * does not parse. A `contradicts` note is recorded without its sentences that only say what does not
+ * conflict ("…, but that is a difference of choice, not a conflict": `stripNonConflictSentences`;
+ * readers strip notes stored before the same way). Results persist in `pair-checks.json` (`knowledgePairChecksPath`, tolerant, see
  * `@orquester/config` `knowledge-linking.ts`), keyed by the pair, with both content hashes: a check
  * of an entry edited since is stale (`all`/`get` leave it out) until the pair is checked again.
  *
@@ -69,7 +71,7 @@ import {
 } from "@orquester/config";
 import type { KnowledgeConceptRef, KnowledgeEntry } from "@orquester/api";
 import type { KnowledgePairCheck, KnowledgePairChecksPort, KnowledgeRoundTask, KnowledgeRoundTaskSource } from "../ports.ts";
-import { isSurveyEntry, noteUsesSideLetters, sideNames } from "../search/contradictions.ts";
+import { isSurveyEntry, noteUsesSideLetters, sideNames, stripNonConflictSentences } from "../search/contradictions.ts";
 import { relevantExcerpt, type Excerpt } from "../search/excerpts.ts";
 import { normalizeAuthor } from "../search/filters.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
@@ -171,7 +173,8 @@ export function parsePairCheckAnswer(text: string): { verdict: PairCheckVerdict;
   }
   if (validatePairCheckAnswer(value) !== null) return null;
   const record = value as { verdict: PairCheckVerdict; note: string };
-  return { verdict: record.verdict, note: record.note.trim() };
+  // A disagreement's note keeps only what conflicts: its padding about mere differences of choice goes.
+  return { verdict: record.verdict, note: record.verdict === "contradicts" ? stripNonConflictSentences(record.note) : record.note.trim() };
 }
 
 export interface PairKey {
