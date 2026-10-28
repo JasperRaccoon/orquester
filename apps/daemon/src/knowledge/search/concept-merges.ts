@@ -796,6 +796,7 @@ export class KnowledgeConceptMerges {
     // Nothing to overlay leaves the graph (and its revision) as it is.
     if (this.file.merges.length > 0) this.graph.setConceptMerges(overlayOf(this.file));
     this.graph.setSimilarConcepts((id) => this.similar(id));
+    this.graph.setConceptSimilarity((a, b) => this.similarity(a, b));
     this.graph.setBackingConcepts(
       (id) => this.backing(id),
       () => {
@@ -818,6 +819,7 @@ export class KnowledgeConceptMerges {
     this.stopped = true;
     for (const off of this.unsubscribe.splice(0)) off();
     this.graph.setSimilarConcepts(null);
+    this.graph.setConceptSimilarity(null);
     this.graph.setBackingConcepts(null);
     await this.vectors.stop();
     await this.chain.catch(() => undefined);
@@ -935,6 +937,14 @@ export class KnowledgeConceptMerges {
       this.applyOverlay(false);
       return true;
     });
+  }
+
+  /** The cosine of two concepts' vectors from a calibrated model; null until those are complete, or when either has none. */
+  similarity(a: string, b: string): number | null {
+    const set = this.vectors.current();
+    if (!set || !this.thresholdsOf(set.modelId)) return null;
+    const [x, y] = [set.vectors.get(a), set.vectors.get(b)];
+    return x && y && x.length === y.length ? dot(x, y) : null;
   }
 
   /**

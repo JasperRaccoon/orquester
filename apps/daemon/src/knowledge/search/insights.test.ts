@@ -5,7 +5,8 @@ import { knowledgeCitation, type KnowledgeEntryMeta, type KnowledgeInsightsRespo
 import type { KnowledgePairCheck } from "../ports.ts";
 import { FakeVectorIndex, around } from "./fake-vector-index.ts";
 import { KnowledgeGraph } from "./graph.ts";
-import { KnowledgeInsights, conceptCentrality, namesTitle, samePoint, statesNoClaim } from "./insights.ts";
+import { KnowledgeInsights, conceptCentrality, samePoint, statesNoClaim } from "./insights.ts";
+import { namesTopic } from "./same-question.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
 import { FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 import { type KnowledgeScope, knowledgeScope, visibleCollections } from "./visibility.ts";
@@ -276,6 +277,46 @@ test("single-source: never a claim another visible entry backs in other words, n
   assert.deepEqual(await listed(s.seoOnly), ["tactic-solo1", "metric-solo3"]);
 });
 
+test("single-source: never a claim another visible entry answers the same question of, a compound whose main step another names, or one naming its cluster's topic", async () => {
+  const s = await setup();
+  const load = (solo: string, extra: Record<string, unknown>[] = []) =>
+    loadGraph(
+      s.graph,
+      [
+        node("topic-marketing", "Marketing", files("p1", "p2", "p3", "p4", "q1", "q2", "r1", "r2", "r3")),
+        node("topic-pa", "Pricing tables", files("p2", "p3")),
+        node("topic-ra", "Retention", files("r2", "r3")),
+        node("tactic-solo1", solo, files("p1")),
+        node("metric-solo3", "Solo metric up 20%", files("r1"), { type: "metric" }),
+        node("tactic-warm-q3", "3-5 days of warming up", files("q3")),
+        node("tactic-warm-h", "Two days of warming up", files("h")),
+        node("tactic-nosim-q3", "No SIM card in the phone", files("q3")),
+        ...extra
+      ],
+      [edge("t1", "tactic-solo1", "topic-pa", null, "about"), edge("t2", "metric-solo3", "topic-ra", null, "measures")]
+    );
+  const listed = async (scope: KnowledgeScope) => (await s.insights.list({}, scope)).singleSource.map((item) => item.concept.id);
+  await load("Warm up for 48 hours");
+  assert.deepEqual(await listed(s.seoOnly), ["metric-solo3", "tactic-solo1"]);
+  // Concept families (or the fallback) say the 48 hours and the 3-5 days answer one question.
+  s.graph.setSameQuestion((a, b) => a.id === b.id || [a.id, b.id].sort().join() === "tactic-solo1,tactic-warm-q3");
+  assert.deepEqual(await listed(s.seoOnly), ["metric-solo3"], "Q3 answers the same question");
+  s.graph.setSameQuestion((a, b) => a.id === b.id || [a.id, b.id].sort().join() === "tactic-solo1,tactic-warm-h");
+  assert.deepEqual(await listed(s.seoOnly), ["metric-solo3", "tactic-solo1"], "only the hidden entry does");
+  assert.deepEqual(await listed(s.all), ["metric-solo3"]);
+  s.graph.setSameQuestion(null);
+
+  // A compound: its main step said elsewhere is enough; a detail only it adds is not worth checking.
+  await load("Remove the SIM card and stay on VPN 24/7");
+  assert.deepEqual(await listed(s.seoOnly), ["metric-solo3"], "Q3 has no SIM card either");
+  await load("Stay on VPN 24/7 and remove the SIM card");
+  assert.deepEqual(await listed(s.seoOnly), ["metric-solo3", "tactic-solo1"], "its main step, staying on a VPN, is its own");
+
+  // The cluster's topic: what most of P1's cluster links to is no claim P1 makes alone.
+  await load("Pricing tables for every plan", [node("topic-pricing", "Pricing tables for plans", files("p2", "p3", "p4"))]);
+  assert.deepEqual(await listed(s.seoOnly), ["metric-solo3"]);
+});
+
 test("contradictions: graph and checked, checked first; a hidden entry is never on either side", async () => {
   const s = await setup();
   s.pairChecks.push({ a: ke("p1"), b: ke("p2"), verdict: "contradicts", note: "P1 says annual, P2 monthly", checkedAt: "2026-10-27T00:00:00.000Z" });
@@ -469,7 +510,7 @@ test("single-source: never the entry's own title restated, a metric that states 
   assert.equal(statesNoClaim({ name: "Payment conversion up 20%", type: "Metric" }), false);
   assert.equal(statesNoClaim({ name: "Churn lower on annual plans", type: "Metric" }), false);
   assert.equal(statesNoClaim({ name: "Payment conversion rate", type: "Result" }), false, "metrics only");
-  assert.equal(namesTitle("Start an app from zero with $300 using used iPhones and TikTok accounts", "Starting an app from zero with $300: 3 used iPhones × 5 TikTok accounts"), true);
-  assert.equal(namesTitle("Making a US-based TikTok account", "How to create a US TikTok account and target only the US (7 steps)"), true);
-  assert.equal(namesTitle("Get keywords from 1-2 star reviews", "SEO playbook for mobile app founders"), false);
+  assert.equal(namesTopic("Start an app from zero with $300 using used iPhones and TikTok accounts", "Starting an app from zero with $300: 3 used iPhones × 5 TikTok accounts"), true);
+  assert.equal(namesTopic("Making a US-based TikTok account", "How to create a US TikTok account and target only the US (7 steps)"), true);
+  assert.equal(namesTopic("Get keywords from 1-2 star reviews", "SEO playbook for mobile app founders"), false);
 });

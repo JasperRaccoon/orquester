@@ -39,6 +39,7 @@ import { normalizeAuthor } from "./filters.ts";
 import type { KnowledgeClusterLabelsPort } from "./cluster-labels.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import { NEAR_COPY_MIN_RESEMBLANCE, resemblance, shingles } from "./near-copy.ts";
+import { answeredElsewhereTest, conceptsByType, namesTopic } from "./same-question.ts";
 import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibility.ts";
 
@@ -167,7 +168,10 @@ export type KnowledgeClusterRef = { label: string | null; size: number };
 
 export interface KnowledgeSimilarityOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
-  graph: Pick<KnowledgeGraph, "relatedEntries" | "conceptsOfEntry" | "conceptIdsOfEntry" | "revision" | "visibleEntriesOf" | "visibleEdgesOfType" | "conceptRef" | "backingConcepts">;
+  graph: Pick<
+    KnowledgeGraph,
+    "relatedEntries" | "conceptsOfEntry" | "conceptIdsOfEntry" | "revision" | "visibleEntriesOf" | "visibleEdgesOfType" | "conceptRef" | "backingConcepts" | "sameQuestion" | "answersSameQuestions" | "commonConceptWords"
+  >;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
   /** An entry as the read views show it (snippet, visible collections, link count, citation). */
@@ -658,21 +662,45 @@ export class KnowledgeSimilarity {
 
   /**
    * What the entry adds: its concepts no other visible entry has, in these words or in others
-   * (`backingConcepts`), nor, for a Tool, names in its text (`naming`: "Find My iPhone" in jason's
-   * steps); claims first, people and organizations last, up to 8; and the cluster it sits in by the latest similarity graph drawn
-   * for `scope` (any `k` and `limit`: the layer's, insights'). Null when none is drawn yet: it never
-   * waits for one, it starts drawing one in the background for the next read. Null while the entry
-   * has no vectors.
+   * (`backingConcepts`), nor, for a claim, answers the same question of (`sameQuestion`, or a
+   * compound's main step: `answeredElsewhereTest`), nor, for a Tool, names in its text (`naming`:
+   * "Find My iPhone" in jason's steps); never one that names the entry's or its cluster's topic
+   * ({@link topicsOf}: "Making a US-based TikTok account" on "How to create a US TikTok account…");
+   * claims first, people and organizations last, up to 8; and the cluster it sits in by the latest
+   * similarity graph drawn for `scope` (any `k` and `limit`: the layer's, insights'). Null when none
+   * is drawn yet: it never waits for one, it starts drawing one in the background for the next read.
+   * Null while the entry has no vectors.
    */
   novelty(id: string, scope: KnowledgeScope): KnowledgeNovelty | null {
     const vectors = this.vectors();
     const own = vectors?.index.entryVector(id) ?? null;
     if (!vectors || !own) return null;
+    const structure = this.latestStructure(scope, vectors.index);
+    if (!structure) this.drawInBackground(scope, vectors.index);
+    const cluster = structure ? clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, new Set()) : -1;
+    const clusterRef = structure ? this.clusterRef(structure, cluster, scope) : null;
+    const topics = this.topicsOf(id, scope, structure && clusterRef ? { structure, cluster, label: clusterRef.label } : null);
     const rankOf = (type: string): number => {
       const key = type.toLowerCase();
       return CLAIM_CONCEPT_TYPES.has(key) ? 0 : NON_TOPIC_CONCEPT_TYPES.has(key) ? 2 : 1;
     };
     const onlyHere = (conceptId: string): boolean => this.knowledgeGraph.visibleEntriesOf(conceptId, scope).every((other) => other === id);
+    let answeredTest: ((concept: KnowledgeConceptRef) => boolean) | null = null;
+    const answered = (concept: KnowledgeConceptRef): boolean => {
+      const graph = this.knowledgeGraph;
+      answeredTest ??= answeredElsewhereTest(
+        conceptsByType(
+          this.store
+            .listMeta()
+            .filter((meta) => meta.id !== id && entryInScope(meta, scope))
+            .map((meta) => meta.id),
+          (entryId) => graph.conceptsOfEntry(entryId, scope)
+        ),
+        graph.answersSameQuestions() ? (a, b) => graph.sameQuestion(a, b) : null,
+        graph.commonConceptWords()
+      );
+      return answeredTest(concept);
+    };
     const newConcepts: KnowledgeConceptRef[] = [];
     for (const { concept } of this.knowledgeGraph
       .conceptsOfEntry(id, scope)
@@ -682,13 +710,40 @@ export class KnowledgeSimilarity {
       if (newConcepts.length >= NOVELTY_CONCEPTS_MAX) break;
       // Nor said in other words by another entry (a concept that backs it); asked in rank order, only as far as listed.
       if (!this.knowledgeGraph.backingConcepts(concept.id).every(onlyHere)) continue;
+      // What the entry or its cluster is about is no claim it adds.
+      if (topics.some((topic) => namesTopic(concept.name, topic))) continue;
+      // Another entry answers the same question ("Warm up by swiping 15-30 min" / "TikTok account warm-up").
+      if (CLAIM_CONCEPT_TYPES.has(concept.type.toLowerCase()) && answered(concept)) continue;
       // A tool another visible entry names in its text ("Find My iPhone" in jason's step 4) is not new here.
       if (concept.type.toLowerCase() === "tool" && this.naming(concept.name).some((other) => other !== id && this.visibleMeta(other, scope) !== null)) continue;
       newConcepts.push({ ...concept });
     }
-    const structure = this.latestStructure(scope, vectors.index);
-    if (!structure) this.drawInBackground(scope, vectors.index);
-    return { newConcepts, cluster: structure ? this.clusterRef(structure, clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, new Set()), scope) : null };
+    return { newConcepts, cluster: clusterRef };
+  }
+
+  /**
+   * What an entry is about as a whole, for its novelty: its title and, in a drawn cluster, the
+   * cluster's label and the names of the concepts (not who wrote them: a person, an organization)
+   * linked to most of its entries.
+   */
+  private topicsOf(id: string, scope: KnowledgeScope, cluster: { structure: GraphStructure; cluster: number; label: string | null } | null): string[] {
+    const topics: string[] = [];
+    const title = this.store.getMeta(id)?.title;
+    if (title) topics.push(title);
+    if (!cluster) return topics;
+    if (cluster.label) topics.push(cluster.label);
+    const members = cluster.structure.ids.filter((_, i) => cluster.structure.cluster[i] === cluster.cluster && this.visibleMeta(cluster.structure.ids[i]!, scope) !== null);
+    const counts = new Map<string, { name: string; count: number }>();
+    for (const member of members) {
+      for (const concept of this.knowledgeGraph.conceptsOfEntry(member, scope)) {
+        if (NON_TOPIC_CONCEPT_TYPES.has(concept.type.toLowerCase())) continue;
+        const seen = counts.get(concept.id);
+        if (seen) seen.count += 1;
+        else counts.set(concept.id, { name: concept.name, count: 1 });
+      }
+    }
+    for (const { name, count } of counts.values()) if (count * 2 > members.length) topics.push(name);
+    return topics;
   }
 
   /**

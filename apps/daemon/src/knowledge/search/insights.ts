@@ -16,8 +16,12 @@
  *   or "CAC" alone; 6 after.
  * - Single-source claims worth verifying: claims ({@link SINGLE_SOURCE_TYPES}) linked to exactly
  *   one visible entry (not a survey: {@link isSurveyEntry}) that sits in a cluster of 3 or more,
- *   that no other visible entry backs in other words (`KnowledgeGraph.backingConcepts`) or states
- *   the figure of (`stating`), that are not the entry's own title ({@link namesTitle}) nor a metric
+ *   that no other visible entry backs in other words (`KnowledgeGraph.backingConcepts`), states
+ *   the figure of (`stating`) or answers the same question of (`KnowledgeGraph.sameQuestion`, or
+ *   for a compound claim its main step: `answeredElsewhereTest`; 126 real entries: 73 → 58, "Create a
+ *   new iCloud account with fresh Gmail and Apple ID" gone, its iCloud account step being Ema's
+ *   too), that do not name the entry's or its cluster's topic (`namesTopic`: its title, the cluster's
+ *   label, a concept most of the cluster's entries link to) nor are a metric
  *   that states nothing ({@link statesNoClaim}), and whose topic other entries of that cluster discuss: at least
  *   {@link SINGLE_SOURCE_MIN_PEERS} and {@link SINGLE_SOURCE_MIN_SHARE} of its other (non-survey)
  *   entries link to a concept the claim is linked to (never a person or an organization, nor a concept on most entries). Peers that
@@ -64,13 +68,14 @@ import {
   scopeKey,
   yielder
 } from "./similarity.ts";
+import { answeredElsewhereTest, conceptsByType, namesTopic } from "./same-question.ts";
 import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope } from "./visibility.ts";
 
 export const KNOWLEDGE_INSIGHTS_DEFAULT_LIMIT = 20;
 export const KNOWLEDGE_INSIGHTS_MAX_LIMIT = 50;
 /** How insights are derived; part of the cache key. */
-const INSIGHTS_ALGORITHM = "insights-v3";
+const INSIGHTS_ALGORITHM = "insights-v4";
 /** Insights responses (and, separately, link-gap lists) kept. */
 const INSIGHTS_CACHE_SIZE = 8;
 /** Other clusters a bridge's distinctive concepts must reach. */
@@ -119,7 +124,22 @@ const CENTRALITY_WEIGHT = 0.1;
 
 export interface KnowledgeInsightsOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
-  graph: ContradictionGraph & Pick<KnowledgeGraph, "revision" | "conceptsOfEntry" | "neighbourLookup" | "canonicalConceptId" | "conceptType" | "backingConcepts" | "backingRevision" | "similarConceptIds" | "conceptVectorsReady">;
+  graph: ContradictionGraph &
+    Pick<
+      KnowledgeGraph,
+      | "revision"
+      | "conceptsOfEntry"
+      | "neighbourLookup"
+      | "canonicalConceptId"
+      | "conceptType"
+      | "backingConcepts"
+      | "backingRevision"
+      | "similarConceptIds"
+      | "conceptVectorsReady"
+      | "sameQuestion"
+      | "answersSameQuestions"
+      | "commonConceptWords"
+    >;
   similarity: Pick<KnowledgeSimilarity, "graph" | "clusterLabelsRevision">;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
@@ -393,16 +413,47 @@ export class KnowledgeInsights {
         }
         return is;
       };
+      // What each cluster is about: its label, and the concepts (not people) most of its entries link to.
+      const clusterTopics = new Map<number, string[]>();
+      const topicsOf = (cluster: number): string[] => {
+        let list = clusterTopics.get(cluster);
+        if (!list) {
+          const label = drawn.clusters[cluster]?.label ?? null;
+          list = label ? [label] : [];
+          const ids = members.get(cluster) ?? [];
+          const counts = new Map<string, { name: string; count: number }>();
+          for (const id of ids) {
+            for (const concept of conceptsOf.get(id)!) {
+              if (NON_TOPIC_CONCEPT_TYPES.has(concept.type.toLowerCase())) continue;
+              const seen = counts.get(concept.id);
+              if (seen) seen.count += 1;
+              else counts.set(concept.id, { name: concept.name, count: 1 });
+            }
+          }
+          for (const { name, count } of counts.values()) if (count * 2 > ids.length) list.push(name);
+          clusterTopics.set(cluster, list);
+        }
+        return list;
+      };
+      // Another visible entry answering a claim's question: any concept of the visible entries linked to one other than the claim's.
+      let answered: ReturnType<typeof answeredElsewhereTest> | null = null;
+      const answeredTest = () =>
+        (answered ??= answeredElsewhereTest(
+          conceptsByType(metaOf.keys(), (id) => conceptsOf.get(id)!),
+          graph.answersSameQuestions() ? (a, b) => graph.sameQuestion(a, b) : null,
+          graph.commonConceptWords()
+        ));
       for (const meta of visible) {
         const cluster = clusterOf.get(meta.id);
         if (cluster === undefined || clusterSize(cluster) < SINGLE_SOURCE_MIN_CLUSTER || isSurveyEntry(meta)) continue;
         const peers = (members.get(cluster) ?? []).filter((id) => id !== meta.id);
         if (peers.length < SINGLE_SOURCE_MIN_PEERS) continue;
         const scored: { concept: KnowledgeConceptRef; peers: number }[] = [];
+        const named = [meta.title, ...topicsOf(cluster)];
         for (const concept of conceptsOf.get(meta.id)!) {
           if (!SINGLE_SOURCE_TYPES.has(concept.type.toLowerCase()) || entriesOf.get(concept.id)!.length !== 1) continue;
-          // The entry's own title ("Start an app from zero with $300…"), or a metric it only names ("Payment conversion rate").
-          if (namesTitle(concept.name, meta.title) || statesNoClaim(concept)) continue;
+          // The entry's or its cluster's topic ("Start an app from zero with $300…" on that title), or a metric it only names ("Payment conversion rate").
+          if (named.some((topic) => namesTopic(concept.name, topic)) || statesNoClaim(concept)) continue;
           const topics = neighbours(graph.canonicalConceptId(concept.id)).filter(isTopic);
           if (topics.length === 0) continue;
           let discussing = 0;
@@ -412,6 +463,8 @@ export class KnowledgeInsights {
           if (graph.backingConcepts(concept.id).some((other) => graph.visibleEntriesOf(other, scope).some((id) => id !== meta.id && metaOf.has(id)))) continue;
           // Another entry states its figure in its text ("Candy Crush (231 configurable settings)").
           if (this.options.stating?.(concept.name).some((id) => id !== meta.id && metaOf.has(id))) continue;
+          // Another entry answers the same question, or names a compound's main step ("Create a new iCloud account …").
+          if (answeredTest()(concept, (other) => (entriesOf.get(other.id) ?? []).some((id) => id !== meta.id))) continue;
           scored.push({ concept, peers: discussing });
         }
         if (scored.length === 0) continue;
@@ -487,31 +540,6 @@ function bridgeStrong(concept: KnowledgeConceptRef): boolean {
   const type = concept.type.toLowerCase();
   if (type === "tactic" || type === "guideline") return true;
   return type === "result" && /\d/.test(concept.name);
-}
-
-/** A concept name's words as {@link namesTitle} compares them: {@link tokenize}'s, "-ing" folded ("Starting" / "Start"). */
-function titleWords(text: string): Set<string> {
-  return new Set(tokenize(text).map((token) => (token.length > 5 && token.endsWith("ing") ? token.slice(0, -3) : token)));
-}
-/**
- * The share of a concept name's words its entry's title must hold for the concept to be the title
- * restated: half ("Making a US-based TikTok account" on "How to create a US TikTok account and
- * target only the US": tiktok, account of making, based, tiktok, account).
- */
-const TITLE_SHARE = 0.5;
-
-/**
- * Whether a concept restates its entry's title: two or more of its words, at least
- * {@link TITLE_SHARE} of them, are the title's ("Start an app from zero with $300 using used
- * iPhones and TikTok accounts" on "Starting an app from zero with $300: 3 used iPhones × 5 TikTok
- * accounts…"). That is what the entry is about, not a claim it makes in passing.
- */
-export function namesTitle(conceptName: string, title: string): boolean {
-  const words = titleWords(conceptName);
-  const titled = titleWords(title);
-  let held = 0;
-  for (const word of words) if (titled.has(word)) held += 1;
-  return held >= 2 && held >= TITLE_SHARE * words.size;
 }
 
 /** Words that give a metric a direction ("Paywall conversion up 20%", "Churn lower on annual plans"). */
