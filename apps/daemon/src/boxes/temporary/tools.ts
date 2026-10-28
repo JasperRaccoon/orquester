@@ -822,26 +822,43 @@ export class TemporaryBoxTools {
     const projectPath = principal.kind === "agent" ? principal.projectPath : "";
     const location = projectPath !== "" ? this.connection?.registry?.locate(projectPath) : undefined;
     if (location?.kind !== "box") {
-      const host = await this.hostForward(boxId, ready.value, port);
+      const host = await this.hostForward(principal, boxId, ready.value, port);
       return host.ok ? done({ url: loopbackUrl(host.value.hostPort), hostPort: host.value.hostPort, boxPort: host.value.boxPort }) : host;
     }
-    const inProjectBox = await this.projectBoxForward(boxId, ready.value, port, location.boxId);
+    const inProjectBox = await this.projectBoxForward(principal, boxId, ready.value, port, location.boxId);
     if (!inProjectBox.ok) return inProjectBox;
     const result: BoxForwardResult = { url: loopbackUrl(inProjectBox.value.boxPort), boxPort: port, projectBoxPort: inProjectBox.value.boxPort };
     if (this.connection?.browserRunsInBox?.(projectPath) === true) return done(result);
     // The Browser tab of this project runs on the host: it needs a host loopback port too.
-    const host = await this.hostForward(boxId, ready.value, port);
+    const host = await this.hostForward(principal, boxId, ready.value, port);
     return host.ok ? done({ ...result, browserUrl: loopbackUrl(host.value.hostPort), hostPort: host.value.hostPort }) : host;
   }
 
+  /**
+   * Around the awaits of {@link forwardPort}: the box is still the caller's, ready, and not being
+   * cleaned up. Forwards are made only then, and put in the box's map at once, so a box's cleanup
+   * closes every forward made for it; a call that finds the box gone after its forward opened
+   * refuses (the cleanup closed it).
+   */
+  private stillForwardable(principal: CallerPrincipal, boxId: string): BoxOutcome<BoxSummary> {
+    const found = this.owned(principal, boxId);
+    if (!found.ok) return found;
+    if (found.value.state !== "ready") return refuse(409, "BOX_NOT_READY", notReadyMessage(found.value));
+    if (this.closing.has(boxId)) return refuse(409, "BOX_NOT_READY", "The box is going away; its port forwards were closed.");
+    return found;
+  }
+
   /** The listener in the project box `projectBoxId` piping to the temporary box's `port` (made on first use). */
-  private async projectBoxForward(boxId: string, connection: BoxConnection, port: number, projectBoxId: string): Promise<BoxOutcome<ProjectBoxForward>> {
+  private async projectBoxForward(principal: CallerPrincipal, boxId: string, connection: BoxConnection, port: number, projectBoxId: string): Promise<BoxOutcome<ProjectBoxForward>> {
     const owner = this.connection?.projectForwards;
     if (!owner) return refuse(400, "BOX_UNSUPPORTED", "This chat's project runs in a box of its own, and forwarding into it is not available here: a host URL would not be reachable from it.");
     const known = this.projectForwards.get(boxId)?.get(port);
-    // One that ended with its project box (destroyed, or another box now) is made again.
+    // One that ended with its project box (destroyed, another box now, or refused on a reconnect) is made again.
     const settled = known ? await known.catch(() => null) : null;
-    if (settled && (!settled.active() || settled.projectBoxId !== projectBoxId)) {
+    const alive = settled ? await settled.alive() : false;
+    const still = this.stillForwardable(principal, boxId);
+    if (!still.ok) return still;
+    if (settled && (!alive || settled.projectBoxId !== projectBoxId)) {
       const ports = this.projectForwards.get(boxId);
       if (ports && ports.get(port) === known) ports.delete(port);
       void settled.close().catch(() => undefined);
@@ -863,7 +880,9 @@ export class TemporaryBoxTools {
       });
     }
     try {
-      return done(await forward);
+      const opened = await forward;
+      const still = this.stillForwardable(principal, boxId);
+      return still.ok ? done(opened) : still;
     } catch (error) {
       if (error instanceof ProjectBoxForwardError && error.code === "PROJECT_BOX_NOT_CONNECTED") {
         return refuse(409, "BOX_NOT_READY", "This chat's project runs in a box of its own, which is not connected right now (reconnecting…): the port could not be forwarded into it. Try again shortly.");
@@ -873,7 +892,10 @@ export class TemporaryBoxTools {
   }
 
   /** A host loopback port piping to the box's `port` (made on first use). */
-  private async hostForward(boxId: string, connection: BoxConnection, port: number): Promise<BoxOutcome<{ hostPort: number; boxPort: number }>> {
+  private async hostForward(principal: CallerPrincipal, boxId: string, connection: BoxConnection, port: number): Promise<BoxOutcome<{ hostPort: number; boxPort: number }>> {
+    // A box project's call comes here after awaiting its project box's forward: the box may have gone since.
+    const ready = this.stillForwardable(principal, boxId);
+    if (!ready.ok) return ready;
     let perBox = this.forwards.get(boxId);
     if (!perBox) {
       perBox = new Map();
@@ -891,7 +913,8 @@ export class TemporaryBoxTools {
     }
     try {
       const open = await forward;
-      return done({ hostPort: open.hostPort, boxPort: open.boxPort });
+      const still = this.stillForwardable(principal, boxId);
+      return still.ok ? done({ hostPort: open.hostPort, boxPort: open.boxPort }) : still;
     } catch (error) {
       return refuse(502, "BOX_FORWARD_FAILED", `The port could not be forwarded: ${clip(transferMessage(error), 300)}`);
     }

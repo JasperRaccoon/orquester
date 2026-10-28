@@ -440,6 +440,9 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     const listened = await hub.setForwards(BOX_ID, [{ boxPort, target: "echo" }]);
     assert.deepEqual(listened, [{ boxPort, error: null }]);
     assert.equal(await roundTrip(boxPort, "via the list"), "via the list");
+    // A port the box already listens on, listened again (a reconnect's check): ok, and it keeps serving.
+    assert.deepEqual(await hub.setForwards(BOX_ID, [{ boxPort, target: "echo" }], { relisten: true }), [{ boxPort, error: null }]);
+    assert.equal(await roundTrip(boxPort, "listened again"), "listened again");
     const taken = await hub.setForwards(BOX_ID, [
       { boxPort, target: "echo" },
       { boxPort: echo.port, target: "echo" }

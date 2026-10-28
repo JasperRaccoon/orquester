@@ -752,13 +752,49 @@ test("forwards: a host loopback URL to the box port, reused for the same port, c
   await assert.rejects(read(forward.value.hostPort!), /ECONNREFUSED/);
 });
 
+test("forwards: a box destroyed while its host forward opens gets no URL, and the host port is closed", async (t) => {
+  const { tools, connection } = world();
+  let opened!: (hostPort: number) => void;
+  const relayed = new Promise<number>((resolve) => (opened = resolve));
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  const forwardToHost = connection.forwardToHost.bind(connection);
+  connection.forwardToHost = async (port, options) => {
+    const relay = await forwardToHost(port, options);
+    t.after(() => relay.close());
+    opened(relay.hostPort);
+    await answered;
+    return relay;
+  };
+  const forwarding = tools.forwardPort("box-a", 4321, { principal: agent() });
+  const hostPort = await relayed;
+  const destroyed = tools.destroy(agent(), "box-a");
+  answer();
+  const [forward] = await Promise.all([forwarding, destroyed]);
+  assert.ok(!forward.ok && forward.code === "BOX_NOT_READY", "no URL for a destroyed box");
+  await assert.rejects(fetchPort(hostPort), /ECONNREFUSED/);
+});
+
 /** A chat whose project (PROJECT) runs in its own box `box-p`, played on this machine by a {@link FakeForwardingHub}. */
-function forwardingProjectWorld(t: TestContext, browserRunsInBox: boolean): World & { hub: FakeForwardingHub; projectBox: LocalBoxConnection } {
+function forwardingProjectWorld(
+  t: TestContext,
+  browserRunsInBox: boolean
+): World & { hub: FakeForwardingHub; projectBox: LocalBoxConnection; setProjectBoxState: (state: StoredBox["state"]) => void } {
   const w = world({ connect: false });
   const projectBox = localBoxConnection({ boxId: "box-p" });
   const hub = new FakeForwardingHub("box-p", projectBox);
   const record = { id: "box-p", purpose: "project", state: "ready" } as StoredBox;
-  const owner = new ProjectBoxForwards({ hub, registry: { get: (boxId) => (boxId === "box-p" ? record : undefined), onChange: () => () => {} } });
+  const registryListeners = new Set<(boxId: string) => void>();
+  const owner = new ProjectBoxForwards({
+    hub,
+    registry: {
+      get: (boxId) => (boxId === "box-p" ? record : undefined),
+      onChange: (listener) => {
+        registryListeners.add(listener);
+        return () => registryListeners.delete(listener);
+      }
+    }
+  });
   w.tools.connect({
     boxes: w.boxes,
     hub: { get: (boxId) => (boxId === "box-a" ? w.connection : undefined) },
@@ -770,7 +806,11 @@ function forwardingProjectWorld(t: TestContext, browserRunsInBox: boolean): Worl
     await w.tools.shutdown();
     hub.close();
   });
-  return { ...w, hub, projectBox };
+  const setProjectBoxState = (state: StoredBox["state"]): void => {
+    record.state = state;
+    for (const listener of [...registryListeners]) listener("box-p");
+  };
+  return { ...w, hub, projectBox, setProjectBoxState };
 }
 
 /** A dev server in the temporary box (this machine): answers `text` and ends. */
@@ -846,6 +886,97 @@ test("forwards in a box project: a host-tcp channel is served only for its own p
   assert.equal(await received(await hub.openAs("box-p", spec!)), "private page");
   assert.equal(await received(await hub.openAs("box-other", spec!)), "", "another box naming the target is closed");
   assert.equal(await received(await hub.openAs("box-p", { ...spec!, target: "fwd-guessed" })), "", "an unknown target is closed");
+  assert.equal(await received(await hub.openAs("box-p", { ...spec!, boxPort: spec!.boxPort + 1 })), "", "the target from another port is closed");
+});
+
+test("forwards in a box project: a project box port is never a privileged one; a preferred port the box refuses for any reason falls back", async (t) => {
+  const { tools, hub } = forwardingProjectWorld(t, true);
+  const privileged = await tools.forwardPort("box-a", 80, { principal: agent() });
+  assert.ok(privileged.ok, privileged.ok ? "" : privileged.message);
+  assert.ok(
+    hub.lists.every((list) => list.every((spec) => spec.boxPort >= 1024)),
+    "port 80 was never listened on in the project box"
+  );
+
+  const boxPort = await devServer(t, "hello from the box");
+  // A Windows project box answers a reserved port (Hyper-V exclusions) with INTERNAL, not EACCES.
+  hub.refusing.set(boxPort, "INTERNAL");
+  const forward = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(forward.ok, forward.ok ? "" : forward.message);
+  assert.notEqual(forward.value.projectBoxPort, boxPort);
+  assert.equal(await fetchPort(forward.value.projectBoxPort!), "hello from the box");
+});
+
+test("forwards in a box project: a box destroyed while its forward is made gets no URL, and nothing is left listening for it", async (t) => {
+  const { tools, hub, projectBox } = forwardingProjectWorld(t, true);
+  // The project box answers the forward's port survey only when the test says so.
+  let surveyed!: () => void;
+  const asked = new Promise<void>((resolve) => (surveyed = resolve));
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  let surveys = 0;
+  const request = projectBox.request.bind(projectBox);
+  projectBox.request = (async (method: string, params: never, options?: object) => {
+    if (method === "sys.ports") {
+      surveys += 1;
+      surveyed();
+      await answered;
+    }
+    return request(method as never, params, options);
+  }) as typeof projectBox.request;
+  const boxPort = await devServer(t, "hello from the box");
+  const first = tools.forwardPort("box-a", boxPort, { principal: agent() });
+  const second = tools.forwardPort("box-a", boxPort, { principal: agent() });
+  await asked;
+  const destroyed = tools.destroy(agent(), "box-a");
+  answer();
+  const [one, two] = await Promise.all([first, second, destroyed]);
+  assert.ok(!one.ok && one.code === "BOX_NOT_READY", "no URL for a destroyed box");
+  assert.ok(!two.ok && two.code === "BOX_NOT_READY", "nor for a call that waited on the first");
+  assert.deepEqual(hub.ports(), [], "nothing listens in the project box for it");
+  assert.equal(surveys, 1, "only the first call made a forward in the project box");
+});
+
+test("forwards in a box project: after a reconnect, one the project box could not listen on again is made anew; the others are kept", async (t) => {
+  const { tools, hub } = forwardingProjectWorld(t, true);
+  const lostPort = await devServer(t, "hello from the box");
+  const keptPort = await devServer(t, "the other page");
+  const lost = await tools.forwardPort("box-a", lostPort, { principal: agent() });
+  const kept = await tools.forwardPort("box-a", keptPort, { principal: agent() });
+  assert.ok(lost.ok && kept.ok);
+  hub.drop();
+  // Another process takes the port while the project box is away: its welcome's listen fails unseen.
+  const squatter = createServer((socket) => socket.end("someone else"));
+  await new Promise<void>((resolve) => squatter.listen(lost.value.projectBoxPort!, "127.0.0.1", resolve));
+  t.after(() => squatter.close());
+  await hub.welcome();
+
+  const again = await tools.forwardPort("box-a", lostPort, { principal: agent() });
+  assert.ok(again.ok, again.ok ? "" : again.message);
+  assert.notEqual(again.value.projectBoxPort, lost.value.projectBoxPort);
+  assert.equal(await fetchPort(again.value.projectBoxPort!), "hello from the box", "not the other process");
+  const same = await tools.forwardPort("box-a", keptPort, { principal: agent() });
+  assert.ok(same.ok);
+  assert.equal(same.value.projectBoxPort, kept.value.projectBoxPort);
+  assert.equal(await fetchPort(same.value.projectBoxPort!), "the other page");
+});
+
+test("forwards in a box project: a destroyed project box's forwards are dropped; a later call listens anew", async (t) => {
+  const { tools, hub, setProjectBoxState } = forwardingProjectWorld(t, true);
+  const boxPort = await devServer(t, "hello from the box");
+  const first = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(first.ok);
+  const [old] = hub.lists.at(-1)!;
+  setProjectBoxState("destroyed");
+  // Its listeners went with it.
+  hub.close();
+  assert.equal(await received(await hub.openAs("box-p", old!)), "", "its target is served no more");
+
+  // The project's box is made again.
+  setProjectBoxState("ready");
+  const next = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(next.ok, next.ok ? "" : next.message);
+  assert.equal(await fetchPort(next.value.projectBoxPort!), "hello from the box");
 });
 
 // ---------------------------------------------------------------------------

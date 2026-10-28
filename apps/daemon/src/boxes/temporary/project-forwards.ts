@@ -10,9 +10,14 @@
  * - **Targets are unguessable and bound to their box.** The box names the target of each `host-tcp`
  *   channel it opens: one is served only when the target is a live forward made for the box that
  *   opened it, on the port it was made for. Anything else is closed at once.
- * - **The port**: the temporary box's port number when the project box has it free, else a random
- *   free one (orq-agent binds 127.0.0.1:<port>; a taken or forbidden port is retried elsewhere).
+ * - **The port**: the temporary box's port number when the project box has it free and it is not a
+ *   privileged one (< 1024), else a random free one (orq-agent binds 127.0.0.1:<port>; a port the
+ *   box refuses for any reason — taken, forbidden, reserved by Windows — is retried elsewhere).
  *   `open` resolves once the project box listens, or rejects with why it cannot.
+ * - **Checked again on every connect**: the box re-listens its list from the welcome and tells no
+ *   one when a port is gone meanwhile, so each forward is listened again; one the box now refuses is
+ *   dropped (the next `box_forward_port` makes a new one) rather than handed out as a URL that may
+ *   reach another process.
  * - Calls for one project box run one at a time; a destroyed project box's forwards are dropped.
  */
 
@@ -26,8 +31,10 @@ import type { BoxHub, BoxRegistry } from "../contracts.ts";
 
 /** Ports tried in all (the preferred one first) before giving up. */
 const MAX_LISTEN_ATTEMPTS = 8;
-/** Errors of `forward.listen` that another port may not have. */
-const RETRY_ELSEWHERE = new Set(["EADDRINUSE", "EACCES"]);
+/** Errors of `forward.listen` after which no other port is tried: the box did not answer (else another port may do). */
+const NO_RETRY = new Set([BOX_DISCONNECTED, "TIMEOUT"]);
+/** The lowest port listened on in a project box as is: below it are the privileged ones. */
+const MIN_PREFERRED_PORT = 1024;
 /** Where a replacement port is drawn from (above the usual dev-server ports, below Linux's ephemeral range). */
 const FALLBACK_PORTS = { min: 20_000, max: 32_000 };
 
@@ -50,12 +57,14 @@ export interface ProjectBoxForward {
   readonly boxPort: number;
   /** False once closed or dropped with its project box. */
   active(): boolean;
+  /** Once the checks of its project box queued before it are done (a reconnect's): whether it still listens. */
+  alive(): Promise<boolean>;
   /** Stop listening. Idempotent. */
   close(): Promise<void>;
 }
 
 export interface ProjectBoxForwardsDeps {
-  hub: Pick<BoxHub, "get" | "setForwards" | "handleChannel">;
+  hub: Pick<BoxHub, "get" | "setForwards" | "handleChannel" | "onConnectionChange">;
   registry: Pick<BoxRegistry, "get" | "onChange">;
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
 }
@@ -76,18 +85,23 @@ export class ProjectBoxForwards {
   private readonly byBox = new Map<string, Map<number, Entry>>();
   private readonly targets = new Map<string, Entry>();
   private readonly queues = new Map<string, Promise<void>>();
-  private readonly unsubscribe: () => void;
+  private readonly unsubscribe: (() => void)[];
 
   constructor(private readonly deps: ProjectBoxForwardsDeps) {
     deps.hub.handleChannel("host-tcp", (context, spec, stream) => this.serve(context.boxId, spec, stream));
-    this.unsubscribe = deps.registry.onChange((boxId) => {
-      const record = deps.registry.get(boxId);
-      if (!record || record.state === "destroyed") this.forget(boxId);
-    });
+    this.unsubscribe = [
+      deps.registry.onChange((boxId) => {
+        const record = deps.registry.get(boxId);
+        if (!record || record.state === "destroyed") this.forget(boxId);
+      }),
+      deps.hub.onConnectionChange((boxId, connected) => {
+        if (connected && this.byBox.has(boxId)) void this.serial(boxId, () => this.recheck(boxId));
+      })
+    ];
   }
 
   dispose(): void {
-    this.unsubscribe();
+    for (const unsubscribe of this.unsubscribe) unsubscribe();
   }
 
   /**
@@ -108,7 +122,7 @@ export class ProjectBoxForwards {
       for (const port of this.byBox.get(projectBoxId)?.keys() ?? []) taken.add(port);
       let failure = "no free port was found";
       for (let attempt = 0; attempt < MAX_LISTEN_ATTEMPTS; attempt += 1) {
-        const boxPort = attempt === 0 && !taken.has(preferredPort) ? preferredPort : freePort(taken);
+        const boxPort = attempt === 0 && preferredPort >= MIN_PREFERRED_PORT && !taken.has(preferredPort) ? preferredPort : freePort(taken);
         taken.add(boxPort);
         const entry: Entry = { projectBoxId, boxPort, target: `fwd-${randomBytes(18).toString("base64url")}`, upstream };
         this.add(entry);
@@ -118,7 +132,7 @@ export class ProjectBoxForwards {
         await this.publish(projectBoxId);
         if (!outcome || outcome.error?.code === BOX_DISCONNECTED) throw notConnected();
         failure = outcome.error?.message ?? failure;
-        if (!RETRY_ELSEWHERE.has(outcome.error?.code ?? "")) break;
+        if (NO_RETRY.has(outcome.error?.code ?? "")) break;
       }
       throw new ProjectBoxForwardError("PROJECT_BOX_LISTEN_FAILED", failure);
     });
@@ -157,6 +171,7 @@ export class ProjectBoxForwards {
       projectBoxId: entry.projectBoxId,
       boxPort: entry.boxPort,
       active: () => this.targets.get(entry.target) === entry,
+      alive: () => this.serial(entry.projectBoxId, async () => this.targets.get(entry.target) === entry),
       close: () =>
         this.serial(entry.projectBoxId, async () => {
           if (this.targets.get(entry.target) !== entry) return;
@@ -167,9 +182,26 @@ export class ProjectBoxForwards {
   }
 
   /** The project box's whole list to the hub; the outcomes of the listens it sent. */
-  private publish(projectBoxId: string): ReturnType<BoxHub["setForwards"]> {
+  private publish(projectBoxId: string, options: { relisten?: boolean } = {}): ReturnType<BoxHub["setForwards"]> {
     const specs: BoxForwardSpec[] = [...(this.byBox.get(projectBoxId)?.values() ?? [])].map((entry) => ({ boxPort: entry.boxPort, target: entry.target }));
-    return this.deps.hub.setForwards(projectBoxId, specs);
+    return this.deps.hub.setForwards(projectBoxId, specs, options);
+  }
+
+  /** The project box (re)connected: every forward listened again; one it refuses now is dropped. */
+  private async recheck(projectBoxId: string): Promise<void> {
+    const entries = [...(this.byBox.get(projectBoxId)?.values() ?? [])];
+    if (entries.length === 0) return;
+    const outcomes = await this.publish(projectBoxId, { relisten: true });
+    let dropped = false;
+    for (const entry of entries) {
+      const error = outcomes.find((outcome) => outcome.boxPort === entry.boxPort)?.error;
+      // No outcome, or the link dropped again: the next connect checks it.
+      if (!error || error.code === BOX_DISCONNECTED) continue;
+      this.deps.logger?.warn("a forward in a project box could not listen again after a reconnect; dropped", { boxId: projectBoxId, boxPort: entry.boxPort, error: error.message });
+      this.drop(entry);
+      dropped = true;
+    }
+    if (dropped) await this.publish(projectBoxId);
   }
 
   private add(entry: Entry): void {

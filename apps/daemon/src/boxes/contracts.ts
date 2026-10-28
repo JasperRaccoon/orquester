@@ -178,9 +178,11 @@ export interface BoxHub {
    * the box is connected, removed ports are unlistened and new or changed ones listened on now:
    * resolves once the box answered them all, with the outcome of each listen sent (`error` null =
    * listening, else the box's error, e.g. code `EADDRINUSE`). A box not connected now gets the list
-   * at its next connect, and the call resolves with no outcomes.
+   * at its next connect, and the call resolves with no outcomes. `relisten` sends a listen for
+   * every port of the list, unchanged ones too (one the box already listens on answers ok), so the
+   * outcomes say which of them the box listens on now (a welcome's listen that failed is not told).
    */
-  setForwards(boxId: string, forwards: BoxAgentConfig["forwards"]): Promise<BoxForwardOutcome[]>;
+  setForwards(boxId: string, forwards: BoxAgentConfig["forwards"], options?: { relisten?: boolean }): Promise<BoxForwardOutcome[]>;
   handle<K extends BoxMethodName<BoxBoxToHostMethods>>(method: K, handler: BoxRequestHandler<K>): void;
   handleRaw(method: string, handler: BoxRawRequestHandler): void;
   handleChannel(kind: "host-tcp" | "ssh-agent" | "mcp-bridge", handler: BoxChannelHandler): void;
