@@ -597,9 +597,7 @@ const boxForwardPort = defineTool({
   name: "box_forward_port",
   title: "Forward a box port",
   description:
-    "Expose a port of one of this chat's boxes (a dev server) where this chat can reach it. `url` works from where this chat runs: your shell, curl and the Browser tab. " +
-    "In a project that runs in a box of its own, `url` is that box's loopback (127.0.0.1 there, not the host's); when the result also has `browser_url`, the Browser tab runs on the host: open browser_url there instead. " +
-    "Closed when the box is destroyed or this chat closes.",
+    "Expose a box port (a dev server) at a loopback `url` for your shell, curl and the Browser tab; if the result has `browser_url`, the Browser tab uses that. Closed with the box.",
   input: { box_id: boxIdField, port: z.number().int().min(1).max(65_535) },
   audiences: ["chat"],
   toolset: "boxes",
