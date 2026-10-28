@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
-import { clearAnsweredTasks, clearUnansweredTasks, InboxBroker, nodeInboxFiles, parseWorkerAnswer, type InboxBrokerOptions, type InboxFiles } from "./inbox.ts";
+import { KNOWLEDGE_WORKER_PART_MAX, knowledgeWorkerTextSize } from "@orquester/api";
+import { clearAnsweredTasks, clearUnansweredTasks, contextRoom, InboxBroker, nodeInboxFiles, parseWorkerAnswer, type InboxBrokerOptions, type InboxFiles } from "./inbox.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -239,6 +240,45 @@ describe("InboxBroker", () => {
     assert.deepEqual(await h.broker.next("w1"), { kind: "done", reason: "session-budget" }, "a released chat gets no more work");
   });
 
+  it("reads the task a chat holds again (a later part) without leasing, re-leasing or counting anything; a task it does not hold is refused with no side effect", async () => {
+    const h = await harness({ budget: { tasks: 2, tokens: 1_000_000 } });
+    const a = await h.addTask("S", "A");
+    const b = await h.addTask("S", "B");
+    const c = await h.addTask("S", "C");
+    const first = await h.broker.next("w1");
+    assert.ok(first.kind === "task" && first.task.taskId === a);
+    const before = h.broker.counts();
+    for (let i = 0; i < 5; i += 1) assert.deepEqual(h.broker.held("w1", a), first, "the same view, every time");
+    assert.deepEqual(h.broker.counts(), before, "no lease taken or dropped");
+    assert.equal(h.broker.tasksOf("w1"), 0);
+
+    // Another chat cannot read it, and reading it takes nothing from w1.
+    const other = await h.broker.next("w2");
+    assert.ok(other.kind === "task" && other.task.taskId === b);
+    const refused = h.broker.held("w2", a);
+    assert.ok("error" in refused && refused.error.includes(a) && refused.error.includes(`Your task is ${b}`), JSON.stringify(refused));
+    assert.ok("error" in h.broker.held("w1", "no-such-task"));
+    assert.ok("error" in h.broker.held("stranger", a));
+    assert.equal(h.broker.knows("stranger"), false, "an unknown chat is not registered by a refused read");
+    assert.deepEqual(h.broker.counts(), { ...before, pending: before.pending - 1, leased: before.leased + 1 });
+    assert.equal(h.broker.gaveUp("w2"), false);
+    const again = await h.broker.next("w1");
+    assert.ok(again.kind === "task" && again.task.taskId === a, "w1 still holds its task");
+
+    // Answering after the reads works as ever; the answered task is no longer held.
+    const answered = await h.broker.submit("w1", a, "{}");
+    assert.ok(answered.accepted && answered.next.kind === "task" && answered.next.task.taskId === c);
+    assert.equal(h.broker.tasksOf("w1"), 1, "one task counted, not one per read");
+    assert.ok("error" in h.broker.held("w1", a));
+    // A chat released while holding a task gave up once, however often it read it.
+    for (let i = 0; i < 3; i += 1) h.broker.held("w1", c);
+    h.broker.release("w1");
+    assert.equal(h.broker.giveUpsOf(c), 1);
+    assert.deepEqual(h.broker.held("w1", c), { kind: "done", reason: "session-budget" }, "a retired chat is told to stop");
+    h.broker.finish("run-finished");
+    assert.deepEqual(h.broker.held("w2", b), { kind: "done", reason: "run-finished" });
+  });
+
   it("an answer already given (by another chat) is accepted without a second write", async () => {
     const h = await harness();
     const a = await h.addTask("S", "A");
@@ -412,6 +452,39 @@ describe("InboxBroker — what a worker is shown (phase 2 neighbour context)", (
     assert.equal(answer.task_id, pass2, "answered under myKG's id: its cache key is unchanged");
     await readFile(join(h.outbox, `${pass2}.done`), "utf8");
     await finishing(h, h.broker.submit("w1", pass1, "{}"));
+  });
+
+  it("gives the context only the room the task leaves in one worker result, and does not ask for one when the task alone fills it", async () => {
+    const asked: { user: number; room: number }[] = [];
+    const h = await harness({
+      contextFor: async (envelope, room) => {
+        asked.push({ user: envelope.user.length, room });
+        return "x".repeat(Math.min(room, 5_000));
+      }
+    });
+    const system = "S".repeat(3_000);
+    const small = await h.addTask(system, "u".repeat(1_000));
+    const tight = await h.addTask(system, "u".repeat(KNOWLEDGE_WORKER_PART_MAX - 3_000 - 1_000));
+    const over = await h.addTask(system, "u".repeat(KNOWLEDGE_WORKER_PART_MAX));
+    const views = new Map<string, string>();
+    const first = await h.broker.next("w1");
+    assert.ok(first.kind === "task");
+    views.set(first.task.taskId, first.task.input);
+    for (const id of [small, tight]) {
+      const submitted = await h.broker.submit("w1", id, "{}");
+      assert.ok(submitted.accepted && submitted.next.kind === "task");
+      views.set(submitted.next.task.taskId, submitted.next.task.input);
+    }
+    assert.deepEqual([...views.keys()], [small, tight, over]);
+    assert.deepEqual(asked.map((a) => a.user), [1_000, KNOWLEDGE_WORKER_PART_MAX - 4_000], "the task already over is not asked for a context");
+    for (const { user, room } of asked) assert.equal(room, contextRoom({ system, user: "u".repeat(user) }));
+    assert.ok(asked[1]!.room > 0 && asked[1]!.room < 5_000);
+    for (const id of [small, tight]) {
+      const input = views.get(id)!;
+      assert.ok(knowledgeWorkerTextSize(`Instructions:\n${system}\n\nInput:\n${input}`) <= KNOWLEDGE_WORKER_PART_MAX, "the task with its context fits one result");
+    }
+    assert.equal(views.get(small), `${"u".repeat(1_000)}\n\n${"x".repeat(5_000)}`);
+    assert.equal(views.get(over), "u".repeat(KNOWLEDGE_WORKER_PART_MAX), "no context for a task already in parts");
   });
 
   it("a context that fails costs only the context", async () => {

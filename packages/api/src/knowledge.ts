@@ -921,6 +921,58 @@ export type KnowledgeWorkerNextResponse =
   /** No task now and the run is finishing, or this session reached its budget: end the turn. */
   | { kind: "done"; reason: "run-finished" | "session-budget" | "run-cancelled" };
 
+export interface KnowledgeWorkerNextRequest {
+  sessionId?: string;
+  /**
+   * The task this session holds, read again without waiting, leasing or counting anything (a later
+   * part of a task shown in parts); a task it does not hold is refused with `KNOWLEDGE_INVALID`.
+   * Absent: the session's next task (its held one first), long-polling.
+   */
+  taskId?: string;
+}
+
+/**
+ * The most a worker tool result (`knowledge_worker_next_task`, `knowledge_worker_submit`) may
+ * serialize to ({@link knowledgeWorkerTextSize}). Claude Code (CLI 2.1.307) returns a tool result
+ * above about 49.5 KB of serialized text not inline but as a file path and a 2 KB preview, and a
+ * worker chat has no tool to read that file: it never sees the task. A larger task is shown in
+ * parts under this size, with room left for the JSON envelope around the text.
+ */
+export const KNOWLEDGE_WORKER_RESULT_MAX = 40_000;
+/** What a part's frame (task header, part line, the instruction after it) may take of {@link KNOWLEDGE_WORKER_RESULT_MAX}. */
+export const KNOWLEDGE_WORKER_FRAME_MAX = 2_000;
+/** The most a task's instructions and input (one part of them) may take in one worker tool result. */
+export const KNOWLEDGE_WORKER_PART_MAX = KNOWLEDGE_WORKER_RESULT_MAX - KNOWLEDGE_WORKER_FRAME_MAX;
+
+/**
+ * The size `text` adds to a serialized tool result: its UTF-8 bytes once JSON-escaped (the
+ * enclosing quotes not counted, so sizes add up). `"`, `\` and the short-escape controls take 2,
+ * other controls and lone surrogates 6 (`\uXXXX`).
+ */
+export function knowledgeWorkerTextSize(text: string): number {
+  let size = 0;
+  for (let i = 0; i < text.length; i += 1) size += knowledgeWorkerCharSize(text, i);
+  return size;
+}
+
+/** The size of the UTF-16 unit at `i` of `text` (an astral character: 4 on its high half, 0 on its low half). */
+export function knowledgeWorkerCharSize(text: string, i: number): number {
+  const code = text.charCodeAt(i);
+  if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) return 2;
+  if (code < 0x20) return 6;
+  if (code < 0x80) return 1;
+  if (code < 0x800) return 2;
+  if (code >= 0xd800 && code <= 0xdbff) {
+    const low = text.charCodeAt(i + 1);
+    return low >= 0xdc00 && low <= 0xdfff ? 4 : 6;
+  }
+  if (code >= 0xdc00 && code <= 0xdfff) {
+    const high = text.charCodeAt(i - 1);
+    return i > 0 && high >= 0xd800 && high <= 0xdbff ? 0 : 6;
+  }
+  return 3;
+}
+
 export interface KnowledgeWorkerSubmitRequest {
   sessionId?: string;
   taskId: string;

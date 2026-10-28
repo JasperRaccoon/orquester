@@ -24,6 +24,7 @@ import type {
 import { ConceptMergeCheckSource } from "../search/concept-merge-checks.ts";
 import { FAKE_THRESHOLDS, FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import type { GraphConcept } from "../search/graph.ts";
+import { KnowledgeError } from "../store/errors.ts";
 import { CONTEXT_HEADING, LINK_CONTEXT_VERSION, type KnowledgeLinkGraphView } from "./context.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
 import type { MykgProcessProbe, SpawnMykg } from "./runner.ts";
@@ -563,6 +564,9 @@ describe("KnowledgeLinkingService — tasks a previous myKG process left in the 
     assert.equal(reply.kind, "task");
     assert.equal(reply.kind === "task" && reply.task.taskId, live);
     assert.notEqual(live, leftover);
+    // A later part reads the held task again; a task the chat does not hold is a KNOWLEDGE_INVALID refusal.
+    assert.deepEqual(await h.service.workerNext("probe-worker", undefined, live), reply);
+    await assert.rejects(h.service.workerNext("probe-worker", undefined, leftover), (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_INVALID" && error.message.includes(`Your task is ${live}`));
     await failRun(children[1]!);
     await h.service.stop();
   });

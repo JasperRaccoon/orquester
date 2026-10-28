@@ -838,7 +838,7 @@ export class KnowledgeService {
         },
         rebuildEstimate: () => current().rebuildEstimate(),
         isActiveWorker: (owner) => current().isActiveWorker(owner),
-        workerNext: (sessionId, signal) => current().workerNext(sessionId, signal),
+        workerNext: (sessionId, signal, taskId) => current().workerNext(sessionId, signal, taskId),
         workerSubmit: (sessionId, taskId, answer, signal) => current().workerSubmit(sessionId, taskId, answer, signal)
       },
       counts: () => this.counts(),

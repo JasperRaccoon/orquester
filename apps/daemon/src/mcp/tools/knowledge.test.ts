@@ -19,8 +19,11 @@ import {
   KNOWLEDGE_SEARCH_MAX_LIMIT,
   KNOWLEDGE_SIMILAR_MAX_EXAMPLES,
   KNOWLEDGE_TITLE_MAX,
+  KNOWLEDGE_WORKER_PART_MAX,
+  KNOWLEDGE_WORKER_RESULT_MAX,
   knowledgeCitation,
   knowledgeRoutes,
+  knowledgeWorkerTextSize,
   type KnowledgeCollectionsResponse,
   type KnowledgeConceptRef,
   type KnowledgeEntryDetail,
@@ -29,12 +32,14 @@ import {
   type KnowledgeMergeResponse,
   type KnowledgeSaveResponse,
   type KnowledgeSearchResponse,
-  type KnowledgeSimilarEntry
+  type KnowledgeSimilarEntry,
+  type KnowledgeWorkerTask
 } from "@orquester/api";
 
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
+import { splitWorkerText } from "./knowledge.ts";
 import { KNOWLEDGE_QUERY_MAX } from "../../knowledge/search/search.ts";
 import { KNOWLEDGE_AUTHOR_MAX, KNOWLEDGE_HANDLE_MAX, KNOWLEDGE_KIND_MAX, KNOWLEDGE_URL_MAX } from "../../knowledge/store/validate.ts";
 
@@ -423,6 +428,150 @@ test("worker tools: a chat that is no worker gets the daemon's KNOWLEDGE_NOT_A_W
   for (const args of [{ taskId: "", answer: "{}" }, { taskId: "t", answer: "" }, { taskId: "t" }]) {
     assert.equal(errorOf(await run(api, "knowledge_worker_submit", args)).code, "INVALID_ARGUMENT", JSON.stringify(args));
   }
+});
+
+// --- worker tasks in parts ----------------------------------------------------------------------
+
+const TASK_ID = "f".repeat(64);
+/** Name-normalization input as myKG writes it: one numbered name per line (about 75 bytes each). */
+const nameList = (bytes: number): string => {
+  const lines: string[] = [];
+  for (let i = 0, size = 0; size < bytes; i += 1) {
+    const line = `${i}. "Warm-up routine ${i} for a new TikTok account" — "café ≤ 48 h"`;
+    lines.push(line);
+    size += Buffer.byteLength(line, "utf8") + 1;
+  }
+  return lines.join("\n");
+};
+const workerTask = (over: Partial<KnowledgeWorkerTask> = {}): KnowledgeWorkerTask => ({
+  taskId: TASK_ID, step: "normalize_names", instructions: "Merge names that mean the same thing. Answer {\"groups\": [...]}.", sameInstructionsAs: null, input: "x", maxTokens: 32000, remaining: 41, ...over
+});
+/** The size the CLI measures: the result's text, serialized. */
+const resultSize = (r: CallToolResult): number => knowledgeWorkerTextSize(textOf(r));
+const bodyOf = (task: KnowledgeWorkerTask): string =>
+  `${task.instructions === null ? `Instructions: the same as task ${task.sameInstructionsAs}.` : `Instructions:\n${task.instructions}`}\n\nInput:\n${task.input}`;
+
+/** Reads every part of the task in `first` through the tool, checking each result's budget; answers the body rebuilt. */
+async function readParts(api: FakeDaemonApi, first: string, taskId: string): Promise<{ parts: number; body: string; texts: string[] }> {
+  const head = /\nThis task is in (\d+) parts\. Part 1 of \1:\n\n/.exec(first);
+  assert.ok(head, first.slice(0, 400));
+  const parts = Number(head[1]);
+  const texts = [first];
+  for (let part = 2; part <= parts; part += 1) {
+    const r = await run(api, "knowledge_worker_next_task", { taskId, part });
+    assert.equal(r.isError, undefined, textOf(r).slice(0, 300));
+    assert.ok(resultSize(r) <= KNOWLEDGE_WORKER_RESULT_MAX, `part ${part}: ${resultSize(r)}`);
+    texts.push(textOf(r));
+  }
+  let body = "";
+  texts.forEach((text, i) => {
+    const start = text.indexOf(`Part ${i + 1} of ${parts}:\n\n`) + `Part ${i + 1} of ${parts}:\n\n`.length;
+    const end = text.lastIndexOf(`\n\nEnd of part ${i + 1} of ${parts}`);
+    assert.ok(start > 0 && end > start, `part ${i + 1} framed`);
+    const midLine = i > 0 && texts[i - 1]!.includes(`(it stops mid-line: part ${i + 1} continues that line)`);
+    body += (i === 0 ? "" : midLine ? "" : "\n") + text.slice(start, end);
+  });
+  return { parts, body, texts };
+}
+
+test("worker tools: a task under the result budget is one result, exactly as before (no part line)", async () => {
+  const task = workerTask({ input: nameList(30_000), remaining: 3 });
+  const api = new FakeDaemonApi().on("POST", knowledgeRoutes.workerNext, { status: 200, body: { kind: "task", task } });
+  const out = textOf(await run(api, "knowledge_worker_next_task", {}));
+  assert.equal(
+    out,
+    `Task ${TASK_ID} · step normalize_names · answer ≤ 32000 tokens · 3 more waiting\nInstructions:\n${task.instructions}\n\nInput:\n${task.input}\n\nReply with knowledge_worker_submit: taskId "${TASK_ID}" and the answer — only the JSON text the instructions ask for.`
+  );
+  assert.doesNotMatch(out, /\bparts?\b/i);
+});
+
+test("worker tools: a task over the result budget comes in parts under it; the parts are read through taskId and part, in order, from the task the chat holds, and rebuild it exactly", async () => {
+  const task = workerTask({ input: nameList(75_000) });
+  const api = new FakeDaemonApi().on("POST", knowledgeRoutes.workerNext, { status: 200, body: { kind: "task", task } });
+  const first = await run(api, "knowledge_worker_next_task", {});
+  assert.ok(resultSize(first) <= KNOWLEDGE_WORKER_RESULT_MAX, `part 1: ${resultSize(first)}`);
+  const out = textOf(first);
+  assert.ok(out.startsWith(`Task ${TASK_ID} · step normalize_names · answer ≤ 32000 tokens · 41 more waiting\nThis task is in `), out.slice(0, 200));
+  const { parts, body, texts } = await readParts(api, out, TASK_ID);
+  assert.ok(parts >= 2, `${parts} parts`);
+  assert.match(out, new RegExp(`Call knowledge_worker_next_task with \\{"taskId": "${TASK_ID}", "part": 2\\}, and so on until you have all ${parts} parts; only then answer the whole task with knowledge_worker_submit`));
+  assert.equal(body, bodyOf(task), "the parts are the task's instructions and input, cut at line breaks");
+  assert.match(texts.at(-1)!, new RegExp(`End of part ${parts} of ${parts}: you now have the whole task\\. Answer it with knowledge_worker_submit: taskId "${TASK_ID}"`));
+  assert.deepEqual(api.calls[0]!.body, { sessionId: "chat-1" }, "the first call asks for the next task");
+  for (const call of api.calls.slice(1)) assert.deepEqual(call.body, { sessionId: "chat-1", taskId: TASK_ID }, "a part reads the held task again");
+  // Asking for part 1 by id answers the same text as the first call.
+  assert.equal(textOf(await run(api, "knowledge_worker_next_task", { taskId: TASK_ID, part: 1 })), out);
+  assert.equal(textOf(await run(api, "knowledge_worker_next_task", { taskId: TASK_ID })), out, "no part: part 1");
+
+  // The answer to a task in parts is submitted once, and a next task in parts comes as its first part.
+  api.on("POST", knowledgeRoutes.workerSubmit, { status: 200, body: { accepted: true, next: { kind: "task", task: { ...task, instructions: null, sameInstructionsAs: "t0" } } } });
+  const submitted = await run(api, "knowledge_worker_submit", { taskId: TASK_ID, answer: '{"groups": []}' });
+  assert.ok(textOf(submitted).startsWith(`Accepted.\nTask ${TASK_ID}`) && textOf(submitted).includes("Part 1 of "));
+  assert.ok(resultSize(submitted) <= KNOWLEDGE_WORKER_RESULT_MAX);
+});
+
+test("worker tools: a part of a task the chat does not hold, a part out of range, or a part without its task is refused, and only a held task is read", async () => {
+  const task = workerTask({ input: nameList(75_000) });
+  const api = new FakeDaemonApi().on("POST", knowledgeRoutes.workerNext, ({ body }) =>
+    (body as { taskId?: string }).taskId === TASK_ID
+      ? { status: 200, body: { kind: "task", task } }
+      : { status: 400, body: { code: "KNOWLEDGE_INVALID", message: `You do not hold task "${(body as { taskId?: string }).taskId}", so it has no parts to read.` } }
+  );
+  const parts = Number(/This task is in (\d+) parts/.exec(textOf(await run(api, "knowledge_worker_next_task", { taskId: TASK_ID })))![1]);
+  const calls = api.calls.length;
+  const noTask = await run(api, "knowledge_worker_next_task", { part: 2 });
+  assert.deepEqual(errorOf(noTask), { code: "INVALID_ARGUMENT", message: "A part needs the taskId of the task it belongs to." });
+  for (const part of [0, -1, 1.5]) assert.equal(errorOf(await run(api, "knowledge_worker_next_task", { taskId: TASK_ID, part })).code, "INVALID_ARGUMENT", String(part));
+  assert.equal(api.calls.length, calls, "nothing invalid reaches the daemon");
+  const beyond = await run(api, "knowledge_worker_next_task", { taskId: TASK_ID, part: parts + 1 });
+  assert.deepEqual(errorOf(beyond), { code: "INVALID_ARGUMENT", message: `Task ${TASK_ID} has ${parts} parts: ask for a part from 1 to ${parts}.` });
+  const notHeld = await run(api, "knowledge_worker_next_task", { taskId: "other", part: 2 });
+  assert.deepEqual(errorOf(notHeld), { code: "KNOWLEDGE_INVALID", message: 'You do not hold task "other", so it has no parts to read.' });
+  // A task in one part has only part 1.
+  api.on("POST", knowledgeRoutes.workerNext, { status: 200, body: { kind: "task", task: workerTask() } });
+  assert.match(errorOf(await run(api, "knowledge_worker_next_task", { taskId: TASK_ID, part: 2 })).message, /has 1 part: it is not in parts, ask for part 1\./);
+  // The run ended while the chat read its parts: it is told to stop.
+  api.on("POST", knowledgeRoutes.workerNext, { status: 200, body: { kind: "done", reason: "run-finished" } });
+  assert.equal(textOf(await run(api, "knowledge_worker_next_task", { taskId: TASK_ID, part: 2 })), "No task (run-finished). End your turn now.");
+});
+
+test("worker tools: no result of any step exceeds the budget, whatever the task's size, characters or lines", async () => {
+  const long = (bytes: number) => "Pass 2 document with no line break at all, 中文 and 😀 emoji, \"quoted\" \\ back\tslash. ".repeat(Math.ceil(bytes / 90));
+  const inputs = [nameList(10_000), nameList(49_500), nameList(52_000), nameList(75_000), long(50_000), long(130_000), `${"\u0001".repeat(9_000)}\n${"😀".repeat(12_000)}`];
+  for (const step of ["pass1", "pass2", "normalize_names", "pair-check", "concept-check", "cluster-name"]) {
+    for (const [i, input] of inputs.entries()) {
+      for (const instructions of ["I".repeat(6_000), null]) {
+        const task = workerTask({ step, input, instructions, sameInstructionsAs: instructions === null ? "t0" : null, taskId: `${step}-${i}`.padEnd(200, "0") });
+        const api = new FakeDaemonApi()
+          .on("POST", knowledgeRoutes.workerNext, { status: 200, body: { kind: "task", task } })
+          .on("POST", knowledgeRoutes.workerSubmit, { status: 200, body: { accepted: true, next: { kind: "task", task } } });
+        const first = await run(api, "knowledge_worker_next_task", {});
+        assert.ok(resultSize(first) <= KNOWLEDGE_WORKER_RESULT_MAX, `${step} ${i}: ${resultSize(first)}`);
+        const submitted = await run(api, "knowledge_worker_submit", { taskId: task.taskId, answer: "{}" });
+        assert.ok(resultSize(submitted) <= KNOWLEDGE_WORKER_RESULT_MAX, `${step} ${i} after submit: ${resultSize(submitted)}`);
+        if (knowledgeWorkerTextSize(bodyOf(task)) <= KNOWLEDGE_WORKER_PART_MAX) {
+          assert.doesNotMatch(textOf(first), /This task is in/, `${step} ${i}: one result`);
+          continue;
+        }
+        const { body } = await readParts(api, textOf(first), task.taskId);
+        assert.equal(body, bodyOf(task), `${step} ${i}: rebuilt`);
+      }
+    }
+  }
+});
+
+test("splitWorkerText: parts within the size, cut at line breaks, a longer line at a character boundary (never inside a surrogate pair)", () => {
+  assert.deepEqual(splitWorkerText("", 10), [{ text: "", midLine: false }]);
+  assert.deepEqual(splitWorkerText("aaa\nbbb\nccc", 8), [{ text: "aaa\nbbb", midLine: false }, { text: "ccc", midLine: false }]);
+  assert.deepEqual(splitWorkerText("aa\nbbbbbbbbbbbbb\nc", 6), [
+    { text: "aa", midLine: false },
+    { text: "bbbbbb", midLine: true },
+    { text: "bbbbbb", midLine: true },
+    { text: "b\nc", midLine: false }
+  ]);
+  const emoji = splitWorkerText("😀😀😀", 6);
+  assert.deepEqual(emoji.map((part) => part.text), ["😀", "😀", "😀"]);
+  assert.deepEqual(splitWorkerText('""""', 4).map((part) => part.text), ['""', '""'], "escapes count serialized");
 });
 
 test("the family is chat-only: an external caller is never served it", async () => {

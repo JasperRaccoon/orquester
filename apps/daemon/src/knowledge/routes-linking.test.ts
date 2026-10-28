@@ -32,8 +32,9 @@ function setup(options: { counts?: Partial<KnowledgeStatusCounts>; owners?: Reco
     },
     rebuildEstimate: async () => ({ entries: 2, tasks: 7 }),
     isActiveWorker: (owner) => owner?.kind === "knowledge-indexer" && owner.runId === "kr_live",
-    workerNext: async (sessionId) => {
-      calls.push({ method: "next", args: [sessionId] });
+    workerNext: async (sessionId, _signal, taskId) => {
+      calls.push({ method: "next", args: taskId === undefined ? [sessionId] : [sessionId, taskId] });
+      if (taskId === "not-mine") throw new KnowledgeError("KNOWLEDGE_INVALID", 'You do not hold task "not-mine".');
       return { kind: "done", reason: "run-finished" };
     },
     workerSubmit: async (sessionId, taskId, answer) => {
@@ -116,6 +117,22 @@ describe("knowledge linking routes", () => {
     const bodyOnly = await app.inject({ method: "POST", url: knowledgeRoutes.workerNext, payload: { sessionId: "worker" } });
     assert.equal(bodyOnly.statusCode, 403, "a session id in the body alone never makes a worker");
     assert.deepEqual(calls.map((c) => c.args[0]), ["worker"]);
+  });
+
+  it("next with a taskId reads the held task (a later part): the id is checked first, and a task not held is a 400", async () => {
+    const { app, calls } = setup({ owners: { worker: WORKER } });
+    for (const taskId of ["", "   ", 7, "x".repeat(201)]) {
+      const res = await app.inject({ method: "POST", url: knowledgeRoutes.workerNext, headers: { "x-test-agent": "worker" }, payload: { taskId } });
+      assert.equal(res.statusCode, 400, JSON.stringify(taskId));
+      assert.equal(res.json().code, "KNOWLEDGE_INVALID");
+    }
+    assert.deepEqual(calls, [], "nothing invalid reaches the broker");
+    const held = await app.inject({ method: "POST", url: knowledgeRoutes.workerNext, headers: { "x-test-agent": "worker" }, payload: { taskId: " t1 " } });
+    assert.equal(held.statusCode, 200);
+    const notMine = await app.inject({ method: "POST", url: knowledgeRoutes.workerNext, headers: { "x-test-agent": "worker" }, payload: { taskId: "not-mine" } });
+    assert.equal(notMine.statusCode, 400);
+    assert.deepEqual(notMine.json(), { code: "KNOWLEDGE_INVALID", message: 'You do not hold task "not-mine".' });
+    assert.deepEqual(calls, [{ method: "next", args: ["worker", "t1"] }, { method: "next", args: ["worker", "not-mine"] }]);
   });
 
   it("submit checks its body before the broker sees it", async () => {

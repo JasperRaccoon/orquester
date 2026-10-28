@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import type { KnowledgeConceptRef, KnowledgeEntryMeta } from "@orquester/api";
+import { knowledgeWorkerTextSize, type KnowledgeConceptRef, type KnowledgeEntryMeta } from "@orquester/api";
 import { FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import {
   CONTEXT_CONCEPTS_MAX,
@@ -93,6 +93,30 @@ describe("nearestNeighbours / neighbourContextBlock", () => {
     assert.equal(neighbourContextBlock("ke_missing", view(index, many)), null, "no vectors for the entry");
     index.limits = null;
     assert.equal(neighbourContextBlock("ke_t", view(index, many)), null, "no model");
+  });
+
+  it("fits the room it is given by leaving out the lowest-ranked concepts, and is null when not one fits", () => {
+    const index = corpus();
+    const many: Record<string, KnowledgeConceptRef[]> = {};
+    for (let i = 1; i <= 5; i += 1) many[`ke_n${i}`] = Array.from({ length: 12 }, (_, j) => ref("Tactic", `n${i} concept ${j} – é`));
+    const v = view(index, many);
+    const full = neighbourContextBlock("ke_t", v)!;
+    assert.equal(neighbourContextBlock("ke_t", v, knowledgeWorkerTextSize(full)), full, "exactly its size: the whole block");
+    const lines = full.split("\n");
+    const conceptLines = lines.filter((line) => line.startsWith("- "));
+    const head = lines.slice(0, lines.length - conceptLines.length).join("\n");
+    for (const keep of [1, 7, CONTEXT_CONCEPTS_MAX - 1]) {
+      const room = knowledgeWorkerTextSize([head, ...conceptLines.slice(0, keep)].join("\n"));
+      for (const r of [room, room + 1]) {
+        const block = neighbourContextBlock("ke_t", v, r)!;
+        assert.equal(block, [head, ...conceptLines.slice(0, keep)].join("\n"), `room ${r}: the ${keep} highest-ranked concepts`);
+        assert.ok(knowledgeWorkerTextSize(block) <= r);
+      }
+      const fewer = neighbourContextBlock("ke_t", v, room - 1);
+      assert.equal(fewer === null ? 0 : fewer.split("\n").filter((line) => line.startsWith("- ")).length, keep - 1, "one byte less: one concept fewer (none: no block)");
+    }
+    assert.equal(neighbourContextBlock("ke_t", v, knowledgeWorkerTextSize(head) + 2), null, "the heading alone is no block");
+    assert.equal(neighbourContextBlock("ke_t", v, 0), null);
   });
 });
 
@@ -213,5 +237,24 @@ describe("EntryDocumentLocator", () => {
     assert.equal(await provider(task), first);
     assert.equal(await provider({ ...task }), first);
     assert.equal(reads, once, "the block is not computed again");
+  });
+
+  it("records an entry as shown context only for a block it answers: a block fitted to the room counts, none for no room or a room nothing fits", async () => {
+    const { put, store } = await setup();
+    for (const id of ["ke_a", "ke_b", "ke_c", "ke_d"]) await put(id, `Text of ${id}.`);
+    const index = corpus();
+    for (const id of ["ke_a", "ke_b", "ke_c", "ke_d"]) index.set(id, axis(DIMS, 0));
+    const many: Record<string, KnowledgeConceptRef[]> = {};
+    for (let i = 1; i <= 5; i += 1) many[`ke_n${i}`] = Array.from({ length: 12 }, (_, j) => ref("Tactic", `n${i} concept ${j}`));
+    const shown: string[] = [];
+    const provider = linkContextProvider(store, view(index, many), (entryId) => shown.push(entryId));
+    const task = (id: string): InboxTaskEnvelope => ({ task_id: `t-${id}`, step: "pass2", context_label: "pass2 chunk 1", system: "S", user: prompt(`Text of ${id}.`), max_tokens: 1, timeout_seconds: 0, created_at: "" });
+    const whole = await provider(task("ke_a"));
+    assert.equal(whole?.split("\n").filter((line) => line.startsWith("- ")).length, CONTEXT_CONCEPTS_MAX, "no room given: the whole block");
+    const fitted = await provider(task("ke_b"), 1_200);
+    assert.ok(fitted !== null && knowledgeWorkerTextSize(fitted) <= 1_200 && fitted.split("\n").filter((line) => line.startsWith("- ")).length < CONTEXT_CONCEPTS_MAX, "shortened to the room");
+    assert.equal(await provider(task("ke_c"), 0), null, "no room: no block");
+    assert.equal(await provider(task("ke_d"), 100), null, "a room the heading does not fit: no block");
+    assert.deepEqual(shown, ["ke_a", "ke_b"], "only the entries a block was answered for");
   });
 });

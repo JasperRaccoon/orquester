@@ -27,6 +27,7 @@ const KNOWLEDGE_INDEXER_INSTRUCTIONS = `You are a Knowledge Graph indexing worke
 Protocol:
 1. Call ${KNOWLEDGE_WORKER_NEXT_TOOL}.
 2. When it returns a task, do exactly what the task's instructions say to its input. When "instructions" is null, the instructions are the ones you received with the task named in "sameInstructionsAs".
+   A long task comes in parts ("This task is in N parts. Part 1 of N"): call ${KNOWLEDGE_WORKER_NEXT_TOOL} with {"taskId": "<its id>", "part": 2}, then part 3, and so on until you have all N parts. The parts follow on from each other; only then answer the whole task, once.
 3. Call ${KNOWLEDGE_WORKER_SUBMIT_TOOL} with the taskId and, as the answer, ONLY the JSON the instructions ask for: no prose, no explanation, no code fence.
 4. The submit result carries your next task: go back to step 2. If the answer is refused, fix it and submit the same task again.
 5. When you are told "done", stop and end your turn with one short line.
