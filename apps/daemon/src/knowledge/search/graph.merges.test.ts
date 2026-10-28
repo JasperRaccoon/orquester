@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { type ConceptMergeOverlay, KnowledgeGraph } from "./graph.ts";
+import { type ConceptMergeOverlay, KnowledgeGraph, isMachineSlug } from "./graph.ts";
 import { FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 import { knowledgeScope } from "./visibility.ts";
 
@@ -355,4 +355,29 @@ test("a merge into a visible concept: a hidden folded concept's names, attribute
   assert.deepEqual(graph.searchConcepts(["secret"], profile, 10), []);
   assert.deepEqual(graph.searchConcepts(["budget", "two", "million"], profile, 10), []);
   assert.equal(graph.concept("tactic-secret", profile), null);
+});
+
+test("person-merge leftovers: a machine slug (a nameless Person's id) is never an alias, whether myKG wrote it or a merge folded it in", async () => {
+  assert.equal(isMachineSlug("person-personematotaro", "Person"), true);
+  assert.equal(isMachineSlug("tactic-warm-up", "Tactic"), true);
+  assert.equal(isMachineSlug("ema_totaro", "Person"), false);
+  assert.equal(isMachineSlug("Emanuele Totaro", "Person"), false);
+  assert.equal(isMachineSlug("person-to-person referrals", "Tactic"), false, "a phrase, and another type's prefix");
+  assert.equal(isMachineSlug("Person-Ema", "Person"), false, "not a slug: capitals");
+  const store = new FakeStore();
+  store.collection(A, "A");
+  store.put(eA, "a", [A], {}, true);
+  store.put(eB, "b", [A], {}, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  await loadGraph(graph, [
+    node("person-ema-totaro", "Ema Totaro", [`${eA}.md`], { type: "Person", aliases: ["Ema", "ema_totaro", "person-personematotaro"] }),
+    // A Person myKG gave no name: the graph names it by its id.
+    { id: "person-personematotaro", type: "Person", confidence: 0.9, attributes: {}, source_files: [`${eB}.md`] }
+  ]);
+  const all = knowledgeScope({ kind: "all" }, [A]);
+  assert.deepEqual(graph.concept("person-ema-totaro", all)!.concept.aliases, ["Ema", "ema_totaro"]);
+  graph.setConceptMerges([{ id: "cm_ema", type: "Person", into: "person-ema-totaro", merged: ["person-personematotaro"], similarity: 1, createdAt: "t" }]);
+  const merged = graph.concept("person-ema-totaro", all)!;
+  assert.deepEqual(merged.concept.aliases, ["Ema", "ema_totaro"]);
+  assert.deepEqual(merged.mergedFrom.map((ref) => ref.id), ["person-personematotaro"], "still listed as merged from");
 });

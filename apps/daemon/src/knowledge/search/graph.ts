@@ -201,7 +201,9 @@ function parseConcept(raw: unknown): GraphConcept | null {
     else attributes[key] = attribute;
   }
   if (typeof node.description === "string" && node.description.trim()) description = node.description.trim();
-  const aliases = Array.isArray(node.aliases) ? node.aliases.filter((a): a is string => typeof a === "string" && a.trim().length > 0) : [];
+  const aliases = Array.isArray(node.aliases)
+    ? node.aliases.filter((a): a is string => typeof a === "string" && a.trim().length > 0 && !isMachineSlug(a, node.type as string))
+    : [];
   return {
     id: node.id,
     name: name ?? node.id,
@@ -285,14 +287,23 @@ function unionIds(lists: readonly (readonly string[])[]): string[] {
   return [...out];
 }
 
-/** Names folded in become aliases of the kept concept: case-insensitively distinct, never its own name. */
-function unionAliases(name: string, lists: readonly (readonly string[])[]): string[] {
+/**
+ * Whether a name is a machine slug with the shape of a myKG id of this type ("person-personematotaro":
+ * the name of a Person myKG gave none, folded in by a merge): never shown as an alias.
+ */
+export function isMachineSlug(name: string, type: string): boolean {
+  const text = name.trim();
+  return text.startsWith(`${type.toLowerCase()}-`) && /^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(text);
+}
+
+/** Names folded in become aliases of the kept concept: case-insensitively distinct, never its own name nor a machine slug. */
+function unionAliases(name: string, type: string, lists: readonly (readonly string[])[]): string[] {
   const seen = new Set([name.trim().toLowerCase()]);
   const out: string[] = [];
   for (const list of lists) {
     for (const alias of list) {
       const key = alias.trim().toLowerCase();
-      if (key.length === 0 || seen.has(key)) continue;
+      if (key.length === 0 || seen.has(key) || isMachineSlug(alias, type)) continue;
       seen.add(key);
       out.push(alias);
     }
@@ -315,7 +326,7 @@ function combineSources(sources: readonly GraphConceptSource[]): KnowledgeConcep
     type: first.type,
     confidence: Math.max(...sources.map((s) => s.confidence)),
     description: sources.find((s) => s.description !== null)?.description ?? null,
-    aliases: unionAliases(first.name, [first.aliases, ...sources.slice(1).flatMap((s) => [[s.name], s.aliases])]),
+    aliases: unionAliases(first.name, first.type, [first.aliases, ...sources.slice(1).flatMap((s) => [[s.name], s.aliases])]),
     attributes
   };
 }
