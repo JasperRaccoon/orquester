@@ -14,6 +14,7 @@ import { isKnowledgeEntryId } from "@orquester/config";
 import type { KnowledgeGraphPort, KnowledgeStorePort } from "../ports.ts";
 import type { KnowledgeLogger } from "../store/errors.ts";
 import { Bm25Index } from "./bm25.ts";
+import { isSurveyEntry } from "./contradictions.ts";
 import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibility.ts";
 
@@ -454,6 +455,7 @@ class View {
   private readonly conceptEntries = new Map<string, string[]>();
   private readonly sources = new Map<string, readonly GraphConceptSource[]>();
   private readonly presented = new Map<string, KnowledgeConcept>();
+  private readonly surveys = new Map<string, boolean>();
 
   constructor(
     readonly snapshot: Snapshot,
@@ -597,9 +599,23 @@ class View {
     return ids;
   }
 
+  /** Whether an entry surveys others rather than claiming (`isSurveyEntry`: a synthesis, a map or audit note). */
+  survey(entryId: string): boolean {
+    let survey = this.surveys.get(entryId);
+    if (survey === undefined) this.surveys.set(entryId, (survey = isSurveyEntry(this.getMeta(entryId))));
+    return survey;
+  }
+
+  /**
+   * The visible collections of the visible entries behind a concept. A survey (a synthesis that
+   * links every topic) counts only for a concept no other visible entry has: an all-collection
+   * synthesis does not put "IPQualityScore" in "SEO & AI Search".
+   */
   collectionsOf(conceptId: string): string[] {
     const out = new Set<string>();
-    for (const entryId of this.entriesOf(conceptId)) {
+    const entries = this.entriesOf(conceptId);
+    const own = entries.filter((entryId) => !this.survey(entryId));
+    for (const entryId of own.length > 0 ? own : entries) {
       const meta = this.getMeta(entryId);
       if (meta) for (const id of visibleCollections(meta, this.scope)) out.add(id);
     }
@@ -617,6 +633,20 @@ class View {
       entryCount: this.entriesOf(conceptId).length,
       degree: this.degree(conceptId)
     };
+  }
+
+  /**
+   * Whether a visible edge joins a Person to something only on the word of surveys: every visible
+   * entry it comes from is a survey ({@link survey}), which attributes positions to the people it
+   * cites rather than stating their own. No provenance: no.
+   */
+  surveyAttributed(edge: GraphEdge): boolean {
+    if (edge.entryIds === null) return false;
+    const isPerson = (id: string): boolean => this.snapshot.concepts.get(id)?.type.toLowerCase() === "person";
+    const person = isPerson(edge.from) || isPerson(edge.to);
+    if (!person) return false;
+    const visible = edge.entryIds.filter((entryId) => this.entry(entryId));
+    return visible.length > 0 && visible.every((entryId) => this.survey(entryId));
   }
 
   /** A visible edge on the wire: as this scope sees it ({@link presentEdge}). */
@@ -944,7 +974,8 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
    * A visible concept with its visible collections, entries and neighbours, the concepts merged
    * into it and similar ones; null when hidden or unknown. The id of a concept merged into another
    * answers that one (links to it keep working) while that folded concept is visible. A merged
-   * concept says only what its visible sources say (`View.present`).
+   * concept says only what its visible sources say (`View.present`). A Person's links that only
+   * surveys make (`View.surveyAttributed`) are not among the neighbours, on either end.
    */
   concept(requested: string, scope: KnowledgeScope): KnowledgeConceptView | null {
     const view = this.view(scope);
@@ -968,10 +999,15 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
       concept: { ...shown, aliases: [...shown.aliases], attributes: { ...shown.attributes } },
       collections: view.collectionsOf(id),
       entryIds: view.entriesOf(id),
-      neighbors: view.visibleEdges(id).map((edge) => ({
-        edge: view.wireEdge(edge),
-        concept: view.ref(edge.from === id ? edge.to : edge.from)
-      })),
+      // A person's links that only surveys make (a research note's "jason recommends …") are not
+      // that person's own position: left out, both on the person and on what it would link.
+      neighbors: view
+        .visibleEdges(id)
+        .filter((edge) => !view.surveyAttributed(edge))
+        .map((edge) => ({
+          edge: view.wireEdge(edge),
+          concept: view.ref(edge.from === id ? edge.to : edge.from)
+        })),
       mergedFrom,
       similarConcepts
     };
