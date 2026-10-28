@@ -684,7 +684,8 @@ export class TemporaryBoxTools {
       }
       if (stats.isDirectory()) {
         // The directory's CONTENTS: unpacked into `remote`, which becomes the copy.
-        const tar = spawn("tar", ["-cf", "-", "-C", local.value, "."], { stdio: ["ignore", "pipe", "pipe"] });
+        // COPYFILE_DISABLE: macOS bsdtar would add AppleDouble `._*` entries for extended attributes.
+        const tar = spawn("tar", ["-cf", "-", "-C", local.value, "."], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, COPYFILE_DISABLE: "1" } });
         const exited = processExit(tar);
         abortWith(options.signal, () => tar.kill("SIGTERM"));
         try {
