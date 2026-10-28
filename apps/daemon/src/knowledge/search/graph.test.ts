@@ -295,7 +295,7 @@ test("a person's links that only surveys make are not its own position: left out
   assert.deepEqual(graph.concept("person-jason", seoOnly)!.neighbors.map((n) => n.edge.id), []);
 });
 
-test("a survey-only link stays when the person's own entry backs it: behind its other end, or the survey is the person's own", async () => {
+test("a survey-only link stays when the person's own saved post backs it (behind its other end); a survey the person wrote never counts", async () => {
   const store = new FakeStore();
   store.collection(A, "TikTok");
   store.collection(B, "SEO");
@@ -321,15 +321,15 @@ test("a survey-only link stays when the person's own entry backs it: behind its 
       edge("e1", "person-jason", "tactic-warm-48", [`${synthesis}.md`], "recommends"), // his own post is behind it: kept
       edge("e2", "person-jason", "tactic-setup", [`${synthesis}.md`], "recommends"), // a synthesis only: left out
       edge("e3", "person-jason", "tactic-warm-week", [`${synthesis}.md`], "recommends"), // another jason's post: left out
-      edge("e4", "person-claude", "tactic-setup", [`${synthesis}.md`], "recommends") // Claude wrote the synthesis: its own
+      edge("e4", "person-claude", "tactic-setup", [`${synthesis}.md`], "recommends") // Claude wrote the synthesis, but a survey is no saved post: left out
     ]
   );
   const all = knowledgeScope({ kind: "all" }, [A, B]);
   const ids = (id: string, scope = all) => graph.concept(id, scope)!.neighbors.map((n) => n.edge.id).sort();
   assert.deepEqual(ids("person-jason"), ["e1"]);
   assert.deepEqual(ids("tactic-warm-48"), ["e1"], "both ends");
-  assert.deepEqual(ids("person-claude"), ["e4"]);
-  assert.deepEqual(ids("tactic-setup"), ["e4"]);
+  assert.deepEqual(ids("person-claude"), [], "its own synthesis restates others: not its own position");
+  assert.deepEqual(ids("tactic-setup"), []);
   // Only visible entries count: a caller who cannot see his post sees the synthesis's word alone.
   assert.deepEqual(ids("person-jason", knowledgeScope({ kind: "collections", ids: [B] }, [A, B])), []);
   // Authorship: by handle, or by name when the entry has no other handle.

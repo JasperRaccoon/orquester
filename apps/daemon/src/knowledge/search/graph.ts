@@ -718,9 +718,9 @@ class View {
   /**
    * Whether a visible edge joins a Person to something only on the word of surveys: every visible
    * entry it comes from is a survey ({@link survey}), which attributes positions to the people it
-   * cites rather than stating their own. No provenance: no. Nor when the Person's own entry
-   * ({@link authored}) backs it: one of the entries it comes from, or one behind its other end (the
-   * Person's post states the warm-up a synthesis attributes to them).
+   * cites rather than stating their own. No provenance: no. Nor when the Person's own saved post
+   * ({@link authored}, not a survey) is behind its other end (the Person's post states the warm-up a
+   * synthesis attributes to them); a survey the Person wrote never counts.
    */
   surveyAttributed(edge: GraphEdge): boolean {
     if (edge.entryIds === null) return false;
@@ -729,9 +729,11 @@ class View {
     if (persons.length === 0) return false;
     const visible = edge.entryIds.filter((entryId) => this.entry(entryId));
     if (visible.length === 0 || !visible.every((entryId) => this.survey(entryId))) return false;
+    // Only the person's own saved post counts as backing, never their own survey: a research note
+    // or synthesis restates others' positions, whoever wrote it.
     return !persons.some((person) => {
       const other = person === edge.from ? edge.to : edge.from;
-      return visible.some((entryId) => this.authored(person, entryId)) || this.entriesOf(other).some((entryId) => this.authored(person, entryId));
+      return this.entriesOf(other).some((entryId) => !this.survey(entryId) && this.authored(person, entryId));
     });
   }
 
