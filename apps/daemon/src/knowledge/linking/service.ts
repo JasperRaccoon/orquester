@@ -1286,10 +1286,11 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         },
         bodyOf: async (id) => (await store.getEntry(id))?.body ?? null,
         // A pair rounds gave up on (no acceptable answer in several rounds) is not asked again, nor one answered since the graph loaded.
-        isChecked: (pair) => {
+        isChecked: (pair, reason) => {
           const key = pairCheckItemKey(pair);
-          return this.pairChecks.isChecked(pair, (id) => longBodies.has(id)) || this.pairChecks.gaveUp(key) || this.roundAnswered.has(key);
+          return this.pairChecks.isChecked(pair, (id) => longBodies.has(id), reason) || this.pairChecks.gaveUp(key) || this.roundAnswered.has(key);
         },
+        recheck: this.pairChecks.recheckPairs(),
         limit: PAIR_CHECK_MAX_PER_RUN
       });
       if (!this.idleForPairChecks()) return;
