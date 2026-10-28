@@ -379,7 +379,7 @@ export type ProjectFsLocation =
     };
 
 /** Where `path` lives: the host (no registry, the plugin off, a host project) or a ready box. */
-export function locateProjectFs(registry: BoxRegistry | undefined, path: string): ProjectFsLocation {
+export function locateProjectFs(registry: Pick<BoxRegistry, "locate"> | undefined, path: string): ProjectFsLocation {
   if (!registry || !path.startsWith("/")) return { kind: "host" };
   const location = registry.locate(posix.resolve(path));
   if (location.kind === "host") return location;
