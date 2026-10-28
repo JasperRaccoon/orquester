@@ -765,6 +765,11 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     return [...this.base.concepts.values()];
   }
 
+  /** myKG's edges as last loaded, before the merge overlay (the concept checks' neighbour anchors). */
+  baseEdges(): readonly GraphEdge[] {
+    return this.base.edges;
+  }
+
   /** Moves with every load swapped in (not with the overlay). */
   loadRevision(): number {
     return this.appliedLoad;

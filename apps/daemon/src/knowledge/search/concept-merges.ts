@@ -722,6 +722,8 @@ export class KnowledgeConceptMerges {
    */
   checkState(): {
     concepts: readonly GraphConcept[];
+    /** myKG's edges (before the overlay): what the checks' neighbour anchors come from. */
+    edges?: readonly { from: string; to: string }[];
     set: ConceptVectorSet;
     thresholds: ConceptMergeThresholds;
     rejected: readonly KnowledgeConceptMergeRejection[];
@@ -734,6 +736,7 @@ export class KnowledgeConceptMerges {
     if (!set || !thresholds) return null;
     return {
       concepts: this.graph.baseConcepts(),
+      edges: this.graph.baseEdges(),
       set,
       thresholds,
       rejected: this.file.rejected,
