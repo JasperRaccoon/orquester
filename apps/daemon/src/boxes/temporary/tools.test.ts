@@ -10,18 +10,20 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { createServer, connect, type AddressInfo } from "node:net";
+import { createServer, connect, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, delimiter, join } from "node:path";
 import { Readable } from "node:stream";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
+import type { StoredBox } from "@orquester/config";
 
 import type { BoxProcess, BoxRegistry } from "../contracts.ts";
 import { boxDiskConnection, fakeBoxRegistry, type BoxDiskConnection } from "../remote/fs/test-box.ts";
 import { localBoxConnection, type LocalBoxConnection } from "../testing.ts";
-import { boxSummary, FakeTemporaryBoxes, ManualClock } from "./testing.ts";
+import { ProjectBoxForwards } from "./project-forwards.ts";
+import { boxSummary, FakeForwardingHub, FakeTemporaryBoxes, ManualClock } from "./testing.ts";
 import { boxPathFor, EXEC_STDOUT_TAIL_BYTES, KILL_GRACE_MS, shellArgv, TemporaryBoxTools } from "./tools.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "boxes-temporary-")));
@@ -743,11 +745,107 @@ test("forwards: a host loopback URL to the box port, reused for the same port, c
       socket.on("end", () => resolve(text));
       socket.on("error", reject);
     });
-  assert.equal(await read(forward.value.hostPort), "hello from the box");
+  assert.equal(await read(forward.value.hostPort!), "hello from the box");
   const same = await tools.forwardPort("box-a", boxPort, { principal: agent() });
   assert.ok(same.ok && same.value.hostPort === forward.value.hostPort);
   await tools.destroy(agent(), "box-a");
-  await assert.rejects(read(forward.value.hostPort), /ECONNREFUSED/);
+  await assert.rejects(read(forward.value.hostPort!), /ECONNREFUSED/);
+});
+
+/** A chat whose project (PROJECT) runs in its own box `box-p`, played on this machine by a {@link FakeForwardingHub}. */
+function forwardingProjectWorld(t: TestContext, browserRunsInBox: boolean): World & { hub: FakeForwardingHub; projectBox: LocalBoxConnection } {
+  const w = world({ connect: false });
+  const projectBox = localBoxConnection({ boxId: "box-p" });
+  const hub = new FakeForwardingHub("box-p", projectBox);
+  const record = { id: "box-p", purpose: "project", state: "ready" } as StoredBox;
+  const owner = new ProjectBoxForwards({ hub, registry: { get: (boxId) => (boxId === "box-p" ? record : undefined), onChange: () => () => {} } });
+  w.tools.connect({
+    boxes: w.boxes,
+    hub: { get: (boxId) => (boxId === "box-a" ? w.connection : undefined) },
+    registry: { locate: (path) => (path === PROJECT ? { kind: "box", boxId: "box-p", record, connection: projectBox } : { kind: "host" }) },
+    projectForwards: owner,
+    browserRunsInBox: () => browserRunsInBox
+  });
+  t.after(async () => {
+    await w.tools.shutdown();
+    hub.close();
+  });
+  return { ...w, hub, projectBox };
+}
+
+/** A dev server in the temporary box (this machine): answers `text` and ends. */
+async function devServer(t: TestContext, text: string): Promise<number> {
+  const server = createServer((socket) => socket.end(text));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  return (server.address() as AddressInfo).port;
+}
+
+/** Everything a socket receives until it closes. */
+function received(socket: Socket): Promise<string> {
+  return new Promise((resolve) => {
+    let text = "";
+    socket.on("data", (chunk) => (text += chunk.toString()));
+    socket.on("error", () => undefined);
+    socket.once("close", () => resolve(text));
+  });
+}
+
+/** What a client on this machine's `port` receives; rejects when nothing listens there. */
+function fetchPort(port: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1");
+    socket.once("error", reject);
+    socket.once("connect", () => resolve(received(socket)));
+  });
+}
+
+test("forwards in a box project: url listens in the project's box and pipes to the box port; browser_url on the host for a host Browser tab; closed with the box", async (t) => {
+  const { tools, hub } = forwardingProjectWorld(t, false);
+  const boxPort = await devServer(t, "hello from the box");
+  const forward = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(forward.ok, forward.ok ? "" : forward.message);
+  const { url, browserUrl, projectBoxPort, hostPort } = forward.value;
+  assert.equal(url, `http://127.0.0.1:${projectBoxPort}/`);
+  assert.deepEqual(hub.ports(), [projectBoxPort], "the project box listens on that port");
+  assert.equal(await fetchPort(projectBoxPort!), "hello from the box", "project box → daemon → box port");
+  assert.equal(browserUrl, `http://127.0.0.1:${hostPort}/`);
+  assert.equal(await fetchPort(hostPort!), "hello from the box", "the host Browser tab's URL");
+  const same = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(same.ok);
+  assert.deepEqual(same.value, forward.value, "the same forward again");
+
+  await tools.destroy(agent(), "box-a");
+  assert.deepEqual(hub.lists.at(-1), [], "the project box's list no longer has it");
+  await assert.rejects(fetchPort(projectBoxPort!), /ECONNREFUSED/);
+  await assert.rejects(fetchPort(hostPort!), /ECONNREFUSED/);
+});
+
+test("forwards in a box project whose Browser tab runs in its box: one URL, no host port; refused while the project box is away", async (t) => {
+  const { tools, hub, projectBox } = forwardingProjectWorld(t, true);
+  const boxPort = await devServer(t, "hello from the box");
+  projectBox.setConnected(false);
+  const away = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(!away.ok && away.code === "BOX_NOT_READY", "no URL the chat could not open");
+  assert.deepEqual(hub.ports(), []);
+
+  projectBox.setConnected(true);
+  const forward = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(forward.ok, forward.ok ? "" : forward.message);
+  assert.equal(forward.value.browserUrl, undefined);
+  assert.equal(forward.value.hostPort, undefined);
+  assert.equal(await fetchPort(forward.value.projectBoxPort!), "hello from the box");
+});
+
+test("forwards in a box project: a host-tcp channel is served only for its own project box and a live target", async (t) => {
+  const { tools, hub } = forwardingProjectWorld(t, true);
+  const boxPort = await devServer(t, "private page");
+  const forward = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(forward.ok, forward.ok ? "" : forward.message);
+  const [spec] = hub.lists.at(-1)!;
+  assert.equal(await received(await hub.openAs("box-p", spec!)), "private page");
+  assert.equal(await received(await hub.openAs("box-other", spec!)), "", "another box naming the target is closed");
+  assert.equal(await received(await hub.openAs("box-p", { ...spec!, target: "fwd-guessed" })), "", "an unknown target is closed");
 });
 
 // ---------------------------------------------------------------------------

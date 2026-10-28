@@ -31,11 +31,12 @@ import {
 import { boxSocketPath, type StoredBox } from "@orquester/config";
 import type { WebSocket } from "ws";
 
-import { LinkedBoxConnection, channelDuplex } from "../client/connection.ts";
+import { DEFAULT_REQUEST_TIMEOUT_MS, LinkedBoxConnection, channelDuplex } from "../client/connection.ts";
 import { BoxError, BoxMux, type MuxChannel } from "../client/mux.ts";
 import type {
   BoxChannelHandler,
   BoxConnection,
+  BoxForwardOutcome,
   BoxHub,
   BoxRawRequestHandler,
   BoxRequestContext,
@@ -628,21 +629,31 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
       }
     },
 
-    setForwards(boxId, next) {
+    async setForwards(boxId, next) {
       const previous = forwards.get(boxId) ?? [];
       forwards.set(boxId, next.map((f) => ({ ...f })));
-      const connection = connections.get(boxId);
-      if (!connection?.connected) return;
+      // Sent on the link itself, not through the connection: the welcome's list re-establishes the
+      // forwards on a reconnect, so the connection must not replay them (a removed one would return).
+      const mux = connections.get(boxId)?.currentMux();
+      if (!mux) return [];
+      const options = { timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS };
       const nextPorts = new Set(next.map((f) => f.boxPort));
-      for (const old of previous) {
-        if (!nextPorts.has(old.boxPort)) connection.request("forward.unlisten", { boxPort: old.boxPort }).catch(() => undefined);
-      }
-      for (const spec of next) {
-        const before = previous.find((f) => f.boxPort === spec.boxPort);
-        if (!before || before.target !== spec.target) {
-          connection.request("forward.listen", spec).catch((error: Error) => logger.warn("forward.listen failed", { boxId, boxPort: spec.boxPort, error: error.message }));
-        }
-      }
+      const changed = next.filter((spec) => previous.find((f) => f.boxPort === spec.boxPort)?.target !== spec.target);
+      // Unlistened first: a new forward may take a port just given up.
+      await Promise.all(
+        previous.filter((old) => !nextPorts.has(old.boxPort)).map((old) => mux.request("forward.unlisten", { boxPort: old.boxPort }, options).catch(() => undefined))
+      );
+      return await Promise.all(
+        changed.map(async (spec): Promise<BoxForwardOutcome> => {
+          try {
+            await mux.request("forward.listen", spec, options);
+            return { boxPort: spec.boxPort, error: null };
+          } catch (error) {
+            logger.warn("forward.listen failed", { boxId, boxPort: spec.boxPort, error: (error as Error).message });
+            return { boxPort: spec.boxPort, error: error as BoxError };
+          }
+        })
+      );
     },
 
     handle<K extends BoxMethodName<BoxBoxToHostMethods>>(method: K, handler: BoxRequestHandler<K>) {

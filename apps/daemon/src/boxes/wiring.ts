@@ -78,6 +78,7 @@ import { createTailscaleKeys, type TailscaleCredentials as TailscaleApiCredentia
 import { createLocalTailscale, type DaemonHttpAddress } from "./tailscale/local.ts";
 import { createBoxGuiInstaller, type BoxGuiInstaller } from "./remote/gui/index.ts";
 import type { TemporaryBoxes } from "./temporary/contract.ts";
+import { ProjectBoxForwards } from "./temporary/project-forwards.ts";
 import type { TemporaryBoxTools } from "./temporary/tools.ts";
 import { createBoxToolingProvisioner, type BoxToolingProvisionerHandle } from "./tooling/provisioner.ts";
 import type { TailscaleCredentials } from "./service/settings.ts";
@@ -288,6 +289,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
   const gitRoute = createBoxGitRouteResolver(registry);
   // Desktops of Linux box projects run in their VM; the GUI installer sets up the desktop stack there.
   const desktops = new BoxDesktops({ registry, hub, tooling, installer: gui });
+  // A box project's chat forwards temporary-box ports into its own box (the hub's `host-tcp` channels).
+  const projectForwards = new ProjectBoxForwards({ hub, registry, logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") } });
 
   // ---- attached later ----------------------------------------------------------------------
   let transcripts: BoxTranscriptSyncService | null = null;
@@ -330,7 +333,15 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     if (enabled) {
       // Build orq-agent now (when no prebuilt one exists) rather than in the first create request.
       void builds.current().catch(() => undefined);
-      if (temporaryBoxTools && !disconnectTools) disconnectTools = temporaryBoxTools.connect({ boxes: temporaryBoxes, hub, registry });
+      if (temporaryBoxTools && !disconnectTools) {
+        disconnectTools = temporaryBoxTools.connect({
+          boxes: temporaryBoxes,
+          hub,
+          registry,
+          projectForwards,
+          browserRunsInBox: (projectPath) => boxBrowsers?.runsInBox(projectPath) ?? false
+        });
+      }
       for (const record of registry.list()) keepConfigInSync(record.id);
     } else {
       // Off means no box traffic at all: live links drop (the boxes keep running and are let back
@@ -569,6 +580,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       }
       await boxes.stop().catch((error) => logger.error("[boxes] Box service stop failed", errorText(error)));
       await forwards?.dispose().catch((error) => logger.warn("[boxes] Closing dev-server forwards failed", errorText(error)));
+      projectForwards.dispose();
       await tooling.stop().catch((error) => logger.warn("[boxes] Tooling stop failed", errorText(error)));
       watches.releaseAll();
       await configSync.close().catch((error) => logger.warn("[boxes] Config sync stop failed", errorText(error)));
