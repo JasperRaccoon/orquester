@@ -65,7 +65,8 @@ import {
   type AnyOrquesterTool,
   type ApprovalPreview,
   type ScopeClaim,
-  type ScopeContext
+  type ScopeContext,
+  type ToolCaller
 } from "../catalog/contract.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
@@ -574,14 +575,14 @@ const opSchema = z.discriminatedUnion("op", [
 type OpArg = z.infer<typeof opSchema>;
 
 /** The daemon's WorkflowProject for an MCP project argument: an existing project resolved exactly as every tool does. */
-async function toWorkflowProject(api: DaemonApi, project: ProjectArg): Promise<WorkflowProject> {
-  if (project.kind === "existing") return { kind: "existing", projectPath: (await resolveProject(api, project.project)).path };
+async function toWorkflowProject(api: DaemonApi, project: ProjectArg, caller: ToolCaller): Promise<WorkflowProject> {
+  if (project.kind === "existing") return { kind: "existing", projectPath: (await resolveProject(api, project.project, caller)).path };
   return { kind: "temp", workspace: project.workspace, source: project.source };
 }
 
-async function toNodeInput(api: DaemonApi, node: NodeInput): Promise<NodeInput> {
+async function toNodeInput(api: DaemonApi, node: NodeInput, caller: ToolCaller): Promise<NodeInput> {
   if (node.projectOverride === undefined) return node;
-  return { ...node, projectOverride: (await resolveProject(api, node.projectOverride)).path };
+  return { ...node, projectOverride: (await resolveProject(api, node.projectOverride, caller)).path };
 }
 
 /** The daemon host's own zone: what a schedule means when the caller names none. */
@@ -593,13 +594,13 @@ function hostTimeZone(): string {
  * The ops as the daemon takes them: every project a caller names resolved (`set_project`, an added
  * block's `projectOverride`, and one an `update_node` sets) — PROJECT_NOT_FOUND before anything.
  */
-async function convertOps(api: DaemonApi, raw: readonly OpArg[]): Promise<WorkflowPatchOp[]> {
+async function convertOps(api: DaemonApi, raw: readonly OpArg[], caller: ToolCaller): Promise<WorkflowPatchOp[]> {
   const ops: WorkflowPatchOp[] = [];
   for (const op of raw) {
-    if (op.op === "set_project") ops.push({ op: "set_project", project: await toWorkflowProject(api, op.project) });
-    else if (op.op === "add_node") ops.push({ op: "add_node", node: (await toNodeInput(api, op.node)) as Extract<WorkflowPatchOp, { op: "add_node" }>["node"] });
+    if (op.op === "set_project") ops.push({ op: "set_project", project: await toWorkflowProject(api, op.project, caller) });
+    else if (op.op === "add_node") ops.push({ op: "add_node", node: (await toNodeInput(api, op.node, caller)) as Extract<WorkflowPatchOp, { op: "add_node" }>["node"] });
     else if (op.op === "update_node" && typeof op.set.projectOverride === "string") {
-      ops.push({ ...op, set: { ...op.set, projectOverride: (await resolveProject(api, op.set.projectOverride)).path } });
+      ops.push({ ...op, set: { ...op.set, projectOverride: (await resolveProject(api, op.set.projectOverride, caller)).path } });
     } else if (op.op === "disconnect" && op.edgeId === undefined && (op.source === undefined || op.target === undefined)) {
       throw new ToolError("INVALID_ARGUMENT", `ops[${ops.length}] (disconnect): name the connection by edgeId, or by source and target (sourceHandle optional).`);
     } else ops.push(op as WorkflowPatchOp);
@@ -634,9 +635,9 @@ interface CreatePlan {
   error: ToolError | null;
 }
 
-async function planCreate(api: DaemonApi, args: CreateArgs, now: number): Promise<CreatePlan> {
-  const project = await toWorkflowProject(api, args.project);
-  const nodes = await Promise.all(args.nodes.map((n) => toNodeInput(api, n)));
+async function planCreate(api: DaemonApi, args: CreateArgs, now: number, caller: ToolCaller): Promise<CreatePlan> {
+  const project = await toWorkflowProject(api, args.project, caller);
+  const nodes = await Promise.all(args.nodes.map((n) => toNodeInput(api, n, caller)));
   const request: CreateWorkflowRequest = {
     name: args.name,
     ...(args.description !== undefined ? { description: args.description } : {}),
@@ -665,8 +666,8 @@ interface UpdatePlan {
   error: ToolError | null;
 }
 
-async function planUpdate(api: DaemonApi, args: { workflowId: string; revision: number; ops: OpArg[] }, now: number): Promise<UpdatePlan> {
-  const ops = await convertOps(api, args.ops);
+async function planUpdate(api: DaemonApi, args: { workflowId: string; revision: number; ops: OpArg[] }, now: number, caller: ToolCaller): Promise<UpdatePlan> {
+  const ops = await convertOps(api, args.ops, caller);
   const { workflow: current } = await readWorkflow(api, args.workflowId);
   if (current.revision !== args.revision) {
     const message = `The workflow is at revision ${current.revision}, not ${args.revision}`;
@@ -796,7 +797,7 @@ const listBlockTypes = defineTool({
 
 /** list_workflows' project: the argument, else (chat) the caller's own; null = every workflow (external only). */
 async function listProject(ctx: ScopeContext, project: string | undefined): Promise<string | null> {
-  if (project !== undefined) return (await resolveProject(ctx.api, project)).path;
+  if (project !== undefined) return (await resolveProject(ctx.api, project, ctx.caller)).path;
   if (!isChat(ctx)) return null;
   const own = ownProjectArg(ctx);
   if (own === null) throw new ToolError("INVALID_ARGUMENT", "This chat has no project of its own: pass project (\"<workspace>/<project>\", list_projects).");
@@ -916,13 +917,13 @@ const createWorkflow = defineTool({
   adminFamily: "workflows",
   async scope(args, ctx) {
     if (!isChat(ctx)) return NOTHING;
-    const plan = await planCreate(ctx.api, args, ctx.now());
+    const plan = await planCreate(ctx.api, args, ctx.now(), ctx.caller);
     const union = await workflowUnion(ctx.api, [plan.draft ?? { project: plan.request.project, nodes: (plan.request.nodes ?? []) as WorkflowNode[] }]);
     return claim({ ...unionScope(union), reads: "metadata", writes: !args.dryRun });
   },
   async approval(args, ctx): Promise<ApprovalPreview> {
     const { api } = ctx;
-    const plan = await planCreate(api, args, ctx.now());
+    const plan = await planCreate(api, args, ctx.now(), ctx.caller);
     if (plan.error || !plan.draft) throw plan.error ?? new ToolError("INVALID_WORKFLOW", "The workflow cannot be built.");
     const draft = plan.draft;
     const problems = await validateDefinition(api, draft);
@@ -950,7 +951,7 @@ const createWorkflow = defineTool({
   resultKind: "json",
   async run(args, ctx) {
     const { api } = ctx;
-    const plan = await planCreate(api, args, ctx.now());
+    const plan = await planCreate(api, args, ctx.now(), ctx.caller);
     if (args.dryRun) {
       if (plan.error || !plan.draft) throw plan.error ?? new ToolError("INVALID_WORKFLOW", "The workflow cannot be built.");
       const union = await workflowUnion(api, [plan.draft]);
@@ -983,7 +984,7 @@ const updateWorkflow = defineTool({
   adminFamily: "workflows",
   async scope(args, ctx) {
     if (!isChat(ctx)) return NOTHING;
-    const plan = await planUpdate(ctx.api, args, ctx.now());
+    const plan = await planUpdate(ctx.api, args, ctx.now(), ctx.caller);
     // The union of before and after: an edit touches where the workflow ran and where it will run.
     const after = plan.after ?? { project: undefined, nodes: plan.ops.flatMap((op) => (op.op === "add_node" ? [op.node as WorkflowNode] : [])) };
     const extra = plan.after ? [] : plan.ops.flatMap((op) => (op.op === "set_project" ? [{ project: op.project }] : []));
@@ -992,7 +993,7 @@ const updateWorkflow = defineTool({
   },
   async approval(args, ctx): Promise<ApprovalPreview> {
     const { api } = ctx;
-    const plan = await planUpdate(api, args, ctx.now());
+    const plan = await planUpdate(api, args, ctx.now(), ctx.caller);
     if (plan.error || !plan.after) throw plan.error ?? new ToolError("INVALID_WORKFLOW", "The edit cannot apply.");
     const { current, after } = plan;
     const problems = await validateDefinition(api, after);
@@ -1041,13 +1042,13 @@ const updateWorkflow = defineTool({
   async run(args, ctx) {
     const { api } = ctx;
     if (args.dryRun) {
-      const plan = await planUpdate(api, args, ctx.now());
+      const plan = await planUpdate(api, args, ctx.now(), ctx.caller);
       if (plan.error || !plan.after) throw plan.error ?? new ToolError("INVALID_WORKFLOW", "The edit cannot apply.");
       const union = await workflowUnion(api, [plan.current, plan.after]);
       const changes = graphDiff(plan.current, plan.after, api.workspacesDir).sections[0];
       return dryRunResult(await validateDefinition(api, plan.after), union, { revision: plan.current.revision, ...(changes?.kind === "changes" ? { changes: changes.items } : {}) });
     }
-    const ops = await convertOps(api, args.ops);
+    const ops = await convertOps(api, args.ops, ctx.caller);
     if (ctx.approval?.pins) {
       const { workflow: current } = await readWorkflow(api, args.workflowId);
       await verifyPins(api, ctx.approval.pins, { current, via: ctx.approval.outcome });

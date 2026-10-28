@@ -105,7 +105,7 @@ async function chatSearchScope(api: DaemonApi, caller: ThreadCaller, project: st
   const projects = await canonicalProjects(api, sessions);
   const projectOf = (s: SessionSummary) => projects.get(s.projectPath) ?? null;
   if (project !== undefined && project !== "all") {
-    const ref = await resolveProject(api, project);
+    const ref = await resolveProject(api, project, caller);
     const target = await canonicalProject(api, ref.path);
     return { searched: "project", projectPath: ref.path, allows: (s) => target !== null && projectOf(s)?.canonical === target.canonical };
   }
@@ -145,7 +145,7 @@ const searchSessions = defineTool({
       if (!caller.projectPath) throw new ToolError("INVALID_ARGUMENT", "This chat belongs to no project: pass project, or \"all\".");
       return { ...claim, projects: [caller.projectPath] };
     }
-    return { ...claim, projects: [(await resolveProject(ctx.api, args.project)).path] };
+    return { ...claim, projects: [(await resolveProject(ctx.api, args.project, ctx.caller)).path] };
   },
   approval: (args, ctx) => projectCard(ctx, args.project ?? "", "search the chats of", [{ label: "Query", value: args.query }]),
   annotations: READ_ONLY,
@@ -165,7 +165,7 @@ const searchSessions = defineTool({
       projectPath = chat.projectPath;
     } else if (args.project !== undefined && args.project !== "all") {
       // `!== undefined`, as list_sessions tests it: an empty project is refused by resolveProject, never "every project".
-      projectPath = (await resolveProject(api, args.project)).path;
+      projectPath = (await resolveProject(api, args.project, caller)).path;
     }
     // A search narrowed after the host answered asks for every hit it may keep, then cuts to the caller's limit.
     const narrowedAfter = chat !== undefined && chat.searched === "workspace";

@@ -59,8 +59,13 @@ describe("box hub authentication", () => {
       }
     };
   };
+  /** When set, the version handshake waits for it (the box has its welcome; its link is not attached yet). */
+  let buildsGate: Promise<void> | null = null;
   const builds: BoxAgentBuilds = {
-    current: async () => ({ version: "test" }),
+    current: async () => {
+      await buildsGate;
+      return { version: "test" };
+    },
     resolve: async () => null
   };
 
@@ -286,6 +291,96 @@ describe("box hub authentication", () => {
     assert.equal(refused.error.code, "UNKNOWN_CHANNEL");
     box.close();
     await box.closed;
+  });
+
+  test("setForwards listens now and resolves with each listen's outcome; a reconnect gets the list in its welcome, not replayed", async () => {
+    records.add("box-fwd-00001");
+    const token = await hub.issueBootstrapToken("box-fwd-00001", 60_000);
+    const box = await FakeBox.connect(url);
+    box.hello({ kind: "bootstrap", token });
+    const credential = expectT(await box.next(), "welcome").credential!;
+    const connection = await hub.waitConnected("box-fwd-00001", { timeoutMs: 5_000 });
+    const list = [
+      { boxPort: 4100, target: "fwd-a" },
+      { boxPort: 4101, target: "fwd-b" }
+    ];
+    const set = hub.setForwards("box-fwd-00001", list);
+    for (let answered = 0; answered < 2; answered += 1) {
+      const req = expectT(await box.next(), "req");
+      assert.equal(req.method, "forward.listen");
+      const taken = (req.params as { boxPort: number }).boxPort === 4101;
+      box.send(taken ? { t: "res", id: req.id, ok: false, error: { code: "EADDRINUSE", message: "address already in use" } } : { t: "res", id: req.id, ok: true, result: null });
+    }
+    assert.deepEqual(
+      (await set).map((outcome) => [outcome.boxPort, outcome.error?.code ?? null]),
+      [
+        [4100, null],
+        [4101, "EADDRINUSE"]
+      ]
+    );
+    // `relisten`: every port is listened again, the unchanged ones too.
+    const relistened = hub.setForwards("box-fwd-00001", list, { relisten: true });
+    const ports: number[] = [];
+    for (let answered = 0; answered < 2; answered += 1) {
+      const message = await Promise.race([box.next(), relistened.then(() => null)]);
+      assert.ok(message, "a listen was sent for each port");
+      const req = expectT(message, "req");
+      assert.equal(req.method, "forward.listen");
+      ports.push((req.params as { boxPort: number }).boxPort);
+      box.send({ t: "res", id: req.id, ok: true, result: null });
+    }
+    assert.deepEqual(ports.sort(), [4100, 4101]);
+    assert.equal((await relistened).length, 2);
+
+    const again = await FakeBox.connect(url);
+    again.hello({ kind: "credential", boxId: "box-fwd-00001", credential });
+    assert.deepEqual(expectT(await again.next(), "welcome").config.forwards, list);
+    await hub.waitConnected("box-fwd-00001", { timeoutMs: 5_000 });
+    // The next request the box sees is this one: nothing re-sent the forwards on top of the welcome.
+    void connection.request("proc.list", {}).catch(() => undefined);
+    assert.equal(expectT(await again.next(), "req").method, "proc.list");
+    again.close();
+    await again.closed;
+  });
+
+  test("a forward list set while a reconnecting box is in its handshake is sent once its link is up", async () => {
+    records.add("box-fwd-00002");
+    const token = await hub.issueBootstrapToken("box-fwd-00002", 60_000);
+    const box = await FakeBox.connect(url);
+    box.hello({ kind: "bootstrap", token });
+    const credential = expectT(await box.next(), "welcome").credential!;
+    const connection = await hub.waitConnected("box-fwd-00002", { timeoutMs: 5_000 });
+    const set = hub.setForwards("box-fwd-00002", [{ boxPort: 4200, target: "fwd-old" }]);
+    const listen = expectT(await box.next(), "req");
+    box.send({ t: "res", id: listen.id, ok: true, result: null });
+    await set;
+
+    let release!: () => void;
+    buildsGate = new Promise<void>((resolve) => (release = resolve));
+    const again = await FakeBox.connect(url);
+    again.hello({ kind: "credential", boxId: "box-fwd-00002", credential });
+    assert.deepEqual(expectT(await again.next(), "welcome").config.forwards, [{ boxPort: 4200, target: "fwd-old" }]);
+    // The welcome went out with the old list; the handshake is still running.
+    assert.deepEqual(await hub.setForwards("box-fwd-00002", [{ boxPort: 4201, target: "fwd-new" }]), [], "no link to send it on yet");
+    buildsGate = null;
+    release();
+    await hub.waitConnected("box-fwd-00002", { timeoutMs: 5_000 });
+    void connection.request("proc.list", {}).catch(() => undefined);
+    const unlisten = expectT(await again.next(), "req");
+    assert.deepEqual([unlisten.method, unlisten.params], ["forward.unlisten", { boxPort: 4200 }], "the welcome's stale port is given up first");
+    again.send({ t: "res", id: unlisten.id, ok: true, result: null });
+    const methods: [string, unknown][] = [];
+    for (let seen = 0; seen < 2; seen += 1) {
+      const req = expectT(await again.next(), "req");
+      methods.push([req.method, req.params]);
+      again.send({ t: "res", id: req.id, ok: true, result: req.method === "proc.list" ? [] : null });
+    }
+    assert.deepEqual(
+      methods.find(([method]) => method === "forward.listen"),
+      ["forward.listen", { boxPort: 4201, target: "fwd-new" }]
+    );
+    again.close();
+    await again.closed;
   });
 
   test("a box revoked while its GitHub OIDC check is pending is refused, not linked", async () => {

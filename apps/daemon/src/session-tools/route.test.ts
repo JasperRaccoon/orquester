@@ -17,6 +17,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 
 import { agentHostAuthValue } from "../agent-host/host-protocol.ts";
 import { createDaemonForwarder } from "../agent-host/session-tools/forwarder.ts";
+import { boxPathMapFor } from "@orquester/api";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { chatSummary, head, message, snapshot, turn } from "../mcp/fixtures.ts";
@@ -288,7 +289,7 @@ test("request_secret over the socket: the answer reaches the call; the host's ca
   assert.deepEqual(secretRequests.list("thread-a"), []);
 });
 
-test("the caller is built from the thread's tab and snapshot: title, mode, planning, exchange, workflow-owned; a tool of any group runs", async (t) => {
+test("the caller is built from the thread's tab and snapshot: title, mode, planning, exchange, workflow-owned, its box's path map; a tool of any group runs", async (t) => {
   const whoami = defineTool({
     name: "whoami", title: "Who am I", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "read",
     scope: async () => ({ projects: [], sessions: [], reads: "none", writes: false, causesTurnIn: [] }),
@@ -329,7 +330,7 @@ test("the caller is built from the thread's tab and snapshot: title, mode, plann
   const tools = new Map([whoami, notes].map((tool) => [tool.name, tool]));
   registerSessionToolsRoute(app, {
     authorizeHost: (authorization) => authorization === agentHostAuthValue(TOKEN),
-    resolveThread: (threadId) => THREADS[threadId] ?? null,
+    resolveThread: (threadId) => (THREADS[threadId] ? { ...THREADS[threadId]!, boxPaths: boxPathMapFor("win32") } : null),
     api: () => api,
     lookup: (name) => tools.get(name)
   });
@@ -347,6 +348,7 @@ test("the caller is built from the thread's tab and snapshot: title, mode, plann
     projectPath: PROJECT,
     workspace: "w",
     cwd: join(PROJECT, "sub"),
+    boxPaths: boxPathMapFor("win32"),
     agentId: "codex",
     callId: "toolu_9",
     runtimeMode: "auto",

@@ -8,20 +8,24 @@
 
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import fsPromises from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { createServer, connect, type AddressInfo } from "node:net";
+import { syncBuiltinESMExports } from "node:module";
+import { createServer, connect, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, delimiter, join } from "node:path";
 import { Readable } from "node:stream";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import type { StoredBox } from "@orquester/config";
 
-import type { BoxProcess } from "../contracts.ts";
+import type { BoxProcess, BoxRegistry } from "../contracts.ts";
+import { boxDiskConnection, fakeBoxRegistry, type BoxDiskConnection } from "../remote/fs/test-box.ts";
 import { localBoxConnection, type LocalBoxConnection } from "../testing.ts";
-import { boxSummary, FakeTemporaryBoxes, ManualClock } from "./testing.ts";
+import { ProjectBoxForwards } from "./project-forwards.ts";
+import { boxSummary, FakeForwardingHub, FakeTemporaryBoxes, ManualClock } from "./testing.ts";
 import { boxPathFor, EXEC_STDOUT_TAIL_BYTES, KILL_GRACE_MS, shellArgv, TemporaryBoxTools } from "./tools.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "boxes-temporary-")));
@@ -47,7 +51,7 @@ interface World {
   open: Set<string>;
 }
 
-function world(options: { connect?: boolean } = {}): World {
+function world(options: { connect?: boolean; registry?: Pick<BoxRegistry, "locate"> } = {}): World {
   const boxes = new FakeTemporaryBoxes()
     .add(boxSummary({ id: "box-a", threadId: "chat-a" }))
     .add(boxSummary({ id: "box-b", threadId: "chat-b" }))
@@ -64,7 +68,11 @@ function world(options: { connect?: boolean } = {}): World {
   let next = 0;
   const tools = new TemporaryBoxTools({ clock, isChatOpen: (id) => open.has(id), newId: () => `id${(next += 1)}`, logger: { warn: () => {}, error: () => {} } });
   if (options.connect !== false) {
-    tools.connect({ boxes, hub: { get: (boxId) => (boxId === "box-a" || boxId === "box-b" ? connection : undefined) } });
+    tools.connect({
+      boxes,
+      hub: { get: (boxId) => (boxId === "box-a" || boxId === "box-b" ? connection : undefined) },
+      ...(options.registry ? { registry: options.registry } : {})
+    });
   }
   return { boxes, tools, clock, connection, open };
 }
@@ -394,17 +402,231 @@ test("files move only between the box and the calling chat's own project (after 
   assert.ok(!byUser.ok && byUser.code === "PERMISSION_DENIED");
 });
 
-test("files: a box project's chat cannot move files through the host stub", async () => {
-  const boxes = new FakeTemporaryBoxes().add(boxSummary({ id: "box-a", threadId: "chat-a" }));
-  const tools = new TemporaryBoxTools();
-  const record = boxSummary({ id: "box-project", purpose: "project" }) as unknown as StoredBox;
-  tools.connect({
-    boxes,
-    hub: { get: () => localBoxConnection({ sys: { home: BOX } }) },
-    registry: { locate: (path) => (path === PROJECT ? { kind: "box", boxId: "box-project", record, connection: undefined } : { kind: "host" }) }
-  });
-  const refused = await tools.upload("box-a", { localPath: join(PROJECT, "run.sh"), remotePath: "s" }, { principal: agent() });
-  assert.ok(!refused.ok && refused.code === "BOX_UNSUPPORTED");
+// A box project: its files live only on its box's disk (`DISK`); the host stub at its path is never
+// created, so every byte moved proves it went through the project box's link.
+const DISK = join(ROOT, "project-box-disk");
+
+function boxProjectWorld(name: string): World & { project: string; projectBox: BoxDiskConnection; inBox(...segments: string[]): string } {
+  const project = join(ROOT, "workspaces", "acme", name);
+  const projectBox = boxDiskConnection({ disk: DISK, boxId: "box-project" });
+  mkdirSync(projectBox.local(project), { recursive: true });
+  return {
+    ...world({ registry: fakeBoxRegistry({ projectPath: project, connection: projectBox }) }),
+    project,
+    projectBox,
+    inBox: (...segments) => projectBox.local(join(project, ...segments))
+  };
+}
+
+test("box project: upload relays a file and a directory's contents from the project box into the temporary box", async () => {
+  const { tools, project, inBox } = boxProjectWorld("boxed-up");
+  writeFileSync(inBox("run.sh"), "#!/bin/sh\necho hi\n", { mode: 0o755 });
+  mkdirSync(inBox("src", "deep"), { recursive: true });
+  writeFileSync(inBox("src", "a.txt"), "A");
+  writeFileSync(inBox("src", "deep", "b.txt"), "B");
+  const principal = agent("chat-a", project);
+
+  const file = await tools.upload("box-a", { localPath: join(project, "run.sh"), remotePath: "boxed-in/run.sh" }, { principal });
+  assert.ok(file.ok, file.ok ? "" : file.message);
+  assert.deepEqual(file.value, { kind: "file", bytes: 18, localPath: join(project, "run.sh"), remotePath: join(BOX, "boxed-in", "run.sh") });
+  assert.equal(readFileSync(join(BOX, "boxed-in", "run.sh"), "utf8"), "#!/bin/sh\necho hi\n");
+  assert.equal(statSync(join(BOX, "boxed-in", "run.sh")).mode & 0o777, 0o755);
+
+  const dir = await tools.upload("box-a", { localPath: join(project, "src"), remotePath: join(BOX, "boxed-copy") }, { principal });
+  assert.ok(dir.ok, dir.ok ? "" : dir.message);
+  assert.equal(dir.value.kind, "directory");
+  assert.ok(dir.value.bytes > 0);
+  // The directory's contents land in remote_path, as from a host project.
+  assert.deepEqual(readdirSync(join(BOX, "boxed-copy")).sort(), ["a.txt", "deep"]);
+  assert.equal(readFileSync(join(BOX, "boxed-copy", "deep", "b.txt"), "utf8"), "B");
+
+  const missing = await tools.upload("box-a", { localPath: join(project, "nope"), remotePath: "x" }, { principal });
+  assert.ok(!missing.ok && missing.code === "NOT_FOUND");
+  assert.equal(existsSync(project), false, "nothing was read from the host stub");
+});
+
+test("box project: download writes a file and a directory into the project box, with the host's rules", async () => {
+  const { tools, project, inBox } = boxProjectWorld("boxed-down");
+  mkdirSync(join(BOX, "bp-out", "logs", "nested"), { recursive: true });
+  writeFileSync(join(BOX, "bp-out", "app"), "BINARY", { mode: 0o755 });
+  writeFileSync(join(BOX, "bp-out", "logs", "build.log"), "ok\n");
+  writeFileSync(join(BOX, "bp-out", "logs", "nested", "n.txt"), "n");
+  writeFileSync(inBox("app"), "old");
+  const principal = agent("chat-a", project);
+
+  const file = await tools.download("box-a", { remotePath: join(BOX, "bp-out", "app"), localPath: join(project, "app") }, { principal });
+  assert.ok(file.ok, file.ok ? "" : file.message);
+  assert.deepEqual(file.value, { kind: "file", bytes: 6, localPath: join(project, "app"), remotePath: join(BOX, "bp-out", "app") });
+  assert.equal(readFileSync(inBox("app"), "utf8"), "BINARY");
+  assert.equal(statSync(inBox("app")).mode & 0o111, 0o111);
+
+  const dir = await tools.download("box-a", { remotePath: join(BOX, "bp-out", "logs"), localPath: join(project, "artifacts", "logs-copy") }, { principal });
+  assert.ok(dir.ok, dir.ok ? "" : dir.message);
+  assert.equal(dir.value.kind, "directory");
+  assert.equal(readFileSync(inBox("artifacts", "logs-copy", "build.log"), "utf8"), "ok\n");
+  assert.equal(readFileSync(inBox("artifacts", "logs-copy", "nested", "n.txt"), "utf8"), "n");
+
+  const again = await tools.download("box-a", { remotePath: join(BOX, "bp-out", "logs"), localPath: join(project, "artifacts", "logs-copy") }, { principal });
+  assert.ok(!again.ok && again.code === "ALREADY_EXISTS");
+  const projectItself = await tools.download("box-a", { remotePath: join(BOX, "bp-out", "logs"), localPath: project }, { principal });
+  assert.ok(!projectItself.ok && projectItself.code === "INVALID_ARGUMENT");
+  assert.deepEqual(readdirSync(inBox("artifacts")), ["logs-copy"], "nothing half-written is left beside the target");
+  assert.deepEqual(readdirSync(inBox()).sort(), ["app", "artifacts"]);
+  assert.equal(existsSync(project), false, "nothing was written to the host stub");
+});
+
+test("box project: transfers stay inside the project after realpath in its box, and never write git metadata there", async () => {
+  const { tools, project, inBox, projectBox } = boxProjectWorld("boxed-git");
+  const outside = projectBox.local(join(ROOT, "workspaces", "acme", "boxed-other"));
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "secret.txt"), "x");
+  symlinkSync("../boxed-other/secret.txt", inBox("leak.txt"));
+  symlinkSync("../boxed-other", inBox("leak-dir"));
+  const principal = agent("chat-a", project);
+  for (const localPath of [join(project, "..", "boxed-other", "secret.txt"), join(project, "leak.txt")]) {
+    const upload = await tools.upload("box-a", { localPath, remotePath: "s" }, { principal });
+    assert.ok(!upload.ok && upload.code === "PERMISSION_DENIED", `upload ${localPath} is refused`);
+  }
+  mkdirSync(join(BOX, "bp-evil"), { recursive: true });
+  writeFileSync(join(BOX, "bp-evil", "pre-commit"), "#!/bin/sh\ntouch /tmp/pwned\n", { mode: 0o755 });
+  const escaped = await tools.download("box-a", { remotePath: join(BOX, "bp-evil", "pre-commit"), localPath: join(project, "leak-dir", "x") }, { principal });
+  assert.ok(!escaped.ok && escaped.code === "PERMISSION_DENIED", "a download through a symlink out of the project is refused");
+  assert.deepEqual(readdirSync(outside), ["secret.txt"]);
+
+  // A repo, a bare repository and a link into a .git, all in the project box.
+  mkdirSync(inBox("repo", ".git", "hooks"), { recursive: true });
+  mkdirSync(inBox("repo", ".git", "objects"));
+  mkdirSync(inBox("repo", ".git", "refs"));
+  writeFileSync(inBox("repo", ".git", "HEAD"), "ref: refs/heads/main\n");
+  mkdirSync(inBox("mirror.git", "objects"), { recursive: true });
+  mkdirSync(inBox("mirror.git", "refs"));
+  writeFileSync(inBox("mirror.git", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync("repo/.git", inBox("meta-link"));
+  // Git follows symlinked objects/refs: still a git directory.
+  mkdirSync(inBox("linked.git", "o"), { recursive: true });
+  mkdirSync(inBox("linked.git", "r"));
+  writeFileSync(inBox("linked.git", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync("o", inBox("linked.git", "objects"));
+  symlinkSync("r", inBox("linked.git", "refs"));
+  for (const localPath of [
+    join(project, "repo", ".GIT", "hooks", "pre-commit"),
+    join(project, "meta-link", "hooks", "pre-commit"),
+    join(project, "mirror.git", "hooks", "post-update"),
+    join(project, "linked.git", "config")
+  ]) {
+    const result = await tools.download("box-a", { remotePath: join(BOX, "bp-evil", "pre-commit"), localPath }, { principal });
+    assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${localPath} is refused`);
+  }
+  assert.deepEqual(readdirSync(inBox("repo", ".git", "hooks")), []);
+  assert.equal(existsSync(inBox("mirror.git", "hooks")), false);
+
+  // A directory that carries a .git, or is itself a git directory.
+  mkdirSync(join(BOX, "bp-nested", "pkg", ".git"), { recursive: true });
+  writeFileSync(join(BOX, "bp-nested", "pkg", ".git", "config"), "[core]\n\tfsmonitor = /tmp/x\n");
+  mkdirSync(join(BOX, "bp-bare", "objects"), { recursive: true });
+  mkdirSync(join(BOX, "bp-bare", "refs"));
+  writeFileSync(join(BOX, "bp-bare", "HEAD"), "ref: refs/heads/main\n");
+  mkdirSync(join(BOX, "bp-linked", "o"), { recursive: true });
+  mkdirSync(join(BOX, "bp-linked", "r"));
+  writeFileSync(join(BOX, "bp-linked", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync("o", join(BOX, "bp-linked", "objects"));
+  symlinkSync("r", join(BOX, "bp-linked", "refs"));
+  mkdirSync(inBox("downloads"));
+  for (const remote of ["bp-nested", "bp-bare", "bp-linked"]) {
+    const result = await tools.download("box-a", { remotePath: join(BOX, remote), localPath: join(project, "downloads", remote) }, { principal });
+    assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${remote} is refused`);
+  }
+  assert.deepEqual(readdirSync(inBox("downloads")), [], "nothing was moved in, no staging left");
+  assert.equal(existsSync(inBox("linked.git", "config")), false);
+});
+
+test("box project: download staging the project box could not remove is retried on its reconnect and next transfer, named in a refusal, and forgotten with that box", async () => {
+  const { tools, boxes, project, inBox, projectBox, connection } = boxProjectWorld("boxed-leftover");
+  boxes.add(boxSummary({ id: "box-project", purpose: "project", threadId: null }));
+  const principal = agent("chat-a", project);
+  mkdirSync(join(BOX, "bp-left", "sub"), { recursive: true });
+  writeFileSync(join(BOX, "bp-left", "sub", "f"), "f");
+  mkdirSync(join(BOX, "bp-left-git", "pkg", ".git"), { recursive: true });
+  writeFileSync(join(BOX, "bp-left-git", "pkg", ".git", "config"), "[core]\n\tfsmonitor = /tmp/x\n");
+  const removals: Promise<unknown>[] = [];
+  let busy = false;
+  const request = projectBox.request;
+  projectBox.request = ((method: string, params: never, options?: never) => {
+    if (method !== "fs.rm") return request(method as "fs.rm", params, options);
+    // A busy or locked file (Windows): the box stays connected but refuses the removal.
+    const removal = busy ? Promise.reject(Object.assign(new Error("Device or resource busy"), { code: "EBUSY" })) : request(method, params, options);
+    removals.push(removal.catch(() => undefined));
+    return removal;
+  }) as typeof projectBox.request;
+
+  // The project box's link drops mid-download: its staging cannot be removed then.
+  const readTar = connection.readTar;
+  connection.readTar = async () =>
+    Readable.from((async function* () {
+      projectBox.setConnected(false);
+      yield* [];
+      throw new Error("the link dropped");
+    })());
+  const dropped = await tools.download("box-a", { remotePath: join(BOX, "bp-left"), localPath: join(project, "drop", "copy") }, { principal });
+  assert.ok(!dropped.ok && dropped.code === "BOX_NOT_READY", dropped.ok ? "" : dropped.message);
+  assert.deepEqual(readdirSync(inBox("drop")), [".orq-download-id1"]);
+  projectBox.setConnected(true);
+  assert.equal(removals.length, 1, "the reconnect removes it");
+  await Promise.all(removals);
+  assert.deepEqual(readdirSync(inBox("drop")), []);
+
+  // The box refuses to remove a refused download's unscanned tree: the refusal says where it is,
+  // and the next transfer into that project box removes it.
+  connection.readTar = readTar;
+  busy = true;
+  const refused = await tools.download("box-a", { remotePath: join(BOX, "bp-left-git"), localPath: join(project, "refused", "copy") }, { principal });
+  assert.ok(!refused.ok && refused.code === "PERMISSION_DENIED", refused.ok ? "" : refused.message);
+  assert.ok(refused.message.includes(join(project, "refused", ".orq-download-id2")), refused.message);
+  assert.deepEqual(readdirSync(inBox("refused")), [".orq-download-id2"]);
+  busy = false;
+  writeFileSync(inBox("a.txt"), "a");
+  const next = await tools.upload("box-a", { localPath: join(project, "a.txt"), remotePath: "a.txt" }, { principal });
+  assert.ok(next.ok, next.ok ? "" : next.message);
+  assert.deepEqual(readdirSync(inBox("refused")), []);
+
+  // Once the project box is destroyed, nothing is retried in it.
+  busy = true;
+  const gone = await tools.download("box-a", { remotePath: join(BOX, "bp-left-git"), localPath: join(project, "gone", "copy") }, { principal });
+  assert.ok(!gone.ok && gone.code === "PERMISSION_DENIED");
+  busy = false;
+  const sent = removals.length;
+  boxes.update("box-project", { state: "destroyed" });
+  projectBox.setConnected(false);
+  projectBox.setConnected(true);
+  assert.equal(removals.length, sent, "no removal is sent to a destroyed project box");
+});
+
+test("box project on macOS: a directory upload's tar runs with COPYFILE_DISABLE (no AppleDouble ._ entries)", async () => {
+  const { tools, project, inBox, projectBox } = boxProjectWorld("boxed-mac");
+  Object.defineProperty(projectBox, "sys", { value: { ...projectBox.sys, os: "darwin" } });
+  mkdirSync(inBox("src"));
+  writeFileSync(inBox("src", "a.txt"), "A");
+  const envs: (Record<string, string> | undefined)[] = [];
+  const exec = projectBox.exec;
+  projectBox.exec = (options) => {
+    envs.push(options.env);
+    return exec(options);
+  };
+  const dir = await tools.upload("box-a", { localPath: join(project, "src"), remotePath: join(BOX, "mac-copy") }, { principal: agent("chat-a", project) });
+  assert.ok(dir.ok, dir.ok ? "" : dir.message);
+  assert.deepEqual(envs.map((env) => env?.COPYFILE_DISABLE), ["1"]);
+});
+
+test("box project: a project box that is not connected is a BOX_NOT_READY refusal about the project's box", async () => {
+  const { tools, project, projectBox } = boxProjectWorld("boxed-offline");
+  projectBox.setConnected(false);
+  const principal = agent("chat-a", project);
+  const upload = await tools.upload("box-a", { localPath: join(project, "a.txt"), remotePath: "a.txt" }, { principal });
+  const download = await tools.download("box-a", { remotePath: join(BOX, "a.txt"), localPath: join(project, "a.txt") }, { principal });
+  for (const result of [upload, download]) {
+    assert.ok(!result.ok && result.code === "BOX_NOT_READY", result.ok ? "" : result.message);
+    assert.match(result.message, /box-project/);
+  }
 });
 
 test("download: a file replaces a file atomically (exec bit kept); a directory lands at local_path; an existing directory is refused", async () => {
@@ -547,6 +769,12 @@ test("download: never into git metadata — a .git path (any spelling), through 
   mkdirSync(join(PROJECT, "mirror.git", "refs"), { recursive: true });
   writeFileSync(join(PROJECT, "mirror.git", "HEAD"), "ref: refs/heads/main\n");
   symlinkSync(join(repo, ".git"), join(PROJECT, "meta-link"));
+  // Git follows symlinked objects/refs: still a git directory.
+  mkdirSync(join(PROJECT, "linked.git", "o"), { recursive: true });
+  mkdirSync(join(PROJECT, "linked.git", "r"));
+  writeFileSync(join(PROJECT, "linked.git", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync("o", join(PROJECT, "linked.git", "objects"));
+  symlinkSync("r", join(PROJECT, "linked.git", "refs"));
   mkdirSync(join(BOX, "evil"), { recursive: true });
   writeFileSync(join(BOX, "evil", "pre-commit"), "#!/bin/sh\ntouch /tmp/pwned\n", { mode: 0o755 });
   writeFileSync(join(BOX, "evil", "config"), "[core]\n\tfsmonitor = /tmp/x\n");
@@ -556,11 +784,14 @@ test("download: never into git metadata — a .git path (any spelling), through 
     join(repo, ".git", "hooks", "pre-commit"),
     join(repo, ".GIT", "hooks", "post-checkout"),
     join(repo, ".git. ", "config"),
+    // How a Windows box spells the `.git` directory through an NTFS stream.
+    join(repo, ".git::$INDEX_ALLOCATION", "config"),
     join(repo, ".git"),
     "repo/.git/hooks/pre-push",
     join(PROJECT, "meta-link", "hooks", "pre-commit"),
     join(PROJECT, "mirror.git", "config"),
-    join(PROJECT, "mirror.git", "hooks", "post-update")
+    join(PROJECT, "mirror.git", "hooks", "post-update"),
+    join(PROJECT, "linked.git", "config")
   ]) {
     const result = await tools.download("box-a", { remotePath: join(BOX, "evil", "pre-commit"), localPath: localPath.startsWith("/") ? localPath : join(PROJECT, localPath) }, { principal: agent() });
     assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${localPath} is refused`);
@@ -575,7 +806,12 @@ test("download: never into git metadata — a .git path (any spelling), through 
   mkdirSync(join(BOX, "bare", "objects"), { recursive: true });
   mkdirSync(join(BOX, "bare", "refs"), { recursive: true });
   writeFileSync(join(BOX, "bare", "HEAD"), "ref: refs/heads/main\n");
-  for (const remote of ["nested", "bare"]) {
+  mkdirSync(join(BOX, "linked", "o"), { recursive: true });
+  mkdirSync(join(BOX, "linked", "r"));
+  writeFileSync(join(BOX, "linked", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync("o", join(BOX, "linked", "objects"));
+  symlinkSync("r", join(BOX, "linked", "refs"));
+  for (const remote of ["nested", "bare", "linked"]) {
     const result = await tools.download("box-a", { remotePath: join(BOX, remote), localPath: join(PROJECT, "downloads", remote) }, { principal: agent() });
     assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${remote} is refused`);
   }
@@ -584,6 +820,92 @@ test("download: never into git metadata — a .git path (any spelling), through 
   // Ordinary files next to a repo still download.
   const ok = await tools.download("box-a", { remotePath: join(BOX, "evil", "config"), localPath: join(repo, "config.example") }, { principal: agent() });
   assert.ok(ok.ok, ok.ok ? "" : ok.message);
+});
+
+test("download: a git directory is never built piece by piece — HEAD, commondir, objects and refs count as written, partial layouts are refused (host and box project)", async () => {
+  const { tools, project, inBox } = boxProjectWorld("boxed-pieces");
+  const pieces = join(BOX, "pieces");
+  mkdirSync(join(pieces, "empty"), { recursive: true });
+  writeFileSync(join(pieces, "config"), "[core]\n\tfsmonitor = /tmp/x\n");
+  writeFileSync(join(pieces, "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(pieces, "commondir"), "../bar\n");
+  // Trees with a partial layout below their top, and one with a mere file named HEAD.
+  for (const [tree, name, text] of [
+    ["lone-head", "HEAD", "0123456789abcdef0123456789abcdef01234567\n"],
+    ["lone-commondir", "commondir", "../../bar\n"],
+    ["notes", "HEAD", "What is on top of the stack.\n"]
+  ] as const) {
+    mkdirSync(join(pieces, tree, "sub"), { recursive: true });
+    writeFileSync(join(pieces, tree, "sub", name), text);
+  }
+  for (const [root, principal, local] of [
+    [join(PROJECT, "pieces"), agent(), (...segments: string[]) => join(PROJECT, "pieces", ...segments)],
+    [join(project, "pieces"), agent("chat-a", project), (...segments: string[]) => inBox("pieces", ...segments)]
+  ] as const) {
+    const download = async (remote: string, localPath: string, written: boolean): Promise<void> => {
+      const result = await tools.download("box-a", { remotePath: join(pieces, remote), localPath: join(root, localPath) }, { principal });
+      if (written) assert.ok(result.ok, result.ok ? "" : `${localPath}: ${result.message}`);
+      else assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${localPath} is refused`);
+    };
+    // Config and objects for a directory a commondir could name, but not the refs completing it.
+    await download("config", "bar/config", true);
+    await download("empty", "bar/objects", true);
+    await download("empty", "bar/refs", false);
+    // A HEAD or a commondir (any spelling) is never written: either starts a git directory.
+    await download("HEAD", "foo/HEAD", false);
+    await download("commondir", "foo/CommonDir.", false);
+    await download("lone-head", "tree-head", false);
+    await download("lone-commondir", "tree-commondir", false);
+    await download("notes", "tree-notes", true);
+    // A mere file named HEAD blocks nothing beside it; a HEAD git reads as one does.
+    mkdirSync(local("notes"));
+    writeFileSync(local("notes", "HEAD"), "What is on top of the stack.\n");
+    await download("config", "notes/config.txt", true);
+    mkdirSync(local("half"));
+    writeFileSync(local("half", "HEAD"), "ref: refs/heads/main\n");
+    await download("config", "half/config", false);
+    assert.deepEqual(readdirSync(local()).sort(), ["bar", "half", "notes", "tree-notes"]);
+    assert.deepEqual(readdirSync(local("bar")).sort(), ["config", "objects"]);
+    assert.deepEqual(readdirSync(local("half")), ["HEAD"]);
+  }
+});
+
+test("download: a remote_path that is a symlink to a directory is refused, nothing followed or installed (host and box project)", async () => {
+  const { tools, project, inBox, projectBox } = boxProjectWorld("boxed-dir-link");
+  mkdirSync(join(BOX, "real-dir"), { recursive: true });
+  writeFileSync(join(BOX, "real-dir", "f"), "f");
+  symlinkSync(join(BOX, "real-dir"), join(BOX, "dir-link"));
+  // The link's target exists in the project box too, so it could be walked and installed there.
+  mkdirSync(projectBox.local(join(BOX, "real-dir")), { recursive: true });
+  for (const [localPath, principal, local] of [
+    [join(PROJECT, "dir-link-copy"), agent(), join(PROJECT, "dir-link-copy")],
+    [join(project, "dir-link-copy"), agent("chat-a", project), inBox("dir-link-copy")]
+  ] as const) {
+    const result = await tools.download("box-a", { remotePath: join(BOX, "dir-link"), localPath }, { principal });
+    assert.ok(!result.ok && result.code === "INVALID_ARGUMENT", result.ok ? `${localPath} was written` : result.message);
+    assert.throws(() => lstatSync(local), { code: "ENOENT" });
+  }
+  assert.deepEqual(readdirSync(PROJECT).filter((name) => name.startsWith(".orq-download-")), []);
+  assert.deepEqual(readdirSync(inBox()), []);
+});
+
+test("download: a directory in place succeeds even when its emptied staging directory cannot be removed", async (t) => {
+  const { tools } = world();
+  mkdirSync(join(BOX, "kept", "sub"), { recursive: true });
+  writeFileSync(join(BOX, "kept", "sub", "f"), "f");
+  const rm = fsPromises.rm;
+  t.mock.method(fsPromises, "rm", async (path: string, options?: Parameters<typeof rm>[1]) => {
+    if (basename(String(path)).startsWith(".orq-download-")) throw Object.assign(new Error("Device or resource busy"), { code: "EBUSY" });
+    return rm(path, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const result = await tools.download("box-a", { remotePath: join(BOX, "kept"), localPath: join(PROJECT, "kept-dir", "copy") }, { principal: agent() });
+  assert.ok(result.ok, result.ok ? "" : result.message);
+  assert.equal(readFileSync(join(PROJECT, "kept-dir", "copy", "sub", "f"), "utf8"), "f");
 });
 
 // ---------------------------------------------------------------------------
@@ -614,11 +936,291 @@ test("forwards: a host loopback URL to the box port, reused for the same port, c
       socket.on("end", () => resolve(text));
       socket.on("error", reject);
     });
-  assert.equal(await read(forward.value.hostPort), "hello from the box");
+  assert.equal(await read(forward.value.hostPort!), "hello from the box");
   const same = await tools.forwardPort("box-a", boxPort, { principal: agent() });
   assert.ok(same.ok && same.value.hostPort === forward.value.hostPort);
   await tools.destroy(agent(), "box-a");
-  await assert.rejects(read(forward.value.hostPort), /ECONNREFUSED/);
+  await assert.rejects(read(forward.value.hostPort!), /ECONNREFUSED/);
+});
+
+test("forwards: a box destroyed while its host forward opens gets no URL, and the host port is closed", async (t) => {
+  const { tools, connection } = world();
+  let opened!: (hostPort: number) => void;
+  const relayed = new Promise<number>((resolve) => (opened = resolve));
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  const forwardToHost = connection.forwardToHost.bind(connection);
+  connection.forwardToHost = async (port, options) => {
+    const relay = await forwardToHost(port, options);
+    t.after(() => relay.close());
+    opened(relay.hostPort);
+    await answered;
+    return relay;
+  };
+  const forwarding = tools.forwardPort("box-a", 4321, { principal: agent() });
+  const hostPort = await relayed;
+  const destroyed = tools.destroy(agent(), "box-a");
+  answer();
+  const [forward] = await Promise.all([forwarding, destroyed]);
+  assert.ok(!forward.ok && forward.code === "BOX_NOT_READY", "no URL for a destroyed box");
+  await assert.rejects(fetchPort(hostPort), /ECONNREFUSED/);
+});
+
+/** A chat whose project (PROJECT) runs in its own box `box-p`, played on this machine by a {@link FakeForwardingHub}. */
+function forwardingProjectWorld(
+  t: TestContext,
+  browserRunsInBox: boolean
+): World & {
+  hub: FakeForwardingHub;
+  projectBox: LocalBoxConnection;
+  setProjectBoxState: (state: StoredBox["state"]) => void;
+  changeProjectBox: (change: Partial<StoredBox>) => void;
+} {
+  const w = world({ connect: false });
+  const projectBox = localBoxConnection({ boxId: "box-p" });
+  const hub = new FakeForwardingHub("box-p", projectBox);
+  const record = { id: "box-p", purpose: "project", state: "ready", project: GAME } as StoredBox;
+  const registryListeners = new Set<(boxId: string) => void>();
+  const owner = new ProjectBoxForwards({
+    hub,
+    registry: {
+      get: (boxId) => (boxId === "box-p" ? record : undefined),
+      onChange: (listener) => {
+        registryListeners.add(listener);
+        return () => registryListeners.delete(listener);
+      }
+    }
+  });
+  w.tools.connect({
+    boxes: w.boxes,
+    hub: { get: (boxId) => (boxId === "box-a" ? w.connection : undefined) },
+    // As the registry's index: a project path maps to the box only while its record is that project's box.
+    registry: {
+      locate: (path) =>
+        path === PROJECT && record.purpose === "project" && record.project?.path === PROJECT ? { kind: "box", boxId: "box-p", record, connection: projectBox } : { kind: "host" }
+    },
+    projectForwards: owner,
+    browserRunsInBox: () => browserRunsInBox
+  });
+  t.after(async () => {
+    await w.tools.shutdown();
+    hub.close();
+  });
+  const changeProjectBox = (change: Partial<StoredBox>): void => {
+    Object.assign(record, change);
+    for (const listener of [...registryListeners]) listener("box-p");
+  };
+  return { ...w, hub, projectBox, setProjectBoxState: (state) => changeProjectBox({ state }), changeProjectBox };
+}
+
+const GAME = { workspace: "acme", name: "game", path: PROJECT };
+
+/** A dev server in the temporary box (this machine): answers `text` and ends. */
+async function devServer(t: TestContext, text: string): Promise<number> {
+  const server = createServer((socket) => socket.end(text));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  return (server.address() as AddressInfo).port;
+}
+
+/** Everything a socket receives until it closes. */
+function received(socket: Socket): Promise<string> {
+  return new Promise((resolve) => {
+    let text = "";
+    socket.on("data", (chunk) => (text += chunk.toString()));
+    socket.on("error", () => undefined);
+    socket.once("close", () => resolve(text));
+  });
+}
+
+/** What a client on this machine's `port` receives; rejects when nothing listens there. */
+function fetchPort(port: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1");
+    socket.once("error", reject);
+    socket.once("connect", () => resolve(received(socket)));
+  });
+}
+
+test("forwards in a box project: url listens in the project's box and pipes to the box port; browser_url on the host for a host Browser tab; closed with the box", async (t) => {
+  const { tools, hub } = forwardingProjectWorld(t, false);
+  const boxPort = await devServer(t, "hello from the box");
+  const forward = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(forward.ok, forward.ok ? "" : forward.message);
+  const { url, browserUrl, projectBoxPort, hostPort } = forward.value;
+  assert.equal(url, `http://127.0.0.1:${projectBoxPort}/`);
+  assert.deepEqual(hub.ports(), [projectBoxPort], "the project box listens on that port");
+  assert.equal(await fetchPort(projectBoxPort!), "hello from the box", "project box → daemon → box port");
+  assert.equal(browserUrl, `http://127.0.0.1:${hostPort}/`);
+  assert.equal(await fetchPort(hostPort!), "hello from the box", "the host Browser tab's URL");
+  const same = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(same.ok);
+  assert.deepEqual(same.value, forward.value, "the same forward again");
+
+  await tools.destroy(agent(), "box-a");
+  assert.deepEqual(hub.lists.at(-1), [], "the project box's list no longer has it");
+  await assert.rejects(fetchPort(projectBoxPort!), /ECONNREFUSED/);
+  await assert.rejects(fetchPort(hostPort!), /ECONNREFUSED/);
+});
+
+test("forwards in a box project whose Browser tab runs in its box: one URL, no host port; refused while the project box is away", async (t) => {
+  const { tools, hub, projectBox } = forwardingProjectWorld(t, true);
+  const boxPort = await devServer(t, "hello from the box");
+  projectBox.setConnected(false);
+  const away = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(!away.ok && away.code === "BOX_NOT_READY", "no URL the chat could not open");
+  assert.deepEqual(hub.ports(), []);
+
+  projectBox.setConnected(true);
+  const forward = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(forward.ok, forward.ok ? "" : forward.message);
+  assert.equal(forward.value.browserUrl, undefined);
+  assert.equal(forward.value.hostPort, undefined);
+  assert.equal(await fetchPort(forward.value.projectBoxPort!), "hello from the box");
+});
+
+test("forwards in a box project: a host-tcp channel is served only for its own project box and a live target", async (t) => {
+  const { tools, hub } = forwardingProjectWorld(t, true);
+  const boxPort = await devServer(t, "private page");
+  const forward = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(forward.ok, forward.ok ? "" : forward.message);
+  const [spec] = hub.lists.at(-1)!;
+  assert.equal(await received(await hub.openAs("box-p", spec!)), "private page");
+  assert.equal(await received(await hub.openAs("box-other", spec!)), "", "another box naming the target is closed");
+  assert.equal(await received(await hub.openAs("box-p", { ...spec!, target: "fwd-guessed" })), "", "an unknown target is closed");
+  assert.equal(await received(await hub.openAs("box-p", { ...spec!, boxPort: spec!.boxPort + 1 })), "", "the target from another port is closed");
+});
+
+test("forwards in a box project: a project box port is never a privileged one; a preferred port the box refuses for any reason falls back", async (t) => {
+  const { tools, hub } = forwardingProjectWorld(t, true);
+  const privileged = await tools.forwardPort("box-a", 80, { principal: agent() });
+  assert.ok(privileged.ok, privileged.ok ? "" : privileged.message);
+  assert.ok(
+    hub.lists.every((list) => list.every((spec) => spec.boxPort >= 1024)),
+    "port 80 was never listened on in the project box"
+  );
+
+  const boxPort = await devServer(t, "hello from the box");
+  // A Windows project box answers a reserved port (Hyper-V exclusions) with INTERNAL, not EACCES.
+  hub.refusing.set(boxPort, "INTERNAL");
+  const forward = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(forward.ok, forward.ok ? "" : forward.message);
+  assert.notEqual(forward.value.projectBoxPort, boxPort);
+  assert.equal(await fetchPort(forward.value.projectBoxPort!), "hello from the box");
+});
+
+test("forwards in a box project: a box destroyed while its forward is made gets no URL, and nothing is left listening for it", async (t) => {
+  const { tools, hub, projectBox } = forwardingProjectWorld(t, true);
+  // The project box answers the forward's port survey only when the test says so.
+  let surveyed!: () => void;
+  const asked = new Promise<void>((resolve) => (surveyed = resolve));
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  let surveys = 0;
+  const request = projectBox.request.bind(projectBox);
+  projectBox.request = (async (method: string, params: never, options?: object) => {
+    if (method === "sys.ports") {
+      surveys += 1;
+      surveyed();
+      await answered;
+    }
+    return request(method as never, params, options);
+  }) as typeof projectBox.request;
+  const boxPort = await devServer(t, "hello from the box");
+  const first = tools.forwardPort("box-a", boxPort, { principal: agent() });
+  const second = tools.forwardPort("box-a", boxPort, { principal: agent() });
+  await asked;
+  const destroyed = tools.destroy(agent(), "box-a");
+  answer();
+  const [one, two] = await Promise.all([first, second, destroyed]);
+  assert.ok(!one.ok && one.code === "BOX_NOT_READY", "no URL for a destroyed box");
+  assert.ok(!two.ok && two.code === "BOX_NOT_READY", "nor for a call that waited on the first");
+  assert.deepEqual(hub.ports(), [], "nothing listens in the project box for it");
+  assert.equal(surveys, 1, "only the first call made a forward in the project box");
+});
+
+test("forwards in a box project: after a reconnect, one the project box could not listen on again is made anew; the others are kept", async (t) => {
+  const { tools, hub } = forwardingProjectWorld(t, true);
+  const lostPort = await devServer(t, "hello from the box");
+  const keptPort = await devServer(t, "the other page");
+  const lost = await tools.forwardPort("box-a", lostPort, { principal: agent() });
+  const kept = await tools.forwardPort("box-a", keptPort, { principal: agent() });
+  assert.ok(lost.ok && kept.ok);
+  hub.drop();
+  // Another process takes the port while the project box is away: its welcome's listen fails unseen.
+  const squatter = createServer((socket) => socket.end("someone else"));
+  await new Promise<void>((resolve) => squatter.listen(lost.value.projectBoxPort!, "127.0.0.1", resolve));
+  t.after(() => squatter.close());
+  await hub.welcome();
+
+  const again = await tools.forwardPort("box-a", lostPort, { principal: agent() });
+  assert.ok(again.ok, again.ok ? "" : again.message);
+  assert.notEqual(again.value.projectBoxPort, lost.value.projectBoxPort);
+  assert.equal(await fetchPort(again.value.projectBoxPort!), "hello from the box", "not the other process");
+  const same = await tools.forwardPort("box-a", keptPort, { principal: agent() });
+  assert.ok(same.ok);
+  assert.equal(same.value.projectBoxPort, kept.value.projectBoxPort);
+  assert.equal(await fetchPort(same.value.projectBoxPort!), "the other page");
+});
+
+test("forwards in a box project: a destroyed project box's forwards are dropped; a later call listens anew", async (t) => {
+  const { tools, hub, setProjectBoxState } = forwardingProjectWorld(t, true);
+  const boxPort = await devServer(t, "hello from the box");
+  const first = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(first.ok);
+  const [old] = hub.lists.at(-1)!;
+  setProjectBoxState("destroyed");
+  // Its listeners went with it.
+  hub.close();
+  assert.equal(await received(await hub.openAs("box-p", old!)), "", "its target is served no more");
+
+  // The project's box is made again.
+  setProjectBoxState("ready");
+  const next = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(next.ok, next.ok ? "" : next.message);
+  assert.equal(await fetchPort(next.value.projectBoxPort!), "hello from the box");
+});
+
+test("forwards in a box project: a project box being destroyed or destroyed is a BOX_DESTROYED refusal, nothing listened", async (t) => {
+  const { tools, hub, projectBox, setProjectBoxState } = forwardingProjectWorld(t, true);
+  const boxPort = await devServer(t, "hello from the box");
+  setProjectBoxState("destroying");
+  const destroying = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(!destroying.ok && destroying.code === "BOX_DESTROYED" && destroying.status === 410, destroying.ok ? "" : destroying.code);
+  setProjectBoxState("destroyed");
+  projectBox.setConnected(false);
+  const destroyed = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(!destroyed.ok && destroyed.code === "BOX_DESTROYED", destroyed.ok ? "" : destroyed.code);
+  assert.deepEqual(hub.ports(), []);
+});
+
+test("forwards in a box project: a bring-your-own project box given back stops listening its forwards; lent again, the old one is not handed back", async (t) => {
+  const { tools, hub, changeProjectBox } = forwardingProjectWorld(t, true);
+  const boxPort = await devServer(t, "hello from the box");
+  const first = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(first.ok, first.ok ? "" : first.message);
+  const [old] = hub.lists.at(-1)!;
+  const setForwards = hub.setForwards.bind(hub);
+  const unlistened = new Promise<void>((resolve) => {
+    hub.setForwards = async (boxId, next, options) => {
+      const outcomes = await setForwards(boxId, next, options);
+      if (next.length === 0) resolve();
+      return outcomes;
+    };
+  });
+  // "Destroying" a bring-your-own project box releases it: an idle machine, still ready and connected, never revoked.
+  changeProjectBox({ purpose: "machine", project: null });
+  assert.equal(await received(await hub.openAs("box-p", old!)), "", "its target is served no more");
+  await unlistened;
+  assert.deepEqual(hub.ports(), [], "the machine listens for it no more");
+
+  // Lent to the project again: a forward made anew, not the one dropped with the release.
+  changeProjectBox({ purpose: "project", project: GAME });
+  const again = await tools.forwardPort("box-a", boxPort, { principal: agent() });
+  assert.ok(again.ok, again.ok ? "" : again.message);
+  const [made] = hub.lists.at(-1)!;
+  assert.notEqual(made!.target, old!.target);
+  assert.equal(await fetchPort(again.value.projectBoxPort!), "hello from the box");
 });
 
 // ---------------------------------------------------------------------------

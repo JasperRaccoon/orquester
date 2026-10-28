@@ -105,7 +105,7 @@ async function attentionWait(args: WaitArgs, ctx: ScopeContext, after: string, t
     const wanted = new Set(targets);
     scope = { select: (s) => wanted.has(s.id) };
   } else if (args.project !== undefined) {
-    const path = (await resolveProject(api, args.project)).path;
+    const path = (await resolveProject(api, args.project, ctx.caller)).path;
     scope = { select: (s) => s.projectPath === path };
   } else if (caller !== null) {
     // A chat's default: its own project.
@@ -184,7 +184,7 @@ export const waitForSessionTool = defineTool({
       }
     }
     if (args.project !== undefined) {
-      const ref = await resolveProject(ctx.api, args.project);
+      const ref = await resolveProject(ctx.api, args.project, ctx.caller);
       const project = await canonicalProject(ctx.api, ref.path);
       if (project === null) throw new ToolError("PROJECT_NOT_FOUND", `No project at "${clipText(args.project, MAX_ECHO_CHARS)}". Use list_projects.`);
       projects.push(project.canonical);

@@ -1,7 +1,7 @@
 // Catalog family module `files` (read_file) — plan Task 9 (unified MCP design 2026-10-15 §4 row 20, §5.1 ruling S6,
 // D-19): a file (paged) or a directory listing, through `DaemonApi.readFileRange` / `listDirectory`.
-import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
+import { callerHostPath } from "../addressing.ts";
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
@@ -30,7 +30,7 @@ function fitListing(listing: ListFilesResult): ListFilesResult {
  * classified, §5.1), an external caller's from the sandbox root (as `read_file` always took it).
  */
 function targetPath(path: string, caller: ToolCaller): string {
-  return caller.kind === "thread" && !isAbsolute(path) ? resolve(caller.cwd || "/", path) : path;
+  return caller.kind === "thread" ? callerHostPath(caller, path, caller.cwd || "/") : path;
 }
 
 /** The two `DaemonApi` file reads, or UNAVAILABLE where the seam has none (a test double). */
@@ -57,8 +57,8 @@ const readFile = defineTool({
   tier: "read",
   // The gate classifies the path (inside a project DIRECTORY, else PERMISSION_DENIED — a file beside the projects,
   // `<ws>/notes.txt`, included: `classifyPath`) and judges its project's content read.
-  async scope(args) {
-    return { projects: [], sessions: [], reads: "content", writes: false, causesTurnIn: [], paths: [args.path] };
+  async scope(args, { caller }) {
+    return { projects: [], sessions: [], reads: "content", writes: false, causesTurnIn: [], paths: [targetPath(args.path, caller)] };
   },
   annotations: READ_ONLY,
   resultKind: "json",

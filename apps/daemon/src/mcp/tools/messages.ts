@@ -17,7 +17,7 @@ import type { AgentConversationsResponse, ApprovalPreviewSection, CreateSessionR
 import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, replyNoticeText, resolveLaunchModel, THREAD_MESSAGE_OVERHEAD_CHARS, threadMessageContext, TURN_NOT_IDLE, UNTRUSTED_NOTICE, WAIT_CYCLE, type AttachmentRef, type CausedBy, type ComposerContextRecord, type CreateAgentChatSessionFields, type ProviderModel, type ReplySubscriptionResponse, type ReplyWaitResponse, type RuntimeMode, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadMessageOrigin, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { findAgent, findModel, loadAgents, resolveModelSelection, supportsFrom, validateAccountId, type AgentView } from "../agents.ts";
 import { resolveProfileArg } from "../profiles.ts";
-import { canonicalProject, realPathInSandbox, resolveProject } from "../addressing.ts";
+import { callerHostPath, canonicalProject, realPathInSandbox, resolveProject } from "../addressing.ts";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type AttachmentInput } from "../attachments.ts";
 import type { DaemonApi } from "../daemon-api.ts";
@@ -27,7 +27,7 @@ import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, 
 import { proposedPlan } from "../transcript.ts";
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { awaitReplySubscription, turnBaseline, waitForTurn, waitWhileWorking, type TurnBaseline, type TurnOutcome } from "../wait.ts";
-import { defineTool, MUTATING, type AnyOrquesterTool, type CallContext, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
+import { defineTool, MUTATING, type AnyOrquesterTool, type CallContext, type ScopeContext, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
 import { NEW_SESSION, openedThreadRuntimeMode, runtimeModesUpTo } from "../gate/turn-policy.ts";
 import { asWaiter } from "../../agent-chat/waits.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT, optionsSchema, runtimeModeSchema } from "./sessions.ts";
@@ -581,9 +581,9 @@ function attachmentRows(attachments: readonly AttachmentInput[] | undefined): { 
   }));
 }
 
-/** Filesystem paths among the attachments, as the gate classifies them (each must lie inside a project, §5.1). */
-function attachmentPaths(api: ScopeContext["api"], attachments: readonly AttachmentInput[] | undefined): string[] {
-  return (attachments ?? []).flatMap((file) => ("path" in file ? [resolvePath(api.fsRoot, file.path)] : []));
+/** Filesystem paths among the attachments, as the gate classifies them (each must lie inside a project, §5.1) and the upload reads them. */
+function attachmentPaths(api: ScopeContext["api"], caller: ThreadCaller, attachments: readonly AttachmentInput[] | undefined): string[] {
+  return (attachments ?? []).flatMap((file) => ("path" in file ? [resolvePath(api.fsRoot, callerHostPath(caller, file.path, api.fsRoot))] : []));
 }
 
 const replyField = z.enum(["wait", "notify", "none"]);
@@ -624,7 +624,7 @@ export const sendMessageTool = defineTool({
     }
     // A turn-causing Act (plan carries on, §5.3); its reply is read with the Act's own rights (§5.2).
     const claim = await sessionClaim(ctx, args.sessionId, { reads: "none", writes: false, causesTurnIn: [args.sessionId], self: "refuse" });
-    const paths = attachmentPaths(ctx.api, args.attachments);
+    const paths = attachmentPaths(ctx.api, caller, args.attachments);
     return paths.length > 0 ? { ...claim, paths } : claim;
   },
   approval: async (args, ctx) =>
@@ -705,7 +705,7 @@ async function sendFromChat(args: SendArgs, ctx: CallContext, caller: ThreadCall
     args.implementPlan === true
       ? buildPlanImplementationPrompt(await actionablePlanMarkdown(ctx.api, summary.id, checked))
       : provenanceFor(ctx, caller, "sent", text, reply, checked.head.runtimeMode);
-  const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, summary.id, args.attachments) : [];
+  const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, summary.id, args.attachments, { caller }) : [];
   // Task 6's alias sets `legacyAlias: "thread_send"` exactly for `thread_send {wait: true}` (legacy-aliases.ts).
   const legacyWait = ctx.legacyAlias === "thread_send" && reply === "wait";
   if (reply === "none" || legacyWait) {
@@ -805,8 +805,8 @@ export function launchAccount(agent: AgentView, requested: string | undefined, i
  * directory. Containment is by REAL paths — a symlink inside the project that leads elsewhere (in
  * or out of the sandbox) is refused.
  */
-async function cwdInProject(api: ScopeContext["api"], projectPath: string, input: string): Promise<string> {
-  const cwd = resolvePath(projectPath, input);
+async function cwdInProject(api: ScopeContext["api"], caller: ToolCaller, projectPath: string, input: string): Promise<string> {
+  const cwd = resolvePath(callerHostPath(caller, input, projectPath));
   let real: string;
   try {
     real = await assertInsideFsRoot(api.fsRoot, cwd);
@@ -861,7 +861,7 @@ async function postCreate(api: ScopeContext["api"], body: CreateSessionRequest, 
 
 /** The project a create opens in: the named one, else (chat) the caller's own. */
 async function createTarget(api: ScopeContext["api"], caller: ThreadCaller | null, project: string | undefined): Promise<string> {
-  if (project !== undefined) return (await resolveProject(api, project)).path;
+  if (project !== undefined) return (await resolveProject(api, project, caller ?? undefined)).path;
   if (caller === null) throw new ToolError("INVALID_ARGUMENT", "project is required: an absolute path or \"<workspace>/<project>\".");
   if (caller.projectPath === "") throw new ToolError("INVALID_ARGUMENT", "This chat belongs to no project: name the project to open the chat in (list_projects).");
   return caller.projectPath;
@@ -932,7 +932,7 @@ export const createSessionTool = defineTool({
       writes: false,
       // The first turn is agent-caused (§8.4); the opened chat runs no broader than this one (turn policy a).
       causesTurnIn: args.prompt !== undefined ? [NEW_SESSION] : [],
-      ...(args.cwd !== undefined ? { paths: [resolvePath(project.canonical, args.cwd)] } : {})
+      ...(args.cwd !== undefined ? { paths: [resolvePath(callerHostPath(caller, args.cwd, project.canonical))] } : {})
     };
   },
   async approval(args, ctx) {
@@ -982,7 +982,7 @@ async function createExternal(args: CreateArgs, ctx: CallContext): Promise<Recor
   const model = launchModel(agent, args.model, undefined);
   const selection = resolveModelSelection(agent, { model: model.slug, ...(args.options !== undefined ? { options: args.options } : {}) });
   const account = launchAccount(agent, args.accountId, undefined, resume);
-  const cwd = args.cwd === undefined ? projectPath : await cwdInProject(api, projectPath, args.cwd);
+  const cwd = args.cwd === undefined ? projectPath : await cwdInProject(api, ctx.caller, projectPath, args.cwd);
   const profile = args.profile === undefined ? null : await resolveProfileArg(api, args.profile);
   const running = (await listSessions(api, projectPath)).filter((s) => s.status === "running").length;
   if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); close some first.`);
@@ -1067,7 +1067,7 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
   const selection = resolveModelSelection(agent, { model: model.slug, ...(args.options !== undefined ? { options: args.options } : {}), ...(current ? { current } : {}) });
   const account = launchAccount(agent, args.accountId, sameAgent && tab.accountId ? tab.accountId : undefined, resume);
   const ownProject = canonical !== null && canonical.canonical === caller.projectPath;
-  const cwd = args.cwd !== undefined ? await cwdInProject(api, projectPath, args.cwd) : ownProject && caller.cwd ? caller.cwd : projectPath;
+  const cwd = args.cwd !== undefined ? await cwdInProject(api, caller, projectPath, args.cwd) : ownProject && caller.cwd ? caller.cwd : projectPath;
   const profile = args.profile === undefined ? null : await resolveProfileArg(api, args.profile);
   const chat: CreateAgentChatSessionFields = {
     ...(account.accountId ? { accountId: account.accountId } : {}),

@@ -117,8 +117,18 @@ export interface BoxTransferResult {
 }
 
 export interface BoxForwardResult {
-  /** `http://127.0.0.1:<hostPort>/` — open it in the Browser tab. */
+  /**
+   * The URL that works where the calling chat runs — its shell, curl, and its Browser tab unless
+   * `browserUrl` is set: `http://127.0.0.1:<hostPort>/` on the host for a host project,
+   * `http://127.0.0.1:<projectBoxPort>/` inside the project's own box for a box project.
+   */
   url: string;
-  hostPort: number;
+  /** Only when the Browser tab needs another URL than `url`: a box project whose Browser tab runs on the host (`http://127.0.0.1:<hostPort>/`). */
+  browserUrl?: string;
+  /** The host loopback port piping to `boxPort`, when one listens (host projects; box projects whose Browser tab runs on the host). */
+  hostPort?: number;
+  /** The temporary box's port. */
   boxPort: number;
+  /** Box projects: the port on the project box's 127.0.0.1 piping to `boxPort`. */
+  projectBoxPort?: number;
 }

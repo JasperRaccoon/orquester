@@ -19,6 +19,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { FastifyInstance } from "fastify";
+import type { BoxPathMap } from "@orquester/api";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
 import { daemonRoutesForHost, type SessionToolCallRequest } from "../agent-host/host-protocol.ts";
@@ -43,6 +44,8 @@ const SESSION_TOOL_BODY_LIMIT = 16 * 1024 * 1024;
 export interface SessionToolThread {
   projectPath: string;
   cwd: string;
+  /** The path map of the box its CLI runs in, when that box's is not identity (a Windows project box). */
+  boxPaths?: BoxPathMap;
   agentId: AgentAdapterId;
   /** The tab's `owner.kind`, when it has one (`"workflow"`, `"knowledge-indexer"`, …). */
   ownerKind?: string;
@@ -89,6 +92,7 @@ export async function buildThreadCaller(
     projectPath: project?.canonical ?? "",
     workspace: project?.workspace ?? "",
     cwd: thread.cwd,
+    ...(thread.boxPaths ? { boxPaths: thread.boxPaths } : {}),
     agentId: thread.agentId,
     callId,
     runtimeMode: ownHead.head.runtimeMode,

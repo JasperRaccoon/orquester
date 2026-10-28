@@ -156,6 +156,12 @@ export type BoxRawRequestHandler = (context: BoxRequestContext, params: unknown,
 /** Handles a box-opened channel (`host-tcp`, `ssh-agent`, `mcp-bridge`). */
 export type BoxChannelHandler = (context: BoxRequestContext, spec: BoxChannelSpec, stream: Duplex) => void;
 
+/** One `forward.listen` sent by {@link BoxHub.setForwards}: `error` null = the box listens on `boxPort`. */
+export interface BoxForwardOutcome {
+  boxPort: number;
+  error: (Error & { code?: string }) | null;
+}
+
 /** The daemon's side of every box link (implemented by boxes/hub). */
 export interface BoxHub {
   /** The connection object for a box, whether or not it is connected right now. Undefined = never connected. */
@@ -166,8 +172,17 @@ export interface BoxHub {
   issueBootstrapToken(boxId: string, ttlMs: number): Promise<string>;
   /** Forget a box: close its link, refuse it from now on (used when it is destroyed). */
   revoke(boxId: string): Promise<void>;
-  /** Forwards `orq-agent` must re-establish on every connect (merged into `welcome.config.forwards`). */
-  setForwards(boxId: string, forwards: BoxAgentConfig["forwards"]): void;
+  /**
+   * The box's whole forward list (`forward.listen` ports in the box, piped to `host-tcp` targets),
+   * replacing the previous one; re-established on every connect (`welcome.config.forwards`). While
+   * the box is connected, removed ports are unlistened and new or changed ones listened on now:
+   * resolves once the box answered them all, with the outcome of each listen sent (`error` null =
+   * listening, else the box's error, e.g. code `EADDRINUSE`). A box not connected now gets the list
+   * at its next connect, and the call resolves with no outcomes. `relisten` sends a listen for
+   * every port of the list, unchanged ones too (one the box already listens on answers ok), so the
+   * outcomes say which of them the box listens on now (a welcome's listen that failed is not told).
+   */
+  setForwards(boxId: string, forwards: BoxAgentConfig["forwards"], options?: { relisten?: boolean }): Promise<BoxForwardOutcome[]>;
   handle<K extends BoxMethodName<BoxBoxToHostMethods>>(method: K, handler: BoxRequestHandler<K>): void;
   handleRaw(method: string, handler: BoxRawRequestHandler): void;
   handleChannel(kind: "host-tcp" | "ssh-agent" | "mcp-bridge", handler: BoxChannelHandler): void;

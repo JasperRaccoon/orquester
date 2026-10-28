@@ -18,13 +18,11 @@
  * - **Ownership** is the daemon's: the temporary-box routes and the `DaemonApi` box operations reach
  *   only the calling chat's own boxes (`boxes/temporary/tools.ts`).
  * - **Nothing is copied into a box**: the agent moves what it needs with `box_upload` /
- *   `box_download` (streamed by the daemon, never through JSON, host paths inside the chat's
- *   project).
+ *   `box_download` (streamed by the daemon, never through JSON; paths inside the chat's project,
+ *   spelled as host paths, whose files are in the project's own box for a box project).
  *
  * Everything goes through `DaemonApi` (D-1): this module imports types and pure contracts only.
  */
-
-import { isAbsolute, resolve } from "node:path";
 
 import { z } from "zod";
 import {
@@ -53,6 +51,7 @@ import {
 } from "@orquester/api";
 
 import type { BoxExecResult, BoxJobOutput, BoxOutputTail } from "../../boxes/temporary/contract.ts";
+import { callerHostPath } from "../addressing.ts";
 import { defineTool, DESTRUCTIVE, MUTATING, type AnyOrquesterTool, type ApprovalPreview, type ScopeClaim, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
 import type { DaemonApi, DaemonOutcome } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
@@ -124,10 +123,10 @@ function transferScope(args: { local_path: string }, ctx: ScopeContext, reads: S
   return ctx.caller.kind === "thread" ? { ...scope, paths: [hostPath(ctx.caller, args.local_path)] } : scope;
 }
 
-/** A host path the agent gave: relative ones are taken from its cwd (else its project root). */
+/** A host path the agent gave (`callerHostPath`): relative ones are taken from its cwd (else its project root). */
 function hostPath(caller: ThreadCaller, path: string): string {
   if (caller.projectPath === "") throw new ToolError("NO_PROJECT", "This chat has no project, so there is nowhere on the host to move files from or to.");
-  return isAbsolute(path) ? path : resolve(caller.cwd || caller.projectPath, path);
+  return callerHostPath(caller, path, caller.cwd || caller.projectPath);
 }
 
 function money(usd: number): string {
@@ -596,7 +595,8 @@ const boxDownload = defineTool({
 const boxForwardPort = defineTool({
   name: "box_forward_port",
   title: "Forward a box port",
-  description: "Expose a port of one of this chat's boxes (a dev server) on a host loopback URL the Browser tab can open. Closed when the box is destroyed.",
+  description:
+    "Expose a box port (a dev server) at a loopback `url` for your shell, curl and the Browser tab; if the result has `browser_url`, the Browser tab uses that. Closed with the box.",
   input: { box_id: boxIdField, port: z.number().int().min(1).max(65_535) },
   audiences: ["chat"],
   toolset: "boxes",
@@ -608,7 +608,18 @@ const boxForwardPort = defineTool({
     threadCaller(caller, "box_forward_port");
     if (!api.boxForwardPort) unwired();
     const forward = unwrap(await api.boxForwardPort!(args.box_id, args.port, { signal }));
-    return { url: forward.url, host_port: forward.hostPort, box_port: forward.boxPort };
+    if (forward.projectBoxPort === undefined) return { url: forward.url, host_port: forward.hostPort, box_port: forward.boxPort };
+    return {
+      url: forward.url,
+      ...(forward.browserUrl !== undefined ? { browser_url: forward.browserUrl } : {}),
+      box_port: forward.boxPort,
+      project_box_port: forward.projectBoxPort,
+      ...(forward.hostPort !== undefined ? { host_port: forward.hostPort } : {}),
+      note:
+        forward.browserUrl !== undefined
+          ? "This project runs in its own box: use url from your shell and curl there. The Browser tab runs on the host: open browser_url in it."
+          : "This project runs in its own box, and so do your shell, curl and the Browser tab: use url for all of them."
+    };
   }
 });
 

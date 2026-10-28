@@ -6,7 +6,8 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import type { ApprovalDecision, AttachmentRef } from "@orquester/api/agent-chat";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type AttachmentInput } from "../attachments.ts";
-import { defineTool, MUTATING, type AnyOrquesterTool } from "../catalog/contract.ts";
+import { callerHostPath } from "../addressing.ts";
+import { defineTool, MUTATING, type AnyOrquesterTool, type ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
@@ -98,12 +99,12 @@ function encodeAnswer(q: Q, raw: Answer): { value: Answer } | { error: string } 
  * Every question's files in ONE upload call, which validates them all before sending any (§8), so a bad file anywhere
  * leaves nothing uploaded. The refs come back in input order and are sliced back per question.
  */
-async function uploadAll(api: DaemonApi, sessionId: string, batches: readonly Batch[]): Promise<Record<string, AttachmentRef[]>> {
+async function uploadAll(api: DaemonApi, caller: ToolCaller, sessionId: string, batches: readonly Batch[]): Promise<Record<string, AttachmentRef[]>> {
   const flat = batches.flatMap((b) => b.files);
   if (!flat.length) return {};
   let refs: AttachmentRef[];
   try {
-    refs = await uploadInlineAttachments(api, sessionId, flat, { max: flat.length }); // the per-question cap is pass 1's
+    refs = await uploadInlineAttachments(api, sessionId, flat, { max: flat.length, caller }); // the per-question cap is pass 1's
   } catch (error) {
     throw error instanceof ToolError ? pointAtQuestion(error, batches) : error;
   }
@@ -131,7 +132,8 @@ function pointAtQuestion(error: ToolError, batches: readonly Batch[]): ToolError
 type AnswerArgs = { sessionId: string; requestId?: string; answers: Record<string, Answer>; attachments?: Record<string, AttachmentInput[]> };
 
 /** Answer a pending question, every question at once (the pre-catalog answer_question). */
-async function answer(api: DaemonApi, args: AnswerArgs, chat: boolean): Promise<Record<string, unknown>> {
+async function answer(api: DaemonApi, args: AnswerArgs, caller: ToolCaller): Promise<Record<string, unknown>> {
+  const chat = caller.kind === "thread";
   await requireChatSession(api, args.sessionId);
   const snap = await readThread(api, args.sessionId);
   const req = pick(pendingQuestionViews(snap), args.requestId, "question");
@@ -169,7 +171,7 @@ async function answer(api: DaemonApi, args: AnswerArgs, chat: boolean): Promise<
   if (missing.length) errors.push(`Every question must be answered. Missing: ${missing.join(", ")}.`);
   if (errors.length) throw new ToolError("INVALID_ARGUMENT", errors.join(" "));
   // Pass 2 uploads every file in question order, in one call that validates them all first, before the command (§8.3).
-  const attachmentsByQuestionId = await uploadAll(api, args.sessionId, batches);
+  const attachmentsByQuestionId = await uploadAll(api, caller, args.sessionId, batches);
   const { seq } = await sendCommand(api, args.sessionId, "answer", { requestId: req.requestId, answers, ...(Object.keys(attachmentsByQuestionId).length ? { attachmentsByQuestionId } : {}) });
   return { seq, session: await chatDetail(api, args.sessionId) };
 }
@@ -204,9 +206,9 @@ function responseProblem(args: { answers?: unknown; dismiss?: true; decision?: u
   return null;
 }
 
-/** The attachment `{path}`s a call names, as the upload resolves them (under the sandbox root). */
-function attachmentPaths(api: DaemonApi, attachments: Record<string, AttachmentInput[]> | undefined): string[] {
-  return Object.values(attachments ?? {}).flatMap((files) => files.flatMap((file) => ("path" in file ? [resolve(api.fsRoot, file.path)] : [])));
+/** The attachment `{path}`s a call names, as the upload resolves them (under the sandbox root, `callerHostPath`). */
+function attachmentPaths(api: DaemonApi, caller: ToolCaller, attachments: Record<string, AttachmentInput[]> | undefined): string[] {
+  return Object.values(attachments ?? {}).flatMap((files) => files.flatMap((file) => ("path" in file ? [resolve(api.fsRoot, callerHostPath(caller, file.path, api.fsRoot))] : [])));
 }
 
 const OWN_CHILDREN_RESPOND = "respond_to_request answers only the questions of chats this chat created (create_session, fork_session); the user answers the rest.";
@@ -233,7 +235,7 @@ const respondToRequest = defineTool({
   async scope(args, ctx) {
     const problem = responseProblem(args);
     if (problem) throw new ToolError("INVALID_ARGUMENT", problem);
-    const paths = ctx.caller.kind === "thread" ? attachmentPaths(ctx.api, args.attachments) : [];
+    const paths = ctx.caller.kind === "thread" ? attachmentPaths(ctx.api, ctx.caller, args.attachments) : [];
     const claim = await sessionClaim(ctx, args.sessionId, { reads: "none", writes: true, self: "refuse", ownChildrenOnly: OWN_CHILDREN_RESPOND });
     return paths.length > 0 ? { ...claim, paths } : claim;
   },
@@ -272,7 +274,7 @@ const respondToRequest = defineTool({
         ? await decide(api, { sessionId: args.sessionId, ...(args.requestId !== undefined ? { requestId: args.requestId } : {}), decision: args.decision })
         : args.dismiss
           ? await dismiss(api, { sessionId: args.sessionId, ...(args.requestId !== undefined ? { requestId: args.requestId } : {}) })
-          : await answer(api, { sessionId: args.sessionId, ...(args.requestId !== undefined ? { requestId: args.requestId } : {}), answers: args.answers!, ...(args.attachments !== undefined ? { attachments: args.attachments } : {}) }, caller.kind === "thread");
+          : await answer(api, { sessionId: args.sessionId, ...(args.requestId !== undefined ? { requestId: args.requestId } : {}), answers: args.answers!, ...(args.attachments !== undefined ? { attachments: args.attachments } : {}) }, caller);
     if (caller.kind !== "thread") return result;
     const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
     // The detail carries the target's words (its last reply, plan, requests): marked as another chat's data (§4.3).

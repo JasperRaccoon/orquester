@@ -428,6 +428,33 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await connection.request("forward.unlisten", { boxPort });
   });
 
+  test("setForwards: the box listens on the list's ports, or says why not (a taken port: EADDRINUSE)", async (t) => {
+    if (!haveGo) return t.skip("Go toolchain not installed");
+    hub.handleChannel("host-tcp", (_context, _spec, stream) => {
+      const upstream = createConnection({ port: echo.port, host: "127.0.0.1" });
+      stream.pipe(upstream).pipe(stream);
+      upstream.on("error", () => stream.destroy());
+      stream.on("error", () => upstream.destroy());
+    });
+    const boxPort = await freePort();
+    const listened = await hub.setForwards(BOX_ID, [{ boxPort, target: "echo" }]);
+    assert.deepEqual(listened, [{ boxPort, error: null }]);
+    assert.equal(await roundTrip(boxPort, "via the list"), "via the list");
+    // A port the box already listens on, listened again (a reconnect's check): ok, and it keeps serving.
+    assert.deepEqual(await hub.setForwards(BOX_ID, [{ boxPort, target: "echo" }], { relisten: true }), [{ boxPort, error: null }]);
+    assert.equal(await roundTrip(boxPort, "listened again"), "listened again");
+    const taken = await hub.setForwards(BOX_ID, [
+      { boxPort, target: "echo" },
+      { boxPort: echo.port, target: "echo" }
+    ]);
+    assert.deepEqual(
+      taken.map((outcome) => [outcome.boxPort, outcome.error?.code ?? null]),
+      [[echo.port, "EADDRINUSE"]]
+    );
+    await hub.setForwards(BOX_ID, []);
+    await assert.rejects(roundTrip(boxPort, "gone"), { code: "ECONNREFUSED" });
+  });
+
   test("ssh-agent and mcp-bridge channels reach the host handlers", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     hub.handleChannel("ssh-agent", (_context, _spec, stream) => {
