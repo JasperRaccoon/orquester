@@ -115,9 +115,13 @@ const GET_LIST_MAX_SEVERAL = 4;
 /** Similar entries shown with an entry (the daemon sends up to 8): reading one, and each of several. */
 const GET_SIMILAR_MAX = 8;
 const GET_SIMILAR_MAX_SEVERAL = 4;
-/** Entries it disagrees with shown with an entry (the daemon sends up to 20): reading one, and each of several. */
+/**
+ * Entries it disagrees with shown with an entry (the daemon sends up to 20), each with its note:
+ * every one, reading one entry or several (with several, compactly: {@link compactDisagreementLines}).
+ */
 const GET_DISAGREEMENTS_MAX = 20;
-const GET_DISAGREEMENTS_MAX_SEVERAL = 4;
+/** A disagreement's note when `knowledge_get` reads several entries (one line each). */
+const COMPACT_NOTE_CHARS = 240;
 /** A title quoted in a list line (a search hit's own title line uses KNOWLEDGE_TITLE_MAX). */
 const LIST_TITLE_CHARS = 100;
 /** A paging cursor, in characters (the daemon's is a short base64url token). */
@@ -191,9 +195,9 @@ const label = (value: string): string => clipText(oneLine(value), NAME_CHARS);
  * A note on one line in at most {@link NOTE_CHARS} code points; a longer one is cut after its last
  * sentence that ends past half of that, else at its last word, and ends in "…".
  */
-function noteText(note: string): string {
+function noteText(note: string, max = NOTE_CHARS): string {
   const text = oneLine(note);
-  const { text: head, truncated } = capText(text, NOTE_CHARS - 1);
+  const { text: head, truncated } = capText(text, max - 1);
   if (!truncated) return text;
   const half = Math.floor(head.length / 2);
   let sentence = -1;
@@ -276,13 +280,17 @@ function cursorOffset(cursor: string): number | null {
   }
 }
 
-/** Where this page sits among every match, the next page's cursor, and a hint to narrow a long list. */
-function pagingFooter(total: number, shown: number, nextCursor: string | null | undefined, cursor: string | undefined): string[] {
+/**
+ * Where this page's entries sit among every matching entry (`total` counts entries only: concept
+ * hits come on top of them), the next page's cursor, and a hint to narrow a long list.
+ */
+function pagingFooter(total: number, shown: number, concepts: number, nextCursor: string | null | undefined, cursor: string | undefined): string[] {
   const lines: string[] = [];
   if (shown > 0) {
     // The last page ends at the total even when its cursor cannot be read.
     const start = cursor === undefined ? 0 : (cursorOffset(cursor) ?? (nextCursor ? null : Math.max(0, total - shown)));
-    lines.push(start === null ? `Showing ${shown} of ${total}.` : `Showing ${start + 1}–${start + shown} of ${total}.`);
+    const range = start === null ? `${shown}` : `${start + 1}–${start + shown}`;
+    lines.push(`Showing entries ${range} of ${total} matching${concepts > 0 ? ` (the ${concepts} concept${concepts === 1 ? "" : "s"} not counted)` : ""}.`);
   }
   if (nextCursor) lines.push(`Next page: cursor "${nextCursor}".`);
   if (total > shown) lines.push("Too many to read? Narrow it: a more specific query, collections, kinds, authors, years or dates.");
@@ -302,14 +310,17 @@ function renderSearch(response: KnowledgeSearchResponse, names: ReadonlyMap<stri
   if (response.hits.length === 0) {
     return `No knowledge found (${over}${asked.filtered ? ", with these filters" : ""}). Don't answer as if it came from the knowledge base.`;
   }
-  const lines = [`${response.hits.length} hit${response.hits.length === 1 ? "" : "s"} (${over}). Read one whole with knowledge_get; cite each entry you use with its cite link, verbatim.`];
+  const entries = response.hits.filter((hit) => hit.kind === "entry").length;
+  const concepts = response.hits.length - entries;
+  const counted = [
+    ...(entries > 0 || concepts === 0 ? [`${entries} entr${entries === 1 ? "y" : "ies"}`] : []),
+    ...(concepts > 0 ? [`${concepts} concept${concepts === 1 ? "" : "s"}`] : [])
+  ].join(" and ");
+  const lines = [`${counted} (${over}). Read one whole with knowledge_get; cite each entry you use with its cite link, verbatim.`];
   if (response.hits.some((hit) => hit.kind === "entry" && hit.match?.band === "weak")) lines.push("Weak hits may be unrelated: never cite one as evidence.");
   response.hits.forEach((hit, index) => lines.push(...hitLines(hit, index, names)));
   // An older daemon sends no total: no footer.
-  if (typeof response.total === "number") {
-    const shown = response.hits.filter((hit) => hit.kind === "entry").length;
-    lines.push(...pagingFooter(response.total, shown, response.nextCursor, asked.cursor));
-  }
+  if (typeof response.total === "number") lines.push(...pagingFooter(response.total, entries, concepts, response.nextCursor, asked.cursor));
   return lines.join("\n");
 }
 
@@ -439,6 +450,17 @@ function disagreementLines(item: KnowledgeDisagreement): string[] {
   return [head.join(" · "), ...contradictionDetail(item.note, item.pairs, "  "), `  cite: ${item.entry.citation}`];
 }
 
+/**
+ * One entry of `disagreements` when several entries are read: its head and its note (cut shorter),
+ * else its concept pairs; no citation (reading that entry gives it).
+ */
+function compactDisagreementLines(item: KnowledgeDisagreement): string[] {
+  const head = `- ${entryRef(item.entry)} · ${contradictionSource(item.source)}`;
+  if (item.note) return [head, `  note: ${noteText(item.note, COMPACT_NOTE_CHARS)}`];
+  const concepts = contradictionPairs(item.pairs);
+  return concepts ? [head, `  concepts: ${concepts}`] : [head];
+}
+
 /** "New here: A (Tactic), B (Rule) · in cluster "Paid ads" (12 entries)". */
 function noveltyLine(novelty: KnowledgeNovelty): string {
   const shown = novelty.newConcepts.slice(0, NOVELTY_CONCEPTS_MAX).map(conceptName);
@@ -472,10 +494,12 @@ function entryLines(detail: KnowledgeEntryDetail, names: ReadonlyMap<string, str
       // (`disagreements`), else (an older daemon) the similar entries with a `contradicts` reason.
       const disagreeingIds = new Set<string>();
       if (detail.disagreements !== undefined) {
-        const shown = detail.disagreements.slice(0, several ? GET_DISAGREEMENTS_MAX_SEVERAL : GET_DISAGREEMENTS_MAX);
+        const shown = detail.disagreements.slice(0, GET_DISAGREEMENTS_MAX);
         const more = Math.max(detail.disagreementsTotal ?? 0, detail.disagreements.length) - shown.length;
         for (const item of detail.disagreements) disagreeingIds.add(item.entry.id);
-        if (shown.length > 0) lines.push("Disagrees with:", ...shown.flatMap(disagreementLines), ...(more > 0 ? [`+${more} more`] : []));
+        if (shown.length > 0) {
+          lines.push("Disagrees with:", ...shown.flatMap(several ? compactDisagreementLines : disagreementLines), ...(more > 0 ? [`+${more} more (knowledge_insights lists every contradiction)`] : []));
+        }
       } else {
         const disagreeing = detail.similar.filter(disagrees).slice(0, similarMax);
         for (const item of disagreeing) disagreeingIds.add(item.entry.id);
@@ -691,6 +715,30 @@ function insightsSection<T>(name: string, gloss: string, items: readonly T[], to
   })];
 }
 
+/** How a contradiction's side is named: its author, else its handle, else its title (as a note names it). */
+function sideName(entry: Pick<KnowledgeEntrySummary, "author" | "handle" | "title">): string {
+  const author = entry.author?.replace(/\s+/g, " ").trim();
+  if (author) return label(author);
+  const handle = entry.handle?.trim().replace(/^@+/, "");
+  return handle ? `@${label(handle)}` : quotedTitle(entry.title, 60);
+}
+
+/**
+ * A contradiction's `also`, each entry once per side it joins: "also with jason (against Alex
+ * Nguyen): ke_… "…""; an older daemon's list without sides as "also: … (the same point)".
+ */
+function alsoLines(item: KnowledgeInsightsResponse["contradictions"][number]): string[] {
+  const joins = item.alsoJoins;
+  if (joins && joins.a.length + joins.b.length > 0) {
+    const [a, b] = [sideName(item.a), sideName(item.b)];
+    const line = (entries: readonly KnowledgeEntrySummary[], side: string, against: string): string[] =>
+      entries.length > 0 ? [`   also with ${side} (against ${against}): ${entries.map(entryRef).join("; ")}`] : [];
+    return [...line(joins.a, a, b), ...line(joins.b, b, a)];
+  }
+  const also = [...new Map((item.also ?? []).map((entry) => [entry.id, entry])).values()];
+  return also.length > 0 ? [`   also: ${also.map(entryRef).join("; ")} (the same point)`] : [];
+}
+
 /** The insights answer: contradictions first, then bridges, single-source concepts and link gaps. */
 function renderInsights(response: KnowledgeInsightsResponse, over: readonly string[]): string {
   const where = over.length > 0 ? ` (in ${over.join(", ")})` : "";
@@ -704,7 +752,7 @@ function renderInsights(response: KnowledgeInsightsResponse, over: readonly stri
     ...insightsSection("Contradictions", "entries that disagree", response.contradictions, totals?.contradictions, (item) => [
       `${entryRef(item.a)} ↔ ${entryRef(item.b)} · ${contradictionSource(item.source)}${item.similarity === null ? "" : ` · meaning ${item.similarity.toFixed(2)}`}`,
       ...contradictionDetail(item.note, item.pairs, "   "),
-      ...(item.also && item.also.length > 0 ? [`   also: ${item.also.map(entryRef).join("; ")} (the same point)`] : []),
+      ...alsoLines(item),
       `   cite: ${item.a.citation}`,
       `   cite: ${item.b.citation}`
     ]),
