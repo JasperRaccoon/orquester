@@ -11,6 +11,7 @@ import {
   CONCEPT_CHECK_STEP,
   CONCEPT_CHECK_SYSTEM,
   ConceptMergeCheckSource,
+  E5_SMALL_CONCEPT_CHECK_BARS,
   conceptCheckCandidates,
   conceptCheckInput,
   conceptExcerpt,
@@ -252,6 +253,43 @@ test("candidates: a name guard refused them, close enough (higher bar without a 
   // A concept renamed since its check: asked again.
   const renamed = await conceptCheckCandidates({ ...input, concepts: concepts.map((c) => (c.id === "tactic-c2" ? { ...c, name: "Landing page per ad" } : c)) });
   assert.ok(renamed.some((c) => c.a.id === "tactic-c1" && c.b.id === "tactic-c2"));
+});
+
+test("candidates: names that nearly coincide are asked about at the lower `alikeNames` bar, with or without a shared entry; an item and the list naming it, or one word in common, are not", async () => {
+  // Live pairs (2026-10-27) below the bar for concepts sharing no entry.
+  const concepts = [
+    concept("tactic-and", "US App Store download and warm-up", ["ke_1"]),
+    concept("tactic-plus", "US App Store download plus warm-up", ["ke_2"]), // 6 of 7 words: asked
+    concept("tactic-isp-check", "ISP proxy with IPQS/Scamalytics risk check", ["ke_3"]),
+    concept("tactic-isp-pass", "ISP proxy that passes IPQS and Scamalytics", ["ke_3"]), // 4 of 8 words, same entry: asked
+    concept("tactic-low-risk", "Check the proxy for low risk", ["ke_5"]), // 3 of 7 words with the risk check (0.97): not
+    concept("tactic-tumblr", "Tumblr posts as backlinks", ["ke_6"]),
+    concept("tactic-list", "Facebook groups, YouTube community posts, AI pages and Tumblr backlinks", ["ke_7"]), // 3 of 11 words: not
+    concept("tactic-proxy-check", "Proxy risk check", ["ke_8"]),
+    concept("tactic-proxy-analysis", "Proxy risk analysis", ["ke_9"]) // half their words shared, but only two: not
+  ];
+  const vectors = new Map<string, Float32Array>([
+    ["tactic-and", vec(0)],
+    ["tactic-plus", vec(0, 0.964)],
+    ["tactic-isp-check", vec(2)],
+    ["tactic-isp-pass", vec(2, 0.947)],
+    ["tactic-low-risk", vec(2, 0.97, 4)],
+    ["tactic-tumblr", vec(5)],
+    ["tactic-list", vec(5, 0.95)],
+    ["tactic-proxy-check", vec(7)],
+    ["tactic-proxy-analysis", vec(7, 0.95)]
+  ]);
+  const input = { concepts, vectors, thresholds: BARS, rejected: [], checks: [], canonical: (id: string) => id, limit: 40, pause: noPause };
+  const found = await conceptCheckCandidates({ ...input, bars: { ...CHECK_BARS, alikeNames: 0.94 } });
+  assert.deepEqual(
+    found.map((c) => [c.a.id, c.b.id]),
+    [
+      ["tactic-isp-check", "tactic-isp-pass"],
+      ["tactic-and", "tactic-plus"]
+    ]
+  );
+  assert.deepEqual(await conceptCheckCandidates({ ...input, bars: CHECK_BARS }), [], "without the bar: below the one for concepts sharing no entry");
+  assert.equal(E5_SMALL_CONCEPT_CHECK_BARS.alikeNames, 0.94);
 });
 
 // ---------------------------------------------------------------------------

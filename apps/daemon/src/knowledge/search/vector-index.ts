@@ -274,15 +274,18 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
     const floor = minimum ?? embedder.thresholds.minimum;
     const dims = embedder.dimensions;
     const hits: KnowledgeVectorHit[] = [];
+    const chunkScores = new Map<KnowledgeVectorHit, { scores: Float64Array; spans: readonly TextSpan[] }>();
     for (const doc of this.docs.values()) {
       const rows = doc.vectors;
       if (!rows || doc.vectorModel !== model || !accept(doc.id)) continue;
       let best = -Infinity;
       let bestRow = 0;
+      const scores = new Float64Array(rows.length / dims);
       for (let row = 0; row * dims < rows.length; row += 1) {
         let dot = 0;
         const offset = row * dims;
         for (let d = 0; d < dims; d += 1) dot += query[d]! * rows[offset + d]!;
+        scores[row] = dot;
         if (dot > best) {
           best = dot;
           bestRow = row;
@@ -290,9 +293,16 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
       }
       if (best < floor) continue;
       const span = doc.spans[bestRow] ?? { start: 0, end: doc.body.length };
-      hits.push({ entryId: doc.id, score: best, chunk: bestRow, chunks: doc.spans.length, span: { start: span.start, end: span.end } });
+      const hit: KnowledgeVectorHit = { entryId: doc.id, score: best, chunk: bestRow, chunks: doc.spans.length, span: { start: span.start, end: span.end } };
+      if (scores.length === doc.spans.length && scores.length > 1) chunkScores.set(hit, { scores, spans: doc.spans });
+      hits.push(hit);
     }
-    return hits.sort((a, b) => b.score - a.score || (a.entryId < b.entryId ? -1 : 1)).slice(0, limit);
+    const kept = hits.sort((a, b) => b.score - a.score || (a.entryId < b.entryId ? -1 : 1)).slice(0, limit);
+    for (const hit of kept) {
+      const all = chunkScores.get(hit);
+      if (all) hit.chunkScores = all.spans.map((chunk, row) => ({ score: all.scores[row]!, span: { start: chunk.start, end: chunk.end } }));
+    }
+    return kept;
   }
 
   /** The cached mean vector; callers must not modify it. */

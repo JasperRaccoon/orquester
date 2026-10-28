@@ -98,6 +98,35 @@ describe("phase 2 wire validation", () => {
       assert.ok(broken?.kind === "entry" && !("novelty" in broken.entry));
     });
 
+    it("reads disagreements, never the entry itself, each once, with a total only past them; absent from an older daemon", () => {
+      const older = parseKnowledgeItemResponse(entryItem({}));
+      assert.ok(older?.kind === "entry" && !("disagreements" in older.entry) && !("disagreementsTotal" in older.entry));
+      const C = summary({ id: "ke_cccccccccccc", title: "C" });
+      const read = parseKnowledgeItemResponse(
+        entryItem({
+          disagreements: [
+            { entry: C, similarity: 0.93, source: "checked", pairs: [{ from: ref("t-a"), to: ref("t-b") }, { from: ref("t-a") }], note: " Gmail vs Outlook. " },
+            { entry: A, similarity: 0.9, source: "checked", pairs: [], note: null },
+            { entry: B, similarity: "high", source: "llm-v3", note: "" },
+            { entry: C, similarity: 0.5, source: "graph", pairs: [], note: null },
+            { similarity: 0.9 },
+            "B"
+          ],
+          disagreementsTotal: 40
+        })
+      );
+      assert.ok(read?.kind === "entry");
+      assert.deepEqual(read.entry.disagreements, [
+        { entry: C, similarity: 0.93, source: "checked", pairs: [{ from: ref("t-a"), to: ref("t-b") }], note: "Gmail vs Outlook." },
+        { entry: B, similarity: null, source: "graph", pairs: [], note: null }
+      ]);
+      assert.equal(read.entry.disagreementsTotal, 40);
+      const fewer = parseKnowledgeItemResponse(entryItem({ disagreements: [{ entry: C, similarity: null, source: "graph", pairs: [], note: null }], disagreementsTotal: 1 }));
+      assert.ok(fewer?.kind === "entry" && !("disagreementsTotal" in fewer.entry), "a total no larger than the list says nothing");
+      const broken = parseKnowledgeItemResponse(entryItem({ disagreements: "all" }));
+      assert.ok(broken?.kind === "entry" && !("disagreements" in broken.entry));
+    });
+
     it("reads merged-from and similar concepts, never the concept itself, each once", () => {
       const older = parseKnowledgeItemResponse(conceptItem({}));
       assert.ok(older?.kind === "concept" && !("mergedFrom" in older.concept) && !("similarConcepts" in older.concept));

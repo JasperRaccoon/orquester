@@ -228,7 +228,7 @@ test("without an index or a model: concepts and author only, similarity null, no
   assert.deepEqual(noModel.possibleDuplicates, []);
   s.noIndex();
   assert.deepEqual(ids(s.similarity.forEntry(ke("a"), s.all).similar), [ke("e"), ke("f"), ke("g")]);
-  assert.deepEqual(s.similarity.forEntry(ke("zzz"), s.all), { similar: [], possibleDuplicates: [] }, "unknown entry");
+  assert.deepEqual(s.similarity.forEntry(ke("zzz"), s.all), { similar: [], possibleDuplicates: [], disagreements: [], disagreementsTotal: 0 }, "unknown entry");
 });
 
 test("similarForSaved: visible near-duplicates outside the save, closest first, at most 3", () => {
@@ -470,6 +470,33 @@ test("graph: topic groups inside a narrow cone, every pair above `good`, are sep
   assert.deepEqual(labelsByTopic(g, s.members), { pricing: "pricing note", tiktok: "tiktok note", seo: "seo note", ads: "ads note" });
 });
 
+test("graph: a survey close to two topics joins one of them; it never glues them into one cluster", async () => {
+  const s = setup();
+  // Two loose topics (each entry 0.36 from its own topic's others) and two surveys of both (0.42 from each entry).
+  for (const [topic, base, sides] of [["x", 0, [3, 4, 5]], ["y", 1, [6, 7, 8]]] as const) {
+    sides.forEach((side, i) => {
+      s.put(`${topic}${i + 1}`, ["kc_seo"], { title: `${topic} ${i + 1}` });
+      s.index.set(ke(`${topic}${i + 1}`), around(DIMS, base, side, 0.6));
+    });
+  }
+  for (const [name, noise] of [["map", 12], ["audit", 13]] as const) {
+    s.put(name, ["kc_seo"], { kind: "synthesis", title: `${name} of x and y` });
+    const vector = new Array<number>(DIMS).fill(0);
+    vector[0] = 1;
+    vector[1] = 1;
+    vector[noise] = 0.1;
+    s.index.set(ke(name), vector);
+  }
+  const g = await s.similarity.graph({}, s.all);
+  const clusterOf = (name: string) => g.nodes.find((node) => node.id === ke(name))!.cluster;
+  assert.deepEqual(
+    ["x2", "x3", "y1", "y2", "y3"].map(clusterOf),
+    [clusterOf("x1"), clusterOf("x1"), clusterOf("y1"), clusterOf("y1"), clusterOf("y1")]
+  );
+  assert.notEqual(clusterOf("x1"), clusterOf("y1"), "the surveys do not glue the two topics");
+  for (const survey of ["map", "audit"]) assert.ok([clusterOf("x1"), clusterOf("y1")].includes(clusterOf(survey)), `${survey} joins a topic`);
+});
+
 test("graph: the same entries always give the same clusters, whatever k is drawn", async () => {
   const topics = { pricing: 5, tiktok: 4, seo: 4, ads: 3 };
   const a = cone(topics);
@@ -679,6 +706,47 @@ test("similar: entries that contradict it (graph, either direction) are listed e
   ]);
 });
 
+test("disagreements: every contradicting entry, checked first then closest, past the 3 `similar` keeps; each side lists the other", async () => {
+  const s = await contradictionFixture();
+  s.index.set(ke("h"), around(DIMS, 0, 2, 0.995)); // The graph guess is closer than every checked disagreement.
+  for (const name of ["n1", "n4", "n7", "n9"]) s.pairChecks.push(pairCheck(ke("a"), ke(name), "contradicts", `${name} disagrees`));
+  const { similar, disagreements, disagreementsTotal } = s.similarity.forEntry(ke("a"), s.all);
+  assert.deepEqual(
+    disagreements.map((item) => item.entry.id),
+    ["n1", "n4", "n7", "n9", "h", "z"].map(ke)
+  );
+  assert.equal(disagreementsTotal, 6);
+  assert.deepEqual(disagreements[0], { entry: disagreements[0]!.entry, similarity: 0.98, source: "checked", pairs: [], note: "n1 disagrees" });
+  assert.deepEqual(disagreements[5], { entry: disagreements[5]!.entry, similarity: 0.1, source: "graph", pairs: [{ from: shortRef, to: longRef }], note: null });
+  assert.equal(similar.filter((item) => item.reasons.some((r) => r.kind === "contradicts")).length, 3, "similar keeps its 3, as older clients read them");
+  for (const other of disagreements) {
+    assert.ok(
+      s.similarity.forEntry(other.entry.id, s.all).disagreements.some((item) => item.entry.id === ke("a")),
+      `${other.entry.id} lists a back`
+    );
+  }
+  // Only the hidden-aware view: H (Ads) is neither listed nor counted.
+  const seo = s.similarity.forEntry(ke("a"), s.seoOnly);
+  assert.ok(!seo.disagreements.some((item) => item.entry.id === ke("h")));
+  assert.equal(seo.disagreementsTotal, 5);
+});
+
+test("disagreements: at most 20 listed, every one counted", async () => {
+  const s = await contradictionFixture();
+  s.index.set(ke("h"), around(DIMS, 0, 2, 0.995)); // The graph guess is closer than every checked disagreement.
+  for (let i = 1; i <= 21; i += 1) {
+    if (i > 10) {
+      s.put(`m${i}`, ["kc_seo"]);
+      s.index.set(ke(`m${i}`), around(DIMS, 0, 1, 0.3));
+    }
+    s.pairChecks.push(pairCheck(ke("a"), ke(i > 10 ? `m${i}` : `n${i}`), "contradicts"));
+  }
+  const { disagreements, disagreementsTotal } = s.similarity.forEntry(ke("a"), s.all);
+  assert.equal(disagreements.length, 20);
+  assert.equal(disagreementsTotal, 23);
+  assert.ok(disagreements.every((item) => item.source === "checked"), "checked ones first");
+});
+
 test("similar: a hidden entry or its concepts never show through a contradiction", async () => {
   const s = await contradictionFixture();
   s.pairChecks.push(pairCheck(ke("a"), ke("h"), "contradicts", "the hidden one disagrees"));
@@ -821,6 +889,19 @@ test("novelty: concepts no other visible entry has (claims first, people last), 
   assert.equal(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster, null);
   await s.similarity.idle();
   assert.equal(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster?.size, 3, "P1, P3 and the late entry");
+});
+
+test("novelty: a concept another visible entry says in other words (a backing concept) is not new", async () => {
+  const s = graphFixture();
+  await loadGraph(s.graph, [
+    node("tactic-unique", "Create a US Apple ID verified with a US number", files([ke("p1")])),
+    node("tactic-reworded", "Create a US Apple ID using the US phone number", files([ke("p2")])),
+    node("tactic-hidden-reworded", "Only here, as a hidden entry says it", files([ke("hidden")])),
+    node("tactic-other", "Only here", files([ke("p1")]))
+  ]);
+  s.graph.setBackingConcepts((id) => (id === "tactic-unique" ? ["tactic-reworded"] : id === "tactic-other" ? ["tactic-hidden-reworded"] : []));
+  assert.deepEqual(s.similarity.novelty(ke("p1"), s.seoOnly)!.newConcepts.map((c) => c.id), ["tactic-other"], "a hidden entry backs nothing");
+  assert.deepEqual(s.similarity.novelty(ke("p1"), s.all)!.newConcepts, []);
 });
 
 test("novelty reads the latest graph drawn for the scope at any k and limit (insights' graph counts)", async () => {

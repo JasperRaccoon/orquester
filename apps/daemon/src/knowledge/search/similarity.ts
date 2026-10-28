@@ -21,6 +21,7 @@ import {
   KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES,
   knowledgeCitation,
   type KnowledgeConceptRef,
+  type KnowledgeDisagreement,
   type KnowledgeEntryMeta,
   type KnowledgeEntrySummary,
   type KnowledgeNovelty,
@@ -33,7 +34,7 @@ import {
 } from "@orquester/api";
 import type { KnowledgePairChecksPort, KnowledgeStorePort, KnowledgeVectorIndex, KnowledgeVectorThresholds } from "../ports.ts";
 import { type WeightedEdge, communities } from "./communities.ts";
-import { type KnowledgeContradictionFound, findContradictions, pairKeyOf } from "./contradictions.ts";
+import { type KnowledgeContradictionFound, findContradictions, isSurveyEntry, pairKeyOf } from "./contradictions.ts";
 import { normalizeAuthor } from "./filters.ts";
 import type { KnowledgeClusterLabelsPort } from "./cluster-labels.ts";
 import type { KnowledgeGraph } from "./graph.ts";
@@ -71,7 +72,7 @@ const BACKGROUND_DRAWS_MAX = 256;
  * How the graph's clusters and labels are made; part of the cache key, so a daemon never serves a
  * graph drawn by an older rule. Bump it whenever clustering or labelling changes.
  */
-const GRAPH_ALGORITHM = "communities-v2";
+const GRAPH_ALGORITHM = "communities-v3";
 /**
  * The exponent on a cluster edge's rescaled similarity ({@link clusterWeight}): squaring widens
  * the gap between a close neighbour and a loose one, which the narrow cone of e5-style models
@@ -85,6 +86,21 @@ const CLUSTER_WEIGHT_POWER = 2;
  * real entries: SEO, marketing playbooks and pricing as one cluster of 51); with 4 they separate.
  */
 const CLUSTER_NEIGHBOURS = 4;
+/**
+ * A community of more than max(`CLUSTER_SPLIT_MIN`, `CLUSTER_SPLIT_SHARE` of the drawn entries) is
+ * found again over its own links, and split when less than `CLUSTER_SPLIT_MAX_ACROSS` of its link
+ * weight runs between the parts found. Surveys (a synthesis, a map or audit note:
+ * {@link isSurveyEntry}) are left out of the links and join a cluster after: close to every topic
+ * they survey, they glued the topics together. Without them modularity still merges the research
+ * notes, which share a style, into one community (126 real entries: teardowns, Instagram, SEO
+ * content and landing pages as one of 39 with its surveys): its resolution limit, which a pass over
+ * the community alone does not have. Its parts share 35% of its link weight (teardowns 9, SEO
+ * content 9, growth 9 and 5 more); the 34 App Store rule notes' parts share 49%, one topic kept
+ * whole. A global resolution above 1 split both, and the small groups of a small base too.
+ */
+const CLUSTER_SPLIT_MIN = 12;
+const CLUSTER_SPLIT_SHARE = 0.2;
+const CLUSTER_SPLIT_MAX_ACROSS = 0.4;
 /** Concept types that say who wrote or published entries, not what they are about: never a cluster label. */
 export const NON_TOPIC_CONCEPT_TYPES: ReadonlySet<string> = new Set(["person", "organization", "company"]);
 /** Concept types that make a claim (a single-source claim is one nobody else backs; novelty lists them first). */
@@ -107,6 +123,8 @@ const DISTINCTIVE_BONUS = 0.25;
 const DISTINCTIVE_BONUS_CONCEPTS = 3;
 /** Entries listed in `similar` because they contradict this one (even below the meaning bar). */
 const CONTRADICTIONS_SIMILAR_MAX = 3;
+/** Entries listed in an entry's `disagreements` (every one counted in `disagreementsTotal`). */
+const DISAGREEMENTS_MAX = 20;
 /** Concepts named per cluster (`KnowledgeSimilarityCluster.concepts`). */
 const CLUSTER_CONCEPTS_MAX = 5;
 /** Concepts named in an entry's `novelty`. */
@@ -139,7 +157,7 @@ export type KnowledgeClusterRef = { label: string | null; size: number };
 
 export interface KnowledgeSimilarityOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
-  graph: Pick<KnowledgeGraph, "relatedEntries" | "conceptsOfEntry" | "conceptIdsOfEntry" | "revision" | "visibleEntriesOf" | "visibleEdgesOfType" | "conceptRef">;
+  graph: Pick<KnowledgeGraph, "relatedEntries" | "conceptsOfEntry" | "conceptIdsOfEntry" | "revision" | "visibleEntriesOf" | "visibleEdgesOfType" | "conceptRef" | "backingConcepts">;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
   /** An entry as the read views show it (snippet, visible collections, link count, citation). */
@@ -350,10 +368,17 @@ export class KnowledgeSimilarity {
    * `concepts` reason whichever way it was found. Duplicates: up to 3 at cosine ≥ `duplicate` whose
    * text is a near-copy of its own ({@link nearCopy}). Only entries `scope` lets through; never the
    * entry itself.
+   *
+   * `disagreements`: every entry that contradicts it, in the same order (checked first, then the
+   * closest), up to {@link DISAGREEMENTS_MAX}, whatever the `similar` cap; `disagreementsTotal`
+   * counts them all. {@link findContradictions} is symmetric, so B is on A's list whenever A is on B's.
    */
-  forEntry(id: string, scope: KnowledgeScope): { similar: KnowledgeSimilarEntry[]; possibleDuplicates: KnowledgeSimilarEntry[] } {
+  forEntry(
+    id: string,
+    scope: KnowledgeScope
+  ): { similar: KnowledgeSimilarEntry[]; possibleDuplicates: KnowledgeSimilarEntry[]; disagreements: KnowledgeDisagreement[]; disagreementsTotal: number } {
     const meta = this.store.getMeta(id);
-    if (!meta) return { similar: [], possibleDuplicates: [] };
+    if (!meta) return { similar: [], possibleDuplicates: [], disagreements: [], disagreementsTotal: 0 };
     const vectors = this.vectors();
     const own = vectors ? vectors.index.entryVector(id) : null;
     const candidates = new Map<string, Candidate>();
@@ -413,16 +438,14 @@ export class KnowledgeSimilarity {
         entryMeta: (other) => this.store.getMeta(other)
       }).values()
     ];
-    if (contradicting.length > 0) {
-      const ranked = contradicting
-        .map((found) => {
-          const otherMeta = this.store.getMeta(found.a === id ? found.b : found.a)!;
-          const similarity = vectors && own ? (this.cosine(vectors.index, own, otherMeta.id) ?? -Infinity) : -Infinity;
-          return { found, meta: otherMeta, similarity, checked: Number(found.source === "checked") };
-        })
-        .sort((x, y) => y.checked - x.checked || y.similarity - x.similarity || newestFirst(x.meta, y.meta));
-      for (const item of ranked.slice(0, CONTRADICTIONS_SIMILAR_MAX)) candidate(item.meta).contradiction = item.found;
-    }
+    const disagreeing = contradicting
+      .map((found) => {
+        const otherMeta = this.store.getMeta(found.a === id ? found.b : found.a)!;
+        const similarity = vectors && own ? (this.cosine(vectors.index, own, otherMeta.id) ?? -Infinity) : -Infinity;
+        return { found, meta: otherMeta, similarity, checked: Number(found.source === "checked") };
+      })
+      .sort((x, y) => y.checked - x.checked || y.similarity - x.similarity || newestFirst(x.meta, y.meta));
+    for (const item of disagreeing.slice(0, CONTRADICTIONS_SIMILAR_MAX)) candidate(item.meta).contradiction = item.found;
 
     // The concepts every candidate shares with it, however it was found (the distinctive ones named first).
     if (ownConcepts.length > 0) {
@@ -484,7 +507,15 @@ export class KnowledgeSimilarity {
       possibleDuplicates: neighbours
         .filter((n) => n.similarity >= duplicate && this.nearCopy(id, n.meta.id))
         .slice(0, KNOWLEDGE_DUPLICATES_MAX)
-        .map((n) => toWire(candidates.get(n.meta.id)!))
+        .map((n) => toWire(candidates.get(n.meta.id)!)),
+      disagreements: disagreeing.slice(0, DISAGREEMENTS_MAX).map(({ found, meta: other, similarity }) => ({
+        entry: this.summary(other, scope),
+        similarity: Number.isFinite(similarity) ? round(similarity) : null,
+        source: found.source,
+        pairs: found.pairs.map((pair) => ({ from: { ...pair.from }, to: { ...pair.to } })),
+        note: found.note
+      })),
+      disagreementsTotal: disagreeing.length
     };
   }
 
@@ -537,7 +568,7 @@ export class KnowledgeSimilarity {
   // -------------------------------------------------------------------------
 
   /**
-   * What the entry adds: its concepts no other visible entry has (claims first, people and
+   * What the entry adds: its concepts no other visible entry has, in these words or in others (`backingConcepts`; claims first, people and
    * organizations last, up to 8), and the cluster it sits in by the latest similarity graph drawn
    * for `scope` (any `k` and `limit`: the layer's, insights'). Null when none is drawn yet: it never
    * waits for one, it starts drawing one in the background for the next read. Null while the entry
@@ -551,13 +582,17 @@ export class KnowledgeSimilarity {
       const key = type.toLowerCase();
       return CLAIM_CONCEPT_TYPES.has(key) ? 0 : NON_TOPIC_CONCEPT_TYPES.has(key) ? 2 : 1;
     };
-    const newConcepts = this.knowledgeGraph
+    const onlyHere = (conceptId: string): boolean => this.knowledgeGraph.visibleEntriesOf(conceptId, scope).every((other) => other === id);
+    const newConcepts: KnowledgeConceptRef[] = [];
+    for (const { concept } of this.knowledgeGraph
       .conceptsOfEntry(id, scope)
-      .filter((concept) => this.knowledgeGraph.visibleEntriesOf(concept.id, scope).every((other) => other === id))
+      .filter((concept) => onlyHere(concept.id))
       .map((concept, order) => ({ concept, order, rank: rankOf(concept.type) }))
-      .sort((a, b) => a.rank - b.rank || a.order - b.order)
-      .slice(0, NOVELTY_CONCEPTS_MAX)
-      .map(({ concept }) => ({ ...concept }));
+      .sort((a, b) => a.rank - b.rank || a.order - b.order)) {
+      if (newConcepts.length >= NOVELTY_CONCEPTS_MAX) break;
+      // Nor said in other words by another entry (a concept that backs it); asked in rank order, only as far as listed.
+      if (this.knowledgeGraph.backingConcepts(concept.id).every(onlyHere)) newConcepts.push({ ...concept });
+    }
     const structure = this.latestStructure(scope, vectors.index);
     if (!structure) this.drawInBackground(scope, vectors.index);
     return { newConcepts, cluster: structure ? this.clusterRef(structure, clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, new Set()), scope) : null };
@@ -699,8 +734,10 @@ export class KnowledgeSimilarity {
    * The similarity layer (spec R7) over the entries `scope` lets through: the most recent `limit`
    * embedded ones as nodes; each node's top-`k` neighbours (cosine ≥ `minimum`) as edges, plus a
    * maximum spanning forest over each node's top-max(k, 8) neighbours (`tree: true`); clusters =
-   * modularity communities ({@link communities}) over each node's top-4 neighbours weighted by
-   * {@link clusterWeight}, largest first, labelled and given their concepts by {@link clusterLabels}.
+   * modularity communities ({@link communities}) over each non-survey node's top-4 non-survey
+   * neighbours weighted by {@link clusterWeight}, an oversize one found again over its own links
+   * ({@link CLUSTER_SPLIT_MIN}), each survey then joining the one its top-4 weigh most in; largest
+   * first, labelled and given their concepts by {@link clusterLabels}.
    * Every edge carries the concepts its two entries share; two drawn entries that contradict each
    * other ({@link findContradictions}) are joined by an edge marked `contradicts` (added, not part
    * of the forest, when they were not neighbours). Cached per algorithm, scope, k, index
@@ -805,25 +842,35 @@ export class KnowledgeSimilarity {
     const packed = new Float32Array(n * dims);
     rows.forEach((row, i) => packed.set(row, i * dims));
 
-    // Each node's best `keep` neighbours at or above `minimum`, best first (earlier offers win ties).
+    // Each node's best `keep` neighbours at or above `minimum`, best first (earlier offers win ties);
+    // and, for the clusters, its best `CLUSTER_NEIGHBOURS` among the entries that are not surveys.
     const keep = Math.max(k, TREE_CANDIDATES);
-    const topIndex = new Int32Array(n * keep).fill(-1);
-    const topSim = new Float64Array(n * keep);
-    const topCount = new Int32Array(n);
-    const offer = (node: number, other: number, similarity: number): void => {
-      const base = node * keep;
-      let at = topCount[node]!;
-      if (at < keep) topCount[node] = at + 1;
-      else if (similarity > topSim[base + keep - 1]!) at = keep - 1;
-      else return;
-      while (at > 0 && topSim[base + at - 1]! < similarity) {
-        topSim[base + at] = topSim[base + at - 1]!;
-        topIndex[base + at] = topIndex[base + at - 1]!;
-        at -= 1;
-      }
-      topSim[base + at] = similarity;
-      topIndex[base + at] = other;
+    const best = (size: number) => {
+      const index = new Int32Array(n * size).fill(-1);
+      const sim = new Float64Array(n * size);
+      const count = new Int32Array(n);
+      const offer = (node: number, other: number, similarity: number): void => {
+        const base = node * size;
+        let at = count[node]!;
+        if (at < size) count[node] = at + 1;
+        else if (similarity > sim[base + size - 1]!) at = size - 1;
+        else return;
+        while (at > 0 && sim[base + at - 1]! < similarity) {
+          sim[base + at] = sim[base + at - 1]!;
+          index[base + at] = index[base + at - 1]!;
+          at -= 1;
+        }
+        sim[base + at] = similarity;
+        index[base + at] = other;
+      };
+      return { index, sim, count, offer };
     };
+    const { index: topIndex, sim: topSim, count: topCount, offer } = best(keep);
+    const near = best(CLUSTER_NEIGHBOURS);
+    // A survey (a synthesis, a map or audit note) is close to every topic it surveys: as a link it
+    // would glue them into one cluster. Clusters are found without them, then each joins its own.
+    const survey = drawn.map((meta) => isSurveyEntry(meta));
+    if (survey.every(Boolean)) survey.fill(false);
     const minimum = thresholds.minimum;
     for (let i = 0; i < n; i += 1) {
       const a = i * dims;
@@ -846,12 +893,14 @@ export class KnowledgeSimilarity {
         if (similarity < minimum) continue;
         offer(i, j, similarity);
         offer(j, i, similarity);
+        if (!survey[j]) near.offer(i, j, similarity);
+        if (!survey[i]) near.offer(j, i, similarity);
       }
       await pause();
     }
 
     // k-NN edges, then the maximum spanning forest over the wider candidate set; the links the
-    // clusters are found over (each node's nearest `CLUSTER_NEIGHBOURS`, weighted).
+    // clusters are found over (each non-survey node's nearest `CLUSTER_NEIGHBOURS` non-survey ones, weighted).
     const edges = new Map<number, { a: number; b: number; similarity: number; tree: boolean; contradicts?: true }>();
     const pairKey = (x: number, y: number) => (x < y ? x * n + y : y * n + x);
     const candidates = new Map<number, { a: number; b: number; similarity: number }>();
@@ -863,7 +912,12 @@ export class KnowledgeSimilarity {
         const key = pairKey(i, j);
         if (r < k && !edges.has(key)) edges.set(key, { ...pair, tree: false });
         if (!candidates.has(key)) candidates.set(key, pair);
-        if (r < CLUSTER_NEIGHBOURS && !links.has(key)) links.set(key, { a: pair.a, b: pair.b, weight: clusterWeight(pair.similarity, minimum) });
+      }
+      if (survey[i]) continue;
+      for (let r = 0; r < near.count[i]!; r += 1) {
+        const j = near.index[i * CLUSTER_NEIGHBOURS + r]!;
+        const key = pairKey(i, j);
+        if (!links.has(key)) links.set(key, { a: Math.min(i, j), b: Math.max(i, j), weight: clusterWeight(near.sim[i * CLUSTER_NEIGHBOURS + r]!, minimum) });
       }
     }
     const forest = new UnionFind(n);
@@ -915,6 +969,57 @@ export class KnowledgeSimilarity {
       degree[edge.b]! += 1;
     }
     const community = await communities(n, [...links.values()], pause);
+    // A community holding a large share of the entries is found again over its own links: on the
+    // whole graph modularity cannot tell its topics apart (its resolution limit).
+    const oversize = Math.max(CLUSTER_SPLIT_MIN, CLUSTER_SPLIT_SHARE * n);
+    const sizes = new Map<number, number[]>();
+    for (let i = 0; i < n; i += 1) {
+      let list = sizes.get(community[i]!);
+      if (!list) sizes.set(community[i]!, (list = []));
+      list.push(i);
+    }
+    let fresh = n;
+    for (const group of sizes.values()) {
+      if (group.length <= oversize) continue;
+      const local = new Map(group.map((node, at) => [node, at]));
+      const inner: WeightedEdge[] = [];
+      for (const link of links.values()) {
+        const a = local.get(link.a);
+        const b = local.get(link.b);
+        if (a !== undefined && b !== undefined) inner.push({ a, b, weight: link.weight });
+      }
+      const parts = await communities(group.length, inner, pause);
+      // Kept whole when its parts are still bound by much of its link weight: one topic, not several.
+      let across = 0;
+      let within = 0;
+      for (const link of inner) {
+        if (parts[link.a] === parts[link.b]) within += link.weight;
+        else across += link.weight;
+      }
+      if (across >= CLUSTER_SPLIT_MAX_ACROSS * (across + within)) continue;
+      group.forEach((node, at) => {
+        community[node] = fresh + parts[at]!;
+      });
+      fresh += group.length;
+    }
+    // Each survey joins the community its nearest non-survey entries weigh most in (the nearest's on a tie).
+    for (let i = 0; i < n; i += 1) {
+      if (!survey[i] || near.count[i] === 0) continue;
+      const weight = new Map<number, number>();
+      for (let r = 0; r < near.count[i]!; r += 1) {
+        const c = community[near.index[i * CLUSTER_NEIGHBOURS + r]!]!;
+        weight.set(c, (weight.get(c) ?? 0) + clusterWeight(near.sim[i * CLUSTER_NEIGHBOURS + r]!, minimum));
+      }
+      let chosen = community[i]!;
+      let most = 0;
+      for (const [c, total] of weight) {
+        if (total > most) {
+          chosen = c;
+          most = total;
+        }
+      }
+      community[i] = chosen;
+    }
     const members = new Map<number, number[]>();
     for (let i = 0; i < n; i += 1) {
       let list = members.get(community[i]!);

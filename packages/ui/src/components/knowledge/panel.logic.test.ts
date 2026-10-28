@@ -13,6 +13,7 @@ import {
   findConceptMerge,
   knowledgeMergePlan,
   markdownBodyPreview,
+  moreDisagreements,
   mergeErrorText,
   reasonLabel,
   similarSection,
@@ -153,6 +154,28 @@ describe("disagreements, distinctive concepts and concept merges (phase 2)", () 
     assert.deepEqual(disagreements({ entry: entry({ id: SELF }) }), [], "an older daemon");
     assert.equal(contradictionSourceText("checked"), "Checked by an agent");
     assert.equal(contradictionSourceText("graph"), "From the concept graph");
+  });
+
+  it("lists the daemon's disagreements when it sends them, past the similar entries, with how many more it counted", () => {
+    const disagreement = (id: string, note: string | null = null) => ({ entry: summary({ id, title: id }), similarity: 0.9, source: "checked" as const, pairs: [], note });
+    const similar = [item("ke_two", [{ kind: "contradicts", source: "graph", pairs: [pair], note: "from similar" }])];
+    const detail = {
+      entry: entry({ id: SELF }),
+      similar,
+      disagreements: [disagreement("ke_one", "One disagrees."), disagreement("ke_two"), disagreement("ke_three"), disagreement("ke_one")],
+      disagreementsTotal: 25
+    };
+    assert.deepEqual(
+      disagreements(detail).map((d) => [d.entry.id, d.source, d.note]),
+      [
+        ["ke_one", "checked", "One disagrees."],
+        ["ke_two", "checked", null],
+        ["ke_three", "checked", null]
+      ]
+    );
+    assert.equal(moreDisagreements(detail), 22);
+    assert.equal(moreDisagreements({ ...detail, disagreementsTotal: undefined }), 0, "all listed");
+    assert.equal(moreDisagreements({ entry: detail.entry, similar }), 0, "an older daemon");
   });
 
   it("labels a contradiction first among an entry's reasons", () => {
