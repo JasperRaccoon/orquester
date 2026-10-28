@@ -215,8 +215,8 @@ test("knowledge_get: a concept's summary and each entry's position, attributed a
   const out = textOf(await run(api, "knowledge_get", { id: concept.id }));
   assert.match(out, /\nSummary: Using a new TikTok account like a real user for a while before posting\.\nPositions:\n/);
   // An entry the detail lists cites as it does; another by its id.
-  assert.ok(out.includes(`- Om Patel ("Alternatives pages"): Post the first video after 1–2 days. ${meta().citation}`), out);
-  assert.ok(out.includes(`- unknown author ("Don't use NordVPN"): Warm up for 3–5 days. [Don't use NordVPN](orquester-knowledge:entry/ke_bbbbbbbbbbbb)`), out);
+  assert.ok(out.includes(`- Om Patel: Post the first video after 1–2 days. ${meta().citation}`), out);
+  assert.ok(out.includes(`- unknown author: Warm up for 3–5 days. [Don't use NordVPN](orquester-knowledge:entry/ke_bbbbbbbbbbbb)`), out);
   // myKG's description (one entry's claim, stated as the concept's) is left out: that entry's position says it.
   assert.ok(!out.includes("Scroll, then post the first video after 1–2 days.") && !out.includes("Extracted description"), out);
   // Without a summary (an older daemon, or not written yet): the description as before.
@@ -249,7 +249,7 @@ test("knowledge_get: a concept's family — the question, its summary, the other
   const out = textOf(await run(api, "knowledge_get", { id: concept.id }));
   assert.ok(out.includes("\nFamily: Warm-up length before the first post — How long a new account is used like a real user's before it posts.\n"), out);
   assert.ok(out.includes("\nFamily members: Warm up the account for 48 hours before posting (Tactic) [tactic-warm-48], Warm up the TikTok account for 5-7 days (Tactic) [tactic-warm-57]\n"), out);
-  assert.ok(out.includes(`\nFamily positions:\n- jason ("Alternatives pages"): Warm up for 48 hours. ${meta().citation}\n- Emanuele Totaro ("US TikTok from Italy"): Warm up for 5–7 days. [US TikTok from Italy · Emanuele Totaro](orquester-knowledge:entry/ke_cccccccccccc)`), out);
+  assert.ok(out.includes(`\nFamily positions:\n- jason: Warm up for 48 hours. ${meta().citation}\n- Emanuele Totaro: Warm up for 5–7 days. [US TikTok from Italy · Emanuele Totaro](orquester-knowledge:entry/ke_cccccccccccc)`), out);
   // Before it is written (or for a caller who may not read it): the family under its fallback name, no summary.
   const unnamed = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), {
     status: 200,
@@ -261,6 +261,42 @@ test("knowledge_get: a concept's family — the question, its summary, the other
   // An older daemon: no family line.
   const older = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(concept.id), { status: 200, body: { kind: "concept", concept: { ...detail, family: undefined } } });
   assert.ok(!textOf(await run(older, "knowledge_get", { id: concept.id })).includes("Family"));
+});
+
+test("knowledge_get: every summary and family position, in the daemon's order, compact when reading several (at most 20)", async () => {
+  const ids = (n: number, letter: string) => Array.from({ length: n }, (_, i) => `ke_${letter}${String(i).padStart(11, "0")}`);
+  const position = (entryId: string, i: number) => ({ entryId, title: `Guide ${i}`, author: `Author ${i}`, claim: `Warm up for ${i + 1} days.` });
+  const warm = { id: "tactic-warm-48", name: "Warm up the account for 48 hours before posting", type: "Tactic", confidence: 0.9, description: null, aliases: [], attributes: {} };
+  const vpn = { id: "tool-nordvpn", name: "NordVPN", type: "Tool", confidence: 0.9, description: null, aliases: [], attributes: {} };
+  // Ten family positions (the daemon puts the entry behind this concept first) and six summary positions.
+  const family = {
+    id: "family-0123456789ab",
+    name: "Account warm-up before first post",
+    concepts: [warm, { id: "tactic-warm-57", name: "Warm up for 5-7 days", type: "Tactic" }],
+    summary: { text: "How long to warm up.", positions: ids(10, "f").map(position) }
+  };
+  const summary = { text: "A commercial VPN.", positions: ids(6, "s").map(position) };
+  const api = withCollections(new FakeDaemonApi())
+    .on("GET", knowledgeRoutes.item(warm.id), { status: 200, body: { kind: "concept", concept: { concept: warm, collections: [], entries: [meta()], neighbors: [], family } } })
+    .on("GET", knowledgeRoutes.item(vpn.id), { status: 200, body: { kind: "concept", concept: { concept: vpn, collections: [], entries: [meta()], neighbors: [], summary } } });
+  // Reading several: one compact line per position (author, entry id, claim), none behind "+N more".
+  const several = textOf(await run(api, "knowledge_get", { ids: [warm.id, vpn.id] }));
+  const familyBlock = several.split("\nFamily positions:\n")[1]!.split("\nEntries")[0]!.split("\n");
+  assert.deepEqual(familyBlock, ids(10, "f").map((id, i) => `- Author ${i} [${id}]: Warm up for ${i + 1} days.`));
+  const summaryBlock = several.split("\nPositions:\n")[1]!.split("\nEntries")[0]!.split("\n");
+  assert.deepEqual(summaryBlock, ids(6, "s").map((id, i) => `- Author ${i} [${id}]: Warm up for ${i + 1} days.`));
+  // Reading one: each with its citation.
+  const one = textOf(await run(api, "knowledge_get", { id: warm.id }));
+  assert.ok(one.includes(`\nFamily positions:\n- Author 0: Warm up for 1 days. [Guide 0 · Author 0](orquester-knowledge:entry/${ids(10, "f")[0]})\n`), one);
+  assert.equal(one.split("\n").filter((line) => line.startsWith("- Author ")).length, 10);
+  // More than 20: the first 20, then how many more.
+  const many = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item(warm.id), {
+    status: 200,
+    body: { kind: "concept", concept: { concept: warm, collections: [], entries: [meta()], neighbors: [], family: { ...family, summary: { text: "x", positions: ids(23, "m").map(position) } } } }
+  });
+  const capped = textOf(await run(many, "knowledge_get", { id: warm.id }));
+  assert.equal(capped.split("\n").filter((line) => line.startsWith("- Author ")).length, 20);
+  assert.ok(capped.includes("- Author 19: ") && !capped.includes("- Author 20: ") && capped.includes("\n+3 more\n"), capped);
 });
 
 test("knowledge_save: one call, many items, the session named, handles without @; no card, even while planning", async () => {

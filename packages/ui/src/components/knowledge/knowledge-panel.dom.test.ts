@@ -561,6 +561,26 @@ describe("the entry panel", () => {
       assert.equal(doc().querySelector('section[aria-label="Family"]'), null);
     });
 
+    it("shows every family and summary position in the daemon's order, none behind a \"more\"", async () => {
+      const ids = (n: number, letter: string) => Array.from({ length: n }, (_, i) => `ke_${letter}${String(i).padStart(11, "0")}`);
+      const positions = (list: string[]) => list.map((entryId, i) => ({ entryId, title: `Guide ${i}`, author: `Author ${i}`, claim: `Warm up for ${i + 1} days.` }));
+      const family = {
+        id: "family-0123456789ab",
+        name: "Account warm-up before first post",
+        concepts: [
+          { id: KEPT, name: "Pricing page", type: "Tactic" },
+          { id: "tactic-warm-57", name: "Warm up for 5-7 days", type: "Tactic" }
+        ],
+        summary: { text: "How long to warm up.", positions: positions(ids(10, "f")) }
+      };
+      await show(concept({ family, summary: { text: "A commercial VPN.", positions: positions(ids(6, "s")) } }));
+      const familyRows = [...doc().querySelectorAll('section[aria-label="Family"] [data-knowledge-family-position]')].map((row) => row.getAttribute("data-knowledge-family-position"));
+      assert.deepEqual(familyRows, ids(10, "f"));
+      const summaryRows = [...doc().querySelectorAll('section[aria-label="Positions"] [data-knowledge-position]')].map((row) => row.getAttribute("data-knowledge-position"));
+      assert.deepEqual(summaryRows, ids(6, "s"));
+      assert.doesNotMatch(doc().body.textContent!, /\+\d+ more/);
+    });
+
     it("lists similar concepts, each opening", async () => {
       await show(concept());
       const section = doc().querySelector('section[aria-label="Similar concepts"]')!;
