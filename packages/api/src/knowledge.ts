@@ -367,6 +367,19 @@ export interface KnowledgeConceptDetail {
    * newest 50 in full; the graph's "show its entries" marks these. Absent from an older daemon.
    */
   entryIds?: string[];
+  /**
+   * A neutral summary written from every visible entry behind the concept (quality round 4): what
+   * the concept is, and each entry's own position on it, attributed. Absent from an older daemon,
+   * for a concept with one entry, or before it is written.
+   */
+  summary?: KnowledgeConceptSummary;
+}
+
+export interface KnowledgeConceptSummary {
+  /** One or two neutral sentences: what the concept is, without any one entry's numbers or verdict. */
+  text: string;
+  /** Each visible entry's own claim about it (its numbers, conditions, verdict), in the entry's words. */
+  positions: { entryId: string; title: string; author: string | null; claim: string }[];
 }
 
 /** One automatic concept merge (phase 2 spec, "Concept merges"). */
