@@ -141,16 +141,20 @@ export async function workspaceOfProject(api: { fsRoot: string; workspacesDir: s
 /**
  * The host path a caller means by a path argument; a relative one is taken from `base` (an absolute
  * host path). A chat whose CLI runs in a Windows box (`boxPaths`) spells paths as the box does —
- * `C:\orq\…`, `build\out.zip`, either slash, any drive-letter case — and those are mapped back to
- * the host path; a POSIX absolute path stays a host path. One outside the box's view of the host
+ * `C:\orq\…`, `build\out.zip`, either slash, any drive-letter case, or Git Bash's `/c/orq/…` — and
+ * those are mapped back to the host path; any other POSIX absolute path stays a host path. One outside the box's view of the host
  * (another drive, `C:\Users\…`, a share) is refused, never re-read as something else. Without a
  * map: POSIX, as always (a backslash is a filename character, an absolute path is returned as
  * given). Containment stays the caller's check, after realpath.
  */
 export function callerHostPath(caller: ToolCaller, path: string, base: string): string {
   const map = caller.kind === "thread" ? caller.boxPaths : undefined;
-  if (map === undefined || map.kind === "identity" || path.startsWith("/")) return isAbsolute(path) ? path : resolve(base, path);
-  const host = boxToHostPath(map, win32.resolve(hostToBoxPath(map, posix.resolve(base)), path));
+  if (map === undefined || map.kind === "identity") return isAbsolute(path) ? path : resolve(base, path);
+  // Git Bash (the Windows CLIs' shell) and Cygwin spell `C:\orq\…` as `/c/orq/…` and `/cygdrive/c/orq/…`.
+  const msys = /^\/(?:cygdrive\/)?([a-zA-Z])(?=\/|$)(.*)$/.exec(path);
+  if (msys === null && path.startsWith("/")) return path;
+  const boxPath = msys === null ? path : `${msys[1]}:${msys[2] || "\\"}`;
+  const host = boxToHostPath(map, win32.resolve(hostToBoxPath(map, posix.resolve(base)), boxPath));
   if (host === null) {
     throw new ToolError("PERMISSION_DENIED", `"${clipText(path, MAX_ECHO_CHARS)}" is outside ${map.prefix}, where this box sees the host's files: paths must lie inside a project.`);
   }

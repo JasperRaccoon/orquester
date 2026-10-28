@@ -161,11 +161,12 @@ test("read_file for a chat in a Windows box: its C:\\orq\\… and backslash path
   const boxPaths = boxPathMapFor("win32");
   const windows = chatCaller(sandbox, { boxPaths });
   const boxed = hostToBoxPath(boxPaths, join(sandbox, "acme", "api", "src", "a.ts"));
-  for (const path of ["src\\a.ts", boxed, `c:${boxed.slice(2).replace(/\\/g, "/")}`]) {
+  const slashed = boxed.slice(2).replace(/\\/g, "/");
+  for (const path of ["src\\a.ts", boxed, `c:${slashed}`, `/c${slashed}`, `/cygdrive/C${slashed}`]) {
     const r = await chatRead(ctx.api, windows, { path });
     assert.equal(answer(r).text, "export const a = 1;\n", path);
   }
-  for (const path of ["D:\\acme\\api\\src\\a.ts", "C:\\Users\\me\\a.ts", `${"..\\".repeat(20)}a.ts`]) {
+  for (const path of ["D:\\acme\\api\\src\\a.ts", "C:\\Users\\me\\a.ts", `${"..\\".repeat(20)}a.ts`, `/d${slashed}`, "/c/Users/me/a.ts"]) {
     const r = await chatRead(ctx.api, windows, { path });
     assert.equal(answer(r).code, "PERMISSION_DENIED", path);
   }
