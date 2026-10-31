@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES, messageStreamingContext, startedTurns } from "@orquester/api/agent-chat";
 import type { ThreadItem } from "@orquester/api/agent-chat";
 import type { GoalAction } from "@orquester/api/agent-chat";
+import type { ScheduledPrompt, ScheduledPromptTurn } from "@orquester/api/agent-chat";
 import type { ForkSessionRequest } from "@orquester/api";
 
 import { shortAccountLabel } from "../../lib/account-label";
@@ -122,6 +123,7 @@ import { ChatBannerDock } from "./banners/ChatBannerDock";
 import type { SecretRequestAnswer } from "./banners/SecretRequestCard";
 import { useSecretRequests } from "./banners/use-secret-requests";
 import { useUsageLimitNotices } from "./banners/use-usage-limit-notices";
+import { useScheduledPromptNotices } from "./banners/use-scheduled-prompt-notices";
 import { markSecretRequestClosed } from "../../lib/agent-chat/secret-requests";
 import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
@@ -292,6 +294,13 @@ function LiveChatTimeline({ threadSessionId, loading, heldRef, ...timeline }: Li
       rows={displayed.rows as AgentChatTimelineRow[]}
     />
   );
+}
+
+/** A scheduled prompt's id, minted once per "Schedule" so a retried request schedules it once. */
+function newScheduledPromptId(): string {
+  const cryptoRef = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (cryptoRef?.randomUUID) return cryptoRef.randomUUID();
+  return `sp-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
 }
 
 export function AgentChatView({ session, projectPath, active }: AgentChatViewProps): JSX.Element {
@@ -472,10 +481,34 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // Usage-limit recovery: the limited chat's banner and the "switched account" notice, both off
   // the session summary the daemon keeps current.
   const usageLimitNotices = useUsageLimitNotices({ session, api, accounts: agentAccounts?.accounts });
-  const dockNotices = React.useMemo(
-    () => (usageLimitNotices.length === 0 ? secretNotices : [...usageLimitNotices, ...(secretNotices ?? [])]),
-    [secretNotices, usageLimitNotices]
+  // Scheduled prompts: the daemon sends each at its time; "Edit" takes one back into the composer.
+  const editScheduledPrompt = React.useCallback(
+    (prompt: ScheduledPrompt) => {
+      flushSync(() =>
+        actions.returnToComposer({ text: prompt.input, attachments: prompt.attachments ?? [], context: prompt.context ?? [] })
+      );
+      focusComposer(sessionId);
+    },
+    [actions, sessionId]
   );
+  const scheduledPromptNotices = useScheduledPromptNotices({ session, api, onEdit: editScheduledPrompt });
+  const scheduleTurn = React.useCallback(
+    async (turn: ScheduledPromptTurn & { sendAt: Date }) => {
+      const { sendAt, ...rest } = turn;
+      try {
+        await api.createScheduledPrompt(sessionId, { ...rest, id: newScheduledPromptId(), sendAt: sendAt.toISOString() });
+      } catch (error) {
+        throw new Error(
+          (error instanceof ApiError ? error.serverMessage : null) ?? "The prompt could not be scheduled. Try again."
+        );
+      }
+    },
+    [api, sessionId]
+  );
+  const dockNotices = React.useMemo(() => {
+    const own = [...scheduledPromptNotices, ...usageLimitNotices];
+    return own.length === 0 ? secretNotices : [...own, ...(secretNotices ?? [])];
+  }, [scheduledPromptNotices, secretNotices, usageLimitNotices]);
 
   // --- the composer overlay's published height -----------------------------
   const [overlay, setOverlay] = React.useState<HTMLDivElement | null>(null);
@@ -1598,6 +1631,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 // only while a child is open: that is how it knows one is.
                 onLeaveDrillIn={drillInAgentId !== null ? closeDrillIn : undefined}
                 actions={composerActions}
+                {...(paintOnly ? {} : { onScheduleTurn: scheduleTurn })}
                 onHeightChange={setComposerHeight}
                 // `/compact` is offered only where there is something to
                 // compact (§4.6.7): an empty thread would earn a refusal.

@@ -858,6 +858,8 @@ export interface AgentChatActions {
   sendQueuedNow(id: string): Promise<void>;
   /** Return one queued message to the composer. */
   returnQueuedToComposer(id: string): void;
+  /** Put a message that never went out (a cancelled scheduled prompt) back into the composer. */
+  returnToComposer(message: Pick<QueuedComposerMessage, "text" | "attachments" | "context">): void;
   /** Interrupting returns EVERY queued message to the composer (§7.4). */
   drainQueueToComposer(): void;
 

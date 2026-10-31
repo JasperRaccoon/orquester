@@ -134,6 +134,8 @@ import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 import { ChatLimitRecovery } from "./agent-chat/limit-recovery.ts";
 import { ChatIdleCompaction } from "./agent-chat/idle-compaction.ts";
 import { registerUsageLimitRoutes } from "./agent-chat/limit-recovery-routes.ts";
+import { ChatScheduledPrompts } from "./agent-chat/scheduled-prompts.ts";
+import { registerScheduledPromptRoutes } from "./agent-chat/scheduled-prompt-routes.ts";
 import { createCooldownStore } from "./workflows/agent/cooldowns.ts";
 import { realClock } from "./workflows/factory.ts";
 // umcp:t5 begin
@@ -1403,6 +1405,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   agentChat.setUsageLimitNoticeListener((threadId, notice) => limitRecovery.onNotice(threadId, notice));
   limitRecovery.start();
+  // Scheduled prompts (`agent-chat/scheduled-prompts.ts`): persisted on the tab records, so `start`
+  // re-arms every one; their sends wait for the daemon's own API (`attachApi` below).
+  const scheduledPrompts = new ChatScheduledPrompts({ chat: agentChat.chat, clock: realClock, logger: console });
+  scheduledPrompts.start();
   // Idle Claude compaction (`agent-chat/idle-compaction.ts`): each open chat's prompt-cache
   // candidate (the summary poll) → a `/compact` two minutes before the cache expires, when the
   // setting says so. Nothing persisted: the first poll after a restart re-arms from the logs.
@@ -1580,6 +1586,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
     limitRecovery,
+    scheduledPrompts,
     idleCompaction,
     delegateStops,
     workflowProjects: workflowDaemon.runtime.projects,
@@ -1774,6 +1781,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // the in-process API just made. Before the boot manifest refresh below, so chats see its collections.
   await knowledge.start().catch((error) => console.error("Knowledge Graph start failed", error instanceof Error ? error.message : error));
   limitRecovery.attachApi(services.internalApi);
+  scheduledPrompts.attachApi(services.internalApi);
   idleCompaction.attachApi(services.internalApi);
   delegateStops.attachApi(services.internalApi);
   // umcp:t6 — every chat tool is on in every chat: a provider session the host kept across this
@@ -1897,6 +1905,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     delegateStops.stop();
     await lineage.stop();
     limitRecovery.stop();
+    scheduledPrompts.stop();
     idleCompaction.stop();
     // umcp:t3 begin
     // Disconnect FIRST, while the transports may still serve: new calls get no card or grant
@@ -2078,6 +2087,8 @@ interface Services {
   lineage?: LineageService;
   /** Usage-limit recovery of interactive chats. Optional: route-level tests build a partial `services`. */
   limitRecovery?: ChatLimitRecovery;
+  /** Scheduled prompts of interactive chats. Optional: route-level tests build a partial `services`. */
+  scheduledPrompts?: ChatScheduledPrompts;
   /** Idle Claude compaction. Optional: route-level tests build a partial `services`. */
   idleCompaction?: ChatIdleCompaction;
   /**
@@ -4430,6 +4441,11 @@ export function createServer(
     // Usage-limit recovery: arm/cancel the automatic resume, resume now, switch and continue.
     registerUsageLimitRoutes(app, {
       recovery: () => services.limitRecovery ?? null,
+      isChatSession: (id) => services.agentChat.chat.has(id)
+    });
+    // Scheduled prompts: schedule, cancel, send now.
+    registerScheduledPromptRoutes(app, {
+      scheduler: () => services.scheduledPrompts ?? null,
       isChatSession: (id) => services.agentChat.chat.has(id)
     });
     // The `request_secret` cards: daemon-owned, never proxied to the host.

@@ -37,6 +37,7 @@ export * from "./plan.ts";
 export * from "./prompts.ts";
 export * from "./re-emitted.ts";
 export * from "./roster.ts";
+export * from "./scheduled-prompts.ts";
 export * from "./slim.ts";
 export * from "./session-tools.ts";
 export * from "./secret-requests.ts";

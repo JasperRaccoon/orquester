@@ -174,6 +174,18 @@ export const agentChatRoutes = {
    */
   usageLimit: (sessionId: string, action: UsageLimitAction): string => `${sessionBase(sessionId)}/usage-limit/${action}`,
   /**
+   * The chat's scheduled prompts (`scheduled-prompts.ts`), daemon-owned like
+   * {@link agentChatRoutes.usageLimit} — never proxied to the host, both transports. `POST`
+   * schedules one (`ScheduledPromptCreateRequest`); each answers `ScheduledPromptsResponse`.
+   */
+  scheduledPrompts: (sessionId: string): string => `${sessionBase(sessionId)}/scheduled-prompts`,
+  /** `DELETE`: cancel it (`ScheduledPromptCancelResponse`, the prompt whole for "Edit"). */
+  scheduledPrompt: (sessionId: string, promptId: string): string =>
+    `${sessionBase(sessionId)}/scheduled-prompts/${encodeURIComponent(promptId)}`,
+  /** `POST`: send it now, whatever its time — also the retry of a failed one. */
+  scheduledPromptSend: (sessionId: string, promptId: string): string =>
+    `${sessionBase(sessionId)}/scheduled-prompts/${encodeURIComponent(promptId)}/send`,
+  /**
    * The thread's pending `request_secret` cards (`GET`,
    * `SecretRequestListResponse`) — daemon-owned like `account`: the
    * daemon holds the requests, in memory, and never forwards them to the host.

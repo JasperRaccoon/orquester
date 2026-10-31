@@ -334,6 +334,9 @@ import type {
   ToolApprovalListResponse,
   TurnDiffQuery,
   TurnDiffResponse,
+  ScheduledPromptCancelResponse,
+  ScheduledPromptCreateRequest,
+  ScheduledPromptsResponse,
   UsageLimitActionResponse,
   UsageLimitSwitchRequest
 } from "@orquester/api/agent-chat";
@@ -2313,6 +2316,21 @@ export class ApiClient {
   /** Dismiss the "switched account after a usage limit" notice. */
   dismissLimitFailover(id: string): Promise<UsageLimitActionResponse> {
     return this.send("POST", agentChatRoutes.usageLimit(id, "dismiss-failover"), { body: {} });
+  }
+
+  /** Schedule a prompt to be sent into the chat at `sendAt`; a retry with the same `id` schedules it once. */
+  createScheduledPrompt(id: string, body: ScheduledPromptCreateRequest): Promise<ScheduledPromptsResponse> {
+    return this.send("POST", agentChatRoutes.scheduledPrompts(id), { body });
+  }
+
+  /** Cancel a scheduled prompt that has not gone out; answers it whole, for the composer. */
+  cancelScheduledPrompt(id: string, promptId: string): Promise<ScheduledPromptCancelResponse> {
+    return this.send("DELETE", agentChatRoutes.scheduledPrompt(id, promptId));
+  }
+
+  /** Send a scheduled prompt now (also the retry of a failed one); a busy chat gets it once idle. */
+  sendScheduledPromptNow(id: string, promptId: string): Promise<ScheduledPromptsResponse> {
+    return this.send("POST", agentChatRoutes.scheduledPromptSend(id, promptId), { body: {} });
   }
 
   /** Settings › Agent tools: every grant (§7.6). */

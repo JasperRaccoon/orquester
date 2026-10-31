@@ -20,7 +20,14 @@ import type {
   SessionOwner,
   ThreadLineage
 } from "@orquester/api";
-import type { AgentChatHome, ChatLimitFailoverRecord, ChatUsageLimitRecord, SessionRecord } from "@orquester/config";
+import { scheduledPromptView, type ScheduledPrompt } from "@orquester/api/agent-chat";
+import type {
+  AgentChatHome,
+  ChatLimitFailoverRecord,
+  ChatUsageLimitRecord,
+  ScheduledPromptRecord,
+  SessionRecord
+} from "@orquester/config";
 
 /** Thrown for a refusal the route maps to a 400. */
 export class ChatSessionError extends Error {
@@ -80,6 +87,8 @@ interface ChatSession {
     /** Usage-limit recovery (`limit-recovery.ts`): kept whole, unknown fields included. */
     usageLimit?: ChatUsageLimitRecord;
     limitFailover?: ChatLimitFailoverRecord;
+    /** Scheduled prompts (`scheduled-prompts.ts`), in send order, unknown fields included. */
+    scheduledPrompts?: ScheduledPromptRecord[];
   };
 }
 
@@ -101,6 +110,38 @@ const USAGE_LIMIT_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 const LIMIT_FAILOVER_KEYS: ReadonlySet<string> = new Set(["fromAccountId", "toAccountId", "at", "automatic"]);
+
+/** `ScheduledPrompt`'s own keys. */
+const SCHEDULED_PROMPT_KEYS: ReadonlySet<string> = new Set([
+  "id",
+  "createdAt",
+  "sendAt",
+  "input",
+  "attachments",
+  "context",
+  "interactionMode",
+  "modelSelection",
+  "state",
+  "error",
+  "attempts"
+]);
+
+/** A stored prompt's own fields, without the unknown ones a newer daemon may have written. */
+function publicScheduledPrompt(record: ScheduledPromptRecord): ScheduledPrompt {
+  return {
+    id: record.id,
+    createdAt: record.createdAt,
+    sendAt: record.sendAt,
+    input: record.input,
+    ...(record.attachments ? { attachments: record.attachments as unknown as NonNullable<ScheduledPrompt["attachments"]> } : {}),
+    ...(record.context ? { context: record.context as unknown as NonNullable<ScheduledPrompt["context"]> } : {}),
+    ...(record.interactionMode ? { interactionMode: record.interactionMode } : {}),
+    ...(record.modelSelection ? { modelSelection: record.modelSelection as unknown as NonNullable<ScheduledPrompt["modelSelection"]> } : {}),
+    state: record.state,
+    ...(record.error !== undefined ? { error: record.error } : {}),
+    attempts: record.attempts
+  };
+}
 
 /** The stored block's own fields, without the unknown ones a newer daemon may have written. */
 function publicUsageLimit(record: ChatUsageLimitRecord): ChatUsageLimitState {
@@ -428,6 +469,33 @@ export class ChatSessionManager {
     return { ...session.summary };
   }
 
+  /** The chat's scheduled prompts, in send order (`[]` when none). */
+  scheduledPromptsOf(id: string): ScheduledPrompt[] {
+    return (this.sessions.get(id)?.chat.scheduledPrompts ?? []).map(publicScheduledPrompt);
+  }
+
+  /**
+   * Replace the chat's scheduled prompts: persisted on the tab record, each keeping the unknown
+   * fields its stored record had, and published on the summary — `[]` once the last one left, never
+   * by dropping the key (a client merges summaries field-wise). "updated" only on a change.
+   */
+  setScheduledPrompts(id: string, prompts: readonly ScheduledPrompt[]): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const before = session.chat.scheduledPrompts ?? [];
+    const previous = new Map(before.map((record) => [record.id, record as Record<string, unknown>]));
+    const next = prompts.map(
+      (prompt) => withUnknownFields(previous.get(prompt.id), SCHEDULED_PROMPT_KEYS, prompt) as ScheduledPromptRecord
+    );
+    if (JSON.stringify(before) === JSON.stringify(next)) return null;
+    if (next.length === 0) delete session.chat.scheduledPrompts;
+    else session.chat.scheduledPrompts = next;
+    session.summary.scheduledPrompts = next.map((record) => scheduledPromptView(publicScheduledPrompt(record)));
+    this.lifecycle.emit("updated", { ...session.summary });
+    this.options.requestPersist();
+    return { ...session.summary };
+  }
+
   /**
    * Record the lineage the host resolved for a fork (spec 2026-10-14 §6): its fork point is
    * only known once the host has cut the parent's conversation.
@@ -578,7 +646,10 @@ export class ChatSessionManager {
         ...(record.chat.forkUnconfirmed === true || record.chat.createUnconfirmed === true ? { chatPending: true } : {}),
         profileId: record.chat.profileId ?? null,
         ...(record.chat.usageLimit ? { usageLimit: publicUsageLimit(record.chat.usageLimit) } : {}),
-        ...(record.chat.limitFailover ? { limitFailover: publicLimitFailover(record.chat.limitFailover) } : {})
+        ...(record.chat.limitFailover ? { limitFailover: publicLimitFailover(record.chat.limitFailover) } : {}),
+        ...(record.chat.scheduledPrompts && record.chat.scheduledPrompts.length > 0
+          ? { scheduledPrompts: record.chat.scheduledPrompts.map((p) => scheduledPromptView(publicScheduledPrompt(p))) }
+          : {})
       };
       this.sessions.set(record.id, {
         summary,
@@ -595,7 +666,10 @@ export class ChatSessionManager {
           ...(record.chat.profileId !== undefined ? { profileId: record.chat.profileId } : {}),
           ...(record.chat.unattended === true ? { unattended: true as const } : {}),
           ...(record.chat.usageLimit ? { usageLimit: record.chat.usageLimit } : {}),
-          ...(record.chat.limitFailover ? { limitFailover: record.chat.limitFailover } : {})
+          ...(record.chat.limitFailover ? { limitFailover: record.chat.limitFailover } : {}),
+          ...(record.chat.scheduledPrompts && record.chat.scheduledPrompts.length > 0
+            ? { scheduledPrompts: record.chat.scheduledPrompts }
+            : {})
         }
       });
     }

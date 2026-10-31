@@ -12,6 +12,7 @@ import type {
   LatestTurnSummary as AgentChatLatestTurnSummary,
   ForkHandoffSummary,
   PendingMergeBack,
+  ScheduledPromptView,
   ThreadForkStrategy,
   ThreadLineage,
   ThreadSessionStatus as AgentChatThreadSessionStatus
@@ -1565,6 +1566,13 @@ export interface SessionSummary {
    * user dismisses the notice. `null` when there is none (explicit, as `usageLimit`).
    */
   limitFailover?: ChatLimitFailover | null;
+  /**
+   * Agent-chat tabs only: the prompts scheduled to be sent into this chat, in send order
+   * (`agent-chat/scheduled-prompts.ts`). Published as `[]` once the last one went out or was
+   * cancelled — never by dropping the key (a client merges summaries field-wise). Absent from an
+   * older daemon, and on a chat that never had one (= none).
+   */
+  scheduledPrompts?: ScheduledPromptView[];
 }
 
 // --- Thread lineage (spec 2026-10-14 §6) ------------------------------------

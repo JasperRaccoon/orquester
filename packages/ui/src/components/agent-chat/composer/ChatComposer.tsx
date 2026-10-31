@@ -8,6 +8,7 @@ import type {
   ComposerContextRecord,
   InteractionMode,
   ModelSelection,
+  ScheduledPromptTurn,
   ThreadItem
 } from "@orquester/api/agent-chat";
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
@@ -49,6 +50,7 @@ import {
   type DraftPersistScheduler
 } from "./composer-draft";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
+import { ComposerSchedule } from "./ComposerSchedule";
 import { ComposerQuotes } from "./ComposerQuotes";
 import { ComposerTokenMenu } from "./ComposerTokenMenu";
 import {
@@ -235,6 +237,11 @@ export interface ChatComposerExtraProps {
    * does not re-render on every streamed token. Absent: no recall.
    */
   readRecallItems?: (() => readonly ThreadItem[]) | undefined;
+  /**
+   * "Send later": hand the draft to the daemon to send at `sendAt`. Resolves once it holds it;
+   * rejects with the reason shown on the composer. Absent: no clock beside Send.
+   */
+  onScheduleTurn?: ((turn: ScheduledPromptTurn & { sendAt: Date }) => Promise<void>) | undefined;
 }
 
 /**
@@ -290,7 +297,8 @@ function ChatComposerView({
   active,
   onLeaveDrillIn,
   profileChip,
-  readRecallItems
+  readRecallItems,
+  onScheduleTurn
 }: ChatComposerProps & ChatComposerExtraProps): React.ReactElement {
   const isMobile = !useMediaQuery("(min-width: 640px)");
   const sessionCwd = useAppStore(
@@ -1736,6 +1744,54 @@ function ChatComposerView({
   );
 
   /**
+   * "Send later" (`ComposerSchedule`): the whole draft — its quotes, text and uploaded
+   * attachments, with the mode and model it would be sent with now — handed to the daemon to send
+   * at `sendAt`. The draft is cleared only once the daemon holds it; a refusal leaves it as it was,
+   * with the reason on the status line. Resolves whether it was scheduled.
+   */
+  const scheduleDraft = async (sendAt: Date): Promise<boolean> => {
+    if (!onScheduleTurn || reverting) return false;
+    const current = draftRef.current;
+    const composed = composeQuotedPrompt(current.quotes, current.text).trim();
+    if (!sendable) return false;
+    if (sendDisabledReason) {
+      setNotice(sendDisabledReason);
+      return false;
+    }
+    const blocked = blockedProviderCommandMessage(provider?.id, composed);
+    const validation = blocked ?? composerSubmissionValidationMessage({ prompt: composed, submissionTarget: "provider-turn" });
+    if (validation) {
+      setNotice(validation);
+      return false;
+    }
+    const sent = current.attachments;
+    const refs = attachmentRefs(sent);
+    try {
+      await onScheduleTurn({
+        input: composed,
+        ...(refs.length > 0 ? { attachments: refs } : {}),
+        interactionMode,
+        ...(modelSelection ? { modelSelection } : {}),
+        sendAt
+      });
+    } catch (error) {
+      setNotice(error instanceof Error && error.message ? error.message : "The prompt could not be scheduled. Try again.");
+      return false;
+    }
+    // Only what was scheduled leaves: anything typed while the request was out stays.
+    if (draftRef.current === current) {
+      revokeImagePreviews(sent);
+      setDraft(EMPTY_DRAFT);
+      carriedContextRef.current = [];
+      persistRef.current?.write(EMPTY_PERSISTED_DRAFT);
+      applyCaret(0);
+      retryFilesRef.current.clear();
+    }
+    setNotice(null);
+    return true;
+  };
+
+  /**
    * Escape interrupts a running turn — and **returns every queued message to
    * the composer first**, because a Stop that silently discards what the user
    * queued is indistinguishable from losing it.
@@ -2246,6 +2302,14 @@ function ChatComposerView({
               onNotice={setNotice}
             />
 
+            <div className="flex items-end gap-1">
+            {onScheduleTurn && planFollowUp === null ? (
+              <ComposerSchedule
+                disabledReason={reverting ? REVERT_RUNNING_REASON : !sendable ? "Write a message to send later" : (uploadBlock ?? countBlock)}
+                onSchedule={scheduleDraft}
+                returnFocusTo={returnFocusToField}
+              />
+            ) : null}
             <ComposerPrimaryActions
               isRunning={isTurnActive}
               showPlanFollowUp={planFollowUp !== null}
@@ -2258,6 +2322,7 @@ function ChatComposerView({
               pendingSendLabel={pendingWording?.sendLabel ?? null}
               onInterrupt={interrupt}
             />
+            </div>
           </div>
         </form>
 

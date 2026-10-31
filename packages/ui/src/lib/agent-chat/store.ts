@@ -2114,6 +2114,19 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         appendToDraft(result.message);
       },
 
+      returnToComposer(message) {
+        appendToDraft({
+          id: newId(),
+          text: message.text,
+          attachments: message.attachments,
+          context: message.context,
+          interactionMode: get().slice.interactionMode,
+          queuedAfterToolActivityId: null,
+          holdUntilUserAction: false,
+          queuedAt: new Date(clock()).toISOString()
+        });
+      },
+
       drainQueueToComposer() {
         const result = drainQueue(get().queue);
         if (result.messages.length === 0) {

@@ -1533,6 +1533,38 @@ export const chatLimitFailoverRecordSchema = z
 export type ChatLimitFailoverRecord = z.infer<typeof chatLimitFailoverRecordSchema>;
 
 /**
+ * A prompt scheduled to be sent into the chat. Mirrors `ScheduledPrompt` in `@orquester/api`
+ * (`agent-chat/scheduled-prompts.ts`). The turn's nested parts (attachments, chips, model) were
+ * checked by the daemon when the prompt was scheduled and are kept as written; unknown fields are
+ * kept (`passthrough`). A record without its identity, text or time is dropped on its own
+ * ({@link scheduledPromptsRecordSchema}), never the tab.
+ */
+export const scheduledPromptRecordSchema = z
+  .object({
+    id: z.string().min(1).max(200),
+    createdAt: z.string().max(64).catch(""),
+    sendAt: z.string().max(64).refine((value) => Number.isFinite(Date.parse(value))),
+    input: z.string(),
+    attachments: z.array(z.object({ type: z.string(), id: z.string() }).passthrough()).optional().catch(undefined),
+    context: z.array(z.object({ kind: z.string(), label: z.string() }).passthrough()).optional().catch(undefined),
+    interactionMode: z.enum(["default", "plan"]).optional().catch(undefined),
+    modelSelection: z.object({ model: z.string() }).passthrough().optional().catch(undefined),
+    state: z.enum(["scheduled", "waiting", "sending", "failed"]).catch("scheduled"),
+    error: z.string().max(2_000).optional().catch(undefined),
+    attempts: z.number().int().nonnegative().catch(0)
+  })
+  .passthrough();
+export type ScheduledPromptRecord = z.infer<typeof scheduledPromptRecordSchema>;
+
+/** A chat's scheduled prompts: each record parsed on its own, the ones that do not read dropped. */
+export const scheduledPromptsRecordSchema = z.array(z.unknown()).transform((items) =>
+  items.flatMap((item) => {
+    const parsed = scheduledPromptRecordSchema.safeParse(item);
+    return parsed.success ? [parsed.data] : [];
+  })
+);
+
+/**
  * The agent-chat block on a tab record (spec §5.2). `sessions.json` stays tab
  * metadata only; the agent host is the source of truth for thread state, so
  * this holds just enough to re-bind the tab to its thread after a restart.
@@ -1582,7 +1614,12 @@ export const sessionChatRecordSchema = z.object({
    */
   usageLimit: chatUsageLimitRecordSchema.optional().catch(undefined),
   /** The "switched account after a usage limit" notice, until dismissed. */
-  limitFailover: chatLimitFailoverRecordSchema.optional().catch(undefined)
+  limitFailover: chatLimitFailoverRecordSchema.optional().catch(undefined),
+  /**
+   * Prompts scheduled to be sent into the chat (`scheduledPromptRecordSchema`), in send order, so
+   * a restart re-arms them. A list that does not read at all is none; a bad record is dropped alone.
+   */
+  scheduledPrompts: scheduledPromptsRecordSchema.optional().catch(undefined)
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 
