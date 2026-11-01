@@ -325,6 +325,19 @@ export function createFakeThreadStore(): FakeThreadStore {
       return [...new Set([...logs.keys(), ...heads.keys()])];
     },
 
+    /** Host updates (P2.3 R16): another host's thread, read with no write. */
+    async readThreadReadOnly(threadId: string) {
+      const head = heads.get(threadId);
+      if (head === undefined && !logs.has(threadId)) return null;
+      const binding = bindings.get(threadId);
+      return {
+        head: head === undefined ? null : { ...head },
+        binding: binding === undefined ? null : { ...binding },
+        events: [...(logs.get(threadId) ?? [])],
+        truncated: false
+      };
+    },
+
     async deleteThread(threadId: string): Promise<void> {
       logs.delete(threadId);
       heads.delete(threadId);

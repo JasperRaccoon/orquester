@@ -80,6 +80,10 @@ export interface TestHostOptions<S extends HostThreadStore = FakeThreadStore> {
    * daemon that answers the thread's launch config as it stands (the same version, nothing moved).
    */
   launchProfile?: OrchestratorOptions["launchProfile"];
+  /** Host updates (spec 2026-11-01 P2.3): the threads this host owns, and whether it retires. */
+  ownership?: OrchestratorOptions["ownership"];
+  /** Host updates (P2.3 R19): told of every release. */
+  onThreadReleased?: OrchestratorOptions["onThreadReleased"];
 }
 
 export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
@@ -197,6 +201,8 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     ...(options.onTurnStarted ? { onTurnStarted: options.onTurnStarted } : {}),
     ...(options.secrets ? { secrets: options.secrets } : {}),
     ...(options.forkHandoffs ? { forkHandoffs: options.forkHandoffs } : {}),
+    ...(options.ownership ? { ownership: options.ownership } : {}),
+    ...(options.onThreadReleased ? { onThreadReleased: options.onThreadReleased } : {}),
     launchProfile:
       options.launchProfile ??
       (async (threadId) => {
