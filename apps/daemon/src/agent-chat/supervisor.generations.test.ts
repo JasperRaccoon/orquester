@@ -163,7 +163,17 @@ async function makeHarness(t: TestContext, opts: { direct?: boolean } = {}): Pro
     },
     cleanup: async () => {
       h.supervisor.stop();
-      await rm(dir, { recursive: true, force: true });
+      // An adoption that completed as the test ended may still be writing the registry: let that
+      // write land (event-loop turns, no clock) before the directory goes.
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await rm(dir, { recursive: true, force: true });
+          return;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt >= 50) throw error;
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      }
     }
   };
   // A spawned host's process runs; it answers only when `spawnReady`.
@@ -410,7 +420,12 @@ test("a 409 THREAD_NOT_OWNED from the retiring host adopts the thread before the
   const h = await makeHarness(t);
   await staleBusyPrimary(h);
   await h.supervisor.init();
+  // A 409 alone moves nothing while the retiring host still lists the thread as its own (I1).
+  await h.supervisor.ownershipStale("t-busy", 0);
+  assert.deepEqual(h.adoptions, []);
+  assert.equal((await h.supervisor.hostForThread("t-busy"))?.generation, 0);
   // Released, but the poll has not seen it yet.
+  h.hosts.get(0)!.owned = [];
   await h.supervisor.ownershipStale("t-busy", 0);
   assert.deepEqual(h.adoptions, [[1, "t-busy"]]);
   assert.equal((await h.supervisor.hostForThread("t-busy"))?.generation, 1);
@@ -826,5 +841,47 @@ test("daemon restart, unreadable registry: live hosts are accounted for from the
   assert.equal(h.spawns.length, 0);
   assert.equal(h.supervisor.primary()?.generation, 1);
   assert.equal((await h.supervisor.hostForThread("t-a"))?.generation, 0, "the retiring host keeps its chat");
+  await h.cleanup();
+});
+
+test("I1/I4: an adoption in backoff when its primary retires keeping the chat never reaches the new primary", async (t) => {
+  const h = await makeHarness(t);
+  // The previous daemon left t-busy's adoption pending; the stale, busy primary runs it now.
+  await staleBusyPrimary(h);
+  await seedRegistry(h, [{ generation: 0, role: "primary" }], ["t-busy"]);
+  let calls = 0;
+  h.adoptHook = async () => {
+    calls += 1;
+    if (calls === 1) throw new Error("agent host did not answer the adopt within 30 s");
+    return "adopted";
+  };
+  await h.supervisor.init();
+  assert.equal(h.supervisor.primary()?.generation, 1, "the update retired generation 0, keeping t-busy");
+
+  await h.passTime(1_000);
+  await h.passTime(2_000);
+  assert.deepEqual(h.adoptions, [[0, "t-busy"]], "the retry is dropped: generation 0 still runs t-busy");
+  assert.deepEqual(await h.pendingAdoptions(), []);
+
+  // Its release starts a fresh adoption.
+  h.hosts.get(0)!.owned = [];
+  await h.passTime(RETIRING_HOST_POLL_MS);
+  assert.deepEqual(h.adoptions, [
+    [0, "t-busy"],
+    [1, "t-busy"]
+  ]);
+  await h.cleanup();
+});
+
+test("daemon restart: a respawned primary boots with pending adoptions as foreign, and adopts them", async (t) => {
+  const h = await makeHarness(t);
+  await seedRegistry(h, [{ generation: 0, role: "primary" }], ["t-x"]);
+  await h.supervisor.init();
+  assert.deepEqual(
+    h.spawns.map((spawn) => [spawn.generation, spawn.foreign]),
+    [[0, ["t-x"]]],
+    "t-x reaches it through /adopt, which sweeps what its previous host left, not its boot reconcile"
+  );
+  assert.deepEqual(h.adoptions, [[0, "t-x"]]);
   await h.cleanup();
 });

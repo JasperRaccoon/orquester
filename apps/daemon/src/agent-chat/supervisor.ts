@@ -529,6 +529,8 @@ export class AgentHostSupervisor implements HostDirectory {
   private readonly endpoints = new Map<string, HostEndpoint>();
   /** P2.4 R26: each thread being adopted by the primary, until it is. */
   private readonly adoptions = new Map<string, Promise<void>>();
+  /** Which run of each thread's adoption is current ({@link cancelAdoption} supersedes one). */
+  private readonly adoptionTokens = new Map<string, object>();
   /**
    * I5: every thread whose adoption has not completed, persisted as the registry's
    * `pendingAdoptions` — removed only once the primary adopted it, so a daemon that dies in
@@ -701,21 +703,17 @@ export class AgentHostSupervisor implements HostDirectory {
   }
 
   /**
-   * A host answered 409 `THREAD_NOT_OWNED` for `threadId`. From a retiring host that we thought
-   * owned it: it released the thread before our poll saw it, so adopt it now. From the primary:
-   * re-read every retiring host's owned set; a thread none of them still owns is the primary's
-   * to adopt. Either way the adoption is awaited (bounded) before the caller retries once.
+   * A host answered 409 `THREAD_NOT_OWNED` for `threadId` (from `generation`). Every retiring
+   * host's owned set is re-read: one that released the thread before our poll saw it has it
+   * adopted now, and a thread none of them still owns is the primary's to adopt. A thread a
+   * retiring host still lists — or that cannot be re-read — is never moved on a 409 alone (I1).
+   * Either way the adoption is awaited (bounded) before the caller retries once.
    */
-  async ownershipStale(threadId: string, generation: number): Promise<void> {
-    const host = this.retiring.get(generation);
-    if (host !== undefined && host.owned.has(threadId)) {
-      await this.releaseThreads(host, [threadId]);
-    } else {
-      await this.refreshRetiringOwnership();
-      if (this.retiringOwnerOf(threadId) === null && !this.switchKeeps?.threadIds.has(threadId)) {
-        this.startAdoption(threadId);
-        await this.persistRegistry();
-      }
+  async ownershipStale(threadId: string, _generation: number): Promise<void> {
+    await this.refreshRetiringOwnership();
+    if (this.retiringOwnerOf(threadId) === null && !this.switchKeeps?.threadIds.has(threadId)) {
+      this.startAdoption(threadId);
+      await this.persistRegistry();
     }
     const adoption = this.adoptions.get(threadId);
     if (adoption !== undefined) await this.settlesWithin(adoption, ROUTE_WAIT_MS);
@@ -1715,7 +1713,10 @@ export class AgentHostSupervisor implements HostDirectory {
     }
     const keeps = this.switchKeeps;
     if (keeps !== null && keeps.generation !== generation) for (const threadId of keeps.threadIds) foreign.add(threadId);
-    if (this.retiring.size > 0 || keeps !== null || generation !== 0) {
+    // A thread whose adoption is pending reaches the new host through `/adopt` (which sweeps what
+    // its previous host left running), not through its boot reconcile.
+    for (const threadId of this.pendingAdoptionIds) foreign.add(threadId);
+    if (this.retiring.size > 0 || keeps !== null || generation !== 0 || foreign.size > 0) {
       const path = agentHostForeignThreadsPath(this.opts.appdir, generation);
       await writeForeignThreads(path, foreign);
       env[AGENT_HOST_ENV.foreignThreads] = path;
@@ -2042,6 +2043,9 @@ export class AgentHostSupervisor implements HostDirectory {
       };
       // Requests for K that waited on the switch go to the old host now (`hostForThread`).
       this.settleRetireAnswer();
+      // I1/I4: an adoption of a kept thread still waiting (in backoff) must never reach the new
+      // primary while the old host runs it; its release starts a fresh one.
+      for (const threadId of keep) this.cancelAdoption(threadId);
       this.log(
         "log",
         `agent host update: generation ${oldGeneration} retires keeping ${keep.length} working chat(s) (${blockers}); starting generation ${generation}`
@@ -2285,9 +2289,10 @@ export class AgentHostSupervisor implements HostDirectory {
   /** R26: `host` no longer owns these: the primary adopts each. */
   private async releaseThreads(host: RetiringHost, threadIds: readonly string[]): Promise<void> {
     for (const threadId of threadIds) {
-      // Registered before the owner changes, in the same tick: no request routes in between.
-      this.startAdoption(threadId);
+      // The owner changes and the adoption is registered in the same tick: no request routes in
+      // between. In this order, so the adoption's own check sees no retiring owner.
       host.owned.delete(threadId);
+      this.startAdoption(threadId);
     }
     this.log("log", `agent host ${host.generation} released ${threadIds.length} chat(s); the current host adopts them`);
     await this.persistRegistry();
@@ -2301,24 +2306,53 @@ export class AgentHostSupervisor implements HostDirectory {
   private startAdoption(threadId: string): void {
     if (this.adoptions.has(threadId) || this.opts.adapters.requestAdopt === undefined) return;
     this.pendingAdoptionIds.add(threadId);
-    const run: Promise<void> = this.adoptUntilDone(threadId).then(async (adopted) => {
-      if (adopted) {
+    const token = {};
+    this.adoptionTokens.set(threadId, token);
+    const current = (): boolean => this.adoptionTokens.get(threadId) === token;
+    const run: Promise<void> = this.adoptUntilDone(threadId, current).then(async (outcome) => {
+      // A cancelled run ({@link cancelAdoption}) touches nothing: a later one may own the entries.
+      if (!current()) return;
+      if (outcome !== "halted") {
         this.pendingAdoptionIds.delete(threadId);
         this.adoptFailures.delete(threadId);
         await this.persistRegistry();
       }
-      if (this.adoptions.get(threadId) === run) this.adoptions.delete(threadId);
+      if (current()) {
+        this.adoptions.delete(threadId);
+        this.adoptionTokens.delete(threadId);
+      }
     });
     this.adoptions.set(threadId, run);
   }
 
-  /** True once the primary adopted it (or had it, or it is gone); false when supervision stopped. */
-  private async adoptUntilDone(threadId: string): Promise<boolean> {
+  /**
+   * I1/I4: `threadId` belongs to a retiring host again (its `/retire` kept it): an adoption of it
+   * still waiting — in backoff, say — must never reach the primary. Its entries go; a later
+   * release starts a fresh one.
+   */
+  private cancelAdoption(threadId: string): void {
+    if (!this.adoptionTokens.has(threadId)) return;
+    this.adoptionTokens.delete(threadId);
+    this.adoptions.delete(threadId);
+    this.pendingAdoptionIds.delete(threadId);
+    this.adoptFailures.delete(threadId);
+  }
+
+  /**
+   * `adopted` once the primary adopted it (or had it, or it is gone); `owned` when a retiring host
+   * owns it now (nothing to adopt: never sent to the primary, I1/I4); `halted` when supervision
+   * stopped or the run was cancelled.
+   */
+  private async adoptUntilDone(threadId: string, current: () => boolean): Promise<"adopted" | "owned" | "halted"> {
     const request = this.opts.adapters.requestAdopt;
-    if (!request) return false;
+    if (!request) return "halted";
     for (let attempt = 1; !this.halted; attempt += 1) {
       const switching = this.switching;
       if (switching !== null) await switching;
+      if (!current()) return "halted";
+      // Checked at every attempt, as boot does: an attempt that sleeps through a switch must not
+      // take a thread the old primary kept, nor one a retiring host still lists.
+      if (this.retiringOwnerOf(threadId) !== null || this.switchKeeps?.threadIds.has(threadId)) return "owned";
       const primary = this.primary();
       if (primary !== null) {
         const sent = request(primary.generation, threadId);
@@ -2326,16 +2360,16 @@ export class AgentHostSupervisor implements HostDirectory {
         try {
           const outcome = await sent;
           if (outcome === "adopted") this.log("log", `agent host ${primary.generation} adopted chat ${threadId}`);
-          return true;
+          return "adopted";
         } catch (error) {
-          this.noteAdoptFailure(threadId, primary.generation, error);
+          if (current()) this.noteAdoptFailure(threadId, primary.generation, error);
         } finally {
           this.adoptRequests.delete(sent);
         }
       }
       await this.delay(Math.min(ADOPT_RETRY_MAX_MS, ADOPT_RETRY_BASE_MS * 2 ** (attempt - 1)));
     }
-    return false;
+    return "halted";
   }
 
   /** One failed adoption: logged; reported (`stuckAdoptions`) once it keeps failing. */
@@ -2413,10 +2447,11 @@ export class AgentHostSupervisor implements HostDirectory {
       host.nextKillAt = now + HOST_KILL_RETRY_MS;
       return;
     }
-    // Each adoption is registered before the host leaves the set, in the same tick (I2). Its
-    // process is gone, so none of its provider sessions is resumed twice (I4).
-    for (const threadId of host.owned) this.startAdoption(threadId);
+    // The host leaves the set and each adoption is registered in the same tick (I2) — in this
+    // order, so the adoption's own check sees no retiring owner. Its process is gone, so none of
+    // its provider sessions is resumed twice (I4).
     this.retiring.delete(host.generation);
+    for (const threadId of host.owned) this.startAdoption(threadId);
     await this.removeHostFiles(host.generation);
     await this.persistRegistry();
   }
@@ -2692,6 +2727,11 @@ export class AgentHostSupervisor implements HostDirectory {
         for (const threadId of recorded) toAdopt.add(threadId);
         this.log("warn", `retiring agent host ${entry.generation} is gone; the primary adopts its ${recorded.length} chat(s)`);
       }
+    }
+    // Pending before any primary is spawned, so its foreign file names them (`hostEnv`): each is
+    // adopted (below), never reconciled at its boot.
+    if (this.opts.adapters.requestAdopt !== undefined) {
+      for (const threadId of toAdopt) if (this.retiringOwnerOf(threadId) === null) this.pendingAdoptionIds.add(threadId);
     }
     const [primary, ...extra] = candidates;
     if (primary !== undefined) {

@@ -263,16 +263,29 @@ function threadIdOfPath(path: string): string | null {
   }
 }
 
-function misrouteOf(status: number, value: unknown): Misroute | null {
+/**
+ * A `THREAD_NOT_OWNED` about another thread than the path's (`detail.threadId`): a request that
+ * touches a second thread (a fork's source, a lineage link) which another host owns. Nothing to
+ * re-route the path's thread for — it answers 503, never the host's code, and marks nothing stale.
+ */
+type OtherThread = { otherThreadId: string };
+
+function misrouteOf(status: number, value: unknown, pathThreadId: string | null): Misroute | OtherThread | null {
   if (status !== 409 || value === null || typeof value !== "object") return null;
   const error = (value as { error?: unknown }).error;
   if (error === null || typeof error !== "object") return null;
   const code = (error as { code?: unknown }).code;
-  return code === "THREAD_NOT_OWNED" || code === "HOST_RETIRING" ? code : null;
+  if (code === "THREAD_NOT_OWNED") {
+    const detail = (error as { detail?: unknown }).detail;
+    const touched = detail !== null && typeof detail === "object" ? (detail as { threadId?: unknown }).threadId : undefined;
+    if (typeof touched === "string" && touched !== pathThreadId) return { otherThreadId: touched };
+    return code;
+  }
+  return code === "HOST_RETIRING" ? code : null;
 }
 
 interface Answer<R> {
-  misroute: Misroute | null;
+  misroute: Misroute | OtherThread | null;
   result: R;
 }
 
@@ -281,7 +294,7 @@ interface Answer<R> {
  * other conflict. Any other answer is handed back untouched; another 409 is handed back as a
  * replay of the bytes read, so the caller reads it exactly as it would have.
  */
-async function inspectStream(stream: HostStream): Promise<Answer<HostStream>> {
+async function inspectStream(stream: HostStream, pathThreadId: string | null): Promise<Answer<HostStream>> {
   if (stream.status !== 409) return { misroute: null, result: stream };
   const chunks: Buffer[] = [];
   let size = 0;
@@ -303,7 +316,7 @@ async function inspectStream(stream: HostStream): Promise<Answer<HostStream>> {
   } catch {
     value = null;
   }
-  const misroute = misrouteOf(stream.status, value);
+  const misroute = misrouteOf(stream.status, value, pathThreadId);
   if (misroute !== null) {
     stream.abort();
     return { misroute, result: stream };
@@ -314,8 +327,9 @@ async function inspectStream(stream: HostStream): Promise<Answer<HostStream>> {
   };
 }
 
-function misrouted(endpoint: HostEndpoint, misroute: Misroute, path: string): HostUnavailableError {
-  return new HostUnavailableError(`agent host generation ${endpoint.generation} answered ${misroute} on ${path}`);
+function misrouted(endpoint: HostEndpoint, misroute: Misroute | OtherThread, path: string): HostUnavailableError {
+  const what = typeof misroute === "string" ? misroute : `THREAD_NOT_OWNED for thread ${misroute.otherThreadId}`;
+  return new HostUnavailableError(`agent host generation ${endpoint.generation} answered ${what} on ${path}`);
 }
 
 /**
@@ -329,7 +343,9 @@ function misrouted(endpoint: HostEndpoint, misroute: Misroute, path: string): Ho
  * - A 409 `THREAD_NOT_OWNED` calls {@link HostDirectory.ownershipStale} (which awaits the
  *   adoption that answer implies) and retries ONCE on the host then resolved. A 409
  *   `HOST_RETIRING` (create, fork) retries once on the primary. A second misroute is
- *   {@link HostUnavailableError}: never a loop, and neither code ever reaches a client.
+ *   {@link HostUnavailableError}: never a loop, and neither code ever reaches a client. A
+ *   `THREAD_NOT_OWNED` whose `detail.threadId` names another thread than the path's is about that
+ *   other thread: {@link HostUnavailableError} at once, no retry, no ownership marked stale.
  * - `open()` follows the same rules: the 409 arrives in the headers, before the caller reads.
  *
  * **A streamed request body (`Readable`: chat uploads) is never retried.** It cannot be replayed
@@ -352,7 +368,7 @@ export class RoutingHostClient implements HostClient {
       path,
       true,
       (client) => client.json<T>(method, path, body, init),
-      async (response) => ({ misroute: misrouteOf(response.status, response.value), result: response })
+      async (response, threadId) => ({ misroute: misrouteOf(response.status, response.value, threadId), result: response })
     );
   }
 
@@ -360,20 +376,22 @@ export class RoutingHostClient implements HostClient {
     path: string,
     replayable: boolean,
     send: (client: HostClient) => Promise<R>,
-    inspect: (result: R) => Promise<Answer<R>>
+    inspect: (result: R, threadId: string | null) => Promise<Answer<R>>
   ): Promise<R> {
     const threadId = threadIdOfPath(path);
     const first = await this.resolve(threadId);
-    const answer = await inspect(await send(first.client));
+    const answer = await inspect(await send(first.client), threadId);
     if (answer.misroute === null) return answer.result;
+    // Another thread than the path's belongs elsewhere: re-routing this one would not help.
+    if (typeof answer.misroute !== "string") throw misrouted(first, answer.misroute, path);
     if (!replayable) {
       this.noteStale(threadId, first, answer.misroute);
       throw misrouted(first, answer.misroute, path);
     }
     const second = await this.reroute(threadId, first, answer.misroute, path);
-    const retried = await inspect(await send(second.client));
+    const retried = await inspect(await send(second.client), threadId);
     if (retried.misroute === null) return retried.result;
-    this.noteStale(threadId, second, retried.misroute);
+    if (typeof retried.misroute === "string") this.noteStale(threadId, second, retried.misroute);
     throw misrouted(second, retried.misroute, path);
   }
 

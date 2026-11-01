@@ -53,6 +53,11 @@ the daemon. `./deploy.sh rollback <target> <sha>` runs the same cycle with that 
 `deploy/lib/remote-update.test.mjs` (in `pnpm test`) drives the script against a throwaway checkout
 with stubbed `systemctl`, `curl` and `pnpm`.
 
+Rolling back to a build from before agent host generations is safe only while the daemon has never
+switched agent hosts during an update. After a switch, first end the `orqsvc-agent-host-<N>` tmux
+sessions, or wait until `<appdir>/daemon/agent-hosts.json` lists only a generation 0 primary. An
+older daemon knows only generation 0, so it would lose track of the chats the other hosts run.
+
 Each deploy writes `/opt/orquester/.orquester-version.json` (`commit`, `version`, `deployedAt`;
 gitignored) before the restart. The daemon reads its version and commit once at boot, from git or
 from this stamp when `.git` is missing, and reports them in the authenticated `GET /api/info`
