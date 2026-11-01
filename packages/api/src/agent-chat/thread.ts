@@ -130,8 +130,10 @@ export interface AutoContinue {
 /**
  * Crash-safe resume (§3.3): the turn `turnId` is a continuation a host started automatically
  * after the previous one stopped unexpectedly — the `attempt`-th in a row. A host that finds this
- * turn still running at its next start (it died again) counts on from `attempt`. Head-only like
- * {@link ContinueAfterRestart}; cleared when that turn ends, a new turn starts or the session is
+ * turn still running at its next start (it died again) counts on from `attempt` — and so does one
+ * that finds it the latest turn of an idle thread whose subagents it left running (host updates
+ * R3: a crash revival). Head-only like {@link ContinueAfterRestart}; cleared when that turn ends
+ * with no background work left (else when that work ends), a new turn starts or the session is
  * ended. An older host ignores it.
  */
 export interface CrashResumedTurn {
@@ -220,8 +222,9 @@ export interface ThreadHead {
   backgroundWorkLive?: true;
   /**
    * Host updates (R4): the continue turns hosts started on their own in a row, newest last. A
-   * chain counts only while its last turn is still the thread's latest — the user's next message
-   * starts another turn, which ends it. Head-only; an older host ignores it.
+   * chain counts until a message comes in after its last turn (a turn with a `userMessageId`; a
+   * turn the provider starts by itself, such as a subagent's wake, does not end it). Head-only; an
+   * older host ignores it.
    */
   autoContinues?: AutoContinue[];
   /**

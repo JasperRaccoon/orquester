@@ -3209,6 +3209,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       runtime,
       "Context compaction was interrupted. Send this message again to continue."
     );
+    // Host updates R6: a continuation waiting to retry its start runs nothing
+    // to interrupt — the Stop takes it back instead.
+    if (await cancelWaitingContinuation(runtime)) return;
     const head = headOf(runtime);
     const adapter = head ? options.adapters.get(head.adapter) : undefined;
     const session = currentSession(runtime);
@@ -6927,8 +6930,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               });
             } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
               persistCursorAtTurnEnd(runtime);
-              // The crash-resumed turn ended: the next unexpected stop counts from one.
-              if (!isHistoricalRuntimeEvent(event) && runtime.crashResumedTurn?.turnId === turnId) {
+              // The crash-resumed turn ended: the next unexpected stop counts from one —
+              // unless the work it started runs on (host updates R3): a host that dies
+              // under those subagents again counts on, so their revivals are bounded
+              // too. The count goes when that work ends (`syncBackgroundWorkMark`).
+              if (
+                !isHistoricalRuntimeEvent(event) &&
+                runtime.crashResumedTurn?.turnId === turnId &&
+                liveness.liveTasks(runtime.id).length === 0
+              ) {
                 await dropCrashResume(runtime);
               }
               captureTurnEnd(runtime, turnId, turnOrdinalOf(runtime, turnId));
@@ -7202,6 +7212,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const live = liveness.liveTasks(runtime.id).length > 0 ? true : undefined;
     if (live === runtime.backgroundWorkLive) return null;
     runtime.backgroundWorkLive = live;
+    // The work a crash-resumed turn left running ended, with no turn running:
+    // the next unexpected stop counts from one again (R3).
+    if (live === undefined && currentSession(runtime).activeTurnId === null) {
+      runtime.crashResumedTurn = undefined;
+    }
     return saveHeadNow(runtime);
   };
 
@@ -8307,7 +8322,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // resumed at most MAX_CRASH_RESUME_ATTEMPTS times in a row, never in a
     // loop; and it says so in the chat.
     const handedOver = marker !== undefined && marker.prepared !== true && markerMatches;
-    const crashAttempt = handedOver ? null : priorCrashAttempts(head) + 1;
+    const crashAttempt = handedOver ? null : priorCrashAttempts(head, runtime.state.turns) + 1;
     // A newer turn — the user's message after the one that was running — wins:
     // the older turn is never continued in its place.
     const superseded = typeof turnId === "string" && hasLaterTurn(runtime.state.turns, turnId);
@@ -8340,7 +8355,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // turn with the pending one.
     await settleStalePendingTurns(runtime);
 
-    if (settledByTeardown && !looping && (!continuable || typeof turnId !== "string")) {
+    if (settledByTeardown && !looping && !exhausted && (!continuable || typeof turnId !== "string")) {
       // The teardown's rows already said what happened — the turn
       // interrupted, the session stopped — and the thread cannot be continued
       // (its tab closed, its cursor gone): the marker goes, nothing else is
@@ -8539,6 +8554,32 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }, delayMs);
     timer.unref?.();
     continuationRetryTimers.set(runtime.id, timer);
+  };
+
+  /**
+   * R6, the user's Stop while a continuation waits to retry its start: the
+   * retry goes, and its prepared marker with it (no later host continues it
+   * either), and the session stops reading `starting` — nothing runs, and a
+   * message continues the chat. False when no continuation was waiting.
+   */
+  const cancelWaitingContinuation = async (runtime: ThreadRuntime): Promise<boolean> => {
+    const timer = continuationRetryTimers.get(runtime.id);
+    if (timer === undefined) return false;
+    clearTimeout(timer);
+    continuationRetryTimers.delete(runtime.id);
+    await writeMarker(runtime, undefined);
+    await upsertBinding(runtime, { status: "stopped" });
+    await persistSession(runtime, { ...currentSession(runtime), status: "stopped", activeTurnId: null });
+    await appendActivity(runtime, {
+      kind: "runtime.warning",
+      tone: "info",
+      summary: "Not continued after the restart",
+      detail: "Stopped while the agent was waiting to be started again. Send a message to continue.",
+      turnId: null
+    }).catch((error: unknown) => {
+      logger.warn(`agent-host: could not note the cancelled continuation of ${runtime.id}`, error);
+    });
+    return true;
   };
 
   // -------------------------------------------------------------------------
@@ -9433,12 +9474,18 @@ function isOrphanedHead(head: ThreadHead, turns?: readonly Turn[]): boolean {
  * work no host resumed yet: a deploy's continuation that was cut short starts
  * the count.
  */
-function priorCrashAttempts(head: ThreadHead): number {
+function priorCrashAttempts(head: ThreadHead, turns: readonly Turn[] | undefined): number {
   const marker = head.continueAfterRestart;
   const fromMarker = marker?.prepared === true ? (marker.crashAttempt ?? 0) : 0;
   const resumed = head.crashResumedTurn;
-  const fromTurn =
-    resumed !== undefined && resumed.turnId === head.session.activeTurnId ? resumed.attempt : 0;
+  // Host updates R3: with no turn running, the resumed turn counts on while it
+  // is still the latest — it ended with the subagents it started still at work
+  // (the record outlives such a turn), and the host died under them again.
+  const counted =
+    resumed !== undefined &&
+    (resumed.turnId === head.session.activeTurnId ||
+      (head.session.activeTurnId === null && turns?.at(-1)?.turnId === resumed.turnId));
+  const fromTurn = resumed !== undefined && counted ? resumed.attempt : 0;
   return Math.max(fromMarker, fromTurn);
 }
 
