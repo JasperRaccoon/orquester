@@ -36,7 +36,9 @@ const STATUS_BY_CODE: Readonly<Record<AgentChatErrorCode, number>> = {
   TURN_NOT_IDLE: 409,
   // `POST …/agent-rows` alone: no open stream with that id on the thread; the client asks again on
   // its next stream. Its own code, so a route miss on an older host can be told apart. A read.
-  STREAM_NOT_FOUND: 404
+  STREAM_NOT_FOUND: 404,
+  THREAD_NOT_OWNED: 409,
+  HOST_RETIRING: 409
 };
 
 /**

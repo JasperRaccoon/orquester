@@ -264,8 +264,8 @@ live work and no command in flight:
    - A command arriving for a released thread gets 409 `THREAD_NOT_OWNED`.
 
 R20. `GET /health` adds `generation`, `retiring: boolean`, and, while retiring,
-`ownedThreadIds: string[]`. The endpoint the daemon's summary poll already calls every 1.5 s also
-carries `ownedThreadIds` when retiring, so the daemon sees a release within one poll.
+`ownedThreadIds: string[]`. The daemon polls each retiring host's `/health` at the summary
+cadence (about 1.5 s), so it sees a release within one poll.
 
 R21. **`POST /unretire`** (used only when the new host failed to start). The host takes its
 released threads back as owned, re-enables creation and caches, and replies. It works only while

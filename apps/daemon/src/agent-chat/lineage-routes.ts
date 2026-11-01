@@ -61,7 +61,9 @@ const STATUS: Record<AgentChatErrorCode, number> = {
   ITEM_NOT_FOUND: 404,
   PROMPT_NOT_FOUND: 404,
   TURN_NOT_IDLE: 409,
-  STREAM_NOT_FOUND: 404
+  STREAM_NOT_FOUND: 404,
+  THREAD_NOT_OWNED: 409,
+  HOST_RETIRING: 409
 };
 
 function envelope(code: AgentChatErrorCode, message: string): AgentChatErrorEnvelope {

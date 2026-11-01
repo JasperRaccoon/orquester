@@ -46,6 +46,42 @@ export const AGENT_HOST_PROTOCOL_VERSION = 1;
 /** The tmux service session the host runs in, like the other `orqsvc-*` service sessions (§3.1). */
 export const AGENT_HOST_SERVICE_SESSION = "orqsvc-agent-host";
 
+/**
+ * Host updates (spec 2026-11-01 P2.2): the tmux service session of host `generation`. Generation
+ * 0 is {@link AGENT_HOST_SERVICE_SESSION}, so a host started before generations existed stays
+ * adoptable.
+ */
+export function agentHostServiceSession(generation: number): string {
+  return generation === 0 ? AGENT_HOST_SERVICE_SESSION : `${AGENT_HOST_SERVICE_SESSION}-${generation}`;
+}
+
+/**
+ * Host updates (spec 2026-11-01 P2.3 R15): the environment a host boots with. Without the
+ * generation variables a host is generation 0 with no foreign threads, as before generations.
+ */
+export const AGENT_HOST_ENV = {
+  /** The socket to listen on (already set for every host). */
+  socket: "ORQUESTER_AGENT_HOST_SOCK",
+  /** The 0600 token file for this generation (`agentHostTokenPath(appdir, generation)`). */
+  tokenPath: "ORQUESTER_AGENT_HOST_TOKEN_PATH",
+  /** This host's generation, a non-negative integer. */
+  generation: "ORQUESTER_AGENT_HOST_GENERATION",
+  /**
+   * The `{ "threadIds": string[] }` file naming threads other live hosts own
+   * (`agentHostForeignThreadsPath`). Set ⇒ the file must be readable, or the host refuses to boot.
+   */
+  foreignThreads: "ORQUESTER_AGENT_HOST_FOREIGN_THREADS"
+} as const;
+
+/** Phase 1 (spec 2026-11-01 P1.4 R12): the longest a pending update waits for a busy host to drain. */
+export const AGENT_HOST_UPDATE_GRACE_MS = 10 * 60_000;
+
+/** Phase 2 (P2.4 R30): the longest a host may retire before its remaining threads are moved. */
+export const AGENT_HOST_RETIRE_MAX_MS = 12 * 60 * 60_000;
+
+/** Phase 2 (P2.2): at most this many retiring hosts at once besides the primary. */
+export const MAX_RETIRING_HOSTS = 3;
+
 /** Bearer token header. The token file is 0600 and regenerated only when no host is alive. */
 export const AGENT_HOST_AUTH_HEADER = "authorization";
 
@@ -268,7 +304,28 @@ export const agentHostRoutes = {
    * its next start. Additive: a host that predates it answers its generic route-miss 404, and the
    * change then applies whenever the thread's session next starts.
    */
-  sessionToolsRefresh: (threadId: string): string => `${thread(threadId)}/session-tools/refresh`
+  sessionToolsRefresh: (threadId: string): string => `${thread(threadId)}/session-tools/refresh`,
+  /**
+   * Host updates (spec 2026-11-01 P2.3 R18): `POST` (no body) → {@link RetireHostResponse}. The
+   * host keeps only threads with live work (or a command in flight), releases every other one,
+   * refuses new threads with 409 `HOST_RETIRING`, and stops writing shared caches. Repeatable:
+   * a second call answers the current owned set. Capability `retire`.
+   */
+  retire: "/retire",
+  /**
+   * Host updates (P2.3 R21): `POST` (no body) → {@link RetireHostResponse}. Undoes a retire when
+   * the replacement host failed to start; the daemon calls it only before any other host adopted
+   * one of the released threads. Capability `retire`.
+   */
+  unretire: "/unretire",
+  /**
+   * Host updates (P2.3 R17): `POST` (no body) → {@link AdoptThreadResponse}. Takes a thread
+   * another host released (or a dead host owned) in exactly as boot takes in a thread from a
+   * stopped host — orphan settle, continuation/revival markers, pending wake, held goal, index
+   * catch-up. Idempotent; a thread that is not foreign answers `{ adopted: false }`.
+   * Capability `retire`.
+   */
+  adopt: (threadId: string): string => `${thread(threadId)}/adopt`
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -628,6 +685,26 @@ export interface AgentHostHealthResponse {
    * it through {@link agentHostSupports}, never as `capabilities.x !== undefined`.
    */
   capabilities?: AgentHostCapabilities;
+  /** Host updates (P2.3 R20): this host's generation. Optional: an older host omits it (= 0). */
+  generation?: number;
+  /** Host updates (P2.3 R20): true once `/retire` was accepted (and not undone). */
+  retiring?: boolean;
+  /**
+   * Host updates (P2.3 R20): while {@link retiring}, the threads this host still owns. A thread
+   * missing from it was released and must be adopted by the primary (P2.4 R26).
+   */
+  ownedThreadIds?: string[];
+}
+
+/** Host updates (P2.3 R18, R21): the owned set after `/retire` or `/unretire`. */
+export interface RetireHostResponse {
+  ownedThreadIds: string[];
+}
+
+/** Host updates (P2.3 R17). */
+export interface AdoptThreadResponse {
+  /** False when the thread was not foreign (already owned): nothing was done. */
+  adopted: boolean;
 }
 
 /**
@@ -660,12 +737,29 @@ export interface AgentHostCapabilities {
    * send it one.
    */
   crossAgentFork?: number;
+  /**
+   * Host updates Phase 1 (spec 2026-11-01 P1.2, P1.4 R13): `1` = `/stop` writes the continuation
+   * markers of R2 (a cut turn, AND an idle thread whose subagents or background work the stop
+   * kills — a revival) and R5 (a turn cut while it waited on the user), and the next host sends
+   * the revival prompt. Only such a host may be restarted while busy (the update grace, "Restart
+   * now"): an older one would leave the chats it cut stopped.
+   */
+  continuationRevival?: number;
+  /**
+   * Host updates Phase 2 (spec 2026-11-01 P2.3): `1` = the host serves `/retire`, `/unretire`,
+   * `/threads/:id/adopt`, honours {@link AGENT_HOST_ENV} generation and foreign threads, and
+   * reports `generation`/`retiring`/`ownedThreadIds` on `/health`.
+   */
+  retire?: number;
 }
 
 /** The capabilities this host build advertises on `/health`. */
 export const AGENT_HOST_CAPABILITIES: Readonly<Required<AgentHostCapabilities>> = Object.freeze({
   sessionProfiles: 1,
   crossAgentFork: 1,
+  // Host updates (spec 2026-11-01): each flips to 1 in the change that implements it.
+  continuationRevival: 0,
+  retire: 0,
   // boxes:
   boxes: 1
 });

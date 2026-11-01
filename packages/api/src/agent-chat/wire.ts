@@ -1046,7 +1046,17 @@ export type AgentChatErrorCode =
    * it opens next. Its own code because a host that predates the route answers its generic
    * route-miss 404 `THREAD_NOT_FOUND`, and the client must tell "ask again" from "never".
    */
-  | "STREAM_NOT_FOUND";
+  | "STREAM_NOT_FOUND"
+  /**
+   * 409 — host ↔ daemon only (host updates, spec 2026-11-01 P2.3 R16/R19): the thread belongs to
+   * another agent host. The daemon re-routes and retries; it never reaches a client.
+   */
+  | "THREAD_NOT_OWNED"
+  /**
+   * 409 — host ↔ daemon only (P2.3 R18): a retiring host refuses to create a thread. The daemon
+   * sends creation to the primary; it never reaches a client.
+   */
+  | "HOST_RETIRING";
 
 export const AGENT_CHAT_ERROR_CODES = [
   "INVALID_COMMAND",
@@ -1059,7 +1069,9 @@ export const AGENT_CHAT_ERROR_CODES = [
   "ITEM_NOT_FOUND",
   "PROMPT_NOT_FOUND",
   "TURN_NOT_IDLE",
-  "STREAM_NOT_FOUND"
+  "STREAM_NOT_FOUND",
+  "THREAD_NOT_OWNED",
+  "HOST_RETIRING"
 ] as const satisfies readonly AgentChatErrorCode[];
 
 /**

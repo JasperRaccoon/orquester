@@ -697,22 +697,74 @@ export function agentChatIndexPath(baseDir: string): string {
   return joinPath(agentChatDir(baseDir), "index.sqlite");
 }
 
-/** The agent host's control socket (named pipe on Windows). */
-export function agentHostSocketPath(baseDir: string, platform: RuntimePlatform): string {
+/**
+ * The agent host's control socket (named pipe on Windows). Host updates
+ * (spec 2026-11-01 P2.2): every host instance has a **generation**; generation
+ * 0 keeps the legacy names so a host started before generations existed stays
+ * adoptable, and a retiring host and its replacement never share a socket.
+ */
+export function agentHostSocketPath(baseDir: string, platform: RuntimePlatform, generation = 0): string {
   if (platform === "win32") {
-    return "\\\\.\\pipe\\orquester-agent-host";
+    return generation === 0 ? "\\\\.\\pipe\\orquester-agent-host" : `\\\\.\\pipe\\orquester-agent-host-${generation}`;
   }
-  return joinPath(daemonConfigDir(baseDir), "agent-host.sock");
+  return joinPath(daemonConfigDir(baseDir), generation === 0 ? "agent-host.sock" : `agent-host-${generation}.sock`);
 }
 
 /**
  * The 0600 token file the daemon and the host authenticate with. Regenerated
- * only when no host is alive (§3.1) — a live host's token must keep working
- * across a daemon restart, which is the whole point of adoption.
+ * only when no host of that generation is alive (§3.1) — a live host's token
+ * must keep working across a daemon restart, which is the whole point of
+ * adoption. One file per generation (spec 2026-11-01 P2.2).
  */
-export function agentHostTokenPath(baseDir: string): string {
-  return joinPath(daemonConfigDir(baseDir), "agent-host.token");
+export function agentHostTokenPath(baseDir: string, generation = 0): string {
+  return joinPath(daemonConfigDir(baseDir), generation === 0 ? "agent-host.token" : `agent-host-${generation}.token`);
 }
+
+/**
+ * Host updates (spec 2026-11-01 P2.2): the daemon's record of every live agent
+ * host generation and its role. A missing file means "generation 0 is the
+ * primary", the single-host layout from before generations existed.
+ */
+export function agentHostRegistryPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent-hosts.json");
+}
+
+/**
+ * Host updates (spec 2026-11-01 P2.3 R15): the `{ "threadIds": string[] }` file a host of
+ * `generation` boots with, naming the threads other live hosts own — threads it must never touch
+ * until it adopts them.
+ */
+export function agentHostForeignThreadsPath(baseDir: string, generation: number): string {
+  return joinPath(daemonConfigDir(baseDir), `agent-host-${generation}.foreign.json`);
+}
+
+/** One host generation in {@link agentHostRegistryPath} (spec 2026-11-01 P2.2). */
+export const agentHostRegistryEntrySchema = z
+  .object({
+    generation: z.number().int().nonnegative(),
+    /**
+     * `starting`: spawned, not yet ready (a daemon that crashed here finds a host that may or may
+     * not have come up); `primary`: takes every new thread; `retiring`: keeps only `ownedThreadIds`.
+     */
+    role: z.enum(["starting", "primary", "retiring"]),
+    /** ISO time the host began retiring; the retirement cap (P2.4 R30) counts from it. */
+    retiringSince: z.string().nullable().optional(),
+    /** A retiring host's last known owned set — what the primary adopts if that host is gone. */
+    ownedThreadIds: z.array(z.string()).optional()
+  })
+  .passthrough();
+
+export type AgentHostRegistryEntry = z.infer<typeof agentHostRegistryEntrySchema>;
+
+/**
+ * The registry file. Readers keep entries they cannot parse out of the live set but preserve
+ * unknown fields when rewriting (a newer daemon's records survive an older one's write).
+ */
+export const agentHostRegistrySchema = z
+  .object({
+    hosts: z.array(z.unknown())
+  })
+  .passthrough();
 
 /** `yyyy-mm-dd` in local time. */
 export function localDateStamp(date = new Date()): string {

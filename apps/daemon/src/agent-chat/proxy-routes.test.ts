@@ -651,7 +651,9 @@ test("a daemon-side refusal answers the §6.2 status of its code, INDEX_UNAVAILA
     ITEM_NOT_FOUND: 404,
     PROMPT_NOT_FOUND: 404,
     TURN_NOT_IDLE: 409,
-    STREAM_NOT_FOUND: 404
+    STREAM_NOT_FOUND: 404,
+    THREAD_NOT_OWNED: 409,
+    HOST_RETIRING: 409
   };
   for (const code of Object.keys(expected) as AgentChatErrorCode[]) {
     const response = await h.app.inject({
