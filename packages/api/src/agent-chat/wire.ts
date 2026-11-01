@@ -1555,8 +1555,14 @@ export interface AgentHostRestartBlocker {
 /**
  * `GET /api/agent-host/status`: the agent host as the daemon supervises it, and the drain-restart
  * a deploy left pending — what it waits on, per thread. A pending restart waits for no turn to
- * run and no background work to be live (a running shell is never killed by it, however long
- * it runs); `POST /api/agent-host/stop` restarts at once and stops all of it.
+ * run and no background work to be live — for at most the update grace when the host resumes the
+ * chats a restart cuts (`restartsAt`; spec 2026-11-01 P1.4 R12), else without limit (R13).
+ * `POST /api/agent-host/stop` restarts at once.
+ *
+ * Host updates Phase 2 (spec 2026-11-01 P2.4 R31): an update usually retires the old host
+ * instead. It keeps the chats that were working (`retiringHosts`) while the current host serves
+ * everything else, and `pendingRestart` stays null. The fields after `pendingRestart` are
+ * additive: a daemon from before them omits them.
  */
 export interface AgentHostStatusResponse {
   state: "stopped" | "starting" | "healthy" | "foreign" | "error";
@@ -1575,7 +1581,39 @@ export interface AgentHostStatusResponse {
     /** The last deferral as the daemon logged it, or null. */
     deferredBy: string | null;
     blockers: AgentHostRestartBlocker[];
+    /**
+     * P1.4 R12: when the host restarts anyway if it has not drained by then (ISO). Null before
+     * the first deferral, and for a host that cannot resume the chats a restart cuts (R13): that
+     * one waits for the drain without limit. Absent from an older daemon.
+     */
+    restartsAt?: string | null;
   } | null;
+  /** The current host's generation (P2.2; 0 = the legacy names). Absent from an older daemon. */
+  generation?: number;
+  /**
+   * P1.4 R13: true when the current host resumes the chats a restart interrupts and revives their
+   * subagents (capability `continuationRevival`) — what "Restart agent host now" does to them.
+   * False: they stop and are not resumed. Absent from an older daemon.
+   */
+  restartResumesChats?: boolean;
+  /** P2.4 R31: previous-version hosts still finishing the chats that were working at the update. */
+  retiringHosts?: AgentHostRetiringStatus[];
+}
+
+/** One retiring agent host ({@link AgentHostStatusResponse.retiringHosts}). */
+export interface AgentHostRetiringStatus {
+  generation: number;
+  hostInstanceId: string | null;
+  pid: number | null;
+  codeStamp: string | null;
+  /** Since when it retires (ISO). */
+  retiringSince: string | null;
+  /** When the retirement cap ends it, interrupting and resuming what still runs there (ISO). */
+  endsAt: string | null;
+  /** The chats it still owns; each moves to the current host as soon as it is idle. */
+  threads: Array<{ threadId: string; threadTitle?: string }>;
+  /** What still runs in those chats, itemised as a pending restart's blockers are. */
+  blockers: AgentHostRestartBlocker[];
 }
 
 // ---------------------------------------------------------------------------
