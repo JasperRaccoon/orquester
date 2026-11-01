@@ -138,6 +138,33 @@ describe("AgentHostRestart", () => {
     assert.deepEqual(calls, ["restart"]);
   });
 
+  it("a previous-version host lists the chats it finishes, each with its running work and a Stop", async () => {
+    await show({
+      ...pending,
+      pendingRestart: null,
+      retiringHosts: [
+        {
+          generation: 0,
+          hostInstanceId: "host-0",
+          pid: 4100,
+          codeStamp: "1570de7c8ee6aaaa",
+          retiringSince: "2026-11-01T09:00:00.000Z",
+          endsAt: "2026-11-01T21:00:00.000Z",
+          threads: [
+            { threadId: "t1", threadTitle: "Auth fixes" },
+            { threadId: "t2", threadTitle: "Docs pass" }
+          ],
+          blockers: [pending.pendingRestart!.blockers[0]!]
+        }
+      ]
+    });
+    assert.equal(text().includes("A restart is pending"), false, "the update is applied, nothing waits");
+    assert.ok(text().includes("Previous version, finishing 2 chats"), text());
+    assert.ok(text().includes("Docs pass"), "a chat with nothing itemised is listed too");
+    await click(button("Stop it")!);
+    assert.deepEqual(calls, ["stop-task t1 b1"]);
+  });
+
   it("no pending restart: no blocker list, the restart button still there", async () => {
     await show({ ...pending, pendingRestart: null });
     assert.equal(text().includes("A restart is pending"), false);

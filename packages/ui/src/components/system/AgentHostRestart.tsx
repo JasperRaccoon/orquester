@@ -11,6 +11,8 @@ import {
   blockerStopAction,
   groupRestartBlockers,
   restartNowConsequences,
+  retiringGroups,
+  type RestartBlockerGroup,
   shortCodeStamp
 } from "./agent-host-restart";
 import { formatDuration } from "./system-format";
@@ -41,6 +43,7 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
   if (status.unavailable) return null;
   const data = status.data;
   const pending = data?.pendingRestart ?? null;
+  const retiring = data?.retiringHosts ?? [];
   const now = Date.now();
 
   const run = async (key: string, action: () => Promise<unknown>): Promise<void> => {
@@ -82,6 +85,41 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
       </Button>
     );
   };
+
+  const blockerList = (groups: RestartBlockerGroup[], label: string): React.ReactNode => (
+    <ul className="space-y-2" aria-label={label}>
+      {groups.map((group) => (
+        <li key={group.threadId} className="rounded-lg border border-neutral-800 px-3 py-2">
+          <p className="mb-1 truncate font-medium text-neutral-200" title={group.threadId}>
+            {group.label}
+          </p>
+          {group.blockers.length === 0 ? (
+            <p className="text-neutral-500">Finishing up</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {group.blockers.map((blocker, index) => {
+                const name = blockerName(blocker);
+                const age = blockerAgeSeconds(blocker, now);
+                return (
+                  <li key={`${blocker.kind}:${blocker.taskId ?? index}`} className="flex flex-wrap items-center gap-2">
+                    <span className="text-neutral-400">{blockerKindLabel(blocker)}</span>
+                    {name !== null && blocker.kind !== "turn" && <span className="text-neutral-200">{name}</span>}
+                    {age !== null && <span className="tabular-nums text-neutral-500">{formatDuration(age)}</span>}
+                    {blocker.command !== undefined && blocker.command !== name && (
+                      <code className="max-w-full truncate rounded bg-neutral-950 px-1.5 py-0.5 text-[11px] text-neutral-400">
+                        {blocker.command}
+                      </code>
+                    )}
+                    <span className="ml-auto">{stopButton(blocker, group.label)}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
 
   return (
     <SettingsSection
@@ -132,36 +170,44 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
           </Notice>
         )}
 
-        {pending && pending.blockers.length > 0 && (
-          <ul className="space-y-2" aria-label="What the restart waits on">
-            {groupRestartBlockers(pending.blockers).map((group) => (
-              <li key={group.threadId} className="rounded-lg border border-neutral-800 px-3 py-2">
-                <p className="mb-1 truncate font-medium text-neutral-200" title={group.threadId}>
-                  {group.label}
-                </p>
-                <ul className="space-y-1.5">
-                  {group.blockers.map((blocker, index) => {
-                    const name = blockerName(blocker);
-                    const age = blockerAgeSeconds(blocker, now);
-                    return (
-                      <li key={`${blocker.kind}:${blocker.taskId ?? index}`} className="flex flex-wrap items-center gap-2">
-                        <span className="text-neutral-400">{blockerKindLabel(blocker)}</span>
-                        {name !== null && blocker.kind !== "turn" && <span className="text-neutral-200">{name}</span>}
-                        {age !== null && <span className="tabular-nums text-neutral-500">{formatDuration(age)}</span>}
-                        {blocker.command !== undefined && blocker.command !== name && (
-                          <code className="max-w-full truncate rounded bg-neutral-950 px-1.5 py-0.5 text-[11px] text-neutral-400">
-                            {blocker.command}
-                          </code>
-                        )}
-                        <span className="ml-auto">{stopButton(blocker, group.label)}</span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </li>
-            ))}
-          </ul>
+        {pending && pending.blockers.length > 0 && blockerList(groupRestartBlockers(pending.blockers), "What the restart waits on")}
+
+        {retiring.length > 0 && !pending && (
+          <Notice tone="info" title="The update is applied">
+            <p>
+              New chats and every idle chat run on the current code. The chats that were working keep running on the
+              previous version, and each moves over on its own as soon as it finishes.
+            </p>
+          </Notice>
         )}
+
+        {retiring.map((host) => {
+          const groups = retiringGroups(host);
+          return (
+            <section
+              key={host.generation}
+              className="space-y-2 rounded-lg border border-neutral-800 px-3 py-2"
+              aria-label={`Previous version ${host.generation}`}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-neutral-200">
+                  Previous version, finishing {host.threads.length} {host.threads.length === 1 ? "chat" : "chats"}
+                </span>
+                {host.pid !== null && <span className="tabular-nums text-neutral-500">pid {host.pid}</span>}
+                <span className="text-neutral-500">
+                  code <code className="text-neutral-300">{shortCodeStamp(host.codeStamp)}</code>
+                </span>
+              </div>
+              {host.endsAt && (
+                <p className="text-neutral-500">
+                  Chats still working there at {new Date(host.endsAt).toLocaleString()} are interrupted, and resumed on the
+                  current host.
+                </p>
+              )}
+              {blockerList(groups, `What still runs on previous version ${host.generation}`)}
+            </section>
+          );
+        })}
 
         {failure !== null && <p className="text-danger">{failure}</p>}
       </div>
@@ -176,6 +222,8 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
               {data?.restartResumesChats === true
                 ? "Every agent chat's provider process is restarted. The chats working now are resumed on the new host and their subagents relaunched, not stopped:"
                 : "Every agent chat's provider process is restarted. This host cannot resume chats, so this stops, without resuming:"}
+              {retiring.length > 0 &&
+                " The previous-version hosts end too; their chats are resumed on the current host."}
             </p>
             <ul className="list-disc space-y-0.5 pl-4">
               {restartNowConsequences(data).map((line) => (

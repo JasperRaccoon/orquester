@@ -64,4 +64,14 @@ test("the restart-now confirmation lists everything it stops", () => {
   assert.deepEqual(restartNowConsequences({ ...status, pendingRestart: null }), [
     "Nothing is running in any chat right now."
   ]);
+  // It ends the previous-version hosts too, and what still runs there.
+  const retiring = { generation: 0, hostInstanceId: "h0", pid: 1, codeStamp: null, retiringSince: null, endsAt: null };
+  assert.deepEqual(
+    restartNowConsequences({
+      ...status,
+      pendingRestart: null,
+      retiringHosts: [{ ...retiring, threads: [{ threadId: "t9", threadTitle: "Long build" }], blockers: [{ threadId: "t9", threadTitle: "Long build", kind: "turn" }] }]
+    }),
+    ["Long build: Turn running"]
+  );
 });
