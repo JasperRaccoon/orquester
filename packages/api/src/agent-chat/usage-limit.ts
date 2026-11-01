@@ -16,8 +16,22 @@ import { isAgentOwnedActivity } from "./compaction.ts";
 import { failureReasonOfActivity, overloadOfActivity } from "./failure-reason.ts";
 import type { ThreadItem, Turn } from "./thread.ts";
 
-/** What the daemon sends into a chat when its limit has reset (T3 Code's wording). */
-export const USAGE_LIMIT_CONTINUE_MESSAGE = "Continue where you left off.";
+/**
+ * What the daemon sends into a chat when its limit has reset, automatically or on "Resume now":
+ * a limit stops the agent's subagents and background commands with its turn, and an agent that
+ * is only told to continue rarely starts them again.
+ */
+export const USAGE_LIMIT_CONTINUE_MESSAGE =
+  "Continue where you left off. If subagents or background commands you started stopped at the usage limit, relaunch the ones whose results you still need with the same instructions; check before repeating anything that changes state.";
+
+/** The continue message older builds sent (T3 Code's wording); their logs still hold it. */
+export const LEGACY_USAGE_LIMIT_CONTINUE_MESSAGE = "Continue where you left off.";
+
+/** Whether a prompt is the daemon's usage-limit continue message, this build's or an older one's. */
+export function isUsageLimitContinueMessage(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed === USAGE_LIMIT_CONTINUE_MESSAGE || trimmed === LEGACY_USAGE_LIMIT_CONTINUE_MESSAGE;
+}
 
 /**
  * How long after the provider's reset the automatic resume goes out: a reset stamp is the

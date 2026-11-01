@@ -1003,7 +1003,9 @@ export const agentPrefsSchema = z.object({
   continueThreadsByProject: z.record(z.string(), z.boolean()).default({}),
   /**
    * Usage-limit recovery: when a chat stops on its account's usage limit and the reset time is
-   * known, the daemon sends "Continue where you left off." into it once the limit has reset.
+   * known, the daemon sends a continue message into it once the limit has reset, telling the
+   * agent to relaunch the subagents and background commands the limit stopped that it still needs
+   * (`USAGE_LIMIT_CONTINUE_MESSAGE` in `@orquester/api`).
    * Host-wide, **on** by default — the chat resumes the work the user already asked for. A chat
    * the user has written to since, or that waits on an approval, is never resumed.
    */

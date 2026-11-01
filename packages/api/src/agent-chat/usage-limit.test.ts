@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem, Turn } from "./thread.ts";
-import { usageLimitNoticeOf } from "./usage-limit.ts";
+import { isUsageLimitContinueMessage, USAGE_LIMIT_CONTINUE_MESSAGE, usageLimitNoticeOf } from "./usage-limit.ts";
 
 let clock = 0;
 function at(): string {
@@ -159,4 +159,10 @@ test("a provider's capacity failure is reported as an overloaded notice; a newer
   assert.equal(limited?.activityId, newer.id);
   assert.equal(limited?.kind, undefined);
   assert.equal(usageLimitNoticeOf([...items, message("user")], [turn("t1", "failed", start)]), null, "the user spoke after it");
+});
+
+test("the usage-limit continue message is recognised in this build's wording and in older logs' wording", () => {
+  assert.equal(isUsageLimitContinueMessage(USAGE_LIMIT_CONTINUE_MESSAGE), true);
+  assert.equal(isUsageLimitContinueMessage("Continue where you left off.\n"), true, "an older build's message");
+  assert.equal(isUsageLimitContinueMessage("Continue where you left off. Then push."), false, "the user's own text");
 });
