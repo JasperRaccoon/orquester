@@ -406,6 +406,16 @@ export interface AdapterCapabilities {
    */
   wakesOnBackgroundCompletion?: boolean;
   /**
+   * A background shell or monitor the agent started outlives every end of its session the user
+   * did not ask for — a host stop, a restart, a crash: the CLI runs it in a process session of its
+   * own, which neither the CLI's exit nor the host lifeline's group kill reaches, and its closing
+   * row says so (`leftRunning`). Only the user's end of the session stops it (Grok). A restart
+   * therefore never counts such work as stopped: it is not named to the agent as something to
+   * restart, and alone it never wakes the agent (host updates spec 2026-11-01 R2, R3). Absent
+   * means no: an end of the session ends its background shells too.
+   */
+  backgroundShellsOutliveSession?: boolean;
+  /**
    * The provider's goal surface (goals §4.5). Absent means none: no chip, no
    * tab marker, no goal state (OpenCode).
    */

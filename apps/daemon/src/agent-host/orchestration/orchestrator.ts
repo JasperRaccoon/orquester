@@ -7205,10 +7205,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return saveHeadNow(runtime);
   };
 
+  /**
+   * What of its adapter's work outlives a stop of the thread's session (Grok's
+   * shells): never counted as stopped by a restart or a crash (R2, R3).
+   */
+  const stopSurvivalOf = (runtime: ThreadRuntime) => {
+    const adapterId = runtime.state.head?.adapter;
+    return adapterId === undefined ? undefined : options.adapters.get(adapterId)?.capabilities;
+  };
+
   /** What `/stop` is about to kill in the thread, named for the continue prompt (R2). */
   const liveWorkOf = (runtime: ThreadRuntime) =>
-    namedLiveWork(liveness.liveTasks(runtime.id), runtime.state.roster, (taskId) =>
-      launchCommandOf(runtime.state.activities, taskId)
+    namedLiveWork(
+      liveness.liveTasks(runtime.id),
+      runtime.state.roster,
+      (taskId) => launchCommandOf(runtime.state.activities, taskId),
+      stopSurvivalOf(runtime)
     );
 
   /**
@@ -7295,7 +7307,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       await clearPendingWake(runtime);
       return;
     }
-    const stoppedWork = stoppedBackgroundWork(runtime.state.roster, wake);
+    // Not a shell its adapter leaves running (Grok's): a crash's closings
+    // read it stopped, but its process runs on (R3).
+    const shellsSurvive = stopSurvivalOf(runtime)?.backgroundShellsOutliveSession === true;
+    const stoppedWork = stoppedBackgroundWork(runtime.state.roster, wake).filter(
+      (row) => !(shellsSurvive && row.agentKind === "background")
+    );
     const attempt = (wake.prepared === true ? (wake.attempt ?? 1) : 0) + 1;
     const optIn = (await options.continuationEnabled?.(head.projectPath)) === true;
     const hasCursor = persistedResumeCursor(runtime, head) !== undefined;
@@ -8235,7 +8252,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       marker === undefined && !isLiveOrphan(head) && head.backgroundWorkLive === true
         ? revivalMarkFor({
             turns: runtime.state.turns,
-            stopped: activeTopLevelWork(runtime.state.roster),
+            stopped: activeTopLevelWork(runtime.state.roster, stopSurvivalOf(runtime)),
             stopAtMs: clock.now().getTime()
           })
         : null;
@@ -8310,7 +8327,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // What the restart stopped, read before any repair below closes it: the
     // marker's record of a `/stop`, and what the roster still shows running
     // (a crash, or a teardown whose rows never reached the log) (R2, R3, R5).
-    const stopped = mergeStoppedWork(marker?.stoppedWork ?? [], activeTopLevelWork(runtime.state.roster));
+    const stopped = mergeStoppedWork(marker?.stoppedWork ?? [], activeTopLevelWork(runtime.state.roster, stopSurvivalOf(runtime)));
     const revival = marker?.revival === true || crashRevival !== null;
     const requestCancelled = marker?.requestCancelled === true || requestPending(runtime.state.pending);
 
