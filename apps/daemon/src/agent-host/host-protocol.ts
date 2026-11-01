@@ -761,7 +761,7 @@ export const AGENT_HOST_CAPABILITIES: Readonly<Required<AgentHostCapabilities>> 
   crossAgentFork: 1,
   // Host updates (spec 2026-11-01): each flips to 1 in the change that implements it.
   continuationRevival: 1,
-  retire: 0,
+  retire: 1,
   // boxes:
   boxes: 1
 });

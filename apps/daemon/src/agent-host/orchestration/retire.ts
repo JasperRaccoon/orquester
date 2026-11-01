@@ -43,9 +43,9 @@ export interface RetireSeams {
   /** The live work of a thread (null: idle, or not loaded). */
   liveWork(threadId: string): RetireLiveWork | null;
   /**
-   * A thread whose only live work is a continuing goal: hold it (pause it between its turns,
-   * marked for the next host). Fire and forget; a hold that does not land is tried again at the
-   * thread's next look.
+   * A kept thread whose goal continues: hold it (pause it between its turns, marked for the next
+   * host). Called for every kept thread; a no-op for one without such a goal. Fire and forget; a
+   * hold that does not land is tried again at the thread's next look.
    */
   holdGoal(threadId: string): void;
   /**
@@ -105,10 +105,9 @@ export function createRetirement(seams: RetireSeams): Retirement {
     if (stopped || !ownership.retiring || ownership.isForeign(threadId) || ownership.releasing(threadId)) return;
     if (ownership.inFlight(threadId) > 0) return;
     const work = seams.liveWork(threadId);
-    if (work === "goal") {
-      seams.holdGoal(threadId);
-      return;
-    }
+    // A continuing goal is held at once — its turn running or not: the pause stops only its NEXT
+    // turn, so the thread is idle at the end of this one.
+    if (work !== null && work !== "busy") seams.holdGoal(threadId);
     if (work !== null) return;
     startRelease(threadId);
   };
@@ -136,7 +135,7 @@ export function createRetirement(seams: RetireSeams): Retirement {
       for (const threadId of ownership.ownedThreadIds() ?? []) {
         if (ownership.inFlight(threadId) > 0) continue;
         const work = seams.liveWork(threadId);
-        if (work === "goal") seams.holdGoal(threadId);
+        if (work !== null && work !== "busy") seams.holdGoal(threadId);
         if (work !== null) continue;
         const release = startRelease(threadId);
         if (release !== null) releases.push(release);

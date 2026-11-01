@@ -247,7 +247,12 @@ describe("agent host server — readiness (§3.1, §8)", () => {
     // Agent Profiles: a daemon refuses to send a profile thread to a host without this; likewise a
     // fork into another agent or account ("Continue in another agent") without `crossAgentFork`.
     // boxes: and a box thread to a host that cannot run its CLI in the box.
-    assert.deepEqual(body.capabilities, { sessionProfiles: 1, crossAgentFork: 1, boxes: 1 });
+    // Host updates (spec 2026-11-01): a forced restart only of a host whose stop marks revivals,
+    // and a retirement only of one that serves `/retire` and `/threads/:id/adopt`.
+    assert.deepEqual(body.capabilities, { sessionProfiles: 1, crossAgentFork: 1, continuationRevival: 1, retire: 1, boxes: 1 });
+    assert.equal(body.generation, 0);
+    assert.equal(body.retiring, false);
+    assert.equal(body.ownedThreadIds, undefined, "an owned set only while retiring");
     assert.equal(agentHostSupports(body, "sessionProfiles"), true);
     assert.equal(agentHostSupports(body, "crossAgentFork"), true);
     assert.equal(agentHostSupports(body, "boxes"), true);

@@ -1598,6 +1598,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     runtime.eventsSinceSnapshot += result.events.length;
     observeIndex(runtime, result);
     publish(runtime, result.events);
+    // Host updates (P2.3 R19): a write may end a retiring host's last live work on the thread.
+    retirement.poke(runtime.id);
     // Rewritten every 50 events and on every head-shaped change (§5.1). A
     // session transition always writes: the §3.3 reconcile reads `meta.json`
     // alone, so a head that lagged behind the log would make a live turn look
@@ -9004,11 +9006,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       session.status === "running" ||
       runtime.compacting ||
       runtime.queuedTurns.length > 0 ||
-      runtime.historyBuffer !== null
+      runtime.historyBuffer !== null ||
+      // An approval or a question waits for the user (`continuation-policy.ts`, R5).
+      requestPending(runtime.state.pending)
     ) {
       return "turn";
     }
-    if (liveness.liveness(threadId) !== null) return "background";
+    // The live work `/health` and the stop's revival read (`liveWorkOf`): the liveness registry's.
+    if (liveness.liveTasks(threadId).length > 0) return "background";
     if (runtime.pendingWake !== undefined) return "wake";
     // A goal held for the handover (its mark on the head) goes with the thread: the adopting
     // host's reconcile resumes it (goals §5.7). One still continuing is held first.
@@ -9148,8 +9153,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         await running.catch(() => undefined);
         return false;
       }
+      // A thread whose directory is gone (deleted on the host that held it) is answered 404, which
+      // the daemon reads as "gone"; its index rows are a cache of nothing.
+      if (!(await store.listThreads()).includes(threadId)) {
+        ownership.adopt(threadId)?.();
+        options.index?.deleteThread(threadId);
+        throw threadNotFound(threadId);
+      }
       // Off the foreign set first (throws HOST_RETIRING on a retiring host): the reconcile below
-      // loads and writes the thread, which only an owner may. Requests for it wait meanwhile.
+      // loads and writes the thread, which only an owner may. Requests for it wait meanwhile. It
+      // answers once the thread is servable: a continuation the reconcile starts runs on.
       const finish = ownership.adopt(threadId);
       if (finish === null) return false;
       const run = (async () => {

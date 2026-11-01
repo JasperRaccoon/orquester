@@ -37,6 +37,7 @@ import type {
   CheckpointService,
   EventPosition,
   EventsFromResult,
+  ForeignThreadRead,
   Ingestion,
   ThreadStore,
   ThreadTail,
@@ -59,6 +60,8 @@ export interface FakeThreadStore extends ThreadStore {
   readonly receipts: Map<string, CommandReceipt>;
   /** Cut the log at `index`, as a malformed line would (§5.1). */
   truncateAt(threadId: string, index: number): void;
+  /** Host updates (P2.3 R16): another host's thread, read with no write. */
+  readThreadReadOnly(threadId: string): Promise<ForeignThreadRead | null>;
   /**
    * `state.json` per thread, as `saveFoldSnapshot` wrote it (A2). Plant a
    * stale or broken snapshot here to drive the fallback: `loadFoldSnapshot`
