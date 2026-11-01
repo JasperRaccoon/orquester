@@ -2454,6 +2454,11 @@ export class ApiClient {
     return this.send("GET", desktopRoutes.host, { query: projectPath ? { projectPath } : undefined, signal });
   }
 
+  /** Installs this host's missing desktop packages; resolves with the new host status. */
+  installDesktopHost(): Promise<DesktopHostStatus> {
+    return this.send("POST", desktopRoutes.hostInstall);
+  }
+
   listDesktops(projectPath?: string, signal?: AbortSignal): Promise<DesktopSummary[]> {
     return this.send("GET", desktopRoutes.list, {
       query: projectPath ? { projectPath } : undefined,

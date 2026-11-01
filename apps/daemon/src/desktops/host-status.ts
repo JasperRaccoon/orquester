@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { accessSync, constants, readFileSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
@@ -83,15 +83,91 @@ export function parseFfmpegOpusEncoder(encodersOutput: string): boolean {
   return encodersOutput.split("\n").some((line) => /^ [A-Z.]{6} libopus(\s|$)/.test(line));
 }
 
+function orderPackages(missingPackages: Iterable<string>): string[] {
+  const missing = new Set(missingPackages);
+  return [...PACKAGE_ORDER.filter((pkg) => missing.has(pkg)), ...[...missing].filter((pkg) => !PACKAGE_ORDER.includes(pkg))];
+}
+
 /** The apt command for the missing packages in the spec's order, or null when nothing is missing. */
 export function buildInstallHint(missingPackages: Iterable<string>): string | null {
-  const missing = new Set(missingPackages);
-  if (missing.size === 0) return null;
-  const ordered = [
-    ...PACKAGE_ORDER.filter((pkg) => missing.has(pkg)),
-    ...[...missing].filter((pkg) => !PACKAGE_ORDER.includes(pkg))
-  ];
-  return `sudo apt-get install -y ${ordered.join(" ")}`;
+  const ordered = orderPackages(missingPackages);
+  return ordered.length === 0 ? null : `sudo apt-get install -y ${ordered.join(" ")}`;
+}
+
+/** apt-get run as root: whether this daemon may, and one run's exit code and output. */
+export interface HostAptGet {
+  available(): Promise<boolean>;
+  run(args: string[]): Promise<{ code: number; output: string }>;
+}
+
+const APT_GET = "/usr/bin/apt-get";
+/** Wait for another apt (unattended-upgrades) instead of failing on its lock; keep changed config files. */
+const APT_OPTIONS = ["-q", "-y", "-o", "DPkg::Lock::Timeout=600", "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold"];
+const APT_RUN_TIMEOUT_MS = 30 * 60_000;
+const OUTPUT_TAIL_LINES = 8;
+
+/**
+ * `/usr/bin/apt-get` as root: directly when the daemon is root, else through `sudo -n` (the
+ * deploy's scoped rule allows apt-get only, so no environment can be passed through it). Stdin
+ * is closed and there is no TTY, so debconf takes each question's default and needrestart only
+ * lists services instead of restarting them.
+ */
+export function systemAptGet(): HostAptGet {
+  const root = process.getuid?.() === 0;
+  let allowed: Promise<boolean> | null = null;
+  return {
+    available() {
+      allowed ??= new Promise((resolve) => {
+        try {
+          accessSync(APT_GET, constants.X_OK);
+        } catch {
+          resolve(false);
+          return;
+        }
+        if (root) {
+          resolve(true);
+          return;
+        }
+        execFile("sudo", ["-n", "-l", APT_GET], { timeout: 10_000 }, (error) => resolve(!error));
+      });
+      return allowed;
+    },
+    run(args) {
+      return new Promise((resolve) => {
+        const [command, argv] = root ? [APT_GET, args] : ["sudo", ["-n", APT_GET, ...args]];
+        const child = spawn(command, argv, {
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env, DEBIAN_FRONTEND: "noninteractive", LC_ALL: "C" },
+          timeout: APT_RUN_TIMEOUT_MS
+        });
+        let output = "";
+        const keep = (chunk: Buffer) => {
+          output = (output + chunk.toString("utf8")).slice(-16_384);
+        };
+        child.stdout.on("data", keep);
+        child.stderr.on("data", keep);
+        child.on("error", (error) => resolve({ code: -1, output: `${output}${error.message}\n` }));
+        child.on("close", (code) => resolve({ code: code ?? -1, output }));
+      });
+    }
+  };
+}
+
+/** Why installing the host's packages did not happen: apt-get cannot run as root here, or it failed. */
+export class DesktopHostInstallError extends Error {
+  constructor(
+    readonly reason: "unavailable" | "failed",
+    message: string,
+    /** The command to run by hand. */
+    readonly hint: string | null
+  ) {
+    super(message);
+    this.name = "DesktopHostInstallError";
+  }
+}
+
+function lastLines(output: string): string {
+  return output.trim().split("\n").slice(-OUTPUT_TAIL_LINES).join("\n");
 }
 
 function run(bin: string, args: string[]): Promise<string> {
@@ -224,10 +300,61 @@ export function evaluateDesktopHost(
 export class DesktopHostProbe {
   private ffmpegCaps: { path: string; caps: Promise<{ pulse: boolean; opus: boolean }> } | null = null;
   private tmuxOk: boolean | null = null;
+  private installing: Promise<DesktopHostStatus> | null = null;
+  private readonly apt: HostAptGet;
 
-  constructor(private readonly options: { path?: () => string } = {}) {}
+  constructor(private readonly options: { path?: () => string; apt?: HostAptGet } = {}) {
+    this.apt = options.apt ?? systemAptGet();
+  }
 
   async status(): Promise<DesktopHostStatus> {
+    const { status, missingPackages } = await this.probe();
+    const installHint = buildInstallHint(missingPackages);
+    const canInstall = installHint !== null && (await this.apt.available());
+    return { ...status, installHint, ...(canInstall ? { canInstall: true } : {}) };
+  }
+
+  /**
+   * Install the missing packages with apt-get as root (one run at a time; a second caller shares
+   * it), refreshing the package lists once when the install fails. Resolves with the new status.
+   */
+  install(): Promise<DesktopHostStatus> {
+    this.installing ??= this.runInstall().finally(() => {
+      this.installing = null;
+    });
+    return this.installing;
+  }
+
+  private async runInstall(): Promise<DesktopHostStatus> {
+    const { missingPackages } = await this.probe();
+    if (missingPackages.length === 0) return this.status();
+    if (!(await this.apt.available())) {
+      throw new DesktopHostInstallError(
+        "unavailable",
+        "The daemon cannot run apt-get as root here; install the packages yourself.",
+        buildInstallHint(missingPackages)
+      );
+    }
+    const install = [...APT_OPTIONS, "install", "--no-install-recommends", ...orderPackages(missingPackages)];
+    let result = await this.apt.run(install);
+    if (result.code !== 0) {
+      // Stale package lists name versions the mirror no longer has: refresh once and retry.
+      const update = await this.apt.run([...APT_OPTIONS, "update"]);
+      if (update.code === 0) result = await this.apt.run(install);
+    }
+    // A newly installed tmux has not had its version checked yet.
+    this.tmuxOk = null;
+    if (result.code !== 0) {
+      throw new DesktopHostInstallError(
+        "failed",
+        `apt-get could not install the desktop packages:\n${lastLines(result.output)}`,
+        buildInstallHint(missingPackages)
+      );
+    }
+    return this.status();
+  }
+
+  private async probe(): Promise<ReturnType<typeof evaluateDesktopHost>> {
     const path = this.options.path?.() ?? sessionPath();
     const toolPaths: Record<string, string | null> = {};
     for (const tool of DESKTOP_TOOLS) toolPaths[tool.name] = resolveTool(tool.name, path);
@@ -236,7 +363,7 @@ export class DesktopHostProbe {
     if (this.tmuxOk === null) {
       this.tmuxOk = tmuxAvailable() && tmuxVersionOk();
     }
-    const { status, missingPackages } = evaluateDesktopHost({
+    return evaluateDesktopHost({
       toolPaths,
       ffmpegPulse: caps.pulse,
       ffmpegOpus: caps.opus,
@@ -246,7 +373,6 @@ export class DesktopHostProbe {
       machineId: machineIdOk(),
       passwdEntry: passwdEntryOk()
     });
-    return { ...status, installHint: buildInstallHint(missingPackages) };
   }
 
   private ffmpegCapabilities(ffmpeg: string): Promise<{ pulse: boolean; opus: boolean }> {

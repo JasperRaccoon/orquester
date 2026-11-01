@@ -4,7 +4,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DESKTOP_TOOLS,
+  DesktopHostInstallError,
   DesktopHostProbe,
+  type HostAptGet,
   buildInstallHint,
   parseFfmpegOpusEncoder,
   parseFfmpegPulseInput,
@@ -74,7 +77,7 @@ test("resolveTool finds executables on the given PATH only", async (t) => {
 test("a host without the tools is unavailable with an install hint", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "orq-desktop-empty-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const status = await new DesktopHostProbe({ path: () => dir }).status();
+  const status = await new DesktopHostProbe({ path: () => dir, apt: fakeApt(dir, { available: false }).apt }).status();
   assert.equal(status.available, false);
   assert.equal(status.audioAvailable, false);
   assert.equal(status.tmuxUsable, false);
@@ -84,4 +87,69 @@ test("a host without the tools is unavailable with an install hint", async (t) =
     status.tools.filter((tool) => tool.required).map((tool) => tool.name),
     ["Xvnc", "openbox", "dbus-daemon", "tmux"]
   );
+});
+
+/** apt-get as root, faked: `install` puts every desktop tool on `dir` unless it is told to fail first. */
+function fakeApt(dir: string, options: { available?: boolean; failingInstalls?: number }) {
+  const calls: string[][] = [];
+  let failing = options.failingInstalls ?? 0;
+  const apt: HostAptGet = {
+    available: async () => options.available ?? true,
+    run: async (args) => {
+      calls.push(args);
+      if (!args.includes("install")) return { code: 0, output: "Reading package lists...\n" };
+      if (failing > 0) {
+        failing -= 1;
+        return { code: 100, output: "Reading package lists...\nE: Unable to locate package openbox\n" };
+      }
+      for (const tool of DESKTOP_TOOLS) await writeFile(join(dir, tool.name), "#!/bin/sh\n", { mode: 0o755 });
+      return { code: 0, output: "" };
+    }
+  };
+  return { apt, calls };
+}
+
+const verbs = (calls: string[][]) => calls.map((args) => (args.includes("install") ? "install" : "update"));
+
+test("install: apt-get installs the missing packages, refreshing the lists once when it fails", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-desktop-install-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const fake = fakeApt(dir, { failingInstalls: 1 });
+  const probe = new DesktopHostProbe({ path: () => dir, apt: fake.apt });
+  assert.equal((await probe.status()).canInstall, true);
+
+  const status = await probe.install();
+  assert.deepEqual(verbs(fake.calls), ["install", "update", "install"]);
+  const installed = fake.calls[0]!.slice(fake.calls[0]!.indexOf("--no-install-recommends") + 1);
+  assert.deepEqual(installed.slice(0, 2), ["tigervnc-standalone-server", "openbox"]);
+  assert.ok(status.tools.every((tool) => tool.path !== null));
+});
+
+test("install: a failure after the refresh rejects with apt-get's output", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-desktop-install-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const fake = fakeApt(dir, { failingInstalls: 2 });
+  const error = await new DesktopHostProbe({ path: () => dir, apt: fake.apt }).install().then(
+    () => assert.fail("install resolved"),
+    (e: unknown) => e
+  );
+  assert.ok(error instanceof DesktopHostInstallError);
+  assert.equal(error.reason, "failed");
+  assert.match(error.message, /Unable to locate package openbox/);
+  assert.deepEqual(verbs(fake.calls), ["install", "update", "install"]);
+});
+
+test("install: without apt-get as root nothing runs and the hint comes back", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-desktop-install-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const fake = fakeApt(dir, { available: false });
+  const probe = new DesktopHostProbe({ path: () => dir, apt: fake.apt });
+  assert.equal((await probe.status()).canInstall, undefined);
+  await assert.rejects(probe.install(), (error: unknown) => {
+    assert.ok(error instanceof DesktopHostInstallError);
+    assert.equal(error.reason, "unavailable");
+    assert.match(error.hint ?? "", /^sudo apt-get install -y tigervnc-standalone-server /);
+    return true;
+  });
+  assert.deepEqual(fake.calls, []);
 });

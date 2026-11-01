@@ -88,6 +88,11 @@ export interface DesktopHostStatus {
   /** `sudo apt-get install -y …` for whatever is missing, or `null`. */
   installHint: string | null;
   /**
+   * This host's missing packages can be installed by the daemon (`POST desktopRoutes.hostInstall`):
+   * it may run apt-get as root. Absent when it cannot, when nothing is missing, and for a VM.
+   */
+  canInstall?: boolean;
+  /**
    * A VM project's desktop stack: Orquester installs what is missing itself when a desktop
    * opens (`installHint` then only names it). Absent when the user must install it, and on the host.
    */
@@ -142,6 +147,8 @@ export const desktopRoutes = {
   create: "/api/desktops",
   /** The host's prerequisites; `?projectPath=` (boxes) answers for that project's machine: its VM for a box project. */
   host: "/api/desktops/host",
+  /** Installs this host's missing desktop packages (apt-get as root); answers the new host status. */
+  hostInstall: "/api/desktops/host/install",
   suggestions: "/api/desktops/suggestions",
   desktop: desktopPath,
   stop: (id: string): string => `${desktopPath(id)}/stop`,

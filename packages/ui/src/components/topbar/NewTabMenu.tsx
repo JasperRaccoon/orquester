@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Download,
   FolderTree,
   GitBranch,
   Globe,
@@ -482,7 +483,9 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string; inBox?: b
  * The desktop entries (spec §10.2): "New desktop…" and one "Open app in" row
  * per running desktop of the project, each opening the launch dialog. Offered
  * only over HTTP (desktops stream over WebSockets) on a host that has the
- * prerequisites; otherwise a hint says which of the two is missing.
+ * prerequisites; otherwise a hint says which of the two is missing, with a
+ * button that installs the host's missing packages when the daemon can run
+ * apt-get as root (else the command to copy).
  *
  * boxes: in a Linux VM project (`inVm`) the desktops run in the VM: the
  * prerequisites are the VM's (missing packages are installed when a desktop
@@ -493,6 +496,8 @@ const DesktopEntries: React.FC<{ projectPath: string; inVm?: boolean }> = ({ pro
   const host = useAppStore((s) => s.desktopHost);
   const desktops = useAppStore((s) => s.desktops);
   const openLaunchDialog = useAppStore((s) => s.openLaunchDialog);
+  const install = useAppStore((s) => s.desktopHostInstall);
+  const installDesktopHost = useAppStore((s) => s.installDesktopHost);
   const [copied, setCopied] = React.useState(false);
   const [vmHost, setVmHost] = React.useState<DesktopHostStatus | "error" | null>(null);
 
@@ -518,7 +523,26 @@ const DesktopEntries: React.FC<{ projectPath: string; inVm?: boolean }> = ({ pro
     return (
       <DropdownEmpty>
         <span className="block">Desktop — {host ? "missing host tools" : "not available on this daemon"}</span>
-        {hint ? (
+        {host?.canInstall || install.installing ? (
+          <>
+            <button
+              type="button"
+              disabled={install.installing}
+              title={hint ?? undefined}
+              onClick={(event) => {
+                event.stopPropagation();
+                void installDesktopHost();
+              }}
+              className="mt-1.5 flex items-center gap-1.5 rounded bg-neutral-800 px-2 py-1 text-xs not-italic text-neutral-200 transition-colors hover:bg-neutral-700 disabled:cursor-default disabled:opacity-70"
+            >
+              {install.installing ? <LoaderCircle size={12} className="animate-spin" /> : <Download size={12} />}
+              {install.installing ? "Installing… this can take a few minutes" : "Install desktop tools"}
+            </button>
+            {install.error ? (
+              <span className="mt-1 block whitespace-pre-wrap break-words text-[11px] not-italic text-danger-300">{install.error}</span>
+            ) : null}
+          </>
+        ) : hint ? (
           <span className="mt-1 flex items-start gap-1 not-italic">
             <code className="min-w-0 flex-1 break-all rounded bg-neutral-950 px-1 py-0.5 font-mono text-[11px] text-neutral-400">
               {hint}
