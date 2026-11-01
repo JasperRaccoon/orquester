@@ -187,8 +187,10 @@ export function requestPending(pending: ThreadFoldState["pending"]): boolean {
 
 /**
  * R4: the automatic continues in a row that still count at `nowMs` — none once
- * another turn followed the last one (the user's message, or anything else the
- * agent did on its own), and only those inside {@link AUTO_CONTINUE_LOOP_WINDOW_MS}.
+ * a message came in after the last one (a turn the host was asked for:
+ * `Turn.userMessageId`; a turn the provider started by itself, such as a
+ * subagent's wake, is none), or once that turn is gone from the thread (a
+ * rewind) — and only those inside {@link AUTO_CONTINUE_LOOP_WINDOW_MS}.
  */
 export function autoContinueChain(
   record: readonly AutoContinue[] | undefined,
@@ -196,7 +198,9 @@ export function autoContinueChain(
   nowMs: number
 ): AutoContinue[] {
   const last = record?.at(-1);
-  if (record === undefined || last === undefined || turns?.at(-1)?.turnId !== last.turnId) return [];
+  if (record === undefined || last === undefined) return [];
+  const at = (turns ?? []).findIndex((turn) => turn.turnId === last.turnId);
+  if (at < 0 || turns!.slice(at + 1).some((turn) => turn.userMessageId !== undefined)) return [];
   return record.filter((entry) => {
     const at = Date.parse(entry.at);
     return Number.isFinite(at) && nowMs - at < AUTO_CONTINUE_LOOP_WINDOW_MS;

@@ -15,6 +15,7 @@ import { runtimeEventToActivities } from "../ingestion/activities.ts";
 import {
   AUTO_CONTINUE_LOOP_MESSAGE,
   CONTINUATION_SEND_FAILED_MESSAGE,
+  CRASH_RESUME_LIMIT_MESSAGE,
   CRASH_RESUME_SUMMARY
 } from "../host-protocol.ts";
 import { DeadlineExceededError } from "../support/deadline.ts";
@@ -116,8 +117,8 @@ async function workingTurn(scene: Scene, work: Array<{ taskId: string; taskType:
   await scene.host.settle();
 }
 
-async function turnEnds(scene: Scene, state: "completed" | "interrupted" = "completed"): Promise<void> {
-  scene.emit("turn.completed", { state }, { turnId: scene.turnId() });
+async function turnEnds(scene: Scene, state: "completed" | "interrupted" = "completed", turnId = scene.turnId()): Promise<void> {
+  scene.emit("turn.completed", { state }, { turnId });
   await scene.host.settle();
 }
 
@@ -131,7 +132,7 @@ async function deploy(scene: Scene): Promise<string[]> {
     scene.emit("task.completed", { taskId, status: "stopped", ...(leftRunning ? { leftRunning: true } : {}) });
   }
   const head = scene.host.store.heads.get(THREAD);
-  if (head?.session.status === "running" && head.session.activeTurnId !== null) await turnEnds(scene, "interrupted");
+  if (head?.session.status === "running" && head.session.activeTurnId !== null) await turnEnds(scene, "interrupted", head.session.activeTurnId);
   await scene.host.settle();
   await shutDown(scene);
   return marked;
@@ -374,9 +375,55 @@ describe("a crash revives what it stopped too (R3)", () => {
     assert.deepEqual(sends, []);
     await shutDown(next);
   });
+
+  it("a host that keeps dying while the subagents run: revived twice, then settled — no loop", async () => {
+    let scene = await serve(claude());
+    await workingTurn(scene, [SUBAGENT]);
+    await turnEnds(scene);
+    await shutDown(scene); // a crash
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const { next, sends } = await boot(scene.host.store, claude(attempt + 1));
+      assert.equal(sends.length, 1, `revival ${attempt}`);
+      // The revival's turn relaunches the subagent and ends; the subagent works on…
+      next.emit("turn.started", {}, { turnId: next.turnId() });
+      const relaunched = { ...SUBAGENT, taskId: `agent-relaunch-${attempt}` };
+      next.adapter.live.add(relaunched.taskId);
+      next.emit("task.started", relaunched);
+      await next.host.settle();
+      await turnEnds(next);
+      await shutDown(next); // …and the host dies again
+      scene = next;
+    }
+    const { next, sends } = await boot(scene.host.store, claude(4));
+    assert.deepEqual(sends, [], "not a third time");
+    assert.equal(headOf(next.host.store).session.lastError, CRASH_RESUME_LIMIT_MESSAGE);
+    await shutDown(next);
+  });
 });
 
 describe("the loop cap (R4)", () => {
+  it("turns the agent started on its own in between are no message of the user's: still a chain", async () => {
+    let scene = await serve(claude());
+    await workingTurn(scene);
+    for (let restart = 1; restart <= 3; restart += 1) {
+      await deploy(scene);
+      const { next, sends } = await boot(scene.host.store, claude(10 * restart));
+      assert.equal(sends.length, 1, `restart ${restart} continues`);
+      next.emit("turn.started", {}, { turnId: next.turnId() });
+      await next.host.settle();
+      await turnEnds(next);
+      // A subagent's end woke the agent: a turn the provider started by itself.
+      next.emit("turn.started", {}, { turnId: `wake-${restart}` });
+      await next.host.settle();
+      scene = next;
+    }
+    await deploy(scene);
+    const { next, sends } = await boot(scene.host.store, claude(40));
+    assert.deepEqual(sends, [], "not a fourth time");
+    assert.equal(headOf(next.host.store).session.lastError, AUTO_CONTINUE_LOOP_MESSAGE);
+    await shutDown(next);
+  });
+
   it("three automatic continues in a row within 10 minutes, nobody writing: the fourth restart settles the chat", async () => {
     let scene = await serve(claude());
     await workingTurn(scene);
@@ -415,6 +462,27 @@ describe("the loop cap (R4)", () => {
 });
 
 describe("a continuation whose start fails (R6)", () => {
+  it("the user's Stop while it waits to retry cancels it: nothing is started later", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const first = await serve(claude());
+    await workingTurn(first);
+    await deploy(first);
+    const adapter = claude(2);
+    adapter.failNext("failStartSession", new DeadlineExceededError("session-open:claude", 30_000));
+    const { next } = await boot(first.host.store, adapter);
+    await next.host.orchestrator.command(THREAD, "interrupt", { commandId: cmd() });
+    await next.host.settle();
+    const head = headOf(next.host.store);
+    assert.equal(head.continueAfterRestart, undefined, "nothing left for a later host to continue either");
+    assert.equal(head.session.status, "stopped", "no longer reads starting");
+
+    t.mock.timers.tick(150_000);
+    await next.host.settle();
+    assert.equal(adapter.calls.filter((call) => call.kind === "startSession").length, 1, "never retried");
+    assert.deepEqual(sendsOf(adapter), []);
+    await shutDown(next);
+  });
+
   it("a transient failure is retried at 30 s and then at 120 s", async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const first = await serve(claude());
