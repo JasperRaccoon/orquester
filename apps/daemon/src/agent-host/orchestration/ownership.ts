@@ -24,6 +24,25 @@
 
 import { AgentChatCommandError } from "./errors.ts";
 
+/** A thread id the host's routes accept (`server/http-server.ts`): a directory name, never a path. */
+const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * P2.3 R15: the foreign-threads file, `{ "threadIds": string[] }`. Anything else throws — a host
+ * that cannot tell which threads another host serves must not boot and guess.
+ */
+export function parseForeignThreadsFile(raw: string): string[] {
+  const parsed = JSON.parse(raw) as unknown;
+  const threadIds =
+    parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as { threadIds?: unknown }).threadIds
+      : undefined;
+  if (!Array.isArray(threadIds) || !threadIds.every((id) => typeof id === "string" && THREAD_ID_PATTERN.test(id))) {
+    throw new Error('The foreign-threads file must be { "threadIds": [<thread id>, …] }.');
+  }
+  return threadIds as string[];
+}
+
 /** The 409 every route answers for a thread another host owns (P2.3 R16, R19). */
 export function threadNotOwned(threadId: string): AgentChatCommandError {
   return new AgentChatCommandError(

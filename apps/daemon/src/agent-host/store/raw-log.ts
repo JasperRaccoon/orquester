@@ -379,6 +379,11 @@ export function pruneRawLogDirectory(input: {
   readonly threadsRoot: string;
   /** Threads with an open writer: their LIVE file is never unlinked. */
   readonly liveThreadIds?: ReadonlySet<string>;
+  /**
+   * Host updates (spec 2026-11-01 P2.3 R16): threads another host serves — not counted, never
+   * pruned (that host may be appending to them).
+   */
+  readonly skip?: (threadId: string) => boolean;
   readonly now?: () => number;
 }): { readonly deleted: number; readonly totalBytes: number } {
   const ceiling = RAW_LOG_TOTAL_BYTES_CEILING;
@@ -402,6 +407,9 @@ export function pruneRawLogDirectory(input: {
       continue;
     }
     const threadId = dirent.name;
+    if (input.skip?.(threadId) === true) {
+      continue;
+    }
     const dir = path.join(input.threadsRoot, threadId);
     let entries: string[];
     try {

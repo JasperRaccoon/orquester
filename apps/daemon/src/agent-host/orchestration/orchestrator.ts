@@ -161,6 +161,7 @@ import type {
   AppendResult,
   CaptureResult,
   CheckpointService,
+  ForeignThreadRead,
   Ingestion,
   LivenessRegistry,
   ProviderSnapshotRegistry,
@@ -343,14 +344,6 @@ export type HostThreadStore = ThreadStore & {
   readThreadReadOnly?(threadId: string): Promise<ForeignThreadRead | null>;
 };
 
-/** What {@link HostThreadStore.readThreadReadOnly} reads. */
-export interface ForeignThreadRead {
-  head: ThreadHead | null;
-  binding: ProviderSessionBinding | null;
-  /** Every complete line that decodes, in order; a trailing line still being written is left out. */
-  events: DomainEvent[];
-  truncated: boolean;
-}
 
 /** How one thread read is projected (`readThread`). */
 export interface ThreadReadOptions {
@@ -990,7 +983,7 @@ export interface Orchestrator {
    * `THREAD_NOT_OWNED` for a thread this host does not own; else counted in flight until the
    * returned exit runs.
    */
-  enterThread(threadId: string): Promise<() => void>;
+  enterThread(threadId: string, options?: { readsForeign?: boolean }): Promise<() => void>;
 
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
@@ -9168,7 +9161,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     adoptThread,
     ownedThreadIds: () => ownership.ownedThreadIds(),
     isRetiring: () => ownership.retiring,
-    enterThread: (threadId) => ownership.enter(threadId),
+    enterThread: (threadId, enterOptions) => ownership.enter(threadId, enterOptions),
     markThreadsForContinuation,
     clearContinuationMarkers,
     reconcile,

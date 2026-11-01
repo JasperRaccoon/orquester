@@ -84,6 +84,7 @@ import type {
   Clock,
   EventPosition,
   EventsFromResult,
+  ForeignThreadRead,
   IdGen,
   ThreadStore,
   ThreadTail
@@ -220,6 +221,12 @@ export interface ThreadStoreOptions {
    * own logger.
    */
   logger?: { warn(message: string, detail?: unknown): void };
+  /**
+   * Host updates (spec 2026-11-01 P2.3 R16, R18): the threads this host's sweeps may touch, and
+   * whether they run at all. Another host's thread is never swept — not its attachments, not its
+   * raw log — and a retiring host sweeps nothing (the primary does). Absent: every thread, always.
+   */
+  sweepScope?: { owns(threadId: string): boolean; suspended(): boolean };
 }
 
 /** Default cadence for the background sweep. */
@@ -315,6 +322,13 @@ export interface AgentThreadStore extends ThreadStore {
     window: ThreadItemOutputWindowQuery
   ): Promise<ThreadItemOutputWindowResponse | null>;
   /**
+   * Host updates (spec 2026-11-01 P2.3 R16): a thread another host serves, read off disk without
+   * a write and without a cache entry — its head, its binding and every complete line of its log
+   * (a trailing line still being written is left out; no torn tail is cut). Null when it does not
+   * exist.
+   */
+  readThreadReadOnly(threadId: string): Promise<ForeignThreadRead | null>;
+  /**
    * Cheap boot cleanup: prune pending/partial uploads and rotated raw logs
    * without reading or folding any conversation history.
    */
@@ -338,6 +352,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
   const ids = options.idGen ?? { uuid: randomUUID };
   const homeDirs = options.homeDirs;
   const deleteThreadRefs = options.deleteThreadRefs;
+  const sweepScope = options.sweepScope;
 
   const threads = new Map<string, ThreadRuntime>();
   const pendingDir = path.join(rootDir, "pending-attachments");
@@ -832,6 +847,13 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (entry.binding !== undefined) {
       return entry.binding;
     }
+    const binding = await readBindingFile(threadId);
+    entry.binding = binding;
+    return binding;
+  }
+
+  /** `binding.json` off disk, uncached; null when absent or unreadable. */
+  async function readBindingFile(threadId: string): Promise<ProviderSessionBinding | null> {
     let binding: ProviderSessionBinding | null = null;
     try {
       const raw = await readFileOrNull(threadBindingPath(rootDir, threadId));
@@ -855,7 +877,6 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     } catch {
       binding = null;
     }
-    entry.binding = binding;
     return binding;
   }
 
@@ -1109,6 +1130,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       pruneRawLogDirectory({
         threadsRoot: threadsDir(rootDir),
         liveThreadIds,
+        ...(sweepScope !== undefined ? { skip: (threadId: string) => !sweepScope.owns(threadId) } : {}),
         now: () => nowMs
       });
     } catch {
@@ -1616,6 +1638,8 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     },
 
     async pruneAttachments(input?: { threadId?: string; now?: Date }): Promise<void> {
+      // A retiring host's scheduled sweep does not run (its owned threads' own prunes still do).
+      if (input?.threadId === undefined && sweepScope?.suspended() === true) return;
       const nowMs = (input?.now ?? clock.now()).getTime();
       // `pending`-segment uploads and `.part` files: nothing references them
       // by construction, so the age bounds are the whole rule.
@@ -1628,8 +1652,9 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         pruneRawLogs(nowMs);
       }
 
-      const targets =
-        input?.threadId !== undefined ? [input.threadId] : await store.listThreads();
+      const targets = (input?.threadId !== undefined ? [input.threadId] : await store.listThreads()).filter(
+        (threadId) => sweepScope?.owns(threadId) !== false
+      );
       for (const threadId of targets) {
         try {
           const dir = threadAttachmentsDir(rootDir, threadId);
@@ -1691,14 +1716,30 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     },
 
     async sweepStartup(): Promise<void> {
+      if (sweepScope?.suspended() === true) return;
       const nowMs = clock.now().getTime();
       await sweepDirectory(pendingDir, nowMs, () => false);
       pruneRawLogs(nowMs);
       // Partials need no event-log reference scan. Keep every completed file;
       // the scheduled deep sweep will fold histories and collect true orphans.
       for (const threadId of await store.listThreads()) {
+        if (sweepScope?.owns(threadId) === false) continue;
         await sweepDirectory(threadAttachmentsDir(rootDir, threadId), nowMs, () => true);
       }
+    },
+
+    async readThreadReadOnly(threadId: string): Promise<ForeignThreadRead | null> {
+      assertSafeThreadId(threadId);
+      const raw = await readFileOrNull(threadMetaPath(rootDir, threadId));
+      if (raw === null) return null;
+      let head: ThreadHead | null = null;
+      try {
+        head = parseAgentThreadHead(JSON.parse(raw)) as ThreadHead | null;
+      } catch {
+        head = null;
+      }
+      const tail = await readLog(threadId);
+      return { head, binding: await readBindingFile(threadId), events: tail.events, truncated: tail.truncated };
     },
 
     dropIdleReplayCursors(nowMs = clock.now().getTime()): number {

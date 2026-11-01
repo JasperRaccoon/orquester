@@ -255,6 +255,13 @@ export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistr
    * lands; `flush()` awaits it.
    */
   stop(): void;
+  /**
+   * Host updates (spec 2026-11-01 P2.3 R18, R21): a retiring host stops writing the shared cache
+   * file — the primary owns it — while it keeps probing and serving in memory; `resumePersistence`
+   * (an unretire) writes what it holds now and every change after.
+   */
+  suspendPersistence(): void;
+  resumePersistence(): void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -448,6 +455,7 @@ export function createProviderSnapshotRegistry(
   let primed = false;
   let timerHandle: unknown = null;
   let stopped = false;
+  let persistSuspended = false;
   let persistChain: Promise<unknown> = Promise.resolve();
 
   const notify = (adapterId: AgentAdapterId): void => {
@@ -463,7 +471,7 @@ export function createProviderSnapshotRegistry(
   const persist = (): void => {
     // A stopped registry writes nothing (see `stop()`): a late probe's write
     // recreated a host-teardown test's deleted temp root, every run.
-    if (stopped) {
+    if (stopped || persistSuspended) {
       return;
     }
     persistChain = persistChain
@@ -939,6 +947,16 @@ export function createProviderSnapshotRegistry(
 
     changeCount(): number {
       return changeCount;
+    },
+
+    suspendPersistence(): void {
+      persistSuspended = true;
+    },
+
+    resumePersistence(): void {
+      if (!persistSuspended) return;
+      persistSuspended = false;
+      persist();
     },
 
     stop(): void {
