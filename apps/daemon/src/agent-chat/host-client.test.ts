@@ -216,6 +216,22 @@ test("a second misroute answers HOST_UNAVAILABLE: one retry, never a loop, and n
   assert.equal(only.sent.length, 1);
 });
 
+test("THREAD_NOT_OWNED about another thread than the path's answers HOST_UNAVAILABLE, and moves nothing", async () => {
+  // Forking t1 touches t-src, which another host owns: t1's own owner is not in question.
+  const otherThread: FakeAnswer = {
+    status: 409,
+    body: { error: { code: "THREAD_NOT_OWNED", message: "Thread 't-src' belongs to another agent host.", detail: { threadId: "t-src" } } }
+  };
+  const primary = new FakeHost(() => otherThread);
+  const directory = fakeDirectory([endpoint(2, "primary", primary)], new Map());
+  const client = new RoutingHostClient(directory);
+
+  await assert.rejects(client.json("POST", agentHostRoutes.turn("t1"), { commandId: "c1" }), HostUnavailableError);
+  await assert.rejects(client.open("GET", agentHostRoutes.events("t1")), HostUnavailableError);
+  assert.equal(primary.sent.length, 2, "not retried");
+  assert.deepEqual(directory.stale, [], "t1's ownership is not marked stale, so nothing is released or adopted");
+});
+
 test("HOST_RETIRING sends a create or a fork once more, to the primary", async () => {
   const old = new FakeHost(() => retiringRefusal);
   const fresh = new FakeHost(({ path }) => ({ status: 200, body: { createdBy: 2, path } }));
