@@ -12,7 +12,8 @@
  *    workflows and chats agree about which accounts are spent;
  * 2. **arms** the automatic resume when the reset is known and the setting
  *    (`autoResumeLimitedChats`) is on: at the reset plus {@link USAGE_LIMIT_RESUME_MARGIN_MS} it
- *    sends {@link USAGE_LIMIT_CONTINUE_MESSAGE} through the chat's own `/turn` route, under the
+ *    sends {@link USAGE_LIMIT_CONTINUE_MESSAGE} (continue, and relaunch the stopped subagents and
+ *    background commands still needed) through the chat's own `/turn` route, under the
  *    idempotent command id `limit-resume:<sessionId>:<turn>:<resetAt>` (the host's receipts make a
  *    re-post after a crash a no-op). A limit with no known reset, or one already past when it is
  *    first seen, is never resumed on its own;

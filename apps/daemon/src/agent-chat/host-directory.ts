@@ -8,7 +8,7 @@
  * summary poll read it, so no caller of the client has to know a second host exists.
  */
 
-import type { AgentHostClient } from "./host-client.ts";
+import type { HostClient } from "./host-client.ts";
 
 export type HostRole = "primary" | "retiring";
 
@@ -16,8 +16,8 @@ export type HostRole = "primary" | "retiring";
 export interface HostEndpoint {
   readonly generation: number;
   readonly role: HostRole;
-  /** A client bound to this host's own socket and token — no routing. */
-  readonly client: AgentHostClient;
+  /** A client bound to this host's own socket and token (an `AgentHostClient`) — no routing. */
+  readonly client: HostClient;
 }
 
 export interface HostDirectory {
@@ -37,4 +37,18 @@ export interface HostDirectory {
    * the adoption that answer implies) before the caller retries once.
    */
   ownershipStale(threadId: string, generation: number): Promise<void>;
+}
+
+/**
+ * One host that is always the primary and owns every thread: the daemon's directory while only
+ * one host exists. Routing over it is exactly today's single-socket client.
+ */
+export function singleHostDirectory(client: HostClient, generation = 0): HostDirectory {
+  const endpoint: HostEndpoint = { generation, role: "primary", client };
+  return {
+    primary: () => endpoint,
+    hosts: () => [endpoint],
+    hostForThread: async () => endpoint,
+    ownershipStale: async () => undefined
+  };
 }

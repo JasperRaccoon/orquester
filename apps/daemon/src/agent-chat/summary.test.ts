@@ -7,7 +7,14 @@ import { test, type TestContext } from "node:test";
 import type { SessionSummary } from "@orquester/api";
 import type { ThreadUsageLimitNotice } from "@orquester/api/agent-chat";
 import { ChatSessionManager } from "./chat-sessions.ts";
-import { AgentHostClient } from "./host-client.ts";
+import {
+  AgentHostClient,
+  HostUnavailableError,
+  RoutingHostClient,
+  type HostClient,
+  type HostJsonResponse
+} from "./host-client.ts";
+import type { HostDirectory, HostEndpoint } from "./host-directory.ts";
 import {
   AgentChatSummaryService,
   type ThreadUsageReading
@@ -870,4 +877,82 @@ test("a thread's usage-limit notice is handed on when it moves, never for a host
   await h.read("t1", { usageLimit: { ...usageLimit, parked: false } });
   await h.read("t1", { usageLimit: null });
   assert.deepEqual(notices.map(([, notice]) => notice?.parked ?? null), [null, true, false, null]);
+});
+
+test("during an update every thread is read from its own host: liveness is the union, and a retiring host's thread fires every listener", async () => {
+  // Host updates (spec 2026-11-01 P2.4 R25). Each fake host answers only the threads it owns.
+  const summaries = new Map<string, unknown>();
+  let primaryDown = false;
+  const host = (owned: string, down: () => boolean = () => false): HostClient => ({
+    async json<T>(_method: string, path: string): Promise<HostJsonResponse<T>> {
+      if (down()) throw new HostUnavailableError("connect ENOENT agent-host-2.sock");
+      if (path !== `/threads/${owned}/summary`) {
+        const value = { error: { code: "THREAD_NOT_OWNED", message: "another host's" } };
+        return { status: 409, value: value as T, raw: JSON.stringify(value) };
+      }
+      const value = summaries.get(owned) ?? {};
+      return { status: 200, value: value as T, raw: JSON.stringify(value) };
+    },
+    open: () => Promise.reject(new Error("the summary poll never opens a stream"))
+  });
+  const hosts: HostEndpoint[] = [
+    { generation: 2, role: "primary", client: host("t-new", () => primaryDown) },
+    { generation: 1, role: "retiring", client: host("t-old") }
+  ];
+  const directory: HostDirectory = {
+    primary: () => hosts[0]!,
+    hosts: () => hosts,
+    hostForThread: async (threadId) => (threadId === "t-old" ? hosts[1]! : hosts[0]!),
+    ownershipStale: async () => undefined
+  };
+  const settled: string[] = [];
+  const backgroundEnded: string[] = [];
+  const notices: Array<[string, ThreadUsageLimitNotice | null]> = [];
+  const candidates: string[] = [];
+  const chat = new ChatSessionManager({ requestPersist: () => undefined });
+  const service = new AgentChatSummaryService({
+    client: new RoutingHostClient(directory),
+    chat,
+    broadcaster: { publish: () => undefined },
+    push: { notifyStructural: async () => undefined },
+    isHostHealthy: () => !primaryDown,
+    directory,
+    onTurnSettled: (threadId) => settled.push(threadId),
+    onBackgroundWorkEnded: (threadId) => backgroundEnded.push(threadId),
+    onUsageLimitNotice: (threadId, notice) => notices.push([threadId, notice]),
+    onIdleCompactionCandidate: (threadId, candidate) => {
+      if (candidate !== null) candidates.push(threadId);
+    }
+  });
+  seedTab(chat, "t-old");
+  seedTab(chat, "t-new");
+
+  const turn = { turnId: "u1", state: "running", startedAt: "2026-11-01T10:00:00.000Z", completedAt: null };
+  summaries.set("t-old", {
+    chatSessionStatus: "running",
+    latestTurn: turn,
+    backgroundLiveness: "working",
+    usageLimit: { activityId: "a1", turnId: "u1", at: "2026-11-01T10:01:00.000Z", message: "limit", parked: true }
+  });
+  summaries.set("t-new", { chatSessionStatus: "ready", backgroundLiveness: "monitoring" });
+  await service.refreshAll();
+  assert.deepEqual(service.threadsWithBackgroundLiveness().sort(), ["t-new", "t-old"]);
+  assert.equal(chat.get("t-old")?.chatSessionStatus, "running", "the retiring host's own state");
+  assert.deepEqual(notices.map(([threadId]) => threadId), ["t-old"]);
+
+  // The primary goes down for a restart; the retiring host's thread finishes meanwhile.
+  primaryDown = true;
+  summaries.set("t-old", {
+    chatSessionStatus: "ready",
+    latestTurn: { ...turn, state: "completed", completedAt: "2026-11-01T10:05:00.000Z" },
+    backgroundLiveness: null,
+    usageLimit: null,
+    idleCompaction: { turnId: "u1", usedTokens: 120_000, promptCacheExpiresAt: "2026-11-01T11:05:00.000Z" }
+  });
+  await service.refreshAll();
+  assert.deepEqual(settled, ["t-old"]);
+  assert.deepEqual(backgroundEnded, ["t-old"]);
+  assert.deepEqual(notices.map(([threadId, notice]) => [threadId, notice?.parked ?? null]), [["t-old", true], ["t-old", null]]);
+  assert.deepEqual(candidates, ["t-old"]);
+  assert.deepEqual(service.threadsWithBackgroundLiveness(), ["t-new"], "the unreachable primary's thread keeps its last state");
 });

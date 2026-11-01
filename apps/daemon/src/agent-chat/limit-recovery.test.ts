@@ -223,6 +223,7 @@ test("at the reset plus the margin the continue message goes out, under the idem
   const [turn] = h.api.turns();
   assert.ok(turn);
   assert.equal(turn.body.input, USAGE_LIMIT_CONTINUE_MESSAGE);
+  assert.match(turn.body.input, /subagents .* relaunch/, "the agent is told to revive the subagents the limit stopped");
   assert.equal(turn.body.commandId, `limit-resume:s1:turn-1:${T0 + HOUR}`);
   assert.equal(turn.body.ifIdle, true);
   assert.equal(turn.body.interactionMode, "plan", "the chat keeps its mode");
@@ -416,6 +417,7 @@ test("failover (opt-in): moves to the least-used other account and continues wit
   assert.equal(account?.body.accountId, "acc2");
   const [turn] = h.api.turns();
   assert.equal(turn?.body.input, continueMessage(false, "usage_limit"));
+  assert.match(turn?.body.input ?? "", /subagents .* relaunch/, "the move revives stopped subagents too");
   assert.deepEqual(h.chat.get("s1")?.limitFailover, { fromAccountId: "acc1", toAccountId: "acc2", at: iso(T0), automatic: true });
   await h.recovery.dismissFailover("s1");
   assert.equal(h.chat.get("s1")?.limitFailover, null);
@@ -538,7 +540,7 @@ test("an overload is retried shortly: no cooldown, no account switch, the contin
   await advance(h, 1_500);
   assert.equal(h.api.posts.filter((post) => post.path.endsWith("/account")).length, 0, "never switches accounts");
   const [turn] = h.api.turns();
-  assert.equal(turn?.body.input, "Continue where you left off.");
+  assert.equal(turn?.body.input, USAGE_LIMIT_CONTINUE_MESSAGE);
   assert.equal(turn?.body.commandId, `limit-resume:s1:turn-1:${T0 + 30_000}`);
 });
 
