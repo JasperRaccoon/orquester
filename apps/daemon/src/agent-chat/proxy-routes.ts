@@ -44,7 +44,7 @@ import {
 } from "@orquester/api/agent-chat";
 import { agentHostRoutes, type HostThreadCatalogResponse } from "../agent-host/host-protocol.ts";
 import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
-import { AgentHostClient, HostUnavailableError, type HostJsonResponse } from "./host-client.ts";
+import { HostUnavailableError, type HostClient, type HostJsonResponse, type HostStream } from "./host-client.ts";
 import {
   DAEMON_STREAM_HEARTBEAT_MS,
   NdjsonForwarder,
@@ -69,7 +69,8 @@ const HOST_COMMAND_ROUTE: Record<AgentChatCommandName, (threadId: string) => str
 };
 
 export interface AgentChatRouteDeps {
-  client: AgentHostClient;
+  /** The routing client in the daemon: each request reaches the host that serves it. */
+  client: HostClient;
   /** False while the host is restarting/foreign → every route answers 503. */
   isHostHealthy(): boolean;
   /** The tab, or undefined when this id is not a chat session. */
@@ -996,7 +997,7 @@ async function pipeStream(
 ): Promise<void> {
   const controller = new AbortController();
   request.raw.on("close", () => controller.abort());
-  let upstream: Awaited<ReturnType<AgentHostClient["open"]>>;
+  let upstream: HostStream;
   try {
     upstream = await deps.client.open("GET", path, {
       headers: { accept: "application/x-ndjson" },
