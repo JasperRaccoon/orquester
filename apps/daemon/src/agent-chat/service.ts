@@ -62,8 +62,8 @@ import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import type { SessionIndexContributor } from "../sessions.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
-import { AgentHostClient, HostUnavailableError, RoutingHostClient, type HostClient } from "./host-client.ts";
-import { singleHostDirectory, type HostDirectory } from "./host-directory.ts";
+import { HostUnavailableError, RoutingHostClient, type HostClient } from "./host-client.ts";
+import type { HostDirectory } from "./host-directory.ts";
 import { markClaudeProjectTrusted } from "./home-prep.ts";
 import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
@@ -143,6 +143,18 @@ const PROFILE_LEASES_DEADLINE_MS = 5_000;
  * short; a missed one is simply tried on the next evaluation.
  */
 const LEGACY_GOAL_CALL_DEADLINE_MS = 5_000;
+
+/**
+ * Host updates (spec 2026-11-01 P2.3): `/retire`, `/unretire` and `…/adopt`. Each runs under the
+ * host's per-thread command serialisation (an adopt brings a thread in as boot would), so it is
+ * given as long as a `/stop`. A timeout is a failure the supervisor handles (fall back, retry).
+ */
+const HOST_CONTROL_DEADLINE_MS = 30_000;
+
+/** A host's non-2xx answer to a control call, with its message when it gave one. */
+function hostAnswerError(status: number, call: string, message: unknown): Error {
+  return new Error(`agent host answered ${status} to ${call}` + (typeof message === "string" && message ? `: ${message}` : ""));
+}
 
 /** One launch-env contribution, mirroring `index.ts`'s `LaunchEnv`. */
 export interface ChatLaunchEnv {
@@ -412,10 +424,9 @@ export class AgentChatService {
    */
   private readonly client: HostClient;
   /**
-   * The supervised host's own socket, unrouted: its health probe, `/stop` and goal-handover calls
-   * address that one host (R24: "health, stop, retire and adopt address a generation").
+   * Every live host and who owns which thread: the supervisor (P2.4 R24/R25). Its health probe,
+   * `/stop`, retire and adopt calls address one generation through `supervisor.clientFor`.
    */
-  private readonly hostClient: AgentHostClient;
   private readonly hostDirectory: HostDirectory;
   private readonly supervisor: AgentHostSupervisor;
   private readonly summary: AgentChatSummaryService;
@@ -437,13 +448,10 @@ export class AgentChatService {
         if (record.childId === id) record.closed = true;
       }
     });
-    this.hostClient = new AgentHostClient({
-      socketPath,
-      token: () => this.supervisor.currentToken()
-    });
     this.supervisor = new AgentHostSupervisor({
       appdir: opts.baseDir,
       tokenPath: agentHostTokenPath(opts.baseDir),
+      platform: opts.platform,
       cwd: opts.cwd,
       env: buildAgentHostEnv({
         sessionPath: opts.sessionPath,
@@ -459,8 +467,12 @@ export class AgentChatService {
       // different one is drained and replaced (see `support/code-stamp.ts`).
       codeStamp: readCodeStamp(),
       adapters: {
-        probe: () => this.probe(),
-        requestStop: () => this.requestHostStop(),
+        probe: (generation) => this.probe(generation),
+        requestStop: (generation) => this.requestHostStop(generation),
+        // Host updates (spec 2026-11-01 P2.3/P2.4): retire the old host instead of stopping it.
+        requestRetire: (generation) => this.requestHostRetire(generation),
+        requestUnretire: (generation) => this.requestHostUnretire(generation),
+        requestAdopt: (generation, threadId) => this.requestHostAdopt(generation, threadId),
         // Agent goals §5.7: asked on every blocked drain evaluation while a
         // deploy waits, which is what keeps the host's hold lease alive.
         requestHoldGoals: () => this.requestHostHoldGoals(),
@@ -503,9 +515,8 @@ export class AgentChatService {
         logger: opts.logger
       }
     });
-    // The hosts the daemon talks to (P2.4 R24/R25). Until the supervisor implements
-    // `HostDirectory`, the one host it supervises; then this is `this.supervisor`.
-    this.hostDirectory = singleHostDirectory(this.hostClient);
+    // The hosts the daemon talks to (P2.4 R24/R25): the supervisor owns which serves what.
+    this.hostDirectory = this.supervisor;
     this.client = new RoutingHostClient(this.hostDirectory);
     this.summary = new AgentChatSummaryService({
       client: this.client,
@@ -939,15 +950,21 @@ export class AgentChatService {
   }
 
   /**
-   * True only for the agent host's own bearer — the gate on the socket-only
-   * session-tool route (design 2026-10-14 §1.1). Constant-time.
+   * True only for an agent host's own bearer — the gate on the socket-only
+   * session-tool route (design 2026-10-14 §1.1). Constant-time. Every live
+   * host's token, and only those: a retiring host's busy chats call back too
+   * (spec 2026-11-01 P2.4).
    */
   authorizeHostRequest(authorization: string | undefined): boolean {
-    const token = this.supervisor.currentToken();
-    if (!token || authorization === undefined) return false;
-    const expected = Buffer.from(agentHostAuthValue(token), "utf8");
+    if (authorization === undefined) return false;
     const actual = Buffer.from(authorization, "utf8");
-    return expected.length === actual.length && timingSafeEqual(expected, actual);
+    let authorized = false;
+    for (const token of this.supervisor.hostTokens()) {
+      const expected = Buffer.from(agentHostAuthValue(token), "utf8");
+      // Every token is compared, so the answer's timing says nothing about which matched.
+      if (expected.length === actual.length && timingSafeEqual(expected, actual)) authorized = true;
+    }
+    return authorized;
   }
 
   /**
@@ -984,7 +1001,10 @@ export class AgentChatService {
   routeDeps(): AgentChatRouteDeps {
     return {
       client: this.client,
-      isHostHealthy: () => this.supervisor.isHealthy(),
+      // Any live host: while the primary is briefly down (a restart, an update's switch) a
+      // retiring host keeps serving the chats it owns. A route for any other thread, or a global
+      // one, still answers 503 — the routing client finds no primary for it.
+      isHostHealthy: () => this.supervisor.isHealthy() || this.supervisor.hosts().length > 0,
       hostInstanceId: () => this.supervisor.status().hostInstanceId,
       chatSession: (id) => this.chat.get(id),
       noteSeq: (id, seq) => this.chat.noteSeq(id, seq),
@@ -994,17 +1014,40 @@ export class AgentChatService {
       profileCatalog: (summary) => this.profileCatalog(summary),
       hostStatus: () => {
         const status = this.supervisor.restartStatus();
-        if (status.pendingRestart === null) return status;
-        const blockers = status.pendingRestart.blockers.map((blocker) => {
-          const title = this.chat.get(blocker.threadId)?.title;
-          return title !== undefined && title.trim() !== "" ? { ...blocker, threadTitle: title } : blocker;
-        });
-        return { ...status, pendingRestart: { ...status.pendingRestart, blockers } };
+        const titleOf = (threadId: string): string | undefined => {
+          const title = this.chat.get(threadId)?.title;
+          return title !== undefined && title.trim() !== "" ? title : undefined;
+        };
+        const titled = <T extends { threadId: string }>(item: T): T => {
+          const title = titleOf(item.threadId);
+          return title === undefined ? item : { ...item, threadTitle: title };
+        };
+        return {
+          ...status,
+          pendingRestart:
+            status.pendingRestart === null
+              ? null
+              : { ...status.pendingRestart, blockers: status.pendingRestart.blockers.map(titled) },
+          ...(status.retiringHosts
+            ? {
+                retiringHosts: status.retiringHosts.map((host) => ({
+                  ...host,
+                  threads: host.threads.map(titled),
+                  blockers: host.blockers.map(titled)
+                }))
+              }
+            : {})
+        };
       },
       restartHost: async () => {
-        this.lastMarkedThreadIds = [];
-        const hostInstanceId = await this.supervisor.restartNow();
-        return { hostInstanceId, markedThreadIds: this.lastMarkedThreadIds };
+        const marked: string[] = [];
+        this.markedThreadIds = marked;
+        try {
+          const hostInstanceId = await this.supervisor.restartNow();
+          return { hostInstanceId, markedThreadIds: [...new Set(marked)] };
+        } finally {
+          if (this.markedThreadIds === marked) this.markedThreadIds = null;
+        }
       },
       onProvidersChanged: (adapterId) =>
         this.summary.publishProvidersChanged(
@@ -1020,8 +1063,11 @@ export class AgentChatService {
     };
   }
 
-  /** Threads the OLD host marked for continuation on its way out (§3.3). */
-  private lastMarkedThreadIds: string[] = [];
+  /**
+   * While "Restart now" runs: the threads each host it stops marked for continuation on its way
+   * out (§3.3). Null otherwise — an automatic restart's marks are the host's to act on, not a reply.
+   */
+  private markedThreadIds: string[] | null = null;
 
   /**
    * A profile chat's composer fallback (`GET …/catalog`, source `profile`): the profile's own items
@@ -2481,10 +2527,10 @@ export class AgentChatService {
     }
   }
 
-  /** Authenticated `GET /health`; classifies exactly the five §3.1 cases. */
-  private async probe(): Promise<ProbeOutcome> {
+  /** Authenticated `GET /health` on host `generation`; classifies exactly the five §3.1 cases. */
+  private async probe(generation: number): Promise<ProbeOutcome> {
     try {
-      const response = await this.hostClient.json<AgentHostHealthResponse>(
+      const response = await this.supervisor.clientFor(generation).json<AgentHostHealthResponse>(
         "GET",
         agentHostRoutes.health,
         undefined,
@@ -2502,17 +2548,63 @@ export class AgentChatService {
     }
   }
 
-  private async requestHostStop(): Promise<void> {
-    const response = await this.hostClient.json<{ markedThreadIds?: unknown }>(
+  private async requestHostStop(generation: number): Promise<void> {
+    const response = await this.supervisor.clientFor(generation).json<{ markedThreadIds?: unknown }>(
       "POST",
       agentHostRoutes.stop,
       {},
       { timeoutMs: 30_000 }
     );
     const marked = response.value?.markedThreadIds;
-    this.lastMarkedThreadIds = Array.isArray(marked)
-      ? marked.filter((id): id is string => typeof id === "string")
-      : [];
+    // "Restart now" may stop several hosts (spec 2026-11-01 P2.4 R30): it answers them all.
+    if (Array.isArray(marked)) {
+      this.markedThreadIds?.push(...marked.filter((id): id is string => typeof id === "string"));
+    }
+  }
+
+  /**
+   * Host updates (spec 2026-11-01 P2.3 R18): `POST /retire` on host `generation` → the threads it
+   * keeps. `null` for a host that predates the route (its route-miss 404); throws on anything else.
+   */
+  private async requestHostRetire(generation: number): Promise<readonly string[] | null> {
+    const response = await this.supervisor.clientFor(generation).json<{ ownedThreadIds?: unknown; error?: { message?: unknown } }>(
+      "POST",
+      agentHostRoutes.retire,
+      undefined,
+      { timeoutMs: HOST_CONTROL_DEADLINE_MS }
+    );
+    if (response.status === 404) return null;
+    if (response.status !== 200) throw hostAnswerError(response.status, "/retire", response.value?.error?.message);
+    const owned = response.value?.ownedThreadIds;
+    if (!Array.isArray(owned)) throw new Error("agent host answered /retire without its owned threads");
+    return owned.filter((id): id is string => typeof id === "string");
+  }
+
+  /** P2.3 R21: `POST /unretire` on host `generation`. Throws on anything but 200. */
+  private async requestHostUnretire(generation: number): Promise<void> {
+    const response = await this.supervisor.clientFor(generation).json<{ error?: { message?: unknown } }>(
+      "POST",
+      agentHostRoutes.unretire,
+      undefined,
+      { timeoutMs: HOST_CONTROL_DEADLINE_MS }
+    );
+    if (response.status !== 200) throw hostAnswerError(response.status, "/unretire", response.value?.error?.message);
+  }
+
+  /**
+   * P2.3 R17: `POST /threads/:id/adopt` on host `generation`. A 404 is a thread that no longer
+   * exists (deleted): nothing to adopt. Throws on anything else but 200, and the supervisor retries.
+   */
+  private async requestHostAdopt(generation: number, threadId: string): Promise<"adopted" | "owned" | "missing"> {
+    const response = await this.supervisor.clientFor(generation).json<{ adopted?: unknown; error?: { message?: unknown } }>(
+      "POST",
+      agentHostRoutes.adopt(threadId),
+      undefined,
+      { timeoutMs: HOST_CONTROL_DEADLINE_MS }
+    );
+    if (response.status === 404) return "missing";
+    if (response.status !== 200) throw hostAnswerError(response.status, "the adopt", response.value?.error?.message);
+    return response.value?.adopted === true ? "adopted" : "owned";
   }
 
   /**
@@ -2524,7 +2616,7 @@ export class AgentChatService {
    * reads as nothing held, and a non-string entry is dropped.
    */
   private async requestHostHoldGoals(): Promise<readonly string[] | null> {
-    const response = await this.hostClient.json<{
+    const response = await this.supervisor.primaryClient().json<{
       heldThreadIds?: unknown;
       error?: { message?: unknown };
     }>("POST", agentHostRoutes.holdGoals, {}, { timeoutMs: GOAL_HOLD_DEADLINE_MS });
@@ -2543,7 +2635,7 @@ export class AgentChatService {
   /** Agent goals §5.7 legacy handover: one blocking thread's running turn, off the host's own snapshot. */
   private async inspectLegacyGoalTurn(threadId: string): Promise<LegacyGoalTurn | null> {
     try {
-      const response = await this.hostClient.json<unknown>("GET", agentHostRoutes.read(threadId), undefined, {
+      const response = await this.client.json<unknown>("GET", agentHostRoutes.read(threadId), undefined, {
         timeoutMs: LEGACY_GOAL_CALL_DEADLINE_MS
       });
       return response.status === 200 ? legacyGoalTurnOf(response.value) : null;
@@ -2554,7 +2646,7 @@ export class AgentChatService {
 
   /** Agent goals §5.7 legacy handover: stop one Codex goal thread's provider session. */
   private async requestHostSessionStop(threadId: string): Promise<void> {
-    const response = await this.hostClient.json<{ error?: { message?: unknown } }>(
+    const response = await this.client.json<{ error?: { message?: unknown } }>(
       "POST",
       agentHostRoutes.sessionStop(threadId),
       { commandId: `goal-handover:${randomUUID()}` },
@@ -2573,7 +2665,7 @@ export class AgentChatService {
   private async requestHostResumeGoalSessions(
     threadIds: readonly string[]
   ): Promise<readonly string[] | null> {
-    const response = await this.hostClient.json<{ threadIds?: unknown; error?: { message?: unknown } }>(
+    const response = await this.supervisor.primaryClient().json<{ threadIds?: unknown; error?: { message?: unknown } }>(
       "POST",
       agentHostRoutes.resumeGoalSessions,
       { threadIds },

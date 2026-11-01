@@ -448,8 +448,13 @@ export class AgentHostSupervisor implements HostDirectory {
   private registryWrites: Promise<unknown> = Promise.resolve();
   /** P2.4 R23: set while the primary retires and its replacement starts; settles when done. */
   private switching: Promise<void> | null = null;
-  /** …the threads the retiring primary keeps, once its `/retire` answered. */
-  private switchKeeps: { generation: number; threadIds: Set<string> } | null = null;
+  /**
+   * …once the old primary's `/retire` answered: its generation, the threads it keeps, since
+   * when, and the generation starting to replace it.
+   */
+  private switchKeeps: { generation: number; threadIds: Set<string>; since: number; starting: number } | null = null;
+  /** One {@link HostEndpoint} per generation and role. */
+  private readonly endpoints = new Map<string, HostEndpoint>();
   /** P2.4 R26: each thread being adopted by the primary, until it is. */
   private readonly adoptions = new Map<string, Promise<void>>();
   /** The `POST …/adopt` requests on the wire: a `/retire` waits for them (I2). */
@@ -541,11 +546,10 @@ export class AgentHostSupervisor implements HostDirectory {
    * daemon's socket with its own (design 2026-10-14 §1.1), so each must be accepted. Never logged.
    */
   hostTokens(): string[] {
-    const live = [this.primaryGeneration, ...this.retiring.keys()];
-    const switching = this.switchKeeps?.generation;
-    return live
+    const live = new Set([this.primaryGeneration, ...this.retiring.keys()]);
+    if (this.switchKeeps !== null) live.add(this.switchKeeps.starting);
+    return [...live]
       .map((generation) => this.tokens.get(generation))
-      .concat(switching === undefined ? [] : [this.tokens.get(switching)])
       .filter((token): token is string => typeof token === "string");
   }
 
@@ -564,6 +568,11 @@ export class AgentHostSupervisor implements HostDirectory {
       this.clients.set(generation, client);
     }
     return client;
+  }
+
+  /** The primary's plain client — for the global calls a pending restart makes (the goal hold). */
+  primaryClient(): AgentHostClient {
+    return this.clientFor(this.primaryGeneration);
   }
 
   // --- HostDirectory (spec 2026-11-01 P2.4 R24) ------------------------------
@@ -1012,16 +1021,22 @@ export class AgentHostSupervisor implements HostDirectory {
 
   /**
    * The daemon-side liveness view (`null` = not known yet); a failing reader
-   * never blocks supervision, and no reader at all means "none".
+   * never blocks supervision, and no reader at all means "none". Only the
+   * primary's threads: the summary merges every host's (P2.4 R25), and work on a
+   * thread a retiring host owns neither holds the primary's drain nor is cut by
+   * its restart.
    */
   private daemonBackgroundWork(): readonly string[] | null {
     const read = this.opts.adapters.backgroundWorkThreadIds;
     if (!read) return [];
+    let view: readonly string[] | null;
     try {
-      return read();
+      view = read();
     } catch {
       return [];
     }
+    if (view === null || (this.retiring.size === 0 && this.switchKeeps === null)) return view;
+    return view.filter((threadId) => this.retiringOwnerOf(threadId) === null && !this.switchKeeps?.threadIds.has(threadId));
   }
 
   /**
@@ -1686,24 +1701,648 @@ export class AgentHostSupervisor implements HostDirectory {
     return Math.min(RESPAWN_BACKOFF_MAX_MS, RESPAWN_BACKOFF_BASE_MS * 2 ** (attempt - 1));
   }
 
-  private async readToken(): Promise<string | null> {
+  private async readToken(generation: number): Promise<string | null> {
     try {
-      const raw = (await readFile(this.opts.tokenPath, "utf8")).trim();
+      const raw = (await readFile(this.tokenPathOf(generation), "utf8")).trim();
       return raw || null;
     } catch {
       return null;
     }
   }
 
-  /** 0600, written atomically. Only ever called when no host is alive (§3.1). */
-  private async regenerateToken(): Promise<string> {
+  /** 0600, written atomically. Only ever called when no host of `generation` is alive (§3.1). */
+  private async regenerateToken(generation: number): Promise<string> {
+    const path = this.tokenPathOf(generation);
     const token = randomBytes(32).toString("base64url");
-    const tmp = `${this.opts.tokenPath}.tmp`;
-    await mkdir(dirname(this.opts.tokenPath), { recursive: true });
+    const tmp = `${path}.tmp`;
+    await mkdir(dirname(path), { recursive: true });
     await writeFile(tmp, `${token}\n`, { encoding: "utf8", mode: 0o600 });
     await chmod(tmp, 0o600).catch(() => undefined);
-    await rename(tmp, this.opts.tokenPath);
+    await rename(tmp, path);
     return token;
+  }
+
+  // --- host updates (spec 2026-11-01 Phase 2) --------------------------------
+  //
+  // State: one primary (`primaryGeneration` and the fields above) and up to MAX_RETIRING_HOSTS
+  // retiring hosts (`retiring`). An update moves the primary through `switching` (retire →
+  // spawn the next generation → promote, or unretire on failure); each retiring host is polled
+  // until it owns nothing (exit), dies (adopt what it owned), or reaches the cap (stop, adopt).
+  // Every thread a retiring host stops owning is adopted by the primary before any request for
+  // it reaches the primary (`adoptions`, `hostForThread`).
+
+  private tokenPathOf(generation: number): string {
+    return generation === 0 ? this.opts.tokenPath : agentHostTokenPath(this.opts.appdir, generation);
+  }
+
+  private socketPathOf(generation: number): string {
+    const legacy = this.opts.env[AGENT_HOST_ENV.socket];
+    if (generation === 0 && typeof legacy === "string" && legacy !== "") return legacy;
+    return agentHostSocketPath(this.opts.appdir, this.opts.platform ?? process.platform, generation);
+  }
+
+  /** One stable endpoint object per generation and role. */
+  private endpoint(generation: number, role: HostRole): HostEndpoint {
+    const key = `${generation}:${role}`;
+    let endpoint = this.endpoints.get(key);
+    if (endpoint === undefined) {
+      endpoint = { generation, role, client: this.clientFor(generation) };
+      this.endpoints.set(key, endpoint);
+    }
+    return endpoint;
+  }
+
+  /** The retiring host that still owns `threadId` as last seen, or null. */
+  private retiringOwnerOf(threadId: string): number | null {
+    for (const host of this.retiring.values()) {
+      if (host.owned.has(threadId)) return host.generation;
+    }
+    return null;
+  }
+
+  /** True once `pending` settles within `ms`; false when the time ran out first. */
+  private settlesWithin(pending: Promise<unknown>, ms: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      let done = false;
+      const cancel = this.setTimer(ms, () => {
+        if (done) return;
+        done = true;
+        resolve(false);
+      });
+      void pending.then(
+        () => undefined,
+        () => undefined
+      ).then(() => {
+        if (done) return;
+        done = true;
+        cancel();
+        resolve(true);
+      });
+    });
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      this.setTimer(ms, resolve);
+    });
+  }
+
+  /** P2.6: whether a busy stale primary can retire instead of waiting for its drain. */
+  private phase2Available(health: AgentHostHealthResponse): boolean {
+    return (
+      this.opts.adapters.requestRetire !== undefined &&
+      agentHostSupports(health, "retire") &&
+      // A protocol change is still a hard restart: the daemon cannot route to both versions.
+      health.protocolVersion === AGENT_HOST_PROTOCOL_VERSION &&
+      this.phase2RefusedInstance !== health.hostInstanceId
+    );
+  }
+
+  private nextGeneration(): number {
+    this.highestGeneration = Math.max(this.highestGeneration, this.primaryGeneration, ...this.retiring.keys()) + 1;
+    return this.highestGeneration;
+  }
+
+  /**
+   * P2.4 R23, the update flow. The busy stale primary retires (keeping K, its working threads),
+   * the next generation starts with a foreign file naming every thread a retiring host keeps
+   * (I3), and becomes the primary; on any failure the new host is killed, the old one unretired
+   * and the registry restored, and the caller falls back to Phase 1. While it runs, `primary()`
+   * is null and requests for threads outside K wait for it (`hostForThread`).
+   */
+  private async retireAndSwitch(
+    health: AgentHostHealthResponse,
+    blockers: string
+  ): Promise<"switched" | "drained" | "unavailable"> {
+    const requestRetire = this.opts.adapters.requestRetire;
+    if (!requestRetire) return "unavailable";
+    const oldGeneration = this.primaryGeneration;
+    // P2.2: room for one more — the oldest retiring host is ended through the cap path first.
+    while (this.retiring.size >= MAX_RETIRING_HOSTS) {
+      const oldest = [...this.retiring.values()].sort((a, b) => a.retiringSince - b.retiringSince)[0]!;
+      await this.endRetiringHost(oldest, "limit");
+    }
+    let settle: () => void = () => undefined;
+    this.switching = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const endSwitch = (): void => {
+      this.switching = null;
+      this.switchKeeps = null;
+      settle();
+    };
+    const fallBack = async (why: string, error?: unknown): Promise<"unavailable"> => {
+      this.log("warn", `agent host update could not retire the old host (${why}); restarting it once drained instead`, ...(error === undefined ? [] : [error]));
+      this.phase2RefusedInstance = health.hostInstanceId;
+      endSwitch();
+      this.setState("healthy", null);
+      return "unavailable";
+    };
+    this.setState("starting", "updating the agent host");
+    try {
+      // I2: an adoption already sent to this host lands (or fails) before it decides what it keeps.
+      await Promise.allSettled([...this.adoptRequests]);
+      let keep: readonly string[] | null;
+      try {
+        keep = await requestRetire(oldGeneration);
+      } catch (error) {
+        // A retire that landed but whose answer was lost is undone, so the host serves again.
+        await this.unretire(oldGeneration);
+        return await fallBack("its /retire failed", error);
+      }
+      if (keep === null) return await fallBack("it predates /retire");
+      if (keep.length === 0) {
+        // Nothing runs any more: today's restart.
+        endSwitch();
+        this.setState("healthy", null);
+        return "drained";
+      }
+      const generation = this.nextGeneration();
+      this.switchKeeps = {
+        generation: oldGeneration,
+        threadIds: new Set(keep),
+        since: this.opts.adapters.now(),
+        starting: generation
+      };
+      this.log(
+        "log",
+        `agent host update: generation ${oldGeneration} retires keeping ${keep.length} working chat(s) (${blockers}); starting generation ${generation}`
+      );
+      // I5: the registry names both before the spawn.
+      this.registryInUse = true;
+      let ready: ProbeOutcome = { ok: false, reachable: false };
+      let failure: unknown;
+      if (await this.persistRegistry()) {
+        try {
+          await this.spawn(generation, true);
+          ready = await this.probeUntilReady(generation);
+        } catch (error) {
+          failure = error;
+        }
+      } else {
+        failure = new Error("the agent host registry could not be written");
+      }
+      if (!ready.ok) {
+        await this.killHost(generation);
+        await this.removeHostFiles(generation);
+        this.switchKeeps = null;
+        await this.unretire(oldGeneration);
+        await this.persistRegistry();
+        return await fallBack(`generation ${generation} never became ready`, failure);
+      }
+      // Promote. The old primary keeps K until each is idle; the new one serves everything else.
+      this.retiring.set(oldGeneration, {
+        generation: oldGeneration,
+        health,
+        owned: new Set(keep),
+        retiringSince: this.switchKeeps.since,
+        firstMissAt: null,
+        ending: false
+      });
+      this.primaryGeneration = generation;
+      this.health = null;
+      this.lastDrainDeferral = null;
+      this.goalHold = null;
+      this.backgroundEndedAt.clear();
+      this.lastBackgroundThreads = new Set();
+      endSwitch();
+      this.adopt(ready.health);
+      // I5: persisted right after the promotion.
+      await this.persistRegistry();
+      this.log(
+        "log",
+        `agent host updated: generation ${generation} (${describeHost(ready.health)}) is primary; generation ${oldGeneration} finishes ${keep.length} chat(s)`
+      );
+      this.scheduleRetiringPoll();
+      return "switched";
+    } finally {
+      if (this.switching !== null) endSwitch();
+    }
+  }
+
+  private async unretire(generation: number): Promise<void> {
+    try {
+      await this.opts.adapters.requestUnretire?.(generation);
+    } catch (error) {
+      // It keeps refusing new threads; the Phase 1 restart that follows replaces it, and a
+      // thread it released is adopted back on demand (`ownershipStale`).
+      this.log("error", `agent host ${generation} could not be unretired`, error);
+    }
+  }
+
+  /** Poll every retiring host each {@link RETIRING_HOST_POLL_MS} while there is one. */
+  private scheduleRetiringPoll(): void {
+    if (this.halted || !this.supervising || this.cancelRetiringPoll !== null || this.retiring.size === 0) return;
+    this.cancelRetiringPoll = this.setTimer(RETIRING_HOST_POLL_MS, () => {
+      // Held while the poll runs, so a health tick cannot start a second loop.
+      this.cancelRetiringPoll = () => undefined;
+      this.transition(() => this.pollRetiringHosts())
+        .catch((error) => this.log("error", "retiring agent host poll failed", error))
+        .finally(() => {
+          this.cancelRetiringPoll = null;
+          this.scheduleRetiringPoll();
+        });
+    });
+  }
+
+  /**
+   * One round over the retiring hosts (R26–R28, R30): adopt what each released, end one that
+   * owns nothing or reached the cap, and take over the threads of one that died.
+   */
+  private async pollRetiringHosts(): Promise<void> {
+    for (const host of [...this.retiring.values()]) {
+      if (host.ending) continue;
+      const probed = await this.safeProbe(host.generation);
+      const now = this.opts.adapters.now();
+      if (probed.ok) {
+        this.applyRetiringHealth(host, probed.health);
+        if (host.owned.size === 0) {
+          await this.endRetiringHost(host, "drained");
+          continue;
+        }
+      } else {
+        if (!(await this.hostProcessAlive(host.generation))) {
+          await this.retiringHostGone(host, "its process exited");
+          continue;
+        }
+        host.firstMissAt ??= now;
+        if (now - host.firstMissAt >= RETIRING_HOST_UNRESPONSIVE_MS) {
+          await this.retiringHostGone(host, `it has not answered for ${Math.round((now - host.firstMissAt) / 1000)} s`);
+          continue;
+        }
+      }
+      if (now - host.retiringSince >= AGENT_HOST_RETIRE_MAX_MS) await this.endRetiringHost(host, "cap");
+    }
+  }
+
+  /** A fresh `/health` of a retiring host: every thread missing from its owned set was released. */
+  private applyRetiringHealth(host: RetiringHost, health: AgentHostHealthResponse): void {
+    host.health = health;
+    host.firstMissAt = null;
+    if (!Array.isArray(health.ownedThreadIds)) return;
+    const owned = new Set(health.ownedThreadIds);
+    const released = [...host.owned].filter((threadId) => !owned.has(threadId));
+    if (released.length > 0) this.releaseThreads(host, released);
+  }
+
+  /** Re-read every retiring host's owned set now (a 409 said ours is stale). Never throws. */
+  private async refreshRetiringOwnership(): Promise<void> {
+    await Promise.all(
+      [...this.retiring.values()].map(async (host) => {
+        if (host.ending) return;
+        const probed = await this.safeProbe(host.generation);
+        if (probed.ok && this.retiring.get(host.generation) === host) this.applyRetiringHealth(host, probed.health);
+      })
+    );
+  }
+
+  /** R26: `host` no longer owns these: the primary adopts each. */
+  private releaseThreads(host: RetiringHost, threadIds: readonly string[]): void {
+    for (const threadId of threadIds) {
+      // Registered before the owner changes, in the same tick: no request routes in between.
+      this.startAdoption(threadId);
+      host.owned.delete(threadId);
+    }
+    this.log("log", `agent host ${host.generation} released ${threadIds.length} chat(s); the current host adopts them`);
+    void this.persistRegistry();
+  }
+
+  /** R26: adopt `threadId` on the primary, retried with backoff until it is — never dropped. */
+  private startAdoption(threadId: string): void {
+    if (this.adoptions.has(threadId) || this.opts.adapters.requestAdopt === undefined) return;
+    const run: Promise<void> = this.adoptUntilDone(threadId).finally(() => {
+      if (this.adoptions.get(threadId) === run) this.adoptions.delete(threadId);
+    });
+    this.adoptions.set(threadId, run);
+  }
+
+  private async adoptUntilDone(threadId: string): Promise<void> {
+    const request = this.opts.adapters.requestAdopt;
+    if (!request) return;
+    for (let attempt = 1; !this.halted; attempt += 1) {
+      const switching = this.switching;
+      if (switching !== null) await switching;
+      const primary = this.primary();
+      if (primary !== null) {
+        const sent = request(primary.generation, threadId);
+        this.adoptRequests.add(sent);
+        try {
+          const outcome = await sent;
+          if (outcome === "adopted") this.log("log", `agent host ${primary.generation} adopted chat ${threadId}`);
+          return;
+        } catch (error) {
+          this.log("warn", `agent host ${primary.generation} could not adopt chat ${threadId} (attempt ${attempt}); retrying`, error);
+        } finally {
+          this.adoptRequests.delete(sent);
+        }
+      }
+      await this.delay(Math.min(ADOPT_RETRY_MAX_MS, ADOPT_RETRY_BASE_MS * 2 ** (attempt - 1)));
+    }
+  }
+
+  /**
+   * End a retiring host (R27, R30, `restartNow`): `/stop` (which marks what it cuts for
+   * continuation; nothing when it owns nothing), wait for its process to exit, then forget it —
+   * the primary adopts what it still owned.
+   */
+  private async endRetiringHost(host: RetiringHost, why: "drained" | "cap" | "limit" | "restart"): Promise<void> {
+    if (host.ending || this.retiring.get(host.generation) !== host) return;
+    host.ending = true;
+    if (why === "drained") {
+      this.log("log", `agent host ${host.generation} finished its last chat; stopping it`);
+    } else {
+      const cause =
+        why === "cap"
+          ? `it retired ${Math.round(AGENT_HOST_RETIRE_MAX_MS / 3_600_000)} h ago`
+          : why === "limit"
+            ? `more than ${MAX_RETIRING_HOSTS} hosts would be retiring`
+            : "a restart was asked for";
+      this.log("warn", `ending agent host ${host.generation} (${cause}): its ${host.owned.size} chat(s) are interrupted and resumed on the current host`);
+    }
+    // I5: what it owns is on disk before the stop — a daemon that dies from here adopts it at boot.
+    await this.persistRegistry();
+    try {
+      await this.opts.adapters.requestStop(host.generation);
+    } catch (error) {
+      this.log("warn", `agent host ${host.generation} stop request failed; killing it`, error);
+    }
+    await this.awaitHostExit(host.generation);
+    await this.forgetRetiringHost(host);
+  }
+
+  /** R28: a retiring host died or stopped answering: its last-known threads move to the primary. */
+  private async retiringHostGone(host: RetiringHost, reason: string): Promise<void> {
+    if (host.ending) return;
+    host.ending = true;
+    this.log("warn", `retiring agent host ${host.generation} is gone (${reason}); the current host adopts its ${host.owned.size} chat(s)`);
+    await this.forgetRetiringHost(host);
+  }
+
+  private async forgetRetiringHost(host: RetiringHost): Promise<void> {
+    await this.killHost(host.generation);
+    // Each adoption is registered before the host leaves the set, in the same tick (I2). Its
+    // provider sessions died with it, so none is resumed twice (I4).
+    for (const threadId of host.owned) this.startAdoption(threadId);
+    this.retiring.delete(host.generation);
+    await this.removeHostFiles(host.generation);
+    await this.persistRegistry();
+  }
+
+  /** Kill host `generation`'s process: its tmux service session, or its direct child. */
+  private async killHost(generation: number): Promise<void> {
+    await this.opts.adapters.tmux?.killServiceSession(agentHostServiceSession(generation)).catch(() => undefined);
+    const handle = this.directHandles.get(generation);
+    if (handle !== undefined) {
+      try {
+        handle.kill();
+      } catch {
+        /* already gone */
+      }
+      this.directHandles.delete(generation);
+    }
+  }
+
+  /** R27: a gone host's socket, token and foreign file, and what the daemon held of it. */
+  private async removeHostFiles(generation: number): Promise<void> {
+    const paths = [this.tokenPathOf(generation), agentHostForeignThreadsPath(this.opts.appdir, generation)];
+    if ((this.opts.platform ?? process.platform) !== "win32") paths.push(this.socketPathOf(generation));
+    await Promise.all(paths.map((path) => rm(path, { force: true }).catch(() => undefined)));
+    this.tokens.delete(generation);
+    this.clients.delete(generation);
+    this.endpoints.delete(`${generation}:primary`);
+    this.endpoints.delete(`${generation}:retiring`);
+  }
+
+  /**
+   * Write the registry as the supervisor sees it now (P2.2, I5), keeping what it does not manage.
+   * A no-op before the registry is in play. Resolves false when the write failed (logged).
+   */
+  private persistRegistry(): Promise<boolean> {
+    if (!this.registryInUse) return Promise.resolve(true);
+    const write = this.registryWrites.then(async () => {
+      const kept = new Map(this.registryKept.entries.map((entry) => [entry.generation, entry]));
+      const entry = (
+        generation: number,
+        fields: Pick<AgentHostRegistryEntry, "role" | "retiringSince" | "ownedThreadIds">
+      ): AgentHostRegistryEntry => {
+        const { role: _role, retiringSince: _since, ownedThreadIds: _owned, ...unknown } = kept.get(generation) ?? {};
+        return {
+          ...unknown,
+          generation,
+          ...fields,
+          // For a reader's eyes; every name derives from the generation.
+          socket: this.socketPathOf(generation),
+          tokenPath: this.tokenPathOf(generation),
+          tmuxSession: agentHostServiceSession(generation)
+        };
+      };
+      const entries: AgentHostRegistryEntry[] = [];
+      const keeps = this.switchKeeps;
+      if (keeps !== null && keeps.generation === this.primaryGeneration) {
+        entries.push(
+          entry(keeps.generation, {
+            role: "retiring",
+            retiringSince: new Date(keeps.since).toISOString(),
+            ownedThreadIds: [...keeps.threadIds].sort()
+          }),
+          entry(keeps.starting, { role: "starting" })
+        );
+      } else {
+        entries.push(entry(this.primaryGeneration, { role: "primary" }));
+      }
+      for (const host of this.retiring.values()) {
+        entries.push(
+          entry(host.generation, {
+            role: "retiring",
+            retiringSince: new Date(host.retiringSince).toISOString(),
+            ownedThreadIds: [...host.owned].sort()
+          })
+        );
+      }
+      try {
+        await writeHostRegistry(agentHostRegistryPath(this.opts.appdir), {
+          entries,
+          unparsed: this.registryKept.unparsed,
+          extra: this.registryKept.extra
+        });
+        return true;
+      } catch (error) {
+        this.log("error", "could not write the agent host registry", error);
+        return false;
+      }
+    });
+    this.registryWrites = write.catch(() => undefined);
+    return write;
+  }
+
+  /** The registry a previous daemon left, or null for the single-host layout. */
+  private async loadRegistry(): Promise<HostRegistryFile | null> {
+    try {
+      const registry = await readHostRegistry(agentHostRegistryPath(this.opts.appdir));
+      if (registry === null) return null;
+      this.registryInUse = true;
+      this.registryKept = registry;
+      this.highestGeneration = Math.max(this.highestGeneration, highestRecordedGeneration(registry));
+      return registry;
+    } catch (error) {
+      if (!(error instanceof HostRegistryUnreadableError)) throw error;
+      this.log("error", "the agent host registry is unreadable; booting the single-host layout", error);
+      return null;
+    }
+  }
+
+  /** Read a recorded generation's token and probe it. */
+  private async probeRecorded(generation: number): Promise<ProbeOutcome> {
+    const token = await this.readToken(generation);
+    if (token === null) return { ok: false, reachable: false };
+    this.tokens.set(generation, token);
+    return this.safeProbe(generation);
+  }
+
+  /** A recorded host that does not answer: kill whatever is left of it and its files. */
+  private async discardHost(generation: number): Promise<void> {
+    await this.killHost(generation);
+    await this.removeHostFiles(generation);
+  }
+
+  /**
+   * P2.4 R29: boot from the registry. Every recorded host is probed and adopted in its role:
+   *   - a live `starting` host (the daemon died mid-update, after the spawn) is the primary — it
+   *     booted with the foreign file of that moment; a dead one is discarded;
+   *   - a live retiring host keeps retiring; the threads it released while the daemon was down,
+   *     and every thread of one that is gone, are adopted by the primary;
+   *   - a live primary is adopted as today (stale ⇒ the update flow);
+   *   - a primary that is gone while retiring hosts live is respawned as a NEW generation whose
+   *     foreign file lists their owned sets; with none live it is respawned in place (§3.1).
+   */
+  private async bootFromRegistry(registry: HostRegistryFile): Promise<void> {
+    const byRole = (role: AgentHostRegistryEntry["role"]): AgentHostRegistryEntry[] =>
+      registry.entries.filter((entry) => entry.role === role).sort((a, b) => b.generation - a.generation);
+    const now = this.opts.adapters.now();
+    const toAdopt = new Set<string>();
+    const candidates: Array<{ generation: number; health: AgentHostHealthResponse }> = [];
+    for (const entry of byRole("starting")) {
+      const probed = await this.probeRecorded(entry.generation);
+      if (probed.ok && probed.health.retiring !== true) candidates.push({ generation: entry.generation, health: probed.health });
+      else await this.discardHost(entry.generation);
+    }
+    let recordedPrimary: number | null = null;
+    const retiringEntries = byRole("retiring");
+    for (const entry of byRole("primary")) {
+      const probed = await this.probeRecorded(entry.generation);
+      if (probed.ok && probed.health.retiring === true) {
+        retiringEntries.push(entry);
+      } else if (probed.ok) {
+        candidates.push({ generation: entry.generation, health: probed.health });
+      } else if (recordedPrimary === null) {
+        recordedPrimary = entry.generation;
+      } else {
+        await this.discardHost(entry.generation);
+      }
+    }
+    for (const entry of retiringEntries) {
+      const recorded = entry.ownedThreadIds ?? [];
+      const probed = entry.role === "primary" ? await this.safeProbe(entry.generation) : await this.probeRecorded(entry.generation);
+      if (probed.ok && probed.health.retiring === true) {
+        const owned = new Set(probed.health.ownedThreadIds ?? recorded);
+        // Released while no daemon watched: nobody adopted them yet.
+        for (const threadId of recorded) if (!owned.has(threadId)) toAdopt.add(threadId);
+        const since = typeof entry.retiringSince === "string" ? Date.parse(entry.retiringSince) : Number.NaN;
+        this.retiring.set(entry.generation, {
+          generation: entry.generation,
+          health: probed.health,
+          owned,
+          retiringSince: Number.isFinite(since) ? since : now,
+          firstMissAt: null,
+          ending: false
+        });
+        this.log("log", `retiring agent host ${entry.generation} adopted: ${describeHost(probed.health)}, ${owned.size} chat(s)`);
+      } else if (probed.ok) {
+        // Unretired, and the daemon died before it recorded that: a primary candidate.
+        candidates.push({ generation: entry.generation, health: probed.health });
+      } else {
+        for (const threadId of recorded) toAdopt.add(threadId);
+        this.log("warn", `retiring agent host ${entry.generation} is gone; the primary adopts its ${recorded.length} chat(s)`);
+        await this.discardHost(entry.generation);
+      }
+    }
+    const [primary, ...extra] = candidates;
+    if (primary !== undefined) {
+      this.primaryGeneration = primary.generation;
+      for (const other of extra) await this.retireExtraHost(other.generation, other.health);
+      if (recordedPrimary !== null) await this.discardHost(recordedPrimary);
+      this.adopt(primary.health);
+      this.log("log", `agent host ${primary.generation} adopted as primary: ${describeHost(primary.health)}`);
+      if (this.isStale(primary.health)) {
+        this.pendingVersionRestart = true;
+        this.log("warn", `${this.staleReason(primary.health)}; updating it`);
+        this.emit();
+      }
+    } else if (this.retiring.size > 0) {
+      // Never a host that reconciles every thread while retiring hosts own some (I3).
+      if (recordedPrimary !== null) await this.discardHost(recordedPrimary);
+      this.primaryGeneration = this.nextGeneration();
+      this.log("warn", `the primary agent host is gone while ${this.retiring.size} retiring host(s) live; starting generation ${this.primaryGeneration}`);
+      await this.bootPrimary();
+    } else {
+      this.primaryGeneration = recordedPrimary ?? 0;
+      await this.bootPrimary();
+    }
+    for (const threadId of toAdopt) {
+      if (this.retiringOwnerOf(threadId) === null) this.startAdoption(threadId);
+    }
+    await this.persistRegistry();
+    this.scheduleRetiringPoll();
+    if (this.pendingVersionRestart && primary !== undefined) await this.restartIfDrained();
+  }
+
+  /**
+   * A second live host that is not retiring (the daemon died between an unretire and the
+   * registry write): it retires now; one that cannot is stopped (its `/stop` marks what it cuts).
+   */
+  private async retireExtraHost(generation: number, health: AgentHostHealthResponse): Promise<void> {
+    let keep: readonly string[] | null = null;
+    try {
+      keep = (await this.opts.adapters.requestRetire?.(generation)) ?? null;
+    } catch (error) {
+      this.log("warn", `agent host ${generation} could not retire`, error);
+    }
+    if (keep !== null) {
+      this.retiring.set(generation, {
+        generation,
+        health,
+        owned: new Set(keep),
+        retiringSince: this.opts.adapters.now(),
+        firstMissAt: null,
+        ending: false
+      });
+      return;
+    }
+    this.log("warn", `stopping agent host ${generation}: a second primary`);
+    await this.opts.adapters.requestStop(generation).catch(() => undefined);
+    await this.awaitHostExit(generation);
+    await this.discardHost(generation);
+  }
+
+  /** R31: one retiring host as the Host status page lists it. */
+  private retiringStatus(host: RetiringHost): AgentHostRetiringStatus {
+    const health = host.health;
+    const blockers =
+      health === null
+        ? []
+        : restartBlockers(health, [], [...new Set((health.pendingWakes ?? []).map((wake) => wake.threadId))]).filter(
+            (blocker) => host.owned.has(blocker.threadId)
+          );
+    return {
+      generation: host.generation,
+      hostInstanceId: health?.hostInstanceId ?? null,
+      pid: health?.pid ?? this.directHandles.get(host.generation)?.pid ?? null,
+      codeStamp: typeof health?.codeStamp === "string" ? health.codeStamp : null,
+      retiringSince: new Date(host.retiringSince).toISOString(),
+      endsAt: new Date(host.retiringSince + AGENT_HOST_RETIRE_MAX_MS).toISOString(),
+      threads: [...host.owned].sort().map((threadId) => ({ threadId })),
+      blockers
+    };
   }
 
   private log(level: "log" | "warn" | "error", ...args: unknown[]): void {
