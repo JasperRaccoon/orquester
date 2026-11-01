@@ -18,6 +18,7 @@ import { watch } from "node:fs";
 import { agentChatDir } from "@orquester/config";
 
 import type { AdapterLogger } from "./adapter.ts";
+import { AGENT_HOST_ENV } from "./host-protocol.ts";
 import { startAgentHost } from "./main.ts";
 
 const quietLogger = (): AdapterLogger => ({
@@ -73,6 +74,34 @@ describe("agent host boot — the store's host-wide sweep (S1 #5)", () => {
         await host.stop();
         await host.stop();
       }
+    } finally {
+      await rm(appdir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+});
+
+describe("agent host boot — host updates' inputs (spec 2026-11-01 P2.3 R15)", () => {
+  it("refuses to boot on a foreign-threads file it cannot read or parse, or a malformed generation", async () => {
+    const appdir = await mkdtemp(join(tmpdir(), "agent-host-boot-"));
+    try {
+      const base = { HOME: appdir, PATH: "/usr/bin:/bin", ORQUESTER_APPDIR: appdir, TMPDIR: join(appdir, "tmp") };
+      const socket = { [AGENT_HOST_ENV.socket]: join(appdir, "h.sock") };
+      const foreign = join(appdir, "foreign.json");
+      // Named but missing: the host must not guess which threads are another's.
+      await assert.rejects(
+        startAgentHost({ appdir, env: { ...base, ...socket, [AGENT_HOST_ENV.foreignThreads]: foreign }, logger: quietLogger() }),
+        /foreign-threads file/
+      );
+      await writeFile(foreign, JSON.stringify({ threadIds: ["ok", "../escape"] }));
+      await assert.rejects(
+        startAgentHost({ appdir, env: { ...base, ...socket, [AGENT_HOST_ENV.foreignThreads]: foreign }, logger: quietLogger() }),
+        /foreign-threads file/
+      );
+      await assert.rejects(
+        startAgentHost({ appdir, env: { ...base, ...socket, [AGENT_HOST_ENV.generation]: "-1" }, logger: quietLogger() }),
+        /must be a non-negative integer/
+      );
+      await assert.rejects(stat(join(appdir, "h.sock")), "nothing was bound");
     } finally {
       await rm(appdir, { recursive: true, force: true, maxRetries: 3 });
     }

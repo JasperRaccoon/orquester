@@ -9145,6 +9145,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   const adoptions = new Map<string, Promise<boolean>>();
+  /** Adoptions' index catch-ups in flight: the test drain waits on them, a stop never does. */
+  const indexCatchUps = new Set<Promise<void>>();
 
   const adoptThread = (threadId: string): Promise<boolean> =>
     whenReady(async () => {
@@ -9176,7 +9178,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           finish();
         }
         startGoalResumes();
-        void catchUpAdoptedIndex(threadId);
+        const catchUp = catchUpAdoptedIndex(threadId);
+        indexCatchUps.add(catchUp);
+        void catchUp.finally(() => indexCatchUps.delete(catchUp));
         logger.info("agent-host: adopted a thread from another host", { threadId });
         return true;
       })();
@@ -9229,6 +9233,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const drain = async (final = false): Promise<void> => {
     await retirement.drain();
+    if (!final) await Promise.allSettled([...indexCatchUps]);
     await goalResumes;
     for (const runtime of [...runtimes.values()]) {
       await runtime.commands.drain();

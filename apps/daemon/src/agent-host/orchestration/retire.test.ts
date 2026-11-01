@@ -6,6 +6,9 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import type {
@@ -15,11 +18,13 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import type { GoalCommandResult } from "../adapter.ts";
+import { createThreadIndex } from "../index/index.ts";
 import { runtimeEventToActivities } from "../ingestion/activities.ts";
 import { isContinuationPrompt } from "./continuation-prompt.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import { createThreadOwnership, type ThreadOwnership } from "./ownership.ts";
 import {
+  createRecordingLogger,
   createScriptedAdapter,
   createTestHost,
   type FakeThreadStore,
@@ -467,6 +472,26 @@ describe("foreign threads are untouchable until adopted (P2.3 R16, R17)", () => 
     assert.equal(await host.orchestrator.adoptThread("crashed"), false);
     await host.settle();
     assert.equal(continuationSends(host).length, 1, "idempotent");
+    await host.stop();
+  });
+
+  it("the index catches an adopted thread up from its cursor, never before", async (t) => {
+    const store = await crashedMidTurn("indexed");
+    const dir = await mkdtemp(join(tmpdir(), "orq-retire-index-"));
+    const index = createThreadIndex({ filePath: join(dir, "index.sqlite"), logger: createRecordingLogger() });
+    t.after(async () => {
+      index.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+    const host = createTestHost({ store, index, ownership: createThreadOwnership({ foreignThreadIds: ["indexed"] }) });
+    await host.orchestrator.reconcile();
+    await host.settle();
+    await index.drain();
+    assert.equal(index.cursor("indexed"), null, "nothing of a foreign thread is indexed");
+    assert.equal(await host.orchestrator.adoptThread("indexed"), true);
+    await host.settle();
+    await index.drain();
+    assert.equal(index.cursor("indexed")?.lastSeq, store.logs.get("indexed")?.at(-1)?.seq, "caught up to the log");
     await host.stop();
   });
 
