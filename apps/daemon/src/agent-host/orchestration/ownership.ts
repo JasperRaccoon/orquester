@@ -55,10 +55,11 @@ export interface ThreadOwnership {
   /** While retiring: the threads this host still owns, releasing ones included. Else null. */
   ownedThreadIds(): string[] | null;
   /**
-   * R17: take a foreign thread in. False when it was not foreign (nothing to do). Throws
-   * `HOST_RETIRING` on a retiring host: only the primary adopts.
+   * R17: take a foreign thread in — owned at once (the adoption's own reconcile writes it), while
+   * requests for it wait for the returned finisher. Null when it was not foreign (nothing to do).
+   * Throws `HOST_RETIRING` on a retiring host: only the primary adopts.
    */
-  adopt(threadId: string): boolean;
+  adopt(threadId: string): (() => void) | null;
   /** R18: retire, keeping `owned`. Repeatable: a second call keeps the current owned set. */
   retire(owned: Iterable<string>): string[];
   /** R21: stop retiring; every released thread is owned again (the boot-foreign ones stay foreign). */
@@ -73,11 +74,12 @@ export interface ThreadOwnership {
   /** True while {@link beginRelease}'s finisher has not run for the thread. */
   releasing(threadId: string): boolean;
   /**
-   * The gate of one request for a thread: waits out a release in flight, then throws
-   * `THREAD_NOT_OWNED` for a foreign thread, else counts the request in flight until the returned
-   * exit runs.
+   * The gate of one request for a thread: waits out a release or an adoption in flight, then
+   * throws `THREAD_NOT_OWNED` for a foreign thread, else counts the request in flight until the
+   * returned exit runs. `readsForeign`: a request that only READS a foreign thread (a fork of a
+   * parent another host serves) passes uncounted instead.
    */
-  enter(threadId: string): Promise<() => void>;
+  enter(threadId: string, options?: { readsForeign?: boolean }): Promise<() => void>;
   /** Count internal work (an effect) for an owned thread while `work` runs. */
   track<T>(threadId: string, work: Promise<T>): Promise<T>;
   /** Requests and tracked work in flight for the thread. */
@@ -96,6 +98,21 @@ export function createThreadOwnership(input: { foreignThreadIds?: Iterable<strin
   const releases = new Map<string, Promise<void>>();
   const counts = new Map<string, number>();
   const listeners: Array<(threadId: string) => void> = [];
+
+  /** A release or an adoption of the thread is under way: requests wait for its finisher. */
+  const gate = (threadId: string): (() => void) => {
+    let open!: () => void;
+    releases.set(
+      threadId,
+      new Promise<void>((resolve) => {
+        open = resolve;
+      })
+    );
+    return () => {
+      releases.delete(threadId);
+      open();
+    };
+  };
 
   const isForeign = (threadId: string): boolean =>
     foreign.has(threadId) || (owned !== null && !owned.has(threadId));
@@ -135,7 +152,8 @@ export function createThreadOwnership(input: { foreignThreadIds?: Iterable<strin
     ownedThreadIds: () => (owned === null ? null : [...owned].sort()),
     adopt(threadId) {
       if (owned !== null) throw hostRetiring();
-      return foreign.delete(threadId);
+      if (!foreign.delete(threadId)) return null;
+      return gate(threadId);
     },
     retire(keep) {
       if (owned === null) {
@@ -150,25 +168,21 @@ export function createThreadOwnership(input: { foreignThreadIds?: Iterable<strin
       if (owned === null || !owned.has(threadId) || releases.has(threadId) || counts.has(threadId)) {
         return null;
       }
-      let finish!: () => void;
-      releases.set(
-        threadId,
-        new Promise<void>((resolve) => {
-          finish = resolve;
-        })
-      );
+      const finish = gate(threadId);
       return (released) => {
         if (released) owned?.delete(threadId);
-        releases.delete(threadId);
         finish();
       };
     },
     releasing: (threadId) => releases.has(threadId),
-    async enter(threadId) {
+    async enter(threadId, options) {
       for (let release = releases.get(threadId); release !== undefined; release = releases.get(threadId)) {
         await release;
       }
-      if (isForeign(threadId)) throw threadNotOwned(threadId);
+      if (isForeign(threadId)) {
+        if (options?.readsForeign === true) return () => undefined;
+        throw threadNotOwned(threadId);
+      }
       return count(threadId);
     },
     async track(threadId, work) {
@@ -202,7 +216,9 @@ const THREAD_WRITES: Readonly<Record<string, (args: readonly unknown[]) => unkno
   pruneAttachments: (args) => (args[0] as { threadId?: unknown } | undefined)?.threadId,
   deleteThread: (args) => args[0],
   copyPages: (args) => args[1],
-  logRawFrame: (args) => args[0]
+  logRawFrame: (args) => args[0],
+  // `launch.json` and `fork-handoff.json` (`LaunchConfigStore`, `ForkHandoffStore`): `save(threadId, …)`.
+  save: (args) => args[0]
 };
 
 /**
