@@ -147,7 +147,7 @@ export const ChatSettings: React.FC = () => {
       <SettingsSection title="Usage limits" description="Shared by every client of this server.">
         <SettingRow
           label="Auto-resume chats when the usage limit resets"
-          description={'When a chat stops on its account\'s usage limit and the reset time is known, send "Continue where you left off." shortly after the reset. A chat you have written to since, or that waits for an approval or an answer, is left alone; each chat\'s banner can cancel it.'}
+          description={'When a chat stops on its account\'s usage limit and the reset time is known, tell it to continue shortly after the reset, and to relaunch the subagents and background commands the limit stopped that it still needs. A chat you have written to since, or that waits for an approval or an answer, is left alone; each chat\'s banner can cancel it.'}
         >
           <Switch
             label="Auto-resume chats when the usage limit resets"

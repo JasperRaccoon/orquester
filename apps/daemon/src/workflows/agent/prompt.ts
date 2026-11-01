@@ -25,9 +25,15 @@ import { tailUtf8, truncateUtf8 } from "../run-context.ts";
 const AUTONOMY_NOTE =
   "You are running unattended inside an automated workflow. No human will answer. Never ask questions or wait for confirmation; make reasonable decisions and complete the task fully.";
 
+/**
+ * What every continue after a stop adds: the stop took the agent's subagents and background
+ * commands with it (the wording of `USAGE_LIMIT_CONTINUE_MESSAGE`).
+ */
+const REVIVE_STOPPED_WORK =
+  "If subagents or background commands you started were stopped, relaunch the ones whose results you still need with the same instructions; check before repeating anything that changes state.";
+
 /** §5.4 step 3 — the first message after an in-session account switch. */
-const CONTINUE_AFTER_SWITCH =
-  "You were interrupted by a usage limit and have been moved to another account. Continue the task from exactly where you stopped.";
+const CONTINUE_AFTER_SWITCH = `You were interrupted by a usage limit and have been moved to another account. Continue the task from exactly where you stopped. ${REVIVE_STOPPED_WORK}`;
 
 /** §5.5 — the custom answer to a question that allows one. */
 export const AUTONOMOUS_ANSWER = "No user is available. Choose the most reasonable option yourself and proceed autonomously.";
@@ -43,7 +49,7 @@ function handoffNotice(agent: string, reason?: AgentFailureReason): string {
       : reason === "auth"
         ? "was stopped because its account's login failed"
         : "was stopped before it finished";
-  return `A previous agent (${agent}) ${why}. Its partial work may already be in the working tree — inspect it and continue from there.`;
+  return `A previous agent (${agent}) ${why}. Its partial work may already be in the working tree — inspect it and continue from there. Subagents or background commands it started stopped with it: run again the ones whose results you still need, and check before repeating anything that changes state.`;
 }
 
 /** The prompt plus the autonomy note, when the block wants it. */
@@ -109,8 +115,7 @@ export function handoffMessagesBudget(input: { contextWindow: number | undefined
 }
 
 /** §5.4 step 3 for an account whose login was refused (the account moved for a sign-in failure). */
-const CONTINUE_AFTER_AUTH_SWITCH =
-  "Your previous account's login failed and you have been moved to another account. Continue the task from exactly where you stopped.";
+const CONTINUE_AFTER_AUTH_SWITCH = `Your previous account's login failed and you have been moved to another account. Continue the task from exactly where you stopped. ${REVIVE_STOPPED_WORK}`;
 
 /**
  * The message sent after an account switch (or after waiting for a reset on the same session),
