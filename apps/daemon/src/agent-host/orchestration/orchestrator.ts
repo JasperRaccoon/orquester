@@ -479,6 +479,12 @@ export interface OrchestratorOptions {
   ownership?: ThreadOwnership;
   /** Host updates (P2.3 R19): a thread was released to the next host; its open streams end. Must not throw. */
   onThreadReleased?: (threadId: string) => void;
+  /**
+   * Host updates (P2.3 R17, P2.5 I4): stop the provider processes another host may have left for
+   * a thread this host is adopting (`stopThreadProviderGroups`), before anything resumes it.
+   * Never rejects. Absent: nothing is looked for (tests).
+   */
+  stopForeignProviderProcesses?: (threadId: string) => Promise<void>;
 }
 
 interface ThreadSubscription {
@@ -9064,7 +9070,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         try {
           await adapter!.stopSession(threadId);
         } catch (error) {
-          logger.warn(`agent-host: could not close ${threadId}'s provider session for its release`, error);
+          // I4: a session that may still run is never handed over — the thread stays, and is
+          // looked at again at its next event or the backstop.
+          logger.warn(`agent-host: could not close ${threadId}'s provider session; it stays on this host`, error);
+          return false;
         }
       }
       runtime.bound = null;
@@ -9175,6 +9184,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           await store.refreshReceipts?.().catch((error: unknown) => {
             logger.warn("agent-host: could not read the receipts another host wrote", error);
           });
+          // Nothing the previous owner left running for it may run beside the session resumed here.
+          await options.stopForeignProviderProcesses?.(threadId);
           // Exactly the boot's per-thread reconcile: an orphan settled or continued, a marker or a
           // revival applied, a pending wake delivered, a held goal queued for its resume.
           await reconcileThread(threadId, liveSessionThreadIds());

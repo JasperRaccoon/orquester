@@ -84,6 +84,8 @@ export interface TestHostOptions<S extends HostThreadStore = FakeThreadStore> {
   ownership?: OrchestratorOptions["ownership"];
   /** Host updates (P2.3 R19): told of every release. */
   onThreadReleased?: OrchestratorOptions["onThreadReleased"];
+  /** Host updates (P2.3 R17): what an adoption stops of the previous owner's processes. */
+  stopForeignProviderProcesses?: OrchestratorOptions["stopForeignProviderProcesses"];
 }
 
 export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
@@ -203,6 +205,7 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     ...(options.forkHandoffs ? { forkHandoffs: options.forkHandoffs } : {}),
     ...(options.ownership ? { ownership: options.ownership } : {}),
     ...(options.onThreadReleased ? { onThreadReleased: options.onThreadReleased } : {}),
+    ...(options.stopForeignProviderProcesses ? { stopForeignProviderProcesses: options.stopForeignProviderProcesses } : {}),
     launchProfile:
       options.launchProfile ??
       (async (threadId) => {

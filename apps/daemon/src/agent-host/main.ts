@@ -82,6 +82,7 @@ import { systemClock, systemIdGen } from "./orchestration/runtime-seams.ts";
 import { createAgentHostServer, type AgentHostServer } from "./server/index.ts";
 import { createThreadStore } from "./store/index.ts";
 import { buildProviderEnv, providerNodePreload } from "./support/env.ts";
+import { stopThreadProviderGroups } from "./support/leftover-processes.ts";
 import {
   createDaemonForwarder,
   createDaemonManifestClient,
@@ -634,6 +635,12 @@ export async function startAgentHost(
     store,
     ownership,
     onThreadReleased: (threadId) => endThreadStreams(threadId),
+    stopForeignProviderProcesses: async (threadId) => {
+      const swept = await stopThreadProviderGroups(threadId);
+      if (swept.found > 0) {
+        logger.warn("agent-host: stopped provider processes another host left for a thread it adopts", { threadId, ...swept });
+      }
+    },
     ingestion,
     checkpoints,
     liveness,

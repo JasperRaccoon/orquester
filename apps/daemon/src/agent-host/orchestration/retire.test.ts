@@ -457,17 +457,24 @@ describe("foreign threads are untouchable until adopted (P2.3 R16, R17)", () => 
 
   it("an adopted crash orphan is resumed as a boot resumes one, once", async () => {
     const store = await crashedMidTurn("crashed");
-    const host = createTestHost({
+    const order: string[] = [];
+    let host: TestHost | undefined;
+    host = createTestHost({
       store,
       continuationEnabled: () => true,
-      ownership: createThreadOwnership({ foreignThreadIds: ["crashed"] })
+      ownership: createThreadOwnership({ foreignThreadIds: ["crashed"] }),
+      stopForeignProviderProcesses: async (threadId) => {
+        order.push(`sweep:${threadId}:${host?.adapter.calls.length ?? 0}`);
+      }
     });
     await host.orchestrator.reconcile();
     await host.settle();
     assert.equal(continuationSends(host).length, 0);
+    assert.deepEqual(order, [], "nothing of a foreign thread is swept at boot");
     assert.equal(await host.orchestrator.adoptThread("crashed"), true);
     await host.settle();
     assert.equal(continuationSends(host).length, 1, "the crash path continued it");
+    assert.deepEqual(order, ["sweep:crashed:0"], "the old owner's processes were stopped before any session started");
     assert.equal(host.store.heads.get("crashed")?.session.status, "running");
     assert.equal(await host.orchestrator.adoptThread("crashed"), false);
     await host.settle();

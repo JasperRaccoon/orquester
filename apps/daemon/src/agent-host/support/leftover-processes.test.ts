@@ -12,8 +12,10 @@ import {
   recordHelperProcesses,
   recordOwnGroup,
   stopLeftoverProcesses,
+  stopThreadProviderGroups,
   type RecordedSession
 } from "./leftover-processes.ts";
+import { spawnProviderChild } from "./spawn.ts";
 import { LIFELINE_ARGV0, LIFELINE_SCRIPT } from "./lifeline.ts";
 import { drain, mockProc } from "./leftover-processes.testing.ts";
 
@@ -364,5 +366,34 @@ test("the real /proc: a recorded session's members are stopped, a daemon and a s
         // Already gone.
       }
     }
+  }
+});
+
+test("an adopting host stops the CLI another host left for the thread, and nothing of another thread (host updates P2.3 R17)", {
+  skip: process.platform !== "linux"
+}, async () => {
+  /** A stand-in CLI through the real lifeline, in its own group; answers once it runs. */
+  const launch = async (threadId: string) => {
+    const child = spawnProviderChild({
+      command: "/bin/sh",
+      args: ["-c", "echo up; exec sleep 600"],
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ORQUESTER_SESSION_ID: threadId, [AGENT_LAUNCH_ENV_VAR]: randomUUID() },
+      cwd: "/"
+    });
+    await new Promise<void>((resolve) => child.stdout.once("data", () => resolve()));
+    return child;
+  };
+  const left = await launch("adopted-thread");
+  const other = await launch("another-thread");
+  try {
+    const swept = await stopThreadProviderGroups("adopted-thread", { graceMs: 2_000 });
+    assert.equal(swept.found, 1, "the CLI, found through its lifeline watcher");
+    const ended = await left.exited;
+    assert.equal(ended.kind, "signal");
+    assert.equal(other.hasExited(), false, "another thread's CLI runs on");
+    assert.deepEqual(await stopThreadProviderGroups("adopted-thread"), { found: 0, terminated: 0, killed: 0 });
+  } finally {
+    await left.kill("SIGKILL");
+    await other.kill("SIGKILL");
   }
 });
