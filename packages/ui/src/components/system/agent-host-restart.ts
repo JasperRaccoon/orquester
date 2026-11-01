@@ -1,4 +1,4 @@
-import type { AgentHostRestartBlocker, AgentHostStatusResponse } from "@orquester/api/agent-chat";
+import type { AgentHostRestartBlocker, AgentHostRetiringStatus, AgentHostStatusResponse } from "@orquester/api/agent-chat";
 
 /** One thread and everything of it a pending agent-host restart waits on. */
 export interface RestartBlockerGroup {
@@ -21,6 +21,20 @@ export function groupRestartBlockers(blockers: readonly AgentHostRestartBlocker[
     group.blockers.push(blocker);
   }
   return [...groups.values()];
+}
+
+/**
+ * Every chat a previous-version host still finishes (spec 2026-11-01 P2.4 R31), with what runs in
+ * it — a chat with nothing itemised (it is about to move over) included, with no blockers.
+ */
+export function retiringGroups(host: AgentHostRetiringStatus): RestartBlockerGroup[] {
+  const groups = groupRestartBlockers(host.blockers);
+  const listed = new Set(groups.map((group) => group.threadId));
+  for (const thread of host.threads) {
+    const label = thread.threadTitle?.trim() ? thread.threadTitle : thread.threadId;
+    if (!listed.has(thread.threadId)) groups.push({ threadId: thread.threadId, label, blockers: [] });
+  }
+  return groups;
 }
 
 /** What a blocker is, in a few words. */
@@ -67,7 +81,11 @@ export function shortCodeStamp(stamp: string | null): string {
  * line per blocker, or a single line saying nothing is running.
  */
 export function restartNowConsequences(status: AgentHostStatusResponse | null): string[] {
-  const blockers = status?.pendingRestart?.blockers ?? [];
+  // A restart also ends every previous-version host (spec 2026-11-01 P2.4 R30): what runs there stops too.
+  const blockers = [
+    ...(status?.pendingRestart?.blockers ?? []),
+    ...(status?.retiringHosts ?? []).flatMap((host) => host.blockers)
+  ];
   if (blockers.length === 0) return ["Nothing is running in any chat right now."];
   return groupRestartBlockers(blockers).flatMap((group) =>
     group.blockers.map((blocker) => {

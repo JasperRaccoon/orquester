@@ -7,6 +7,7 @@ import {
   AGENT_HOST_CAPABILITIES,
   AGENT_HOST_PROTOCOL_VERSION,
   AGENT_HOST_SERVICE_SESSION,
+  AGENT_HOST_UPDATE_GRACE_MS,
   agentHostSupports,
   type AgentHostHealthResponse
 } from "../agent-host/host-protocol.ts";
@@ -1484,5 +1485,72 @@ test("restart status: every blocker per thread — a turn, a shell with its comm
     { threadId: "t-bg", kind: "background", taskId: "b1", since: "2026-10-23T09:00:00.000Z", stoppable: true, title: "Run the suite", command: "pnpm test > /tmp/x.log" },
     { threadId: "t-bg", kind: "agent", taskId: "a1", since: "2026-10-23T09:01:00.000Z", stoppable: false }
   ]);
+  await h.cleanup();
+});
+
+// Spec 2026-11-01 P1.4 R12/R13: a pending update waits for the drain for at most the grace, on a
+// host whose `/stop` resumes what it cuts — and never forces one that cannot.
+
+/** A stale host (moved code stamp) with a running turn until the replacement is spawned. */
+function staleBusyUntilReplaced(h: Harness, capabilities: AgentHostHealthResponse["capabilities"]): () => ProbeOutcome {
+  return () =>
+    h.spawns.length === 0
+      ? healthy({ codeStamp: "a".repeat(40), active: ["t-busy"], background: [], pendingWakes: [], capabilities })
+      : healthy({ instance: "host-2", codeStamp: "b".repeat(40), background: [], pendingWakes: [] });
+}
+
+/** Resolves once the supervisor has adopted `instance`. */
+function adopted(h: Harness, instance: string): Promise<void> {
+  return new Promise((resolve) => {
+    const off = h.supervisor.onChange((status) => {
+      if (status.state === "healthy" && status.hostInstanceId === instance) {
+        off();
+        resolve();
+      }
+    });
+  });
+}
+
+test("update grace: a busy stale host that resumes chats is restarted when the grace runs out, without a health tick", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await makeHarness([], { seedToken: "tok", tmux: true, codeStamp: "b".repeat(40) });
+  h.probeHook = staleBusyUntilReplaced(h, { continuationRevival: 1 });
+  h.hostExitsAfterPolls = 0;
+  const passTime = (ms: number) => {
+    h.advance(ms);
+    t.mock.timers.tick(ms);
+  };
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 0, "a busy host is not restarted at once");
+  const status = h.supervisor.restartStatus();
+  assert.equal(status.pendingRestart?.restartsAt, new Date(h.now() + AGENT_HOST_UPDATE_GRACE_MS).toISOString());
+  assert.equal(status.restartResumesChats, true);
+
+  passTime(AGENT_HOST_UPDATE_GRACE_MS - 1);
+  assert.equal(h.stopRequests, 0, "not before the grace is over");
+  const replaced = adopted(h, "host-2");
+  passTime(1);
+  await replaced;
+  assert.equal(h.stopRequests, 1, "restarted through /stop, which marks the working chats for continuation");
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.supervisor.restartStatus().pendingRestart, null);
+  await h.cleanup();
+});
+
+test("update grace: a host without continuationRevival is never forced — it waits for the drain without limit", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await makeHarness([], { seedToken: "tok", tmux: true, codeStamp: "b".repeat(40) });
+  h.probeHook = staleBusyUntilReplaced(h, { continuationRevival: 0 });
+  await h.supervisor.init();
+  for (let i = 0; i < 8; i += 1) {
+    h.advance(AGENT_HOST_UPDATE_GRACE_MS);
+    t.mock.timers.tick(AGENT_HOST_UPDATE_GRACE_MS);
+    await h.supervisor.checkHealth();
+  }
+  assert.equal(h.stopRequests, 0, "its /stop would leave the chats it cuts stopped");
+  assert.equal(h.spawns.length, 0);
+  const status = h.supervisor.restartStatus();
+  assert.equal(status.pendingRestart?.restartsAt, null);
+  assert.equal(status.restartResumesChats, false);
   await h.cleanup();
 });
