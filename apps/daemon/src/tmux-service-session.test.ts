@@ -36,8 +36,13 @@ test("service session lives outside orq- namespace and survives listSessions/rea
     !sessions.includes("svc-test") && !sessions.some((s) => s.includes("orqsvc")),
     "listSessions (the reaper's input) must not see the service session"
   );
+  // Another session keeps the server up, so the answer is tmux's "can't find session" — a
+  // session that is gone, not a tmux that failed (which throws).
+  await tmux.newServiceSession({ name: "orqsvc-keep", cwd: "/tmp", env: {}, bin: "sleep", args: ["60"] });
   await tmux.killServiceSession("orqsvc-test");
   assert.equal(await tmux.hasServiceSession("orqsvc-test"), false);
+  await tmux.killServiceSession("orqsvc-keep");
+  assert.equal(await tmux.hasServiceSession("orqsvc-keep"), false, "…and no server at all is no session");
 });
 
 test("newServiceSession rejects non-orqsvc names", async () => {

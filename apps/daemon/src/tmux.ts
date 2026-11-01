@@ -660,10 +660,16 @@ export class Tmux {
     return windows;
   }
 
-  /** True if a live service session with this exact name exists on this server. */
+  /**
+   * True if a live service session with this exact name exists on this server; false when it,
+   * or the server, does not. Any other failure throws: a caller that acts on "gone" (the agent
+   * host supervisor moves a host's chats elsewhere) must never read a broken tmux as an absent one.
+   */
   async hasServiceSession(name: string): Promise<boolean> {
     const result = await this.run(["has-session", "-t", `=${name}`]);
-    return result.code === 0;
+    if (result.code === 0) return true;
+    if (TMUX_NO_SERVER.test(result.stderr) || /can't find session|session not found/i.test(result.stderr)) return false;
+    throw new Error(`tmux has-session failed (${result.code}): ${result.stderr.trim()}`);
   }
 
   /** Kill a service session by its exact name. */

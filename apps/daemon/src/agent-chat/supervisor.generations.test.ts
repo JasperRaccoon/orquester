@@ -32,7 +32,11 @@ const FULL: AgentHostCapabilities = { continuationRevival: 1, retire: 1 };
 interface FakeHost {
   generation: number;
   instance: string;
+  /** Its process runs. */
   alive: boolean;
+  /** …and answers `/health` (a busy or wedged host does not). */
+  answers: boolean;
+  protocolVersion: number;
   codeStamp: string;
   /** Threads with a running turn. */
   active: string[];
@@ -56,10 +60,22 @@ interface Harness {
   adoptHook?: (generation: number, threadId: string) => Promise<"adopted" | "owned" | "missing">;
   /** Whether a spawned host comes up. */
   spawnReady: boolean;
+  /** `tmux has-session` fails (tmux cannot tell). */
+  tmuxBroken: boolean;
+  /** No-tmux harness: the signals each direct child got, and the ones it dies of. */
+  signals: Array<[number, string]>;
+  directDiesOn: Set<string>;
+  /** Runs inside `/retire` before the fake answers; may throw. */
+  beforeRetire?: (host: FakeHost) => Promise<void>;
+  unretireFails: boolean;
+  /** Awaited by the spawn of a new tmux session, after `onSpawnStart`. */
+  spawnGate?: Promise<void>;
+  onSpawnStart?: () => void;
   logs: string[];
   /** Advance the mocked clock and fire due timers, then let the supervisor's queue drain. */
   passTime(ms: number): Promise<void>;
   registry(): Promise<AgentHostRegistryEntry[] | null>;
+  pendingAdoptions(): Promise<string[]>;
   cleanup(): Promise<void>;
 }
 
@@ -73,6 +89,8 @@ function fakeHost(generation: number, fields: Partial<FakeHost> = {}): FakeHost 
     generation,
     instance: `host-g${generation}`,
     alive: true,
+    answers: true,
+    protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
     codeStamp: NEW,
     active: [],
     retiring: false,
@@ -85,7 +103,7 @@ function fakeHost(generation: number, fields: Partial<FakeHost> = {}): FakeHost 
 function healthOf(host: FakeHost): AgentHostHealthResponse {
   return {
     ok: true,
-    protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+    protocolVersion: host.protocolVersion,
     hostInstanceId: host.instance,
     liveThreadIds: [],
     activeTurnThreadIds: host.active,
@@ -108,7 +126,7 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
-async function makeHarness(t: TestContext): Promise<Harness> {
+async function makeHarness(t: TestContext, opts: { direct?: boolean } = {}): Promise<Harness> {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
   const dir = await mkdtemp(join(tmpdir(), "orq-host-gens-"));
   const h: Harness = {
@@ -122,6 +140,10 @@ async function makeHarness(t: TestContext): Promise<Harness> {
     unretires: [],
     adoptions: [],
     spawnReady: true,
+    tmuxBroken: false,
+    signals: [],
+    directDiesOn: new Set(["SIGTERM", "SIGKILL"]),
+    unretireFails: false,
     logs: [],
     passTime: async (ms) => {
       t.mock.timers.tick(ms);
@@ -135,13 +157,32 @@ async function makeHarness(t: TestContext): Promise<Harness> {
         return null;
       }
     },
+    pendingAdoptions: async () => {
+      const raw = await readFile(agentHostRegistryPath(dir), "utf8");
+      return (JSON.parse(raw) as { pendingAdoptions?: string[] }).pendingAdoptions ?? [];
+    },
     cleanup: async () => {
       h.supervisor.stop();
       await rm(dir, { recursive: true, force: true });
     }
   };
+  // A spawned host's process runs; it answers only when `spawnReady`.
+  const spawned = (generation: number, foreign: string[] | null, env: Record<string, string>): FakeHost => {
+    h.spawns.push({ generation, env, foreign });
+    const host = fakeHost(generation, { instance: `host-g${generation}-spawn${h.spawns.length}`, answers: h.spawnReady });
+    h.hosts.set(generation, host);
+    return host;
+  };
+  const foreignOf = async (env: Record<string, string>): Promise<string[] | null> => {
+    const foreignPath = env[AGENT_HOST_ENV.foreignThreads];
+    return foreignPath ? (JSON.parse(await readFile(foreignPath, "utf8")) as { threadIds: string[] }).threadIds : null;
+  };
   const tmux: SupervisorTmux = {
-    hasServiceSession: async (name) => h.sessions.has(name),
+    hasServiceSession: async (name) => {
+      if (h.tmuxBroken) throw new Error("tmux has-session failed (1): lost server");
+      return h.sessions.has(name);
+    },
+    listServiceSessions: async (prefix) => [...h.sessions].filter((name) => name.startsWith(prefix)),
     killServiceSession: async (name) => {
       h.sessions.delete(name);
       const host = h.hosts.get(generationOfSession(name));
@@ -149,18 +190,16 @@ async function makeHarness(t: TestContext): Promise<Harness> {
     },
     newServiceSession: async ({ name, env }) => {
       const generation = Number(env[AGENT_HOST_ENV.generation]);
-      const foreignPath = env[AGENT_HOST_ENV.foreignThreads];
-      const foreign = foreignPath
-        ? (JSON.parse(await readFile(foreignPath, "utf8")) as { threadIds: string[] }).threadIds
-        : null;
-      h.spawns.push({ generation, env, foreign });
+      const foreign = await foreignOf(env);
+      h.onSpawnStart?.();
+      await h.spawnGate;
       h.sessions.add(name);
-      h.hosts.set(generation, fakeHost(generation, { instance: `host-g${generation}-spawn${h.spawns.length}`, alive: h.spawnReady }));
+      spawned(generation, foreign, env);
     }
   };
   const live = (generation: number): FakeHost | null => {
     const host = h.hosts.get(generation);
-    return host?.alive ? host : null;
+    return host?.alive && host.answers ? host : null;
   };
   h.supervisor = new AgentHostSupervisor({
     appdir: dir,
@@ -187,12 +226,13 @@ async function makeHarness(t: TestContext): Promise<Harness> {
         if (!host) throw new Error("agent host unavailable");
         host.retiring = true;
         host.owned = [...host.active];
+        await h.beforeRetire?.(host);
         return host.owned;
       },
       requestUnretire: async (generation) => {
         h.unretires.push(generation);
         const host = live(generation);
-        if (!host) throw new Error("agent host unavailable");
+        if (!host || h.unretireFails) throw new Error("agent host unavailable");
         host.retiring = false;
         host.owned = [];
       },
@@ -200,9 +240,19 @@ async function makeHarness(t: TestContext): Promise<Harness> {
         h.adoptions.push([generation, threadId]);
         return h.adoptHook ? h.adoptHook(generation, threadId) : Promise.resolve("adopted");
       },
-      tmux,
-      spawnDirect: () => {
-        throw new Error("this harness runs under tmux");
+      tmux: opts.direct ? null : tmux,
+      spawnDirect: (_bin, _args, env) => {
+        if (!opts.direct) throw new Error("this harness runs under tmux");
+        const generation = Number(env[AGENT_HOST_ENV.generation]);
+        const host = spawned(generation, null, env);
+        return {
+          pid: 2000 + generation,
+          kill: (signal) => {
+            h.signals.push([generation, signal ?? "SIGTERM"]);
+            if (h.directDiesOn.has(signal ?? "SIGTERM")) host.alive = false;
+          },
+          isAlive: () => host.alive
+        };
       },
       now: () => Date.now(),
       sleep: async (ms) => {
@@ -227,8 +277,8 @@ async function seedHost(h: Harness, host: FakeHost): Promise<void> {
   await writeFile(path, `tok-${host.generation}\n`, { mode: 0o600 });
 }
 
-async function seedRegistry(h: Harness, entries: AgentHostRegistryEntry[]): Promise<void> {
-  await writeHostRegistry(agentHostRegistryPath(h.dir), { entries, unparsed: [], extra: {} });
+async function seedRegistry(h: Harness, entries: AgentHostRegistryEntry[], pendingAdoptions: string[] = []): Promise<void> {
+  await writeHostRegistry(agentHostRegistryPath(h.dir), { entries, unparsed: [], extra: {}, pendingAdoptions });
 }
 
 /** Generation 0, stale and running a turn in `t-busy`: what a deploy finds. */
@@ -563,5 +613,218 @@ test("a stale busy host without the retire capability is never retired", async (
   assert.deepEqual(h.retires, []);
   assert.equal(h.spawns.length, 0);
   assert.notEqual(h.supervisor.restartStatus().pendingRestart, null);
+  await h.cleanup();
+});
+
+test("update flow, no tmux: the old host is unretired only once the failed replacement is confirmed gone — SIGKILL after SIGTERM", async (t) => {
+  const h = await makeHarness(t, { direct: true });
+  h.spawnReady = false;
+  // A child that outlives both signals (its SIGTERM teardown would write the chats it took).
+  h.directDiesOn = new Set();
+  await staleBusyPrimary(h);
+  await h.supervisor.init();
+
+  assert.deepEqual(h.signals, [
+    [1, "SIGTERM"],
+    [1, "SIGKILL"]
+  ]);
+  assert.deepEqual(h.unretires, [], "I1: the old host takes nothing back while the new one may run");
+  assert.equal(h.supervisor.status().state, "error");
+  assert.equal(h.supervisor.primary(), null);
+  assert.equal((await h.supervisor.hostForThread("t-busy"))?.generation, 0, "what the old host kept stays served");
+
+  h.hosts.get(1)!.alive = false;
+  await h.passTime(30_000);
+  assert.deepEqual(h.unretires, [0]);
+  assert.equal(h.supervisor.primary()?.generation, 0);
+  await h.cleanup();
+});
+
+test("update flow: a /retire that failed on a host that cannot be unretired restarts it (Phase 1), never leaving a retired primary", async (t) => {
+  const h = await makeHarness(t);
+  await staleBusyPrimary(h);
+  // The retire landed; its answer was lost.
+  h.beforeRetire = async () => {
+    throw new Error("socket hang up");
+  };
+  h.unretireFails = true;
+  await h.supervisor.init();
+
+  assert.ok(h.unretires.length > 1, "the unretire is retried");
+  assert.deepEqual(h.stops, [0], "then the old host is stopped: its /stop marks what it kept for continuation");
+  assert.deepEqual(h.spawns.map((spawn) => spawn.generation), [0]);
+  assert.equal(h.supervisor.status().state, "healthy");
+  assert.equal(h.hosts.get(0)?.retiring, false, "the primary is the new, unretired host");
+  await h.cleanup();
+});
+
+test("routing: a request for a chat the old host keeps goes there as soon as /retire answers, not after the switch", async (t) => {
+  const h = await makeHarness(t);
+  await staleBusyPrimary(h);
+  let answerRetire: () => void = () => undefined;
+  const retireAnswered = new Promise<void>((resolve) => {
+    answerRetire = resolve;
+  });
+  let retireAsked: () => void = () => undefined;
+  const asked = new Promise<void>((resolve) => {
+    retireAsked = resolve;
+  });
+  h.beforeRetire = () => {
+    retireAsked();
+    return retireAnswered;
+  };
+  let openSpawn: () => void = () => undefined;
+  h.spawnGate = new Promise((resolve) => {
+    openSpawn = resolve;
+  });
+  const spawnStarted = new Promise<void>((resolve) => {
+    h.onSpawnStart = resolve;
+  });
+  const booted = h.supervisor.init();
+  await asked;
+  let routed: number | null | undefined;
+  void h.supervisor.hostForThread("t-busy").then((host) => {
+    routed = host?.generation ?? null;
+  });
+  answerRetire();
+  await spawnStarted;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(routed, 0, "served by the old host while the new one is still starting");
+  openSpawn();
+  await booted;
+  await h.cleanup();
+});
+
+test("supervision: a silent retiring host whose death tmux cannot confirm keeps its chats until it can", async (t) => {
+  const h = await makeHarness(t);
+  await staleBusyPrimary(h);
+  await h.supervisor.init();
+  h.hosts.get(0)!.answers = false;
+  h.tmuxBroken = true;
+
+  await h.passTime(RETIRING_HOST_POLL_MS);
+  assert.deepEqual(h.adoptions, [], "a tmux error is no death");
+  await h.passTime(60_000);
+  assert.deepEqual(h.adoptions, [], "silent for a minute: killed, but its exit cannot be confirmed — nothing moves (I1)");
+  assert.equal((await h.supervisor.hostForThread("t-busy"))?.generation, 0);
+  assert.equal(typeof h.supervisor.restartStatus().retiringHosts?.[0]?.stopUnconfirmedSince, "string");
+
+  h.tmuxBroken = false;
+  await h.passTime(30_000);
+  assert.deepEqual(h.adoptions, [[1, "t-busy"]]);
+  assert.deepEqual(h.supervisor.hosts().map((host) => host.generation), [1]);
+  await h.cleanup();
+});
+
+test("daemon restart: a retiring host that misses its first probe is kept — the poll's patience decides, not one timeout", async (t) => {
+  const h = await makeHarness(t);
+  await seedHost(h, fakeHost(1));
+  await seedHost(h, fakeHost(0, { codeStamp: OLD, retiring: true, owned: ["t-a"], active: ["t-a"], answers: false }));
+  await seedRegistry(h, [
+    { generation: 0, role: "retiring", retiringSince: new Date().toISOString(), ownedThreadIds: ["t-a"] },
+    { generation: 1, role: "primary" }
+  ]);
+  await h.supervisor.init();
+
+  assert.equal(h.sessions.has(agentHostServiceSession(0)), true, "not killed");
+  assert.deepEqual(h.adoptions, []);
+  assert.equal((await h.supervisor.hostForThread("t-a"))?.generation, 0);
+  h.hosts.get(0)!.answers = true;
+  await h.passTime(RETIRING_HOST_POLL_MS);
+  assert.equal(h.supervisor.restartStatus().retiringHosts?.[0]?.hostInstanceId, "host-g0");
+  await h.cleanup();
+});
+
+test("daemon restart: a retiring host of another protocol version is ended through the cap path and its chats adopted", async (t) => {
+  const h = await makeHarness(t);
+  await seedHost(h, fakeHost(1));
+  await seedHost(
+    h,
+    fakeHost(0, { protocolVersion: AGENT_HOST_PROTOCOL_VERSION + 1, retiring: true, owned: ["t-a"], active: ["t-a"] })
+  );
+  await seedRegistry(h, [
+    { generation: 0, role: "retiring", retiringSince: new Date().toISOString(), ownedThreadIds: ["t-a"] },
+    { generation: 1, role: "primary" }
+  ]);
+  await h.supervisor.init();
+
+  assert.deepEqual(h.stops, [0], "its /stop marks what it cuts for continuation");
+  assert.deepEqual(h.adoptions, [[1, "t-a"]]);
+  assert.deepEqual(h.supervisor.hosts().map((host) => host.generation), [1]);
+  await h.cleanup();
+});
+
+test("I5: a released chat stays in the registry until its adoption completes", async (t) => {
+  const h = await makeHarness(t);
+  await staleBusyPrimary(h);
+  await h.supervisor.init();
+  let finish: () => void = () => undefined;
+  h.adoptHook = () =>
+    new Promise((resolve) => {
+      finish = () => resolve("adopted");
+    });
+  h.hosts.get(0)!.owned = [];
+  h.hosts.get(0)!.active = [];
+  await h.passTime(RETIRING_HOST_POLL_MS);
+
+  assert.deepEqual(await h.pendingAdoptions(), ["t-busy"], "a daemon that dies now still adopts it at boot");
+  finish();
+  await h.supervisor.hostForThread("t-busy");
+  assert.deepEqual(await h.pendingAdoptions(), []);
+  await h.cleanup();
+});
+
+test("daemon restart: adoptions the previous daemon did not see complete are adopted at boot", async (t) => {
+  const h = await makeHarness(t);
+  await seedHost(h, fakeHost(1));
+  await seedRegistry(h, [{ generation: 1, role: "primary" }], ["t-x"]);
+  await h.supervisor.init();
+  assert.deepEqual(h.adoptions, [[1, "t-x"]]);
+  await h.supervisor.hostForThread("t-x");
+  assert.deepEqual(await h.pendingAdoptions(), []);
+  await h.cleanup();
+});
+
+test("a chat whose adoption keeps failing is listed on the status page until it lands, and still retried", async (t) => {
+  const h = await makeHarness(t);
+  await staleBusyPrimary(h);
+  await h.supervisor.init();
+  let failing = true;
+  h.adoptHook = async () => {
+    if (failing) throw new Error("agent host answered 503 to the adopt");
+    return "adopted";
+  };
+  h.hosts.get(0)!.owned = [];
+  h.hosts.get(0)!.active = [];
+  await h.passTime(RETIRING_HOST_POLL_MS);
+  assert.equal(h.supervisor.restartStatus().stuckAdoptions, undefined, "one failure is not reported yet");
+  for (const ms of [1_000, 2_000, 4_000, 8_000]) await h.passTime(ms);
+  assert.deepEqual(h.supervisor.restartStatus().stuckAdoptions?.map((stuck) => stuck.threadId), ["t-busy"]);
+
+  failing = false;
+  await h.passTime(16_000);
+  await h.supervisor.hostForThread("t-busy");
+  assert.equal(h.supervisor.restartStatus().stuckAdoptions, undefined);
+  await h.cleanup();
+});
+
+test("daemon restart, unreadable registry: live hosts are accounted for from their own health; one that cannot be blocks the boot", async (t) => {
+  const h = await makeHarness(t);
+  await seedHost(h, fakeHost(1));
+  await seedHost(h, fakeHost(0, { codeStamp: OLD, retiring: true, owned: ["t-a"], active: ["t-a"] }));
+  await seedHost(h, fakeHost(2, { answers: false }));
+  await writeFile(agentHostRegistryPath(h.dir), "{ not json");
+  await h.supervisor.init();
+
+  assert.equal(h.supervisor.status().state, "error", "generation 2 runs and cannot say what it owns");
+  assert.equal(h.supervisor.primary(), null);
+  assert.equal(h.spawns.length, 0, "no host is started that would own its chats");
+
+  h.hosts.get(2)!.alive = false;
+  h.sessions.delete(agentHostServiceSession(2));
+  await h.passTime(15_000);
+  assert.equal(h.spawns.length, 0);
+  assert.equal(h.supervisor.primary()?.generation, 1);
+  assert.equal((await h.supervisor.hostForThread("t-a"))?.generation, 0, "the retiring host keeps its chat");
   await h.cleanup();
 });

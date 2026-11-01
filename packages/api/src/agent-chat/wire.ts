@@ -1598,6 +1598,19 @@ export interface AgentHostStatusResponse {
   restartResumesChats?: boolean;
   /** P2.4 R31: previous-version hosts still finishing the chats that were working at the update. */
   retiringHosts?: AgentHostRetiringStatus[];
+  /**
+   * P2.4 R26: chats whose move to the current host has failed several times. Each is unreachable
+   * until it lands, and is still retried. Absent when there are none, and from an older daemon.
+   */
+  stuckAdoptions?: Array<{
+    threadId: string;
+    threadTitle?: string;
+    attempts: number;
+    /** When its first attempt failed (ISO). */
+    since: string;
+    /** The last failure, or null. */
+    error: string | null;
+  }>;
 }
 
 /** One retiring agent host ({@link AgentHostStatusResponse.retiringHosts}). */
@@ -1614,6 +1627,12 @@ export interface AgentHostRetiringStatus {
   threads: Array<{ threadId: string; threadTitle?: string }>;
   /** What still runs in those chats, itemised as a pending restart's blockers are. */
   blockers: AgentHostRestartBlocker[];
+  /**
+   * Set when the daemon is ending this host but cannot confirm its process is gone (ISO, since
+   * when): its chats stay on it, and move to the current host only once it is. Absent otherwise,
+   * and from an older daemon.
+   */
+  stopUnconfirmedSince?: string;
 }
 
 // ---------------------------------------------------------------------------

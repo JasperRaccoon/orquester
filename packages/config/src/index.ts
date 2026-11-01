@@ -762,7 +762,13 @@ export type AgentHostRegistryEntry = z.infer<typeof agentHostRegistryEntrySchema
  */
 export const agentHostRegistrySchema = z
   .object({
-    hosts: z.array(z.unknown())
+    hosts: z.array(z.unknown()),
+    /**
+     * Threads a retiring host released (or that a gone host owned) whose adoption by the primary
+     * has not completed yet (P2.5 I5): a daemon that dies before it does adopts them at boot. A
+     * malformed value reads as none.
+     */
+    pendingAdoptions: z.array(z.string()).optional().catch(undefined)
   })
   .passthrough();
 

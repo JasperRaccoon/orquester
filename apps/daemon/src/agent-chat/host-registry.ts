@@ -23,8 +23,10 @@ export interface HostRegistryFile {
   entries: AgentHostRegistryEntry[];
   /** Entries it could not parse (or duplicates): never live, always written back as they were. */
   unparsed: unknown[];
-  /** Top-level fields besides `hosts`, written back as they were. */
+  /** Top-level fields besides `hosts` and `pendingAdoptions`, written back as they were. */
   extra: Record<string, unknown>;
+  /** Threads whose adoption by the primary had not completed (P2.5 I5); absent = none. */
+  pendingAdoptions?: string[];
 }
 
 /** The registry file could not be read or is not a registry. Distinct from "missing". */
@@ -55,7 +57,10 @@ export async function readHostRegistry(path: string): Promise<HostRegistryFile |
   }
   const file = agentHostRegistrySchema.safeParse(json);
   if (!file.success) throw new HostRegistryUnreadableError(`${path} is not an agent host registry`);
-  const { hosts, ...extra } = file.data as { hosts: unknown[] } & Record<string, unknown>;
+  const { hosts, pendingAdoptions, ...extra } = file.data as { hosts: unknown[]; pendingAdoptions?: string[] } & Record<
+    string,
+    unknown
+  >;
   const entries: AgentHostRegistryEntry[] = [];
   const unparsed: unknown[] = [];
   const seen = new Set<number>();
@@ -68,13 +73,17 @@ export async function readHostRegistry(path: string): Promise<HostRegistryFile |
     seen.add(entry.data.generation);
     entries.push(entry.data);
   }
-  return { entries, unparsed, extra };
+  return { entries, unparsed, extra, pendingAdoptions: pendingAdoptions ?? [] };
 }
 
 /** Write the registry atomically (tmp + rename), 0600; entries first, by generation. */
 export async function writeHostRegistry(path: string, registry: HostRegistryFile): Promise<void> {
   const hosts = [...[...registry.entries].sort((a, b) => a.generation - b.generation), ...registry.unparsed];
-  await writeAtomic(path, `${JSON.stringify({ ...registry.extra, hosts }, null, 2)}\n`);
+  const pending = [...new Set(registry.pendingAdoptions ?? [])].sort();
+  await writeAtomic(
+    path,
+    `${JSON.stringify({ ...registry.extra, hosts, ...(pending.length > 0 ? { pendingAdoptions: pending } : {}) }, null, 2)}\n`
+  );
 }
 
 /**

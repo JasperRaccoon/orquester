@@ -44,6 +44,7 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
   const data = status.data;
   const pending = data?.pendingRestart ?? null;
   const retiring = data?.retiringHosts ?? [];
+  const stuck = data?.stuckAdoptions ?? [];
   const now = Date.now();
 
   const run = async (key: string, action: () => Promise<unknown>): Promise<void> => {
@@ -155,6 +156,31 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
           </p>
         )}
 
+        {/* "starting" names the step under way (an update's switch takes seconds), not a problem. */}
+        {data?.reason && data.state !== "starting" && (
+          <Notice tone={data.state === "error" ? "danger" : "warn"} title="Agent host problem">
+            <p>{data.reason}</p>
+          </Notice>
+        )}
+
+        {stuck.length > 0 && (
+          <Notice tone="danger" title="Chats that cannot move to the current host">
+            <p>These chats are unavailable until the current host takes them. It keeps trying.</p>
+            <ul className="mt-1 space-y-0.5">
+              {stuck.map((item) => (
+                <li key={item.threadId} title={item.threadId}>
+                  <span className="text-neutral-200">{item.threadTitle?.trim() ? item.threadTitle : item.threadId}</span>
+                  <span className="text-neutral-500">
+                    {" "}
+                    — {item.attempts} attempts since {new Date(item.since).toLocaleString()}
+                    {item.error ? `: ${item.error}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </Notice>
+        )}
+
         {pending && (
           <Notice tone="warn" title="A restart is pending">
             <p>
@@ -198,7 +224,13 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
                   code <code className="text-neutral-300">{shortCodeStamp(host.codeStamp)}</code>
                 </span>
               </div>
-              {host.endsAt && (
+              {host.stopUnconfirmedSince && (
+                <p className="text-danger">
+                  Being stopped since {new Date(host.stopUnconfirmedSince).toLocaleString()}, but its process cannot be
+                  confirmed gone. Its chats stay on it until it is.
+                </p>
+              )}
+              {host.endsAt && !host.stopUnconfirmedSince && (
                 <p className="text-neutral-500">
                   Chats still working there at {new Date(host.endsAt).toLocaleString()} are interrupted, and resumed on the
                   current host.

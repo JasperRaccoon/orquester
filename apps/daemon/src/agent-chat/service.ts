@@ -493,7 +493,7 @@ export class AgentChatService {
             alive = false;
           });
           return {
-            kill: () => child.kill(),
+            kill: (signal) => child.kill(signal),
             pid: child.pid,
             // The supervisor waits for the process to exit before replacing a stopped host.
             isAlive: () => alive
@@ -1036,7 +1036,8 @@ export class AgentChatService {
                   blockers: host.blockers.map(titled)
                 }))
               }
-            : {})
+            : {}),
+          ...(status.stuckAdoptions ? { stuckAdoptions: status.stuckAdoptions.map(titled) } : {})
         };
       },
       restartHost: async () => {
