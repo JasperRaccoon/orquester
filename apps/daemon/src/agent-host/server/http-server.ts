@@ -710,7 +710,13 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     // thread another host owns (a release or an adoption in flight is waited out first), and a
     // request of an owned one counts in flight until it is answered — a retiring host never
     // releases a thread under it. A fork only READS its parent, which may be another host's.
-    const leave = await orchestrator.enterThread(threadId, rest === "/fork" ? { readsForeign: true } : undefined);
+    // The exit is tied to the response BEFORE the gate is awaited: a client that goes away while
+    // the request waits (a release or an adoption in flight) must not leave it counted for good.
+    const entering = orchestrator.enterThread(threadId, rest === "/fork" ? { readsForeign: true } : undefined);
+    response.once("close", () => {
+      void entering.then((exit) => exit(), () => undefined);
+    });
+    const leave = await entering;
     if (rest === "/events" && method === "GET") {
       try {
         await serveEvents(response, url, threadId);
@@ -719,7 +725,6 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       }
       return;
     }
-    response.once("close", leave);
 
     if (rest === "") {
       if (method === "DELETE") {

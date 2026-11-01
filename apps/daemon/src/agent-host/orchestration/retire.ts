@@ -69,6 +69,11 @@ export interface Retirement {
   poke(threadId: string): void;
   /** Every release in flight, settled (§9: tests and the stop wait on this, never a timer). */
   drain(): Promise<void>;
+  /**
+   * Every owned thread looked at once more, then {@link drain}: the orchestrator's drain ends here,
+   * so a release that an effect's end owes is never left for a microtask after it.
+   */
+  settle(): Promise<void>;
   stop(): void;
 }
 
@@ -156,6 +161,12 @@ export function createRetirement(seams: RetireSeams): Retirement {
     },
     poke,
     async drain() {
+      while (inFlight.size > 0) {
+        await Promise.allSettled([...inFlight]);
+      }
+    },
+    async settle() {
+      pokeAll();
       while (inFlight.size > 0) {
         await Promise.allSettled([...inFlight]);
       }

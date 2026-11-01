@@ -1824,4 +1824,26 @@ describe("agent host server — host updates (spec 2026-11-01 P2.3)", () => {
     assert.equal((await h.call("GET", agentHostRoutes.read(threadId))).status, 200);
     assert.equal(((await h.call("GET", agentHostRoutes.health)).body as AgentHostHealthResponse).retiring, false);
   });
+
+  it("a request whose client goes away while it waits at the thread's gate is not left counted", async () => {
+    const ownership = createThreadOwnership({ foreignThreadIds: ["arriving"] });
+    const h = await harness({ ownership });
+    // An adoption in flight: requests for the thread wait at its gate.
+    const finishAdoption = ownership.adopt("arriving")!;
+    const settled = new Promise<void>((resolve) => ownership.onSettled((threadId) => threadId === "arriving" && resolve()));
+    const waiting = request({ socketPath: h.socketPath, method: "GET", path: agentHostRoutes.read("arriving"), headers: { authorization: `Bearer ${TOKEN}` } });
+    waiting.on("error", () => undefined);
+    // Listened for after the server's own handler, which has reached the gate by then.
+    const atGate = new Promise<{ once(event: "close", listener: () => void): unknown }>((resolve) =>
+      h.server.server.once("request", (_request, response) => resolve(response))
+    );
+    waiting.end();
+    const response = await atGate;
+    const gone = new Promise<void>((resolve) => response.once("close", () => resolve()));
+    waiting.destroy();
+    await gone;
+    finishAdoption();
+    await settled;
+    assert.equal(ownership.inFlight("arriving"), 0, "a retiring host could still release it");
+  });
 });

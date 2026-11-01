@@ -123,6 +123,29 @@ test("two hosts sharing receipts.json lose neither's receipts, and an adopter re
   assert.equal((await late.getReceipt("cmd-old-2"))?.threadId, "busy");
 });
 
+test("two hosts writing receipts at the same moment lose none of them", async (t) => {
+  const rootDir = await tempRoot();
+  const hosts = [createThreadStore({ rootDir, sharedReceipts: () => true }), createThreadStore({ rootDir, sharedReceipts: () => true })];
+  t.after(() => {
+    for (const host of hosts) host.close();
+  });
+  const ids: string[] = [];
+  await Promise.all(
+    hosts.flatMap((host, which) =>
+      Array.from({ length: 10 }, (_unused, n) => {
+        const commandId = `cmd-${which}-${n}`;
+        ids.push(commandId);
+        return host.putReceipt({ commandId, threadId: `t-${which}`, seq: 1, status: "accepted", acceptedAt: "2026-11-01T00:00:00.000Z" });
+      })
+    )
+  );
+  const onDisk = JSON.parse(await fs.readFile(path.join(rootDir, "receipts.json"), "utf8")) as {
+    receipts: Array<{ commandId: string }>;
+  };
+  assert.deepEqual(onDisk.receipts.map((entry) => entry.commandId).sort(), ids.sort());
+  assert.equal(await exists(path.join(rootDir, "receipts.json.lock")), false, "the lock is let go of");
+});
+
 test("a read-only read of another host's thread leaves its files byte for byte, a half-written line included", async (t) => {
   const rootDir = await tempRoot();
   const writer = createThreadStore({ rootDir });
