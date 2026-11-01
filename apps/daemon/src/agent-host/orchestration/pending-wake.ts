@@ -166,7 +166,8 @@ export function stoppedBackgroundWork(
   const since = Date.parse(wake.since);
   const own = new Set(wake.tasks.map((task) => task.taskId));
   return (roster ?? []).filter((row) => {
-    if (row.status !== "interrupted" || own.has(row.id)) return false;
+    // A row the adapter closed as LEFT RUNNING (a Grok shell) was not stopped: its process runs on.
+    if (row.status !== "interrupted" || row.leftRunning === true || own.has(row.id)) return false;
     const ended = row.completedAt !== null ? Date.parse(row.completedAt) : Number.NaN;
     return Number.isFinite(ended) && Number.isFinite(since) && ended >= since;
   });

@@ -121,6 +121,9 @@ const GROK_CAPABILITIES: AdapterCapabilities = {
   // `subagent-completed-<id>` / `task-completed-<id>`: the CLI prompts the
   // parent itself when background work ends (`openWakeTurn`).
   wakesOnBackgroundCompletion: true,
+  // Its shells and monitors run in sessions of their own: a deploy, a restart or a crash leaves
+  // them running (`stopBackgroundTasks`' `leftRunning`); only the user's end sweeps them.
+  backgroundShellsOutliveSession: true,
   goals: { command: "provider", actions: ["resume", "clear"], continuesAcrossTurns: false }
 };
 

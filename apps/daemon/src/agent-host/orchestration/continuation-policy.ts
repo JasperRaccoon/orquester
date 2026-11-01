@@ -23,6 +23,7 @@
 
 import {
   ACTIVE_SUBAGENT_STATUSES,
+  type AdapterCapabilities,
   CONTINUATION_STOPPED_WORK_MAX,
   type AutoContinue,
   type ContinuationStoppedWork,
@@ -114,19 +115,27 @@ export function stoppedWorkFields(
   };
 }
 
+/** What of a thread's work its adapter leaves running past a stop the user did not ask for. */
+export type StopSurvival = Pick<AdapterCapabilities, "backgroundShellsOutliveSession"> | undefined;
+
 /**
- * The thread's live work as the agent knows it, named: the roster's title, the
- * task's own, a shell's command, its id. Only the parent's own — a subagent's
- * shells go with the subagent, which the parent relaunches — and never a row
- * that drives work rather than does it (a scheduled prompt, a legacy goal).
+ * The live work a stop of the thread's session kills, named as the agent knows
+ * it: the roster's title, the task's own, a shell's command, its id. Only the
+ * parent's own — a subagent's shells go with the subagent, which the parent
+ * relaunches — never a row that drives work rather than does it (a scheduled
+ * prompt, a legacy goal), and never work that outlives the stop
+ * ({@link StopSurvival}: Grok's shells run on, and naming them would have the
+ * agent start a second copy).
  */
 export function namedLiveWork(
   live: readonly LiveBackgroundTask[],
   roster: readonly RuntimeSubagent[] | undefined,
-  commandOf: (taskId: string) => string | undefined
+  commandOf: (taskId: string) => string | undefined,
+  survival: StopSurvival
 ): ContinuationStoppedWork[] {
   const work: ContinuationStoppedWork[] = [];
   for (const task of live) {
+    if (task.kind === "background" && survival?.backgroundShellsOutliveSession === true) continue;
     const row = roster?.find((entry) => entry.id === task.taskId);
     if (row !== undefined && !isOwnWork(row)) continue;
     const name = nonBlank(row?.title) ?? nonBlank(task.title) ?? nonBlank(commandOf(task.taskId)) ?? task.taskId;
@@ -135,10 +144,24 @@ export function namedLiveWork(
   return work;
 }
 
-/** R3: what a dead process left running, as its roster shows it — the work its crash stopped. */
-export function activeTopLevelWork(roster: readonly RuntimeSubagent[] | undefined): ContinuationStoppedWork[] {
+/**
+ * R3: what a dead process left running, as its roster shows it — the work its
+ * crash stopped. Not work that outlives it ({@link StopSurvival}): the host
+ * lifeline's group kill never reaches a Grok shell, which runs in a process
+ * session of its own.
+ */
+export function activeTopLevelWork(
+  roster: readonly RuntimeSubagent[] | undefined,
+  survival: StopSurvival
+): ContinuationStoppedWork[] {
+  const shellsSurvive = survival?.backgroundShellsOutliveSession === true;
   return (roster ?? [])
-    .filter((row) => ACTIVE_SUBAGENT_STATUSES.has(row.status) && isOwnWork(row))
+    .filter(
+      (row) =>
+        ACTIVE_SUBAGENT_STATUSES.has(row.status) &&
+        isOwnWork(row) &&
+        !(shellsSurvive && row.agentKind === "background")
+    )
     .map((row) => ({
       name: nonBlank(row.title) ?? row.id,
       kind: row.agentKind === "background" ? ("background" as const) : ("subagent" as const)

@@ -36,7 +36,7 @@ const cmd = (): string => `rv-${(seq += 1)}`;
 type Claude = ScriptedAdapter & { live: Set<string> };
 
 /** A Claude stand-in that knows which of its tasks still run (the liveness probe). */
-function claude(firstTurn = 1, capabilities: Partial<AdapterCapabilities> = {}, id: "claude" | "codex" = "claude"): Claude {
+function claude(firstTurn = 1, capabilities: Partial<AdapterCapabilities> = {}, id: "claude" | "codex" | "grok" = "claude"): Claude {
   const adapter = createScriptedAdapter({
     id,
     capabilities: { wakesOnBackgroundCompletion: id === "claude", supportsTaskStop: true, ...capabilities }
@@ -126,7 +126,9 @@ async function deploy(scene: Scene): Promise<string[]> {
   const marked = await scene.host.orchestrator.markThreadsForContinuation();
   for (const taskId of [...scene.adapter.live]) {
     scene.adapter.live.delete(taskId);
-    scene.emit("task.completed", { taskId, status: "stopped" });
+    // A shell its adapter leaves running (Grok) is closed as such, as the real teardown writes it.
+    const leftRunning = scene.adapter.capabilities.backgroundShellsOutliveSession === true && taskId.startsWith("shell");
+    scene.emit("task.completed", { taskId, status: "stopped", ...(leftRunning ? { leftRunning: true } : {}) });
   }
   const head = scene.host.store.heads.get(THREAD);
   if (head?.session.status === "running" && head.session.activeTurnId !== null) await turnEnds(scene, "interrupted");
@@ -280,6 +282,37 @@ describe("a restart continues every chat that had live work (spec 2026-11-01 R2)
     const { next, sends } = await boot(first.host.store, claude(2));
     assert.equal(sends.length, 1);
     assert.match(sends[0]!, /cancelled by the restart: ask again if the action is still needed/);
+    await shutDown(next);
+  });
+});
+
+describe("work that outlives the stop is never counted as stopped (Grok's shells)", () => {
+  const grok = (firstTurn = 1) => claude(firstTurn, { backgroundShellsOutliveSession: true }, "grok");
+
+  it("a restart: a shell left running neither revives the chat nor is named to the agent", async () => {
+    const shellOnly = await serve(grok());
+    await workingTurn(shellOnly, [SHELL]);
+    await turnEnds(shellOnly);
+    assert.deepEqual(await deploy(shellOnly), [], "the shell runs on: nothing to revive");
+
+    const both = await serve(grok());
+    await workingTurn(both, [SUBAGENT, SHELL]);
+    await turnEnds(both);
+    assert.deepEqual(await deploy(both), [THREAD], "the subagent did stop");
+    const { next, sends } = await boot(both.host.store, grok(2));
+    assert.equal(sends.length, 1);
+    assert.match(sends[0]!, /The restart stopped these subagents: "S34: shrink shipped player size" \(subagent\)\./);
+    assert.doesNotMatch(sends[0]!, /Wait for F check completion/, "never asked to start the running shell again");
+    await shutDown(next);
+  });
+
+  it("a crash: the shell survives the host's death too, so it revives nothing", async () => {
+    const first = await serve(grok());
+    await workingTurn(first, [SHELL]);
+    await turnEnds(first);
+    await shutDown(first); // a crash
+    const { next, sends } = await boot(first.host.store, grok(2));
+    assert.deepEqual(sends, []);
     await shutDown(next);
   });
 });
