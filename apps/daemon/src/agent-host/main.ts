@@ -396,7 +396,8 @@ export async function startAgentHost(
       homeDirs: [homeDir],
       deleteThreadRefs: (input) => checkpoints.deleteThreadRefs(input),
       logger: { warn: (message, detail) => logger.warn(message, detail) },
-      sweepScope: { owns: (threadId) => !ownership.isForeign(threadId), suspended: () => ownership.retiring }
+      sweepScope: { owns: (threadId) => !ownership.isForeign(threadId), suspended: () => ownership.retiring },
+      sharedReceipts: () => ownership.shared()
     }),
     ownership
   );

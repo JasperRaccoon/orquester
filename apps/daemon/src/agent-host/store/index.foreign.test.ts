@@ -90,6 +90,39 @@ test("the boot sweep and the scheduled one skip another host's thread, and a ret
   assert.equal(await exists(ours), true, "a retiring host leaves every sweep to the primary");
 });
 
+test("two hosts sharing receipts.json lose neither's receipts, and an adopter reads the other's", async (t) => {
+  const rootDir = await tempRoot();
+  const old = createThreadStore({ rootDir, sharedReceipts: () => true });
+  const next = createThreadStore({ rootDir, sharedReceipts: () => true });
+  t.after(() => {
+    old.close();
+    next.close();
+  });
+  const receipt = (commandId: string, threadId: string) => ({
+    commandId,
+    threadId,
+    seq: 1,
+    status: "accepted" as const,
+    acceptedAt: "2026-11-01T00:00:00.000Z"
+  });
+  // Both hosts read the ring before either wrote (each caches it from then on).
+  assert.equal(await old.getReceipt("none"), null);
+  assert.equal(await next.getReceipt("none"), null);
+  await old.putReceipt(receipt("cmd-old", "busy"));
+  await next.putReceipt(receipt("cmd-new", "fresh"));
+  const onDisk = JSON.parse(await fs.readFile(path.join(rootDir, "receipts.json"), "utf8")) as {
+    receipts: Array<{ commandId: string }>;
+  };
+  assert.deepEqual(onDisk.receipts.map((entry) => entry.commandId).sort(), ["cmd-new", "cmd-old"], "the second write kept the first's");
+  // The new host adopts `busy`: the retried command is known there.
+  const late = createThreadStore({ rootDir });
+  t.after(() => late.close());
+  assert.equal(await late.getReceipt("cmd-none"), null);
+  await old.putReceipt(receipt("cmd-old-2", "busy"));
+  await late.refreshReceipts();
+  assert.equal((await late.getReceipt("cmd-old-2"))?.threadId, "busy");
+});
+
 test("a read-only read of another host's thread leaves its files byte for byte, a half-written line included", async (t) => {
   const rootDir = await tempRoot();
   const writer = createThreadStore({ rootDir });

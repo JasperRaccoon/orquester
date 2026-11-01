@@ -358,6 +358,8 @@ export type HostThreadStore = ThreadStore & {
    * cache of it (`store/index.ts`); null when it does not exist. Absent: such a read is refused.
    */
   readThreadReadOnly?(threadId: string): Promise<ForeignThreadRead | null>;
+  /** Host updates (P2.3 R17): the receipts another host wrote, taken in (`store/index.ts`). */
+  refreshReceipts?(): Promise<void>;
 };
 
 
@@ -9169,6 +9171,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (finish === null) return false;
       const run = (async () => {
         try {
+          // A command the old host accepted and the daemon retries here answers its receipt.
+          await store.refreshReceipts?.().catch((error: unknown) => {
+            logger.warn("agent-host: could not read the receipts another host wrote", error);
+          });
           // Exactly the boot's per-thread reconcile: an orphan settled or continued, a marker or a
           // revival applied, a pending wake delivered, a held goal queued for its resume.
           await reconcileThread(threadId, liveSessionThreadIds());

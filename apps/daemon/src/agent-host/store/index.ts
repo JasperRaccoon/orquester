@@ -227,6 +227,12 @@ export interface ThreadStoreOptions {
    * raw log — and a retiring host sweeps nothing (the primary does). Absent: every thread, always.
    */
   sweepScope?: { owns(threadId: string): boolean; suspended(): boolean };
+  /**
+   * Host updates (P2.3, P2.5 I1): true while another host may write `receipts.json` beside this
+   * one. Each write then merges the ring on disk first, so neither host's receipts are lost to the
+   * other's rewrite. Absent: this host is the file's only writer.
+   */
+  sharedReceipts?: () => boolean;
 }
 
 /** Default cadence for the background sweep. */
@@ -329,6 +335,11 @@ export interface AgentThreadStore extends ThreadStore {
    */
   readThreadReadOnly(threadId: string): Promise<ForeignThreadRead | null>;
   /**
+   * Host updates (P2.3 R17): take in the receipts another host wrote to `receipts.json` — an
+   * adopted thread's command retried here is then answered from its receipt, never run twice.
+   */
+  refreshReceipts(): Promise<void>;
+  /**
    * Cheap boot cleanup: prune pending/partial uploads and rotated raw logs
    * without reading or folding any conversation history.
    */
@@ -399,7 +410,33 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     return next;
   }
 
+  /**
+   * Host updates: the receipts another host wrote since this one read the file, taken into the
+   * ring (oldest first, ahead of this host's own), never over one it holds.
+   */
+  async function mergeReceiptsFromDisk(): Promise<void> {
+    const ring = await loadReceipts();
+    const raw = await readFileOrNull(receiptsPath(rootDir));
+    if (raw === null) return;
+    let disk: CommandReceipt[];
+    try {
+      disk = parseAgentReceiptsFile(JSON.parse(raw)).receipts as CommandReceipt[];
+    } catch {
+      return;
+    }
+    const theirs = disk.filter((entry) => !receiptIndex.has(entry.commandId));
+    if (theirs.length === 0) return;
+    ring.unshift(...theirs);
+    for (const entry of theirs) receiptIndex.set(entry.commandId, entry);
+    if (ring.length > AGENT_RECEIPTS_RING_SIZE) {
+      for (const evicted of ring.splice(0, ring.length - AGENT_RECEIPTS_RING_SIZE)) {
+        receiptIndex.delete(evicted.commandId);
+      }
+    }
+  }
+
   async function writeReceipt(receipt: CommandReceipt): Promise<void> {
+    if (options.sharedReceipts?.() === true) await mergeReceiptsFromDisk();
     const ring = await loadReceipts();
     const existing = ring.findIndex((entry) => entry.commandId === receipt.commandId);
     if (existing !== -1) {
@@ -1515,6 +1552,10 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         // publishes nothing, and one that starts after it reads what is left.
         toolOutputCache.dropThread(threadId);
       });
+    },
+
+    async refreshReceipts(): Promise<void> {
+      await enqueueReceipt(mergeReceiptsFromDisk);
     },
 
     async getReceipt(commandId: string): Promise<CommandReceipt | null> {
