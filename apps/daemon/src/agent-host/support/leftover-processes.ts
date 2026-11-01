@@ -615,3 +615,56 @@ export async function stopLeftoverProcesses(options: StopLeftoversOptions): Prom
   }
   return { found: found.length, terminated, killed };
 }
+
+/** The variable every provider launch of a thread carries its thread id in (`env.ts`). */
+const SESSION_ID_ENV_VAR = "ORQUESTER_SESSION_ID";
+
+/**
+ * Host updates (spec 2026-11-01 P2.3 R17, P2.5 I4): before a host adopts a thread another host
+ * served, the provider CLIs that host may have left running for it are stopped — exactly what
+ * each CLI's lifeline does when its host dies (`lifeline.ts`: its whole process group, TERM then
+ * KILL), so a resumed session never runs beside an old one, whether the old host released the
+ * thread, died, or its lifeline is still inside its grace. Found by their lifeline watchers: one
+ * per local launch, carrying the launch's environment — the thread's id and the launch marker —
+ * in the CLI's own process group. Only what carries that launch's marker in that group is
+ * signalled (`stopLeftoverProcesses`); never this process's own group, never a shared daemon.
+ * Box launches have no local process (their box sweeps at launch). Linux-only; never rejects.
+ */
+export async function stopThreadProviderGroups(
+  threadId: string,
+  options: { graceMs?: number } = {}
+): Promise<LeftoverSweepResult> {
+  const none: LeftoverSweepResult = { found: 0, terminated: 0, killed: 0 };
+  if (process.platform !== "linux" || threadId.length === 0) return none;
+  const proc = PROC;
+  const own = await proc.stat(process.pid);
+  const sessionMark = `${SESSION_ID_ENV_VAR}=${threadId}`;
+  const launchPrefix = `${AGENT_LAUNCH_ENV_VAR}=`;
+  const groups = new Map<number, { group: RecordedGroup; launchId: string }>();
+  await eachLimited(await proc.pids(), async (pid) => {
+    if (pid === process.pid || !(await proc.lifeline(pid))) return;
+    const environ = await proc.environ(pid);
+    const entries = environ?.split("\0") ?? [];
+    if (!entries.includes(sessionMark)) return;
+    const launchId = entries.find((entry) => entry.startsWith(launchPrefix))?.slice(launchPrefix.length);
+    const stat = await proc.stat(pid);
+    if (launchId === undefined || launchId.length === 0 || !running(stat)) return;
+    if (own !== null && stat.pgid === own.pgid) return;
+    const leader = await proc.stat(stat.pgid);
+    groups.set(stat.pgid, { group: { pgid: stat.pgid, leaderStarttime: running(leader) ? leader.starttime : -1 }, launchId });
+  });
+  const results = await Promise.all(
+    [...groups.values()].map(
+      async ({ group, launchId }) =>
+        await stopLeftoverProcesses({ launchId, group, ...(options.graceMs !== undefined ? { graceMs: options.graceMs } : {}) })
+    )
+  );
+  return results.reduce(
+    (sum, result) => ({
+      found: sum.found + result.found,
+      terminated: sum.terminated + result.terminated,
+      killed: sum.killed + result.killed
+    }),
+    none
+  );
+}

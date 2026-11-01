@@ -112,6 +112,18 @@ export interface AttachmentPutInput {
  * - the receipt is written **in the same step** that appends the events, so a
  *   receipt never exists for events that did not land.
  */
+/**
+ * Host updates (spec 2026-11-01 P2.3 R16): a thread another host serves, read off disk with no
+ * write and no cache entry (`AgentThreadStore.readThreadReadOnly`).
+ */
+export interface ForeignThreadRead {
+  head: ThreadHead | null;
+  binding: ProviderSessionBinding | null;
+  /** Every complete line that decodes, in order; a trailing line still being written is left out. */
+  events: DomainEvent[];
+  truncated: boolean;
+}
+
 export interface ThreadStore {
   /**
    * Append events and, atomically with them, the command receipt. Returns the

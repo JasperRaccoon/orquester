@@ -162,6 +162,7 @@ import type {
   AppendResult,
   CaptureResult,
   CheckpointService,
+  ForeignThreadRead,
   Ingestion,
   LivenessRegistry,
   ProviderSnapshotRegistry,
@@ -308,6 +309,14 @@ import {
   type ResolvedForkCut
 } from "./fork.ts";
 import type { ForkHandoffRecord } from "@orquester/config";
+import {
+  createThreadOwnership,
+  guardThreadWrites,
+  hostRetiring,
+  threadNotOwned,
+  type ThreadOwnership
+} from "./ownership.ts";
+import { createRetirement, RETIRE_RELEASE_BACKSTOP_MS, type RetireLiveWork } from "./retire.ts";
 
 // ---------------------------------------------------------------------------
 // Dependencies
@@ -344,7 +353,15 @@ export type HostThreadStore = ThreadStore & {
     itemId: string,
     window: ThreadItemOutputWindowQuery
   ): Promise<ThreadItemOutputWindowResponse | null>;
+  /**
+   * Host updates (spec 2026-11-01 P2.3 R16): another host's thread off disk without a write or a
+   * cache of it (`store/index.ts`); null when it does not exist. Absent: such a read is refused.
+   */
+  readThreadReadOnly?(threadId: string): Promise<ForeignThreadRead | null>;
+  /** Host updates (P2.3 R17): the receipts another host wrote, taken in (`store/index.ts`). */
+  refreshReceipts?(): Promise<void>;
 };
+
 
 /** How one thread read is projected (`readThread`). */
 export interface ThreadReadOptions {
@@ -455,6 +472,19 @@ export interface OrchestratorOptions {
     link(threadId: string, parentThreadId: string): void;
     maskValue(threadId: string, value: unknown): unknown;
   };
+  /**
+   * Host updates (spec 2026-11-01 P2.3, `ownership.ts`): which threads this host owns — the
+   * boot's foreign threads, and while retiring its owned set. Absent: it owns every thread.
+   */
+  ownership?: ThreadOwnership;
+  /** Host updates (P2.3 R19): a thread was released to the next host; its open streams end. Must not throw. */
+  onThreadReleased?: (threadId: string) => void;
+  /**
+   * Host updates (P2.3 R17, P2.5 I4): stop the provider processes another host may have left for
+   * a thread this host is adopting (`stopThreadProviderGroups`), before anything resumes it.
+   * Never rejects. Absent: nothing is looked for (tests).
+   */
+  stopForeignProviderProcesses?: (threadId: string) => Promise<void>;
 }
 
 interface ThreadSubscription {
@@ -976,6 +1006,30 @@ export interface Orchestrator {
    */
   noteSessionToolsWarning(threadId: string, detail: string): void;
 
+  /**
+   * Host updates (spec 2026-11-01 P2.3 R18, `retire.ts`): `POST /retire` — keep the threads with
+   * live work, release every other one, refuse new threads. Answers the owned set; repeatable.
+   */
+  retire(): Promise<string[]>;
+  /** P2.3 R21, `POST /unretire`: every released thread is served here again. Answers the threads taken back and kept. */
+  unretire(): Promise<string[]>;
+  /**
+   * P2.3 R17, `POST /threads/:id/adopt`: a foreign thread brought in exactly as the boot brings in
+   * a thread from a stopped host (`reconcileThread`), then its index caught up. False when it was
+   * not foreign. Idempotent; a repeat waits for the adoption in flight.
+   */
+  adoptThread(threadId: string): Promise<boolean>;
+  /** P2.3 R20: while retiring, the threads still owned; else null. */
+  ownedThreadIds(): string[] | null;
+  /** True between `/retire` and `/unretire`. */
+  isRetiring(): boolean;
+  /**
+   * P2.3 R16, R19: the gate of one thread-scoped request (`ThreadOwnership.enter`): 409
+   * `THREAD_NOT_OWNED` for a thread this host does not own; else counted in flight until the
+   * returned exit runs.
+   */
+  enterThread(threadId: string, options?: { readsForeign?: boolean }): Promise<() => void>;
+
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
   clearContinuationMarkers(threadIds: readonly string[]): Promise<void>;
@@ -1042,9 +1096,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const clock = options.clock ?? systemClock;
   const ids = options.ids ?? systemIdGen;
   const buildEvent: BuildEvent = createEventBuilder({ clock, ids });
-  const launchConfigs = options.launchConfigs;
-  const forkHandoffs = options.forkHandoffs ?? createMemoryForkHandoffStore();
-  const { store, ingestion, checkpoints, liveness, snapshots, logger } = options;
+  const { ingestion, checkpoints, liveness, snapshots, logger } = options;
+  // Host updates (P2.3, P2.5 I1): no write of a thread this host does not own reaches the disk.
+  const ownership = options.ownership ?? createThreadOwnership();
+  const store = guardThreadWrites(options.store, ownership);
+  const launchConfigs = guardThreadWrites(options.launchConfigs, ownership);
+  const forkHandoffs = guardThreadWrites(options.forkHandoffs ?? createMemoryForkHandoffStore(), ownership);
 
   const runtimes = new Map<string, ThreadRuntime>();
   // §3.1: a background task is live until its work ends — and only the
@@ -1139,6 +1196,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * must not poison the thread for the life of the host.
    */
   const loadRuntime = (threadId: string): Promise<ThreadRuntime> => {
+    // Host updates (P2.3 R16): another host's thread is never folded here.
+    if (ownership.isForeign(threadId)) return Promise.reject(threadNotOwned(threadId));
     const existing = runtimes.get(threadId);
     if (existing) {
       return Promise.resolve(existing);
@@ -1321,11 +1380,41 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
-  const buildRuntime = async (threadId: string): Promise<ThreadRuntime> => {
-    const loaded = await foldFromDisk(threadId);
+  /**
+   * Host updates (spec 2026-11-01 P2.3 R16): another host's thread, read in place — its whole log
+   * folded from the file (a trailing line still being written ignored), its head and binding read
+   * off disk — through the store's write-free read (`readThreadReadOnly`), which touches none of
+   * its caches, cuts no torn tail and writes nothing. For a read that creates a thread here (a fork
+   * of a parent a retiring host still serves); the view is never published and never written.
+   */
+  const readForeignThread = async (
+    threadId: string
+  ): Promise<{
+    loaded: Awaited<ReturnType<typeof foldFromDisk>>;
+    head: ThreadHead | null;
+    binding: ProviderSessionBinding | null;
+  }> => {
+    const read = await store.readThreadReadOnly?.(threadId);
+    if (read === undefined || read === null || read.head === null) throw threadNotFound(threadId);
+    return {
+      loaded: {
+        state: await applyEventsChunked(createEmptyThreadState(), read.events),
+        derived: advanceLogDerived(EMPTY_LOG_DERIVED, read.events),
+        folded: read.events.length,
+        logBytes: null,
+        truncated: read.truncated
+      },
+      head: read.head,
+      binding: read.binding
+    };
+  };
+
+  const buildRuntime = async (threadId: string, readOnly = false): Promise<ThreadRuntime> => {
+    const foreign = readOnly ? await readForeignThread(threadId) : null;
+    const loaded = foreign?.loaded ?? (await foldFromDisk(threadId));
     const state = loaded.state;
-    const persistedHead = await store.loadHead(threadId).catch(() => null);
-    const binding = await store.loadBinding(threadId).catch(() => null);
+    const persistedHead = foreign !== null ? foreign.head : await store.loadHead(threadId).catch(() => null);
+    const binding = foreign !== null ? foreign.binding : await store.loadBinding(threadId).catch(() => null);
     const launch = await launchConfigs.load(threadId).catch(() => null);
     const runtime: ThreadRuntime = {
       id: threadId,
@@ -1378,6 +1467,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // be folded from the top on every host restart (the upgrade to snapshots
     // starts with none at all). Never for a log cut at a malformed line.
     if (
+      !readOnly &&
       loaded.logBytes !== null &&
       !loaded.truncated &&
       loaded.folded >= FOLD_SNAPSHOT_EVENT_INTERVAL
@@ -1516,6 +1606,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     runtime.eventsSinceSnapshot += result.events.length;
     observeIndex(runtime, result);
     publish(runtime, result.events);
+    // Host updates (P2.3 R19): a write may end a retiring host's last live work on the thread.
+    retirement.poke(runtime.id);
     // Rewritten every 50 events and on every head-shaped change (§5.1). A
     // session transition always writes: the §3.3 reconcile reads `meta.json`
     // alone, so a head that lagged behind the log would make a live turn look
@@ -2697,11 +2789,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   const runEffect = (runtime: ThreadRuntime, task: () => Promise<void>): Promise<void> =>
-    runtime.effects
-      .run(task)
-      .catch((error: unknown) => {
+    // Counted in flight (host updates P2.3 R19): a retiring host never releases a thread under it.
+    ownership.track(
+      runtime.id,
+      runtime.effects.run(task).catch((error: unknown) => {
         logger.error(`agent-host: effect failed for ${runtime.id}`, error);
-      });
+      })
+    );
 
   /** A transcript-handoff fork's record, read once per runtime ({@link ThreadRuntime.forkHandoff}). */
   const forkHandoffOf = async (runtime: ThreadRuntime, head: ThreadHead): Promise<ForkHandoffRecord | null> => {
@@ -4485,6 +4579,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (typeof threadId !== "string" || threadId.length === 0) {
         throw invalidCommand("threadId is required.");
       }
+      // Host updates (P2.3 R18): a retiring host takes no new thread (a repeat for one it still owns
+      // answers its head, as on any host).
+      if (ownership.retiring && ownership.isForeign(threadId)) throw hostRetiring();
       const adapterId = options.adapterForRefId(request.refId);
       if (!adapterId) {
         throw invalidCommand(`Registry entry '${request.refId}' has no chat adapter.`);
@@ -4749,6 +4846,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (typeof threadId !== "string" || threadId.length === 0 || threadId === parentThreadId) {
         throw invalidCommand("threadId is required and must name a new thread.");
       }
+      // Host updates (P2.3 R18): a fork creates a thread, which a retiring host does not.
+      if (ownership.retiring && ownership.isForeign(threadId)) throw hostRetiring();
       // One fork per child at a time: a repeat (the daemon's retry of an answer it lost, or its
       // reconcile) that arrives while the first is still cutting waits for it and gets its
       // answer, never a second `thread.created` racing the first.
@@ -4790,11 +4889,40 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (!adapterId) {
       throw invalidCommand(`Registry entry '${request.refId}' has no chat adapter.`);
     }
-    const parent = await loadRuntime(parentThreadId);
+    // Host updates (P2.3 R16): a parent a retiring host still serves is read in place — never
+    // folded into this host, never written — and the child is this host's own thread.
+    const parent = ownership.isForeign(parentThreadId)
+      ? await buildRuntime(parentThreadId, true)
+      : await loadRuntime(parentThreadId);
     const parentHead = headOf(parent);
     if (parentHead === null || parent.deleted) {
       throw threadNotFound(parentThreadId);
     }
+    if (!ownership.isForeign(parentThreadId)) {
+      return forkFromParent(parent, parentHead, adapterId, request, threadId);
+    }
+    foreignParents.set(parentThreadId, parent);
+    try {
+      return await forkFromParent(parent, parentHead, adapterId, request, threadId);
+    } finally {
+      if (foreignParents.get(parentThreadId) === parent) foreignParents.delete(parentThreadId);
+    }
+  };
+
+  /**
+   * Host updates (P2.3 R16): the foreign parents a fork is reading right now, so the parent's
+   * launch config (its account home, its box) answers {@link launchConfig} as a loaded one does.
+   */
+  const foreignParents = new Map<string, ThreadRuntime>();
+
+  const forkFromParent = async (
+    parent: ThreadRuntime,
+    parentHead: ThreadHead,
+    adapterId: AgentAdapterId,
+    request: ForkHostThreadRequest,
+    threadId: string
+  ): Promise<ForkHostThreadResponse> => {
+    const parentThreadId = parent.id;
     // "Continue in another agent" (`continuation`): another adapter, or another account of this
     // one. Without it a fork runs on its parent's agent, exactly as before.
     const continuation = parseForkContinuation(request.continuation);
@@ -6481,7 +6609,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   const launchConfig = (threadId: string): ThreadLaunchConfig | null =>
-    runtimes.get(threadId)?.launch ?? null;
+    runtimes.get(threadId)?.launch ?? foreignParents.get(threadId)?.launch ?? null;
 
   const launchConfigForCwd = (cwd: string): ThreadLaunchConfig | null => {
     let best: { launch: ThreadLaunchConfig; updatedAt: string } | null = null;
@@ -6827,6 +6955,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
                 await settleStrandedQuestions(runtime, turnId);
               }
             }
+            // Host updates (P2.3 R19): every event may end a retiring host's last live work.
+            retirement.poke(runtime.id);
           }
         } catch (error) {
           logger.error("agent-host: failed to ingest a runtime event", error);
@@ -6909,6 +7039,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     events: AppendableDomainEvent[]
   ): Promise<void> => {
     if (events.length === 0) return;
+    // Host updates (P2.3 R19): a released thread's late rows (its closed session's last words)
+    // belong to no one here; the next host writes the thread from its own session.
+    if (ownership.isForeign(threadId)) {
+      logger.info("agent-host: dropping rows of a thread another host owns", { threadId, events: events.length });
+      return;
+    }
     const runtime = runtimes.get(threadId) ?? (await loadRuntime(threadId));
     // The pending-turn rule is the host's, not any one writer's: an adapter
     // that reports `ready` while a turn start is in flight must not settle the
@@ -7304,6 +7440,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     }
     for (const threadId of await store.listThreads()) {
+      // Host updates (P2.3 R16, R22): another host's thread is never marked here.
+      if (ownership.isForeign(threadId)) continue;
       if (candidates.has(threadId)) continue;
       if (liveSessions.has(threadId)) {
         candidates.add(threadId);
@@ -7734,6 +7872,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       const threadIds = await store.listThreads();
       for (const threadId of threadIds) {
+        // Host updates (P2.3 R16): another host's thread waits for its adoption (`adoptThread`).
+        if (ownership.isForeign(threadId)) continue;
         try {
           await reconcileThread(threadId, live);
         } catch (error) {
@@ -7810,7 +7950,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * stop it.
    */
   const resumeGoalSession = async (threadId: string): Promise<void> => {
-    if (hostStopping()) return;
+    // Another host's thread (host updates P2.3 R16) keeps its mark for the host that adopts it.
+    if (hostStopping() || ownership.isForeign(threadId)) return;
     let runtime: ThreadRuntime;
     try {
       runtime = await loadRuntime(threadId);
@@ -8580,7 +8721,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    */
   const holdGoal = (runtime: ThreadRuntime, adapter: AgentAdapter): Promise<void> =>
     runEffect(runtime, async () => {
-      if (goalHoldUntil === null || hostStopping() || holdableGoalAdapter(runtime) === null) {
+      // A retiring host holds without a lease (host updates P2.3 R19): the adopting host resumes it.
+      if ((goalHoldUntil === null && !ownership.retiring) || hostStopping() || holdableGoalAdapter(runtime) === null) {
         return;
       }
       runtime.goalHeldForHandover = true;
@@ -8698,7 +8840,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * checks again (`clearContinuationMarkers`).
    */
   const checkGoalHoldLease = (): void => {
-    if (hostStopping()) return;
+    // Retiring (host updates P2.3 R19): a held goal goes to the adopting host with its mark.
+    if (hostStopping() || ownership.retiring) return;
     if (goalHoldUntil !== null) {
       const remaining = goalHoldUntil - clock.now().getTime();
       if (remaining > 0) {
@@ -8855,10 +8998,259 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   // -------------------------------------------------------------------------
+  // Host updates (spec 2026-11-01 P2.3): retire, release, adopt — `ownership.ts`, `retire.ts`
+  // -------------------------------------------------------------------------
+
+  /** What keeps a thread on a retiring host (R18): see `RetireLiveWork`. */
+  const retireLiveWork = (threadId: string): RetireLiveWork | null => {
+    if (loadingRuntimes.has(threadId) || ownership.inFlight(threadId) > 0) return "busy";
+    const runtime = runtimes.get(threadId);
+    const head = runtime === undefined ? null : headOf(runtime);
+    if (runtime === undefined || head === null || runtime.deleted) return null;
+    const session = currentSession(runtime);
+    if (
+      turnIsActive(runtime) ||
+      session.status === "starting" ||
+      session.status === "running" ||
+      runtime.compacting ||
+      runtime.queuedTurns.length > 0 ||
+      runtime.historyBuffer !== null ||
+      // An approval or a question waits for the user (`continuation-policy.ts`, R5).
+      requestPending(runtime.state.pending)
+    ) {
+      return "turn";
+    }
+    // The live work `/health` and the stop's revival read (`liveWorkOf`): the liveness registry's.
+    if (liveness.liveTasks(threadId).length > 0) return "background";
+    if (runtime.pendingWake !== undefined) return "wake";
+    // A goal held for the handover (its mark on the head) goes with the thread: the adopting
+    // host's reconcile resumes it (goals §5.7). One still continuing is held first.
+    if (runtime.goalHeldForHandover !== true && goalContinuingNow(runtime, head, options.adapters.get(head.adapter))) {
+      return "goal";
+    }
+    return null;
+  };
+
+  /** When a retirement last asked each thread's goal to hold (epoch ms): a refused hold is asked again only this much later. */
+  const retireHoldAskedAt = new Map<string, number>();
+
+  const holdGoalForRetire = (threadId: string): void => {
+    const runtime = runtimes.get(threadId);
+    const adapter = runtime === undefined ? null : holdableGoalAdapter(runtime);
+    if (runtime === undefined || adapter === null) return;
+    const now = clock.now().getTime();
+    const asked = retireHoldAskedAt.get(threadId);
+    if (asked !== undefined && now - asked < RETIRE_RELEASE_BACKSTOP_MS) return;
+    retireHoldAskedAt.set(threadId, now);
+    void holdGoal(runtime, adapter);
+  };
+
+  /**
+   * R19's release of one owned thread, on its effect queue behind everything it owes the provider:
+   * its live work checked once more, then its provider session closed as a restart closes it
+   * (cursor kept, its agent's work untouched — there is none), its session written `stopped`, its
+   * head (with any handover mark) and every queued write flushed — all while the thread is still
+   * owned — and only then dropped from memory. False when live work came back meanwhile.
+   */
+  const releaseThread = async (threadId: string): Promise<boolean> => {
+    await loadingRuntimes.get(threadId)?.catch(() => undefined);
+    bootSettlePending.delete(threadId);
+    goalResumePending.delete(threadId);
+    const runtime = runtimes.get(threadId);
+    if (runtime === undefined) return true;
+    await runtime.commands.drain();
+    return runtime.effects.run(async () => {
+      if (retireLiveWork(threadId) !== null) return false;
+      const head = headOf(runtime);
+      const adapter = head === null ? undefined : options.adapters.get(head.adapter);
+      runtime.watchdog?.stop();
+      runtime.watchdog = null;
+      const hadSession = adapter?.hasSession(threadId) === true;
+      if (hadSession) {
+        try {
+          await adapter!.stopSession(threadId);
+        } catch (error) {
+          // I4: a session that may still run is never handed over — the thread stays, and is
+          // looked at again at its next event or the backstop.
+          logger.warn(`agent-host: could not close ${threadId}'s provider session; it stays on this host`, error);
+          return false;
+        }
+      }
+      runtime.bound = null;
+      releaseProviderThreads(threadId);
+      if (head !== null && !runtime.deleted) {
+        if (hadSession) {
+          await upsertBinding(runtime, { status: "stopped" });
+          await persistSession(runtime, { ...currentSession(runtime), status: "stopped", activeTurnId: null });
+        }
+        await saveHeadNow(runtime);
+      }
+      await ingestion.flushThread(threadId).catch(() => undefined);
+      await runtime.captures.drain();
+      await runtime.commands.drain();
+      await store.drain();
+      const wakeTimer = pendingWakeTimers.get(threadId);
+      if (wakeTimer !== undefined) clearTimeout(wakeTimer);
+      pendingWakeTimers.delete(threadId);
+      goalsHeld.delete(threadId);
+      goalHoldIdleSince.delete(threadId);
+      goalHoldReleased.delete(threadId);
+      retireHoldAskedAt.delete(threadId);
+      liveUsageLimits.delete(threadId);
+      runtime.subscribers.clear();
+      await ingestion.forget(threadId).catch(() => undefined);
+      runtimes.delete(threadId);
+      releasedWhileRetiring.add(threadId);
+      return true;
+    });
+  };
+
+  /** Threads this retirement released, which an `/unretire` brings back in through the reconcile. */
+  const releasedWhileRetiring = new Set<string>();
+
+  const retirement = createRetirement({
+    ownership,
+    logger,
+    loadedThreadIds: () => [...new Set([...runtimes.keys(), ...loadingRuntimes.keys()])],
+    liveWork: retireLiveWork,
+    holdGoal: holdGoalForRetire,
+    release: releaseThread,
+    onReleased: (threadId) => {
+      try {
+        options.onThreadReleased?.(threadId);
+      } catch (error) {
+        logger.warn("agent-host: a thread-released listener failed", error);
+      }
+    }
+  });
+
+  const liveSessionThreadIds = (): Set<string> => {
+    const live = new Set<string>();
+    for (const adapter of options.adapters.values()) {
+      for (const session of adapter.listSessions()) live.add(session.threadId);
+    }
+    return live;
+  };
+
+  /** R17's last step, never awaited: the index brought up to the adopted thread's log from its cursor. */
+  const catchUpAdoptedIndex = async (threadId: string): Promise<void> => {
+    const index = options.index;
+    if (index === undefined) return;
+    try {
+      const head = await store.loadHead(threadId, { seedRuntime: false });
+      if (head === null) {
+        // Gone while another host held it (deleted there): its rows are a cache of nothing.
+        index.deleteThread(threadId);
+        return;
+      }
+      await index.catchUp({
+        threadId,
+        projectPath: head.projectPath,
+        title: head.title,
+        logSeq: await store.lastSeq(threadId),
+        read: (cursor) => store.readEventsFrom(threadId, cursor)
+      });
+    } catch (error) {
+      logger.warn(`agent-host: the thread index could not catch up the adopted ${threadId}`, error);
+    }
+  };
+
+  const adoptions = new Map<string, Promise<boolean>>();
+  /** Adoptions' index catch-ups in flight: the test drain waits on them, a stop never does. */
+  const indexCatchUps = new Set<Promise<void>>();
+
+  const adoptThread = (threadId: string): Promise<boolean> =>
+    whenReady(async () => {
+      const running = adoptions.get(threadId);
+      if (running !== undefined) {
+        await running.catch(() => undefined);
+        return false;
+      }
+      // A thread whose directory is gone (deleted on the host that held it) is answered 404, which
+      // the daemon reads as "gone"; its index rows are a cache of nothing.
+      if (!(await store.listThreads()).includes(threadId)) {
+        ownership.adopt(threadId)?.();
+        options.index?.deleteThread(threadId);
+        throw threadNotFound(threadId);
+      }
+      // Off the foreign set first (throws HOST_RETIRING on a retiring host): the reconcile below
+      // loads and writes the thread, which only an owner may. Requests for it wait meanwhile. It
+      // answers once the thread is servable: a continuation the reconcile starts runs on.
+      const finish = ownership.adopt(threadId);
+      if (finish === null) return false;
+      const run = (async () => {
+        try {
+          // A command the old host accepted and the daemon retries here answers its receipt.
+          await store.refreshReceipts?.().catch((error: unknown) => {
+            logger.warn("agent-host: could not read the receipts another host wrote", error);
+          });
+          // Nothing the previous owner left running for it may run beside the session resumed here.
+          await options.stopForeignProviderProcesses?.(threadId);
+          // Exactly the boot's per-thread reconcile: an orphan settled or continued, a marker or a
+          // revival applied, a pending wake delivered, a held goal queued for its resume.
+          await reconcileThread(threadId, liveSessionThreadIds());
+        } catch (error) {
+          logger.warn(`agent-host: the reconcile of the adopted ${threadId} failed`, error);
+        } finally {
+          finish();
+        }
+        startGoalResumes();
+        const catchUp = catchUpAdoptedIndex(threadId);
+        indexCatchUps.add(catchUp);
+        void catchUp.finally(() => indexCatchUps.delete(catchUp));
+        logger.info("agent-host: adopted a thread from another host", { threadId });
+        return true;
+      })();
+      adoptions.set(threadId, run);
+      try {
+        return await run;
+      } finally {
+        adoptions.delete(threadId);
+      }
+    });
+
+  const retire = (): Promise<string[]> =>
+    whenReady(async () => {
+      const owned = await retirement.retire();
+      // What the boot left owed for threads that are now another host's: that host's boot owes it.
+      for (const threadId of [...bootSettlePending]) {
+        if (ownership.isForeign(threadId)) bootSettlePending.delete(threadId);
+      }
+      for (const threadId of [...goalResumePending]) {
+        if (ownership.isForeign(threadId)) goalResumePending.delete(threadId);
+      }
+      return owned;
+    });
+
+  const unretire = (): Promise<string[]> =>
+    whenReady(async () => {
+      const kept = ownership.ownedThreadIds() ?? [];
+      retirement.unretire();
+      const taken = [...releasedWhileRetiring];
+      releasedWhileRetiring.clear();
+      // Each released thread comes back as a thread from a stopped host does: a handover mark its
+      // release left (a held goal) is acted on again.
+      const live = liveSessionThreadIds();
+      for (const threadId of taken) {
+        try {
+          await reconcileThread(threadId, live);
+        } catch (error) {
+          logger.warn(`agent-host: the reconcile of ${threadId} after an unretire failed`, error);
+        }
+      }
+      startGoalResumes();
+      // Holds a retirement made with no lease behind them are let go of here (goals §5.7).
+      checkGoalHoldLease();
+      return [...new Set([...kept, ...taken])].sort();
+    });
+
+  // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
 
   const drain = async (final = false): Promise<void> => {
+    await retirement.drain();
+    if (!final) await Promise.allSettled([...indexCatchUps]);
     await goalResumes;
     for (const runtime of [...runtimes.values()]) {
       await runtime.commands.drain();
@@ -8885,6 +9277,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const runStop = async (): Promise<void> => {
     stopped = true;
+    retirement.stop();
     // Goals §5.7: a held goal is the next host's to resume — its mark is on
     // the head, which the saves below rewrite with it — never this host's.
     if (goalHoldTimer !== null) {
@@ -8985,6 +9378,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         logger.warn("agent-host: could not record a session-tools warning", error)
       );
     },
+    retire,
+    unretire,
+    adoptThread,
+    ownedThreadIds: () => ownership.ownedThreadIds(),
+    isRetiring: () => ownership.retiring,
+    enterThread: (threadId, enterOptions) => ownership.enter(threadId, enterOptions),
     markThreadsForContinuation,
     clearContinuationMarkers,
     reconcile,

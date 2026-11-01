@@ -68,7 +68,9 @@ import {
   type AgentHostProfileLeasesResponse,
   type AgentHostRecycleOpenCodeResponse,
   type AgentHostResumeGoalSessionsResponse,
+  type AdoptThreadResponse,
   type CreateHostThreadRequest,
+  type RetireHostResponse,
   type ForkHostThreadRequest,
   type ForkHostThreadResponse,
   type HostThreadCatalogResponse,
@@ -142,11 +144,25 @@ export interface AgentHostServerOptions {
    * (`agentHostRoutes.sessionToolsRefresh`). Absent → the route is not served (route-miss 404).
    */
   sessionToolsRefresh?(threadId: string, body: SessionToolsRefreshRequest): Promise<SessionToolsRefreshResponse>;
+  /** Host updates (spec 2026-11-01 P2.3 R20): this host's generation on `/health`. Default 0. */
+  generation?: number;
+  /**
+   * Host updates (P2.3 R18, R21): `POST /retire` and `POST /unretire` — the orchestrator's, plus
+   * the host's shared caches (the thread index, the provider-snapshot cache). Absent: the
+   * orchestrator's alone.
+   */
+  onRetire?(): Promise<RetireHostResponse>;
+  onUnretire?(): Promise<RetireHostResponse>;
 }
 
 export interface AgentHostServer {
   listen(): Promise<void>;
   close(): Promise<void>;
+  /**
+   * Host updates (P2.3 R19): end every open event stream of a thread this host released — its
+   * clients re-read it from the host that adopts it.
+   */
+  endThreadStreams(threadId: string): void;
   readonly server: Server;
 }
 
@@ -386,6 +402,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       ...(options.secretLiterals !== undefined ? { literals: options.secretLiterals } : {})
     });
   const streams = new Set<ThreadStream>();
+  /** The thread each open stream follows (host updates P2.3 R19: a release ends them). */
+  const streamThreads = new Map<ThreadStream, string>();
   /** The open streams that opted into on-demand agent rows, by their `streamId`. */
   const agentRowStreams = new Map<string, { threadId: string; stream: ThreadStream }>();
 
@@ -501,8 +519,13 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         startedAt: options.startedAt,
         codeStamp: options.codeStamp ?? null,
         providersRevision: orchestrator.providersChangeCount(),
-        capabilities: { ...AGENT_HOST_CAPABILITIES }
+        capabilities: { ...AGENT_HOST_CAPABILITIES },
+        // Host updates (P2.3 R20).
+        generation: options.generation ?? 0,
+        retiring: orchestrator.isRetiring()
       };
+      const owned = orchestrator.ownedThreadIds();
+      if (owned !== null) body.ownedThreadIds = owned;
       sendJson(response, 200, body);
       return;
     }
@@ -540,6 +563,22 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         limit,
         ...(projectPath !== null && projectPath.length > 0 ? { projectPath } : {})
       });
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // Host updates (spec 2026-11-01 P2.3 R18, R21): repeatable, no body.
+    if (path === agentHostRoutes.retire && method === "POST") {
+      const body: RetireHostResponse = options.onRetire
+        ? await options.onRetire()
+        : { ownedThreadIds: await orchestrator.retire() };
+      sendJson(response, 200, body);
+      return;
+    }
+    if (path === agentHostRoutes.unretire && method === "POST") {
+      const body: RetireHostResponse = options.onUnretire
+        ? await options.onUnretire()
+        : { ownedThreadIds: await orchestrator.unretire() };
       sendJson(response, 200, body);
       return;
     }
@@ -660,6 +699,27 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       return;
     }
     const rest = threadMatch[2] ?? "";
+
+    // Host updates (P2.3 R17): a foreign thread taken in — answered once it is servable.
+    if (rest === "/adopt" && method === "POST") {
+      const body: AdoptThreadResponse = { adopted: await orchestrator.adoptThread(threadId) };
+      sendJson(response, 200, body);
+      return;
+    }
+    // Host updates (P2.3 R16, R19): every other thread route answers 409 `THREAD_NOT_OWNED` for a
+    // thread another host owns (a release or an adoption in flight is waited out first), and a
+    // request of an owned one counts in flight until it is answered — a retiring host never
+    // releases a thread under it. A fork only READS its parent, which may be another host's.
+    const leave = await orchestrator.enterThread(threadId, rest === "/fork" ? { readsForeign: true } : undefined);
+    if (rest === "/events" && method === "GET") {
+      try {
+        await serveEvents(response, url, threadId);
+      } finally {
+        leave();
+      }
+      return;
+    }
+    response.once("close", leave);
 
     if (rest === "") {
       if (method === "DELETE") {
@@ -818,50 +878,6 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     if (rest === "/catalog" && method === "GET") {
       const body: HostThreadCatalogResponse = await orchestrator.readCatalog(threadId);
       sendJson(response, 200, body);
-      return;
-    }
-
-    if (rest === "/events" && method === "GET") {
-      const after = parseAfter(url);
-      const window = parseReadWindow(url);
-      const agentRows = parseAgentRows(url);
-      const releaseWatcher = options.addProviderWatcher?.();
-      // On-demand agent rows: the stream gets an id a `POST …/agent-rows` names, and its
-      // frame is built from the fold in the step that writes it (`stream.ts`).
-      const streamId = agentRows !== undefined ? randomUUID() : undefined;
-      const stream = createThreadStream({
-        response,
-        hostInstanceId,
-        subscribe: (listener, onHistoryImport) =>
-          orchestrator.subscribe(threadId, {
-            onEvents: listener,
-            ...(onHistoryImport ? { onHistoryImport } : {})
-          }),
-        ...(streamId !== undefined
-          ? { agentRows: { streamId, frame: (agentIds) => orchestrator.agentRowsFrame(threadId, agentIds) } }
-          : {}),
-        read: async (): Promise<AgentChatStreamFrame[]> => {
-          // Only for a client that asked: an older one expects the whole window (`ThreadReadWindow`)
-          // and every agent's rows.
-          const read = await orchestrator.readThread(threadId, after, readOptionsOf(window, agentRows));
-          if (read.kind === "snapshot") {
-            return [{ kind: "snapshot", thread: read.thread }];
-          }
-          return read.events.map((event) => ({
-            kind: "event" as const,
-            seq: event.seq,
-            event
-          }));
-        },
-        onClose: () => {
-          streams.delete(stream);
-          if (streamId !== undefined) agentRowStreams.delete(streamId);
-          releaseWatcher?.();
-        }
-      });
-      streams.add(stream);
-      if (streamId !== undefined) agentRowStreams.set(streamId, { threadId, stream });
-      await stream.start();
       return;
     }
 
@@ -1038,6 +1054,56 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     });
   };
 
+  /**
+   * `GET /threads/:id/events`, behind the thread gate (`route`). Counted in flight only while it
+   * starts: an open stream never keeps a retiring host from releasing its thread — the release
+   * ends the stream instead (`endThreadStreams`).
+   */
+  const serveEvents = async (response: ServerResponse, url: URL, threadId: string): Promise<void> => {
+    const after = parseAfter(url);
+    const window = parseReadWindow(url);
+    const agentRows = parseAgentRows(url);
+    const releaseWatcher = options.addProviderWatcher?.();
+    // On-demand agent rows: the stream gets an id a `POST …/agent-rows` names, and its
+    // frame is built from the fold in the step that writes it (`stream.ts`).
+    const streamId = agentRows !== undefined ? randomUUID() : undefined;
+    const stream = createThreadStream({
+      response,
+      hostInstanceId,
+      subscribe: (listener, onHistoryImport) =>
+        orchestrator.subscribe(threadId, {
+          onEvents: listener,
+          ...(onHistoryImport ? { onHistoryImport } : {})
+        }),
+      ...(streamId !== undefined
+        ? { agentRows: { streamId, frame: (agentIds) => orchestrator.agentRowsFrame(threadId, agentIds) } }
+        : {}),
+      read: async (): Promise<AgentChatStreamFrame[]> => {
+        // Only for a client that asked: an older one expects the whole window (`ThreadReadWindow`)
+        // and every agent's rows.
+        const read = await orchestrator.readThread(threadId, after, readOptionsOf(window, agentRows));
+        if (read.kind === "snapshot") {
+          return [{ kind: "snapshot", thread: read.thread }];
+        }
+        return read.events.map((event) => ({
+          kind: "event" as const,
+          seq: event.seq,
+          event
+        }));
+      },
+      onClose: () => {
+        streams.delete(stream);
+        streamThreads.delete(stream);
+        if (streamId !== undefined) agentRowStreams.delete(streamId);
+        releaseWatcher?.();
+      }
+    });
+    streams.add(stream);
+    streamThreads.set(stream, threadId);
+    if (streamId !== undefined) agentRowStreams.set(streamId, { threadId, stream });
+    await stream.start();
+  };
+
   // Mirrors the command gate for the error mapping: `orchestrator.ready` is a
   // promise, and `sendError` runs synchronously on a failed request.
   let hostReady = false;
@@ -1073,6 +1139,11 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
   return {
     server,
+    endThreadStreams(threadId: string): void {
+      for (const [stream, streamThread] of [...streamThreads]) {
+        if (streamThread === threadId) stream.close("host");
+      }
+    },
     async listen(): Promise<void> {
       if (!socketPath.startsWith("\\\\.\\pipe\\")) {
         await mkdir(dirname(socketPath), { recursive: true });

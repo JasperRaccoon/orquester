@@ -37,6 +37,7 @@ import type {
   CheckpointService,
   EventPosition,
   EventsFromResult,
+  ForeignThreadRead,
   Ingestion,
   ThreadStore,
   ThreadTail,
@@ -59,6 +60,8 @@ export interface FakeThreadStore extends ThreadStore {
   readonly receipts: Map<string, CommandReceipt>;
   /** Cut the log at `index`, as a malformed line would (§5.1). */
   truncateAt(threadId: string, index: number): void;
+  /** Host updates (P2.3 R16): another host's thread, read with no write. */
+  readThreadReadOnly(threadId: string): Promise<ForeignThreadRead | null>;
   /**
    * `state.json` per thread, as `saveFoldSnapshot` wrote it (A2). Plant a
    * stale or broken snapshot here to drive the fallback: `loadFoldSnapshot`
@@ -323,6 +326,19 @@ export function createFakeThreadStore(): FakeThreadStore {
 
     async listThreads(): Promise<string[]> {
       return [...new Set([...logs.keys(), ...heads.keys()])];
+    },
+
+    /** Host updates (P2.3 R16): another host's thread, read with no write. */
+    async readThreadReadOnly(threadId: string) {
+      const head = heads.get(threadId);
+      if (head === undefined && !logs.has(threadId)) return null;
+      const binding = bindings.get(threadId);
+      return {
+        head: head === undefined ? null : { ...head },
+        binding: binding === undefined ? null : { ...binding },
+        events: [...(logs.get(threadId) ?? [])],
+        truncated: false
+      };
     },
 
     async deleteThread(threadId: string): Promise<void> {

@@ -285,6 +285,18 @@ test("a live file whose thread has an open writer is never unlinked", async () =
   assert.equal(fs.existsSync(idle), false, "an idle thread's live file is fair game");
 });
 
+test("another host's thread is never pruned, by age or by the ceiling (host updates P2.3 R16)", async () => {
+  const threadsRoot = await tempRoot("orq-raw-ceiling-");
+  const theirsLive = await seedThreadLog(threadsRoot, "theirs", "raw.ndjson", 600 * 1024 * 1024, 600_000);
+  const theirsStale = await seedThreadLog(threadsRoot, "theirs", "raw.ndjson.3", 100, 30 * 24 * 60 * 60 * 1000);
+  const ours = await seedThreadLog(threadsRoot, "ours", "raw.ndjson", 300 * 1024 * 1024, 300_000);
+
+  pruneRawLogDirectory({ threadsRoot, skip: (threadId) => threadId === "theirs" });
+  assert.equal(fs.existsSync(theirsLive), true, "the host that writes it may be appending to it");
+  assert.equal(fs.existsSync(theirsStale), true);
+  assert.equal(fs.existsSync(ours), true, "its bytes do not count towards this host's ceiling either");
+});
+
 test("a rung past the age bound is removed even when the ceiling is not reached", async () => {
   const threadsRoot = await tempRoot("orq-raw-ceiling-");
   const stale = await seedThreadLog(

@@ -51,6 +51,7 @@ import {
 } from "./extra-routes.ts";
 import { DeadlineExceededError } from "../support/deadline.ts";
 import { createAgentHostServer, type AgentHostServer } from "./http-server.ts";
+import { createThreadOwnership } from "../orchestration/ownership.ts";
 
 const TOKEN = "test-token";
 
@@ -86,14 +87,18 @@ async function harness(
     index?: ThreadIndex;
     adapters?: TestHostOptions["adapters"];
     sessionToolsRefresh?: Parameters<typeof createAgentHostServer>[0]["sessionToolsRefresh"];
+    ownership?: TestHostOptions["ownership"];
   } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "agent-host-test-"));
   const socketPath = join(dir, "agent-host.sock");
+  let endThreadStreams = (_threadId: string): void => undefined;
   const host = createTestHost({
     openGate: options.openGate ?? true,
     ...(options.index ? { index: options.index } : {}),
-    ...(options.adapters ? { adapters: options.adapters } : {})
+    ...(options.adapters ? { adapters: options.adapters } : {}),
+    ...(options.ownership ? { ownership: options.ownership } : {}),
+    onThreadReleased: (threadId) => endThreadStreams(threadId)
   });
   const server = createAgentHostServer({
     orchestrator: host.orchestrator,
@@ -108,6 +113,7 @@ async function harness(
     onStop: async () => ({ ok: true, markedThreadIds: [] }),
     ...(options.sessionToolsRefresh ? { sessionToolsRefresh: options.sessionToolsRefresh } : {})
   });
+  endThreadStreams = (threadId) => server.endThreadStreams(threadId);
   await server.listen();
 
   const call: Harness["call"] = (method, path, body, token = TOKEN) =>
@@ -247,7 +253,12 @@ describe("agent host server — readiness (§3.1, §8)", () => {
     // Agent Profiles: a daemon refuses to send a profile thread to a host without this; likewise a
     // fork into another agent or account ("Continue in another agent") without `crossAgentFork`.
     // boxes: and a box thread to a host that cannot run its CLI in the box.
-    assert.deepEqual(body.capabilities, { sessionProfiles: 1, crossAgentFork: 1, boxes: 1 });
+    // Host updates (spec 2026-11-01): a forced restart only of a host whose stop marks revivals,
+    // and a retirement only of one that serves `/retire` and `/threads/:id/adopt`.
+    assert.deepEqual(body.capabilities, { sessionProfiles: 1, crossAgentFork: 1, continuationRevival: 1, retire: 1, boxes: 1 });
+    assert.equal(body.generation, 0);
+    assert.equal(body.retiring, false);
+    assert.equal(body.ownedThreadIds, undefined, "an owned set only while retiring");
     assert.equal(agentHostSupports(body, "sessionProfiles"), true);
     assert.equal(agentHostSupports(body, "crossAgentFork"), true);
     assert.equal(agentHostSupports(body, "boxes"), true);
@@ -1751,5 +1762,66 @@ describe("agent host server — on-demand agent rows", () => {
       assert.equal(code(refused), "INVALID_COMMAND");
     }
     live.close();
+  });
+});
+
+describe("agent host server — host updates (spec 2026-11-01 P2.3)", () => {
+  const errorCode = (body: unknown): string | undefined => (body as { error?: { code?: string } } | null)?.error?.code;
+
+  it("answers 409 THREAD_NOT_OWNED on every route of a foreign thread until it is adopted", async () => {
+    const h = await harness({ ownership: createThreadOwnership({ foreignThreadIds: ["theirs"] }) });
+    for (const [method, path] of [
+      ["GET", agentHostRoutes.read("theirs")],
+      ["GET", agentHostRoutes.events("theirs")],
+      ["POST", agentHostRoutes.turn("theirs")],
+      ["DELETE", agentHostRoutes.deleteThread("theirs")]
+    ] as const) {
+      const result = await h.call(method, path, method === "POST" ? { commandId: "c-1", input: "hi" } : undefined);
+      assert.equal(result.status, 409, `${method} ${path}`);
+      assert.equal(errorCode(result.body), "THREAD_NOT_OWNED", `${method} ${path}`);
+    }
+    // The thread does not exist here at all: the adoption says so with a 404.
+    const adopted = await h.call("POST", agentHostRoutes.adopt("theirs"));
+    assert.equal(adopted.status, 404);
+    assert.equal(errorCode(adopted.body), "THREAD_NOT_FOUND");
+  });
+
+  it("retires over the wire: health reports it, creation is refused, a released thread's stream ends", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    const live = await h.stream(agentHostRoutes.events(threadId));
+    await live.waitFor((frames) => frames.some((frame) => frame.kind === "snapshot"));
+
+    const retired = await h.call("POST", agentHostRoutes.retire);
+    assert.equal(retired.status, 200);
+    assert.deepEqual(retired.body, { ownedThreadIds: [] }, "nothing ran: everything is released");
+    await live.closed;
+
+    const health = await h.call("GET", agentHostRoutes.health);
+    const body = health.body as AgentHostHealthResponse;
+    assert.equal(body.retiring, true);
+    assert.deepEqual(body.ownedThreadIds, []);
+    const read = await h.call("GET", agentHostRoutes.read(threadId));
+    assert.equal(errorCode(read.body), "THREAD_NOT_OWNED");
+    const created = await h.call("POST", agentHostRoutes.createThread, {
+      threadId: "fresh",
+      projectPath: "/work/project",
+      cwd: "/work/project",
+      title: "t",
+      refId: "claude",
+      accountId: "acc1",
+      home: "account",
+      modelSelection: { model: "m" },
+      runtimeMode: "approval-required"
+    });
+    assert.equal(created.status, 409);
+    assert.equal(errorCode(created.body), "HOST_RETIRING");
+    const adopt = await h.call("POST", agentHostRoutes.adopt(threadId));
+    assert.equal(errorCode(adopt.body), "HOST_RETIRING", "a retiring host adopts nothing");
+
+    const unretired = await h.call("POST", agentHostRoutes.unretire);
+    assert.deepEqual(unretired.body, { ownedThreadIds: [threadId] });
+    assert.equal((await h.call("GET", agentHostRoutes.read(threadId))).status, 200);
+    assert.equal(((await h.call("GET", agentHostRoutes.health)).body as AgentHostHealthResponse).retiring, false);
   });
 });

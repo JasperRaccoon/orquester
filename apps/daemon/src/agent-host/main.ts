@@ -23,7 +23,7 @@ import { readCodeStamp } from "./support/code-stamp.ts";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, resolve as resolvePath, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 
 import {
   agentChatDir,
@@ -52,7 +52,7 @@ import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, AdapterLogger, AgentAdapter } from "./adapter.ts";
+import type { AdapterContext, AdapterFactory, AdapterLogger, AgentAdapter } from "./adapter.ts";
 import {
   ADAPTER_IDS,
   ADAPTER_PENDING_SNAPSHOTS,
@@ -61,7 +61,8 @@ import {
 } from "./adapters/index.ts";
 import { createCheckpointService } from "./checkpoints/index.ts";
 import type { AgentHostStopResponse } from "@orquester/api/agent-chat";
-import { newHostInstanceId } from "./host-protocol.ts";
+import { AGENT_HOST_ENV, newHostInstanceId, type RetireHostResponse } from "./host-protocol.ts";
+import { createThreadOwnership, guardThreadWrites, parseForeignThreadsFile } from "./orchestration/ownership.ts";
 import {
   createThreadIndex,
   createUnavailableThreadIndex,
@@ -81,6 +82,7 @@ import { systemClock, systemIdGen } from "./orchestration/runtime-seams.ts";
 import { createAgentHostServer, type AgentHostServer } from "./server/index.ts";
 import { createThreadStore } from "./store/index.ts";
 import { buildProviderEnv, providerNodePreload } from "./support/env.ts";
+import { stopThreadProviderGroups } from "./support/leftover-processes.ts";
 import {
   createDaemonForwarder,
   createDaemonManifestClient,
@@ -209,6 +211,39 @@ function accountFamilyFor(adapter: AgentAdapterId): "claude" | "codex" | "grok" 
   return adapter === "claude" || adapter === "codex" || adapter === "grok" ? adapter : null;
 }
 
+/**
+ * Host updates (spec 2026-11-01 P2.3 R15): what the daemon told this host instance to be — its
+ * generation, socket, token file and the threads other live hosts own. Without the variables it
+ * is generation 0 on the legacy names with no foreign threads, as every host before generations.
+ * A malformed generation, or a foreign-threads file that is named but cannot be read or parsed,
+ * fails the boot: a host must never guess which threads are another's.
+ */
+export async function readHostBootInputs(
+  env: NodeJS.ProcessEnv,
+  appdir: string
+): Promise<{ generation: number; socketPath: string; tokenPath: string; foreignThreadIds: string[] }> {
+  const rawGeneration = env[AGENT_HOST_ENV.generation];
+  const generation = rawGeneration === undefined || rawGeneration === "" ? 0 : Number(rawGeneration);
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    throw new Error(`${AGENT_HOST_ENV.generation} must be a non-negative integer, not '${rawGeneration}'.`);
+  }
+  const platform = process.platform === "win32" ? "win32" : "linux";
+  const socketPath = env[AGENT_HOST_ENV.socket] || agentHostSocketPath(appdir, platform, generation);
+  const tokenPath = env[AGENT_HOST_ENV.tokenPath] || agentHostTokenPath(appdir, generation);
+  const foreignPath = env[AGENT_HOST_ENV.foreignThreads];
+  let foreignThreadIds: string[] = [];
+  if (foreignPath !== undefined && foreignPath !== "") {
+    try {
+      foreignThreadIds = parseForeignThreadsFile(await readFile(foreignPath, "utf8"));
+    } catch (error) {
+      throw new Error(
+        `The foreign-threads file ${AGENT_HOST_ENV.foreignThreads} names could not be read: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  return { generation, socketPath, tokenPath, foreignThreadIds };
+}
+
 async function readOrCreateToken(path: string): Promise<string> {
   try {
     const existing = (await readFile(path, "utf8")).trim();
@@ -220,9 +255,7 @@ async function readOrCreateToken(path: string): Promise<string> {
     // spawn path.
   }
   const token = randomBytes(32).toString("base64url");
-  await mkdir(daemonConfigDir(resolvePath(path, "..", "..")), { recursive: true }).catch(
-    () => undefined
-  );
+  await mkdir(dirname(path), { recursive: true }).catch(() => undefined);
   await writeFile(path, `${token}\n`, { encoding: "utf8", mode: 0o600 });
   await chmod(path, 0o600).catch(() => undefined);
   return token;
@@ -260,6 +293,11 @@ interface StartAgentHostOptions {
    * this host cannot reach boxes (never runs its CLI here instead).
    */
   boxConnector?: BoxConnector;
+  /**
+   * The factory of each adapter id named here instead of the registry's (`adapters/index.ts`):
+   * a stand-in provider for a host booted by a test fixture. Absent in production.
+   */
+  adapterFactories?: Partial<Record<AgentAdapterId, AdapterFactory>>;
 }
 
 export async function startAgentHost(
@@ -282,8 +320,12 @@ export async function startAgentHost(
   await mkdir(stateDir, { recursive: true });
   await mkdir(tmpDir, { recursive: true });
 
-  const token = await readOrCreateToken(agentHostTokenPath(appdir));
-  const socketPath = agentHostSocketPath(appdir, process.platform === "win32" ? "win32" : "linux");
+  // Host updates (P2.3 R15): first, before anything is bound or read — a bad input fails the boot.
+  const boot = await readHostBootInputs(env, appdir);
+  const token = await readOrCreateToken(boot.tokenPath);
+  const socketPath = boot.socketPath;
+  // Which threads this host owns (P2.3 R16–R21): every guard below reads it.
+  const ownership = createThreadOwnership({ foreignThreadIds: boot.foreignThreadIds });
 
   // ---- session tools (design 2026-10-14 §1; unified MCP design 2026-10-15 §9.4) --
   // The static chat catalog, advertised per thread: each provider session's list, instruction
@@ -343,14 +385,23 @@ export async function startAgentHost(
   // `rootDir` is `<appdir>/daemon/agent`, NOT the appdir. The delete hook runs
   // before the directory is removed and a throw there aborts the delete, so a
   // thread can never be deleted and leave its checkpoint refs behind (§5.4).
-  const store = createThreadStore({
-    rootDir: stateDir,
-    clock,
-    idGen: ids,
-    homeDirs: [homeDir],
-    deleteThreadRefs: (input) => checkpoints.deleteThreadRefs(input),
-    logger: { warn: (message, detail) => logger.warn(message, detail) }
-  });
+  //
+  // Host updates (P2.5 I1): wrapped so no write of another host's thread reaches its files, from
+  // the orchestrator, a route or an adapter; and its sweeps never touch such a thread, nor run at
+  // all while this host retires (P2.3 R16, R18).
+  const store = guardThreadWrites(
+    createThreadStore({
+      rootDir: stateDir,
+      clock,
+      idGen: ids,
+      homeDirs: [homeDir],
+      deleteThreadRefs: (input) => checkpoints.deleteThreadRefs(input),
+      logger: { warn: (message, detail) => logger.warn(message, detail) },
+      sweepScope: { owns: (threadId) => !ownership.isForeign(threadId), suspended: () => ownership.retiring },
+      sharedReceipts: () => ownership.shared()
+    }),
+    ownership
+  );
 
   /**
    * OpenCode's shared per-project server is built with a synthetic
@@ -578,8 +629,18 @@ export async function startAgentHost(
     secrets: secretRedactor
   });
 
+  // The server is created after the orchestrator; a release ends the thread's streams there.
+  let endThreadStreams = (_threadId: string): void => undefined;
   orchestrator = createOrchestrator({
     store,
+    ownership,
+    onThreadReleased: (threadId) => endThreadStreams(threadId),
+    stopForeignProviderProcesses: async (threadId) => {
+      const swept = await stopThreadProviderGroups(threadId);
+      if (swept.found > 0) {
+        logger.warn("agent-host: stopped provider processes another host left for a thread it adopts", { threadId, ...swept });
+      }
+    },
     ingestion,
     checkpoints,
     liveness,
@@ -663,6 +724,28 @@ export async function startAgentHost(
     socketPath,
     tmpDir,
     startedAt,
+    generation: boot.generation,
+    // Host updates (P2.3 R18): the owned set kept and the rest released first — their last rows
+    // still reach the index — then the shared caches this host stops writing: the thread index
+    // (flushed and closed) and the provider-snapshot file. Store sweeps stop by themselves
+    // (`sweepScope`). Repeatable.
+    onRetire: async (): Promise<RetireHostResponse> => {
+      const ownedThreadIds = await host.retire();
+      snapshots.suspendPersistence();
+      await snapshots.flush();
+      await threadIndex.suspend().catch((error: unknown) => {
+        logger.warn("agent-host: the thread index did not close cleanly for the retirement", error);
+      });
+      return { ownedThreadIds };
+    },
+    // P2.3 R21: the caches back — the index reopened and caught up over every thread this host
+    // owns (it wrote them while the file was closed), the snapshot file written again.
+    onUnretire: async (): Promise<RetireHostResponse> => {
+      const ownedThreadIds = await host.unretire();
+      snapshots.resumePersistence();
+      openThreadIndex();
+      return { ownedThreadIds };
+    },
     // Read ONCE at boot: this is the code this process is running, which is
     // the whole point — after a deploy the checkout moves and this does not.
     codeStamp: readCodeStamp(),
@@ -703,6 +786,8 @@ export async function startAgentHost(
     addProviderWatcher: () => snapshots.addWatcher()
   });
 
+  endThreadStreams = (threadId) => server.endThreadStreams(threadId);
+
   // The socket is bound first so the daemon's connect succeeds; the health
   // request itself waits on the gate (§8: a bound socket is not readiness).
   await server.listen();
@@ -716,7 +801,7 @@ export async function startAgentHost(
    * keep the host from serving.
    */
   const openThreadIndex = (): void => {
-    if (stopping) return;
+    if (stopping || ownership.retiring) return;
     try {
       threadIndex.open(
         createThreadIndex({ filePath: agentChatIndexPath(appdir), logger, clock })
@@ -761,6 +846,8 @@ export async function startAgentHost(
       }
       for (const threadId of threadIds) {
         if (stopping) return;
+        // Host updates (P2.3 R16): another host's thread is caught up when it is adopted.
+        if (ownership.isForeign(threadId)) continue;
         try {
           const head = await store.loadHead(threadId);
           if (head === null) continue;
@@ -848,7 +935,7 @@ export async function startAgentHost(
     await snapshots.load();
     for (const id of ADAPTER_IDS) {
       try {
-        const adapter = await adapterFactory(id)(adapterContext(id));
+        const adapter = await (options.adapterFactories?.[id] ?? adapterFactory(id))(adapterContext(id));
         adapters.set(id, adapter);
         // One consumer per adapter: the host's ingestion is the only reader of
         // an adapter's canonical event stream (§4.1).
@@ -907,10 +994,12 @@ export async function startAgentHost(
  * `deleteThread` is remembered and replayed, because no catch-up ever visits a
  * thread whose directory is gone.
  */
-function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void } {
+function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void; suspend(): Promise<void> } {
   let target: ThreadIndex = createUnavailableThreadIndex();
   let opened = false;
   let closed = false;
+  /** Host updates (P2.3 R18): closed for a retirement; an unretire opens it again. */
+  let suspended = false;
   const deletedBeforeOpen = new Set<string>();
   return {
     get available() {
@@ -922,6 +1011,7 @@ function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void }
         return;
       }
       opened = true;
+      suspended = false;
       target = index;
       for (const threadId of deletedBeforeOpen) {
         index.deleteThread(threadId);
@@ -931,6 +1021,20 @@ function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void }
     observe: (input) => target.observe(input),
     drain: () => target.drain(),
     catchUp: (input) => target.catchUp(input),
+    /**
+     * Host updates (P2.3 R18): a retiring host stops writing the shared file — what is queued is
+     * applied, then it closes — and the handle answers as one not open yet ("unavailable"
+     * coverage) until an `open` after an unretire. A delete meanwhile is replayed then.
+     */
+    suspend: async (): Promise<void> => {
+      if (closed) return;
+      suspended = true;
+      if (!opened) return;
+      const previous = target;
+      opened = false;
+      target = createUnavailableThreadIndex();
+      await previous.stop();
+    },
     deleteThread: (threadId) => {
       if (!opened) {
         deletedBeforeOpen.add(threadId);
@@ -963,7 +1067,7 @@ function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void }
     coverage: (threadId, logSeq) =>
       opened
         ? target.coverage(threadId, logSeq)
-        : Promise.resolve(closed ? "unavailable" : "catching-up"),
+        : Promise.resolve(closed || suspended ? "unavailable" : "catching-up"),
     beginCatchUpSweep: () => target.beginCatchUpSweep(),
     prompts: (threadId, input) => target.prompts(threadId, input),
     prompt: (threadId, messageId) => target.prompt(threadId, messageId),
