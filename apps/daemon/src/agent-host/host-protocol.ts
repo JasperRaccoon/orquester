@@ -1039,10 +1039,26 @@ export interface SetThreadIdentityResponse {
 }
 
 /**
- * The literal continuation prompt for an adapter without
- * `promptlessTurnContinuation` (§3.3 step 3).
+ * The continuation prompt's core sentence, and the whole prompt hosts sent before spec
+ * 2026-11-01 (§3.3 step 3) — old logs and provider transcripts hold it. Every continue prompt is
+ * now built by `orchestration/continuation-prompt.ts` around it, and recognised there too.
  */
 export const CONTINUATION_PROMPT = "Continue where you left off.";
+
+/**
+ * Host updates (spec 2026-11-01 P1.2 R4): a thread the hosts continued on their own this many
+ * times in a row, within {@link AUTO_CONTINUE_LOOP_WINDOW_MS} and with no message of the user's in
+ * between — restarts and unexpected stops alike — is not continued again
+ * ({@link AUTO_CONTINUE_LOOP_MESSAGE}).
+ */
+export const AUTO_CONTINUE_LOOP_MAX = 3;
+
+/** The window {@link AUTO_CONTINUE_LOOP_MAX} counts in. */
+export const AUTO_CONTINUE_LOOP_WINDOW_MS = 10 * 60_000;
+
+/** The settle of a thread the loop cap stopped continuing (R4). */
+export const AUTO_CONTINUE_LOOP_MESSAGE =
+  "The agent host restarted several times in a row while this chat was working, so it was not resumed again. Send a message to continue.";
 
 /**
  * §3.3 — the ORPHAN settle: a running thread the restart found with nothing
@@ -1075,6 +1091,14 @@ export const CRASH_RESUME_SUMMARY = "Resumed after the agent host stopped unexpe
 /** The detail of {@link CRASH_RESUME_SUMMARY}'s row. */
 export function crashResumeDetail(attempt: number, maxAttempts: number): string {
   return `The agent host stopped unexpectedly while this turn was running. It was resumed automatically (attempt ${attempt} of ${maxAttempts}).`;
+}
+
+/**
+ * Host updates (spec 2026-11-01 R3): the detail of {@link CRASH_RESUME_SUMMARY}'s row when no
+ * turn was running — the host died while subagents or background commands still ran.
+ */
+export function crashRevivalDetail(attempt: number, maxAttempts: number): string {
+  return `The agent host stopped unexpectedly while subagents or background commands were still running in this chat. The agent was continued automatically to relaunch the ones it still needs (attempt ${attempt} of ${maxAttempts}).`;
 }
 
 /**

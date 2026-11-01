@@ -89,6 +89,42 @@ export interface ContinueAfterRestart {
    * Optional; an older host ignores it.
    */
   crashAttempt?: number;
+  /**
+   * Host updates (spec 2026-11-01 P1.2 R2b): no turn was cut — `turnId` names the thread's latest
+   * turn, which had ended — but the stop killed subagents or background commands still running in
+   * the thread, so the next host revives it with a turn of its own. Optional; an older host ignores
+   * it and clears the marker (its turn is not one a teardown settled `interrupted`).
+   */
+  revival?: true;
+  /**
+   * Host updates (R2, R8): the subagents and background commands the stop killed, named for the
+   * continue prompt — at most {@link CONTINUATION_STOPPED_WORK_MAX}, the rest counted in
+   * {@link moreStoppedWork}. Optional; an older host ignores both.
+   */
+  stoppedWork?: ContinuationStoppedWork[];
+  moreStoppedWork?: number;
+  /** Host updates (R5): the cut turn waited on an approval or a question, which the stop cancelled. */
+  requestCancelled?: true;
+}
+
+/** Host updates (spec 2026-11-01 R8): one subagent or background command a restart stopped. */
+export interface ContinuationStoppedWork {
+  name: string;
+  kind: "subagent" | "background";
+}
+
+/** At most this many stopped items are recorded on a marker; the rest are counted. */
+export const CONTINUATION_STOPPED_WORK_MAX = 12;
+
+/**
+ * Host updates (spec 2026-11-01 P1.2 R4): one continue turn a host started on its own after a
+ * restart or an unexpected stop — what the loop cap counts. Head-only.
+ */
+export interface AutoContinue {
+  /** The turn the continuation started. */
+  turnId: string;
+  /** When it was sent (ISO). */
+  at: string;
 }
 
 /**
@@ -174,6 +210,20 @@ export interface ThreadHead {
   crashResumedTurn?: CrashResumedTurn;
   /** A background task's completion the agent has not picked up yet: see {@link PendingWake}. Head-only. */
   pendingWake?: PendingWake;
+  /**
+   * Host updates (spec 2026-11-01 P1.2 R3): a subagent or background command runs in this thread
+   * (the liveness registry holds one). Written when the first starts, cleared when the last ends,
+   * so a host that dies with work running leaves it: the next boot folds the thread even idle,
+   * and revives the agent when the roster shows that work stopped. Head-only; an older host
+   * ignores it.
+   */
+  backgroundWorkLive?: true;
+  /**
+   * Host updates (R4): the continue turns hosts started on their own in a row, newest last. A
+   * chain counts only while its last turn is still the thread's latest — the user's next message
+   * starts another turn, which ends it. Head-only; an older host ignores it.
+   */
+  autoContinues?: AutoContinue[];
   /**
    * Goals §5.5: the deploy handover found this thread's goal CONTINUING —
    * active on a provider that starts its own turns (Codex) — with a usable

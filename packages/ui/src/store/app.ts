@@ -253,8 +253,8 @@ const DEFAULT_USAGE_PREFS: UsagePrefs = {
 const DEFAULT_AGENT_PREFS: AgentPrefs = {
   claudeTimeoutMinutes: 30,
   claudeSubagentCacheTtl: "auto",
-  // Agent chat §3.3: continuing an interrupted turn is opt-in, per project.
-  continueThreadsAfterRestart: false,
+  // Agent chat §3.3: continuing after a restart is on by default (spec 2026-11-01 R1), per project.
+  continueThreadsAfterRestart: true,
   continueThreadsByProject: {},
   // Usage-limit recovery: resuming at the reset is on, moving to another account is opt-in.
   autoResumeLimitedChats: true,

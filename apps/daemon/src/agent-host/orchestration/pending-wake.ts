@@ -20,6 +20,7 @@
 
 import {
   INERT_TASK_TYPES,
+  isUsageLimitContinueMessage,
   type PendingWake,
   type PendingWakeTask,
   type RuntimeEvent,
@@ -28,6 +29,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { CONTINUATION_PROMPT } from "../host-protocol.ts";
+import { continuationPrompt, endsLikeContinuationPrompt, isContinuationPrompt } from "./continuation-prompt.ts";
 
 /**
  * How long a pending wake is held at all. A provider wakes within seconds of
@@ -183,8 +185,9 @@ function stoppedName(row: RuntimeSubagent): string {
 /**
  * What the next host sends the agent in place of the wake it missed: which
  * background tasks finished while the agent host restarted, their results
- * (each capped on the mark), where their whole output is, and what the restart
- * stopped — ending with the ordinary continuation sentence.
+ * (each capped on the mark), where their whole output is — ending with the
+ * continue prompt of a wake (`continuation-prompt.ts`), which names what the
+ * restart stopped and asks the agent to relaunch what it still needs.
  */
 export function wakePrompt(wake: PendingWake, stopped: readonly RuntimeSubagent[]): string {
   const lines: string[] = [
@@ -199,13 +202,18 @@ export function wakePrompt(wake: PendingWake, stopped: readonly RuntimeSubagent[
   if ((wake.moreTasks ?? 0) > 0) {
     lines.push("", `${wake.moreTasks} more background task(s) finished as well; check their output.`);
   }
-  if (stopped.length > 0) {
-    lines.push(
-      "",
-      `This background work was still running when the agent host stopped, and it was stopped with it: ${stopped.map(stoppedName).join(", ")}. Start it again if it is still needed.`
-    );
-  }
-  lines.push("", CONTINUATION_PROMPT);
+  // What the restart stopped, and what to do about it, in the words of every
+  // other continue prompt (spec 2026-11-01 R8).
+  lines.push(
+    "",
+    continuationPrompt({
+      cause: "wake",
+      stopped: stopped.map((row) => ({
+        name: nonBlank(row.title) ?? row.id,
+        kind: row.agentKind === "background" ? "background" : "subagent"
+      }))
+    })
+  );
   return lines.join("\n");
 }
 
@@ -216,16 +224,21 @@ const WAKE_PROMPT_OPENINGS = [
 ] as const;
 
 /**
- * Whether a prompt is one the host sent on its own after a restart — the
- * continuation (§3.3) or a {@link wakePrompt} — never one the user wrote. Live,
- * neither is a message row; a history projection that finds one in the
- * provider's transcript must not replay it as the user's.
+ * Whether a prompt is one Orquester sent on its own — the continuation after a
+ * restart (§3.3, `continuation-prompt.ts`), a {@link wakePrompt}, or the
+ * daemon's usage-limit continue — never one the user wrote. Live, the host's
+ * are no message row; a history projection that finds one in the provider's
+ * transcript must not replay it as the user's. This build's texts and the ones
+ * older builds sent (all three once ended in, or were, the bare
+ * {@link CONTINUATION_PROMPT}), which old transcripts hold (spec 2026-11-01 R10).
  */
 export function isHostRestartPrompt(text: string): boolean {
   const trimmed = text.trim();
   return (
-    trimmed === CONTINUATION_PROMPT ||
-    (WAKE_PROMPT_OPENINGS.some((opening) => trimmed.startsWith(opening)) && trimmed.endsWith(CONTINUATION_PROMPT))
+    isContinuationPrompt(trimmed) ||
+    isUsageLimitContinueMessage(trimmed) ||
+    (WAKE_PROMPT_OPENINGS.some((opening) => trimmed.startsWith(opening)) &&
+      (trimmed.endsWith(CONTINUATION_PROMPT) || endsLikeContinuationPrompt(trimmed)))
   );
 }
 
