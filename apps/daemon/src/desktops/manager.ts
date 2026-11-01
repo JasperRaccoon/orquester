@@ -41,6 +41,7 @@ import {
   desktopSessionName,
   hostScriptArgs
 } from "./host-env.ts";
+import { DesktopHostInstallError } from "./host-status.ts";
 import { type ReconciledDesktop, reconcile } from "./reconcile.ts";
 import { DesktopStore } from "./store.ts";
 import { DesktopWindowNotFoundError, DesktopWindowTracker, type DesktopWindowTrackerOptions } from "./windows.ts";
@@ -89,6 +90,8 @@ export interface DesktopManagerOptions {
   indexFile: string;
   tmux: DesktopTmux;
   hostStatus: () => Promise<DesktopHostStatus>;
+  /** Installs the host's missing desktop packages and resolves with the new status (absent: not offered). */
+  installHost?: () => Promise<DesktopHostStatus>;
   audio?: Pick<DesktopAudioHub, "stopDesktop">;
   /** The env apps start from (default: the session base env with the session PATH). */
   baseEnv?: () => Record<string, string>;
@@ -262,6 +265,21 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
 
   hostStatus(): Promise<DesktopHostStatus> {
     return this.options.hostStatus();
+  }
+
+  /** Installs what desktops are missing on this host (apt-get as root); the new status. */
+  async installHost(): Promise<DesktopHostStatus> {
+    if (!this.options.installHost) {
+      throw new DesktopError(409, DESKTOP_UNAVAILABLE_CODE, "This daemon cannot install the desktop packages.");
+    }
+    try {
+      return await this.options.installHost();
+    } catch (error) {
+      if (!(error instanceof DesktopHostInstallError)) throw error;
+      throw error.reason === "unavailable"
+        ? new DesktopError(409, DESKTOP_UNAVAILABLE_CODE, error.message, error.hint)
+        : new DesktopError(500, "DESKTOP_INSTALL_FAILED", error.message);
+    }
   }
 
   /** boxes: the desktop stack in a box as it is now (never installs). */

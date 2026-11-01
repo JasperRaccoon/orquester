@@ -73,6 +73,9 @@ async function makeHarness(t: any, mode: "local" | "remote" = "local"): Promise<
   const known = () => summary(project);
   const desktops = {
     hostStatus: async () => ({ available: true }),
+    installHost: async () => {
+      throw new DesktopError(500, "DESKTOP_INSTALL_FAILED", "apt-get could not install the desktop packages:\nE: Unable to locate package openbox");
+    },
     list: (projectPath?: string) => {
       harness.calls.list.push(projectPath);
       return [known()];
@@ -165,6 +168,14 @@ test("create: 409 DESKTOP_UNAVAILABLE carries the install hint", async (t) => {
   const res = await h.inject({ method: "POST", url: "/api/desktops", payload: { projectPath: h.project } });
   assert.equal(res.statusCode, 409);
   assert.deepEqual(res.json(), { code: DESKTOP_UNAVAILABLE_CODE, message: "Desktops need Xvnc on the server.", hint });
+});
+
+test("host install: apt-get's failure reaches the client", async (t) => {
+  const h = await makeHarness(t);
+  const res = await h.inject({ method: "POST", url: "/api/desktops/host/install" });
+  assert.equal(res.statusCode, 500);
+  assert.equal(res.json().code, "DESKTOP_INSTALL_FAILED");
+  assert.match(res.json().message, /Unable to locate package openbox/);
 });
 
 test("launch: cwd escaping the sandbox is 403", async (t) => {

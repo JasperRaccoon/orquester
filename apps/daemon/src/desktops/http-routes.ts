@@ -26,6 +26,7 @@ import { isReservedAppEnvKey } from "./host-env.ts";
 export type DesktopRoutesService = Pick<
   DesktopManager,
   | "hostStatus"
+  | "installHost"
   | "boxHostStatus"
   | "list"
   | "get"
@@ -250,6 +251,15 @@ export function registerDesktopHttpRoutes(app: FastifyInstance, deps: DesktopRou
       }
     }
   );
+
+  // This host's packages only: a VM installs its own when a desktop opens.
+  app.post(desktopRoutes.hostInstall, async (_request, reply): Promise<DesktopHostStatus | FastifyReply> => {
+    try {
+      return await desktops.installHost();
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 
   app.get<{ Querystring: { projectPath?: string } }>(
     desktopRoutes.list,

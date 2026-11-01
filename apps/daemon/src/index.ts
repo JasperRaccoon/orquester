@@ -1455,6 +1455,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     indexFile: resolved.desktopsIndexFile,
     tmux,
     hostStatus: () => desktopHost.status(),
+    installHost: () => desktopHost.install(),
     audio: desktopAudio,
     // boxes: desktops of Linux box projects run in their VM.
     boxes: boxes.desktops

@@ -1004,6 +1004,8 @@ export interface AppState {
    * daemon without desktops (404) and after a failed fetch.
    */
   desktopHost: DesktopHostStatus | null;
+  /** Installing this host's missing desktop packages: in progress, or why the last try failed. */
+  desktopHostInstall: { installing: boolean; error: string | null };
   /**
    * Built-in plugins (Settings → Plugins), or null until the section first
    * loads them on this connection; live via `plugins.changed`.
@@ -1343,6 +1345,8 @@ export interface AppState {
   openBrowser: (url?: string) => Promise<void>;
   /** Refetch the daemon's desktop prerequisites (on connect and when the "+" menu opens). */
   loadDesktopHost: () => Promise<void>;
+  /** Have the daemon install this host's missing desktop packages, then take the new status. */
+  installDesktopHost: () => Promise<void>;
   upsertDesktop: (desktop: DesktopSummary) => void;
   /** Drop a desktop (and its tab and viewer prefs); the daemon side is not touched. */
   removeDesktop: (id: string) => void;
@@ -1482,6 +1486,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   browsers: [],
   desktops: [],
   desktopHost: null,
+  desktopHostInstall: { installing: false, error: null },
   plugins: null,
   launchDialog: null,
   activityById: {},
@@ -2175,6 +2180,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       browsers: [],
       desktops: [],
       desktopHost: null,
+      desktopHostInstall: { installing: false, error: null },
       plugins: null,
       launchDialog: null,
       accounts: []
@@ -3329,6 +3335,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch {
       // Older daemons 404; any failure reads as "no desktops here".
       if (get().api === api) set({ desktopHost: null });
+    }
+  },
+
+  installDesktopHost: async () => {
+    const api = get().api;
+    if (!api || get().desktopHostInstall.installing) return;
+    set({ desktopHostInstall: { installing: true, error: null } });
+    try {
+      const host = await api.installDesktopHost();
+      if (get().api === api) set({ desktopHost: host, desktopHostInstall: { installing: false, error: null } });
+    } catch (error) {
+      if (get().api !== api) return;
+      const message =
+        error instanceof ApiError ? (error.serverMessage ?? error.message) : error instanceof Error ? error.message : String(error);
+      set({ desktopHostInstall: { installing: false, error: message } });
+      // The install may have got part of the way: show what is still missing.
+      void get().loadDesktopHost();
     }
   },
 
