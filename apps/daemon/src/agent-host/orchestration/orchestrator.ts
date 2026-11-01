@@ -292,6 +292,14 @@ import {
   type ResolvedForkCut
 } from "./fork.ts";
 import type { ForkHandoffRecord } from "@orquester/config";
+import {
+  createThreadOwnership,
+  guardThreadWrites,
+  hostRetiring,
+  threadNotOwned,
+  type ThreadOwnership
+} from "./ownership.ts";
+import { createRetirement, RETIRE_RELEASE_BACKSTOP_MS, type RetireLiveWork } from "./retire.ts";
 
 // ---------------------------------------------------------------------------
 // Dependencies
