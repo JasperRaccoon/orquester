@@ -399,7 +399,7 @@ describe("a retiring host hands a continuing goal over held (P2.3 R19, goals §5
     const next = codexHost({ store: host.store, ownership: createThreadOwnership({ foreignThreadIds: [threadId] }) });
     await next.orchestrator.reconcile();
     await next.settle();
-    assert.deepEqual(next.adapter.calls, [], "the boot reconcile skipped it");
+    assert.equal(next.adapter.calls.length, 0, "the boot reconcile skipped it");
     // …until it adopts it: the held goal's session comes back and the goal is resumed.
     assert.equal(await next.orchestrator.adoptThread(threadId), true);
     await next.settle();
@@ -445,7 +445,7 @@ describe("foreign threads are untouchable until adopted (P2.3 R16, R17)", () => 
     await assert.rejects(host.orchestrator.readThread("theirs"), isCode("THREAD_NOT_OWNED"));
     await assert.rejects(host.orchestrator.command("theirs", "interrupt", { commandId: cmd() }), isCode("THREAD_NOT_OWNED"));
     await assert.rejects(host.orchestrator.subscribe("theirs", { onEvents: () => undefined }), isCode("THREAD_NOT_OWNED"));
-    assert.deepEqual(host.adapter.calls, [], "no session started, stopped or swept for it");
+    assert.equal(host.adapter.calls.length, 0, "no session started, stopped or swept for it");
     assert.equal(JSON.stringify({ log: store.logs.get("theirs"), head: store.heads.get("theirs") }), before, "not a byte written");
     await host.stop();
   });
@@ -541,6 +541,8 @@ describe("foreign threads are untouchable until adopted (P2.3 R16, R17)", () => 
       refId: "claude",
       accountId: "acc1",
       home: "account",
+      modelSelection: undefined,
+      runtimeMode: undefined,
       fork: {}
     });
     assert.equal(fork.head.id, "child");
