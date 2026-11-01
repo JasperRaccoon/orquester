@@ -235,6 +235,11 @@ export interface ThreadStoreOptions {
   sharedReceipts?: () => boolean;
 }
 
+/** `receipts.json.lock` (host updates): how long a writer waits for it, how often it asks, when it is stale. */
+const RECEIPTS_LOCK_WAIT_MS = 2_000;
+const RECEIPTS_LOCK_RETRY_MS = 10;
+const RECEIPTS_LOCK_STALE_MS = 10_000;
+
 /** Default cadence for the background sweep. */
 const DEFAULT_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -435,8 +440,51 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     }
   }
 
+  /**
+   * Host updates: while another host writes `receipts.json` too, the read-merge-write is one
+   * step across both processes — under `receipts.json.lock`, taken with `O_EXCL`. A lock older
+   * than {@link RECEIPTS_LOCK_STALE_MS} belongs to a host that died holding it and is broken; one
+   * not had within {@link RECEIPTS_LOCK_WAIT_MS} is written without (a receipt is a de-duplication
+   * cache: at worst one replayed command, never a thread).
+   */
+  async function withReceiptsLock<T>(task: () => Promise<T>): Promise<T> {
+    const lockPath = `${receiptsPath(rootDir)}.lock`;
+    const deadline = Date.now() + RECEIPTS_LOCK_WAIT_MS;
+    let held = false;
+    while (!held) {
+      try {
+        await (await fsp.open(lockPath, "wx", 0o600)).close();
+        held = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") break;
+        const since = await fsp.stat(lockPath).then((stat) => stat.mtimeMs, () => null);
+        if (since !== null && Date.now() - since > RECEIPTS_LOCK_STALE_MS) {
+          await fsp.rm(lockPath, { force: true });
+          continue;
+        }
+        if (Date.now() >= deadline) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, RECEIPTS_LOCK_RETRY_MS));
+      }
+    }
+    try {
+      return await task();
+    } finally {
+      if (held) await fsp.rm(lockPath, { force: true }).catch(() => undefined);
+    }
+  }
+
   async function writeReceipt(receipt: CommandReceipt): Promise<void> {
-    if (options.sharedReceipts?.() === true) await mergeReceiptsFromDisk();
+    if (options.sharedReceipts?.() === true) {
+      await withReceiptsLock(async () => {
+        await mergeReceiptsFromDisk();
+        await writeReceiptNow(receipt);
+      });
+      return;
+    }
+    await writeReceiptNow(receipt);
+  }
+
+  async function writeReceiptNow(receipt: CommandReceipt): Promise<void> {
     const ring = await loadReceipts();
     const existing = ring.findIndex((entry) => entry.commandId === receipt.commandId);
     if (existing !== -1) {

@@ -13,12 +13,14 @@ import { describe, it } from "node:test";
 
 import type {
   AdapterGoalSupport,
+  DomainEvent,
   GoalUpdatedPayload,
   RuntimeEvent
 } from "@orquester/api/agent-chat";
 
 import type { GoalCommandResult } from "../adapter.ts";
 import { createThreadIndex } from "../index/index.ts";
+import { AGENT_HOST_DEADLINES, DeadlineExceededError } from "../support/deadline.ts";
 import { runtimeEventToActivities } from "../ingestion/activities.ts";
 import { isContinuationPrompt } from "./continuation-prompt.ts";
 import { isAgentChatCommandError } from "./errors.ts";
@@ -434,6 +436,137 @@ const continuationSends = (host: TestHost) =>
   host.adapter.calls.filter(
     (call) => call.kind === "sendTurn" && isContinuationPrompt((call.detail as { input?: string }).input ?? "")
   );
+
+describe("nothing that is still on its way is released (P2.3 R19, I4)", () => {
+  it("a continuation waiting to retry its start keeps its thread, and its retry runs here", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const store = await crashedMidTurn("retrying");
+    const host = createTestHost({ store, continuationEnabled: () => true });
+    host.adapter.failNext("failStartSession", new DeadlineExceededError("session-open:claude", 30_000));
+    await host.orchestrator.reconcile();
+    await host.settle();
+    assert.equal(continuationSends(host).length, 0, "the first start timed out; a retry is armed");
+    // The failed start's own end reads as a stopped session: nothing else says work is coming.
+    await sessionSet(host, "retrying", "stopped", null);
+
+    assert.deepEqual(await host.orchestrator.retire(), ["retrying"], "the retry is a turn on its way");
+    t.mock.timers.tick(30_000);
+    await host.settle();
+    assert.equal(continuationSends(host).length, 1, "retried on the host that owns it");
+    assert.deepEqual(host.orchestrator.ownedThreadIds(), ["retrying"]);
+    await host.stop();
+  });
+
+  it("a goal pause that outlived its deadline keeps its thread until it lands, and then the mark goes with it", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let landPause!: () => void;
+    let host: TestHost | undefined;
+    const adapter = createScriptedAdapter({
+      id: "codex",
+      capabilities: { goals: HOST_GOALS },
+      goalCommand: async (threadId, command): Promise<GoalCommandResult> => {
+        if (command.kind === "pause") {
+          await new Promise<void>((resolve) => {
+            landPause = resolve;
+          });
+          const goal = host?.orchestrator.summary(threadId)?.goal ?? null;
+          if (host !== undefined && goal !== null) {
+            await pushGoal(host, threadId, { goal: { objective: goal.objective, status: "paused" }, change: "paused" });
+          }
+        }
+        return { summary: "" };
+      }
+    });
+    host = createTestHost({ adapters: { codex: adapter } });
+    const threadId = await host.createThread({ threadId: "late", refId: "codex", homePath: "/homes/acc1" });
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "work" });
+    await host.settle();
+    await pushGoal(host, threadId, { goal: { objective: "ship it", status: "active" }, change: "set" });
+    await sessionSet(host, threadId, "ready", null);
+
+    const retired = host.orchestrator.retire();
+    // The hold's pause is asked for, and runs out of time…
+    while (adapter.calls.every((call) => call.kind !== "goalCommand")) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    t.mock.timers.tick(AGENT_HOST_DEADLINES.goalPauseMs);
+    assert.deepEqual(await retired, ["late"]);
+    await host.settle();
+    assert.deepEqual(host.orchestrator.ownedThreadIds(), ["late"], "its pause may land yet: the thread stays");
+    // …and lands after all: marked, then released with the mark.
+    landPause();
+    while (!host.logger.entries.some((entry) => entry.message.includes("late pause landed"))) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await host.settle();
+    assert.deepEqual(host.orchestrator.ownedThreadIds(), []);
+    assert.equal(host.store.heads.get(threadId)?.goalHeldForHandover, true, "the adopter resumes it");
+    await host.stop();
+  });
+
+  it("a thread the boot left unsettled is still settled on its first load after an unretire", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread({ threadId: "stranded" });
+    await first.stop();
+    // A message whose send never happened: the boot leaves its settle to the first load.
+    const log = first.store.logs.get(threadId)!;
+    const at = first.clock.nowIso();
+    const line = (type: string, payload: unknown): DomainEvent =>
+      ({ seq: log.length + 1, eventId: `stranded-${log.length + 1}`, threadId, type, payload, occurredAt: at, commandId: null, causationEventId: null, metadata: {} }) as DomainEvent;
+    log.push(line("thread.message-sent", { messageId: "user:stranded", role: "user", text: "never sent", streaming: false, turnId: null }));
+    log.push(line("thread.turn-start-requested", { turnId: null, messageId: "user:stranded", interactionMode: "default" }));
+
+    const next = createTestHost({ store: first.store });
+    next.clock.advance(10 * 60_000);
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.deepEqual(await next.orchestrator.retire(), [], "never loaded: foreign at once");
+    await next.orchestrator.unretire();
+    const read = await next.orchestrator.readThread(threadId);
+    assert.equal(read.kind === "snapshot" ? read.thread.turns.at(-1)?.state : null, "interrupted", "the settle it was owed ran");
+    await next.stop();
+  });
+
+  it("a thread created or forked while the host retires stays until its creation is done", async () => {
+    let releaseFork!: () => void;
+    const adapter = createScriptedAdapter({
+      id: "claude",
+      forkConversation: async () => {
+        await new Promise<void>((resolve) => {
+          releaseFork = resolve;
+        });
+        return { resumeCursor: { cursor: "forked" } };
+      }
+    });
+    const host = createTestHost({ adapters: { claude: adapter } });
+    await host.createThread({ threadId: "parent" });
+    await host.orchestrator.command("parent", "turn", { commandId: cmd(), input: "the question" });
+    await host.settle();
+    await sessionSet(host, "parent", "ready", null);
+
+    const forking = host.orchestrator.forkThread("parent", {
+      threadId: "child",
+      projectPath: "/work/project",
+      cwd: "/work/project",
+      title: "Test thread (fork)",
+      refId: "claude",
+      accountId: "acc1",
+      home: "account",
+      modelSelection: undefined,
+      runtimeMode: undefined,
+      fork: {}
+    });
+    // The provider is forking: the child's runtime is loaded, still headless.
+    while (adapter.calls.every((call) => call.kind !== "forkConversation")) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.ok((await host.orchestrator.retire()).includes("child"), "the child being created stays");
+    releaseFork();
+    const fork = await forking;
+    assert.equal(fork.head.id, "child", "the fork completed on the host that made it");
+    await host.stop();
+  });
+});
 
 describe("foreign threads are untouchable until adopted (P2.3 R16, R17)", () => {
   it("the boot neither reconciles, marks nor starts anything for a foreign thread, and every route refuses it", async () => {

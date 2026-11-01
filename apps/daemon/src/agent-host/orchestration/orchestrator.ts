@@ -2134,6 +2134,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     pendingTurnStart: boolean,
     goal: { carryGoal: boolean } = { carryGoal: false }
   ): Promise<ProviderSession> => {
+    // Host updates (P2.5 I4): never a provider start for a runtime this host let go of.
+    if (!servesRuntime(runtime)) throw threadNotOwned(runtime.id);
     // A resumed thread with no timeline yet: its streams show a loading
     // screen from now — the agent's start-up is part of the wait — until the
     // replay below is over, however it ends.
@@ -2792,10 +2794,28 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // Counted in flight (host updates P2.3 R19): a retiring host never releases a thread under it.
     ownership.track(
       runtime.id,
-      runtime.effects.run(task).catch((error: unknown) => {
-        logger.error(`agent-host: effect failed for ${runtime.id}`, error);
-      })
+      runtime.effects
+        .run(async () => {
+          // A timer or a late answer still holding a runtime this host let go of (released,
+          // deleted, replaced) runs nothing: no provider work for a thread it does not serve.
+          if (!servesRuntime(runtime)) {
+            logger.info("agent-host: dropping provider work of a thread this host no longer serves", { threadId: runtime.id });
+            return;
+          }
+          await task();
+        })
+        .catch((error: unknown) => {
+          logger.error(`agent-host: effect failed for ${runtime.id}`, error);
+        })
     );
+
+  /**
+   * Host updates (P2.5 I1, I4): this runtime is the one this host serves the thread with — still
+   * published, the thread owned. Every provider start checks it (`startSession`), so no stale
+   * runtime can ever start a CLI beside the one another host resumed.
+   */
+  const servesRuntime = (runtime: ThreadRuntime): boolean =>
+    runtimes.get(runtime.id) === runtime && !ownership.isForeign(runtime.id);
 
   /** A transcript-handoff fork's record, read once per runtime ({@link ThreadRuntime.forkHandoff}). */
   const forkHandoffOf = async (runtime: ThreadRuntime, head: ThreadHead): Promise<ForkHandoffRecord | null> => {
@@ -4582,6 +4602,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // Host updates (P2.3 R18): a retiring host takes no new thread (a repeat for one it still owns
       // answers its head, as on any host).
       if (ownership.retiring && ownership.isForeign(threadId)) throw hostRetiring();
+      // Counted in flight for the whole creation, in the same step as the check above: a retire
+      // meanwhile keeps the new thread (its runtime is headless until `thread.created`).
+      return ownership.track(threadId, (async (): Promise<ThreadHead> => {
       const adapterId = options.adapterForRefId(request.refId);
       if (!adapterId) {
         throw invalidCommand(`Registry entry '${request.refId}' has no chat adapter.`);
@@ -4648,6 +4671,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         lineage: parseThreadLineage(request.lineage),
         profile
       });
+      })());
     });
 
   /**
@@ -4793,7 +4817,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // The tab's loading screen starts now, before this answers, so the
       // client's first stream already shows it rather than an empty thread.
       reportHistoryImport(runtime, { phase: "reading", done: 0, total: null });
-      void runtime.effects
+      // Counted in flight like every effect (host updates P2.3 R19); `startSession` refuses a
+      // runtime this host has let go of meanwhile.
+      void ownership.track(runtime.id, runtime.effects
         .run(() => ensureSession(runtime))
         .catch(async (error: unknown) => {
           // A resume that cannot open its session is reported by the turn
@@ -4817,7 +4843,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           if (runtime.historyImport !== null) {
             reportHistoryImport(runtime, { phase: "done", done: 0, total: 0 });
           }
-        });
+        }));
     }
     return requireHead(runtime);
   };
@@ -4846,36 +4872,45 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (typeof threadId !== "string" || threadId.length === 0 || threadId === parentThreadId) {
         throw invalidCommand("threadId is required and must name a new thread.");
       }
-      // Host updates (P2.3 R18): a fork creates a thread, which a retiring host does not.
+      // Host updates (P2.3 R18): a fork creates a thread, which a retiring host does not; the child
+      // counts in flight for the whole fork (its runtime is headless while the provider forks).
       if (ownership.retiring && ownership.isForeign(threadId)) throw hostRetiring();
-      // One fork per child at a time: a repeat (the daemon's retry of an answer it lost, or its
-      // reconcile) that arrives while the first is still cutting waits for it and gets its
-      // answer, never a second `thread.created` racing the first.
-      for (let running = forksInFlight.get(threadId); running; running = forksInFlight.get(threadId)) {
-        await running.catch(() => undefined);
-      }
-      if (request.confirmOnly === true) {
-        const runtime = await loadRuntime(threadId);
-        const existing = headOf(runtime);
-        if (
-          existing &&
-          !runtime.deleted &&
-          !runtime.state.deleted &&
-          existing.lineage?.relation === "fork" &&
-          existing.lineage.parentThreadId === parentThreadId
-        ) {
-          return { head: existing, lineage: existing.lineage, strategy: recordedForkStrategy(runtime) };
-        }
-        throw threadNotFound(threadId);
-      }
-      const run = forkThreadNow(parentThreadId, request, threadId);
-      forksInFlight.set(threadId, run);
-      try {
-        return await run;
-      } finally {
-        if (forksInFlight.get(threadId) === run) forksInFlight.delete(threadId);
-      }
+      return ownership.track(threadId, forkThreadCounted(parentThreadId, request, threadId));
     });
+
+  const forkThreadCounted = async (
+    parentThreadId: string,
+    request: ForkHostThreadRequest,
+    threadId: string
+  ): Promise<ForkHostThreadResponse> => {
+    // One fork per child at a time: a repeat (the daemon's retry of an answer it lost, or its
+    // reconcile) that arrives while the first is still cutting waits for it and gets its
+    // answer, never a second `thread.created` racing the first.
+    for (let running = forksInFlight.get(threadId); running; running = forksInFlight.get(threadId)) {
+      await running.catch(() => undefined);
+    }
+    if (request.confirmOnly === true) {
+      const runtime = await loadRuntime(threadId);
+      const existing = headOf(runtime);
+      if (
+        existing &&
+        !runtime.deleted &&
+        !runtime.state.deleted &&
+        existing.lineage?.relation === "fork" &&
+        existing.lineage.parentThreadId === parentThreadId
+      ) {
+        return { head: existing, lineage: existing.lineage, strategy: recordedForkStrategy(runtime) };
+      }
+      throw threadNotFound(threadId);
+    }
+    const run = forkThreadNow(parentThreadId, request, threadId);
+    forksInFlight.set(threadId, run);
+    try {
+      return await run;
+    } finally {
+      if (forksInFlight.get(threadId) === run) forksInFlight.delete(threadId);
+    }
+  };
 
   /** The forks being cut, by child id ({@link forkThread}). */
   const forksInFlight = new Map<string, Promise<ForkHostThreadResponse>>();
@@ -7935,8 +7970,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (!gateOpen || hostStopping() || goalResumePending.size === 0) {
       return;
     }
-    const threadIds = [...goalResumePending];
-    goalResumePending.clear();
+    // A thread another host serves keeps its place: its resume is owed again after an unretire.
+    const threadIds = [...goalResumePending].filter((threadId) => !ownership.isForeign(threadId));
+    for (const threadId of threadIds) goalResumePending.delete(threadId);
+    if (threadIds.length === 0) return;
     goalResumes = goalResumes
       // A macrotask later, so the health answer the gate just released goes
       // out first.
@@ -8535,6 +8572,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const timer = setTimeout(() => {
       continuationRetryTimers.delete(runtime.id);
       if (hostStopping() || runtime.deleted || runtime.continueAfterRestart?.prepared !== true) return;
+      if (!servesRuntime(runtime)) return;
       void runEffect(runtime, retry);
     }, delayMs);
     timer.unref?.();
@@ -8818,9 +8856,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * it again), the user acted on its goal during the lease, or it is gone.
    */
   const adoptLatePause = (runtime: ThreadRuntime, pausing: Promise<GoalCommandResult>): void => {
+    // Host updates (P2.3 R19): a retiring host keeps the thread while the pause may land yet.
+    latePauses.add(runtime.id);
     void pausing.then(
       (late) => {
-        if (typeof late.summary === "string" && late.summary.length > 0) return;
+        if (typeof late.summary === "string" && late.summary.length > 0) {
+          latePauses.delete(runtime.id);
+          return;
+        }
+        latePauses.delete(runtime.id);
         void runEffect(runtime, async () => {
           if (goalsHeld.has(runtime.id) || goalHoldReleased.has(runtime.id) || runtime.deleted) {
             return;
@@ -8833,9 +8877,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           await completeHold(runtime);
         });
       },
-      () => undefined
+      () => {
+        latePauses.delete(runtime.id);
+      }
     );
   };
+
+  /** Threads whose goal pause outlived its deadline and may land yet (`adoptLatePause`). */
+  const latePauses = new Set<string>();
 
   const armGoalHoldTimer = (ms: number): void => {
     if (goalHoldTimer !== null) clearTimeout(goalHoldTimer);
@@ -9021,6 +9070,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   /** What keeps a thread on a retiring host (R18): see `RetireLiveWork`. */
   const retireLiveWork = (threadId: string): RetireLiveWork | null => {
     if (loadingRuntimes.has(threadId) || ownership.inFlight(threadId) > 0) return "busy";
+    // A continuation waiting to try its start again (R6) is a turn on its way.
+    if (continuationRetryTimers.has(threadId)) return "turn";
+    // A goal pause that outlived its deadline may land yet: its mark must be written here.
+    if (latePauses.has(threadId)) return "goal";
     const runtime = runtimes.get(threadId);
     const head = runtime === undefined ? null : headOf(runtime);
     if (runtime === undefined || head === null || runtime.deleted) return null;
@@ -9109,6 +9162,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       const wakeTimer = pendingWakeTimers.get(threadId);
       if (wakeTimer !== undefined) clearTimeout(wakeTimer);
       pendingWakeTimers.delete(threadId);
+      clearTimeout(continuationRetryTimers.get(threadId));
+      continuationRetryTimers.delete(threadId);
       goalsHeld.delete(threadId);
       goalHoldIdleSince.delete(threadId);
       goalHoldReleased.delete(threadId);
@@ -9228,15 +9283,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const retire = (): Promise<string[]> =>
     whenReady(async () => {
-      const owned = await retirement.retire();
-      // What the boot left owed for threads that are now another host's: that host's boot owes it.
-      for (const threadId of [...bootSettlePending]) {
-        if (ownership.isForeign(threadId)) bootSettlePending.delete(threadId);
-      }
-      for (const threadId of [...goalResumePending]) {
-        if (ownership.isForeign(threadId)) goalResumePending.delete(threadId);
-      }
-      return owned;
+      // What the boot left owed (`bootSettlePending`, `goalResumePending`) stays: a foreign thread
+      // is never loaded nor resumed here, and an unretire owes it again.
+      return await retirement.retire();
     });
 
   const unretire = (): Promise<string[]> =>
@@ -9282,6 +9331,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       await runtime.captures.drain();
       await runtime.commands.drain();
     }
+    // Host updates (P2.3 R19): what settled just now may owe a release (never at the teardown).
+    if (!final) await retirement.settle();
   };
 
   let stopping: Promise<void> | null = null;
