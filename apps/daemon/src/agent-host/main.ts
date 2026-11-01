@@ -52,7 +52,7 @@ import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, AdapterLogger, AgentAdapter } from "./adapter.ts";
+import type { AdapterContext, AdapterFactory, AdapterLogger, AgentAdapter } from "./adapter.ts";
 import {
   ADAPTER_IDS,
   ADAPTER_PENDING_SNAPSHOTS,
@@ -292,6 +292,11 @@ interface StartAgentHostOptions {
    * this host cannot reach boxes (never runs its CLI here instead).
    */
   boxConnector?: BoxConnector;
+  /**
+   * The factory of each adapter id named here instead of the registry's (`adapters/index.ts`):
+   * a stand-in provider for a host booted by a test fixture. Absent in production.
+   */
+  adapterFactories?: Partial<Record<AgentAdapterId, AdapterFactory>>;
 }
 
 export async function startAgentHost(
@@ -922,7 +927,7 @@ export async function startAgentHost(
     await snapshots.load();
     for (const id of ADAPTER_IDS) {
       try {
-        const adapter = await adapterFactory(id)(adapterContext(id));
+        const adapter = await (options.adapterFactories?.[id] ?? adapterFactory(id))(adapterContext(id));
         adapters.set(id, adapter);
         // One consumer per adapter: the host's ingestion is the only reader of
         // an adapter's canonical event stream (§4.1).
