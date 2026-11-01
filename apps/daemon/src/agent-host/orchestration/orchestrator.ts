@@ -376,9 +376,8 @@ export interface OrchestratorOptions {
     home: "system" | "account";
   }): Promise<AccountHome>;
   /**
-   * §3.3: continuation is opt-in per project over a host-wide default that is
-   * **off**, because "pick up where you left off" is wrong for a project where
-   * a turn was halfway through a destructive operation.
+   * §3.3: whether the project continues its chats after a restart — per
+   * project over a host-wide default that is **on** (spec 2026-11-01 R1).
    */
   continuationEnabled?(projectPath: string): boolean | Promise<boolean>;
   /** A tab the user closed: settled on the next boot, never continued (§3.3). */
@@ -7346,12 +7345,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // can be resumed, and the head's copy is a projection that an event may
         // already have replaced.
         if (persistedResumeCursor(runtime, head) === undefined) continue;
-        // A running turn is continued only where the project opted in.
-        // Continuation is opt-in per project over a host-wide default that is
-        // OFF, so a marker written for an opted-out thread would make the next
-        // boot resume it — the reconcile trusts a marker on its own, exactly
-        // because the stop path is supposed to be the place that filter is
-        // applied.
+        // A thread is continued only where the project opted in (a
+        // per-project choice over a host-wide default): a marker written for
+        // an opted-out thread would make the next boot resume it — the
+        // reconcile trusts a marker on its own, exactly because the stop path
+        // is supposed to be the place that filter is applied.
         // Goals §5.5: a goal the provider continues by itself is resumed
         // WITHOUT that opt-in — setting the goal was the user's opt-in to
         // autonomous work. Only one that IS continuing, on a live session: a

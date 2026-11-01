@@ -246,10 +246,12 @@ export const agentHostRoutes = {
 
 
   /**
-   * The intentional stop of §3.3: write every continuation marker for a
-   * running thread with a usable cursor, then drain and stop. If the stop is
-   * aborted, every marker written for it is cleared, so a cancelled restart
-   * does not inject a phantom "Continue where you left off." on the next boot.
+   * The intentional stop of §3.3: write every continuation marker — a running
+   * turn, and (spec 2026-11-01 R2) a revival for an idle thread whose subagents
+   * or background commands the stop kills — for an opted-in thread with a
+   * usable cursor, then drain and stop. If the stop is aborted, every marker
+   * written for it is cleared, so a cancelled restart does not inject a
+   * phantom continue turn on the next boot.
    */
   stop: "/stop",
 
@@ -758,7 +760,7 @@ export const AGENT_HOST_CAPABILITIES: Readonly<Required<AgentHostCapabilities>> 
   sessionProfiles: 1,
   crossAgentFork: 1,
   // Host updates (spec 2026-11-01): each flips to 1 in the change that implements it.
-  continuationRevival: 0,
+  continuationRevival: 1,
   retire: 0,
   // boxes:
   boxes: 1
