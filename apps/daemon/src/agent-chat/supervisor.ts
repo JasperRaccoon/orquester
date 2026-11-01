@@ -177,6 +177,28 @@ const ADOPT_RETRY_BASE_MS = 1_000;
 const ADOPT_RETRY_MAX_MS = 30_000;
 
 /**
+ * P2.4 R26: after this many failed attempts a thread's adoption is reported on the Host status
+ * page (`stuckAdoptions`) and logged as an error — the chat is unreachable until it lands. It is
+ * still retried.
+ */
+const ADOPT_ATTEMPTS_BEFORE_REPORTING = 5;
+
+/**
+ * I1/I4: how long a killed host has to be confirmed gone — its tmux session ended or its direct
+ * child exited, and its socket silent — before the kill is escalated (SIGKILL, the session killed
+ * again), and again after that before the kill counts as unconfirmed. A direct child's SIGTERM
+ * teardown is bounded at 3 s by the host itself.
+ */
+const HOST_KILL_GRACE_MS = 10_000;
+
+/** A host whose death could not be confirmed is killed again this long after the last attempt. */
+const HOST_KILL_RETRY_MS = 30_000;
+
+/** P2.3 R21: `/unretire` attempts before an update's failure falls back to a Phase 1 restart. */
+const UNRETIRE_ATTEMPTS = 3;
+const UNRETIRE_RETRY_MS = 1_000;
+
+/**
  * P2.4 R23/R26: the longest {@link AgentHostSupervisor.hostForThread} holds a request for a
  * switch or an adoption in flight before answering "no host now" (a 503 the client retries) —
  * the bound a host request has anyway.
@@ -209,14 +231,21 @@ export type ProbeOutcome =
 
 /** A directly-spawned host child (the no-tmux fallback). */
 export interface DirectHostHandle {
-  kill(): void;
+  /** SIGTERM unless `signal` says otherwise. */
+  kill(signal?: NodeJS.Signals): void;
   pid?: number;
   /** False once the child has exited; absent when the spawner cannot tell. */
   isAlive?(): boolean;
 }
 
 export interface SupervisorTmux {
+  /** False only when the session (or the server) is gone; throws when tmux cannot tell. */
   hasServiceSession(name: string): Promise<boolean>;
+  /**
+   * The live service sessions whose names start with `prefix`; throws when tmux cannot tell.
+   * Optional: without it a registry the daemon cannot read is checked one generation at a time.
+   */
+  listServiceSessions?(prefix: string): Promise<string[]>;
   killServiceSession(name: string): Promise<void>;
   newServiceSession(opts: {
     name: string;
@@ -386,6 +415,33 @@ interface RetiringHost {
   firstMissAt: number | null;
   /** Being ended (drained, capped, dead): never ended twice. */
   ending: boolean;
+  /**
+   * I1: since when the daemon has been ending it without being able to confirm its process is
+   * gone, or null. Until it is confirmed, its threads stay its own; it is killed again on the
+   * poll, at most every {@link HOST_KILL_RETRY_MS}.
+   */
+  killUnconfirmedSince: number | null;
+  /** When the next kill attempt is due (adapter clock), while {@link killUnconfirmedSince} is set. */
+  nextKillAt: number;
+}
+
+/**
+ * I1: a host the daemon tried to kill without being able to confirm it is gone, and that may own
+ * threads no other host's foreign file lists — an update's failed replacement, or a recorded host
+ * that did not answer at boot. While any exists, no host that would own every thread is spawned.
+ */
+interface UnstoppableHost {
+  reason: string;
+  nextKillAt: number;
+  /** What the confirmed kill unblocks (an update's undo), run once. */
+  onGone?: () => Promise<void>;
+}
+
+/** P2.4 R26: a thread whose adoption keeps failing. */
+interface AdoptionFailure {
+  attempts: number;
+  since: number;
+  error: string | null;
 }
 
 export interface AgentHostStatus {
@@ -453,10 +509,34 @@ export class AgentHostSupervisor implements HostDirectory {
    * when, and the generation starting to replace it.
    */
   private switchKeeps: { generation: number; threadIds: Set<string>; since: number; starting: number } | null = null;
+  /** Settles {@link switching}. */
+  private switchDone: (() => void) | null = null;
+  /**
+   * Settles once the switching primary's `/retire` answered (or the switch ended): a request
+   * waiting on the switch for a thread the old host keeps goes there then, not after the spawn.
+   * Null once it has.
+   */
+  private retireAnswer: { promise: Promise<void>; resolve: () => void } | null = null;
+  /** I1: hosts whose kill could not be confirmed and that may own unlisted threads, by generation. */
+  private readonly unstoppable = new Map<number, UnstoppableHost>();
+  /**
+   * The registry was unreadable, or named hosts this daemon cannot parse, and a live host could
+   * not be accounted for: why. Nothing is spawned or adopted until the boot is tried again and
+   * accounts for every live host.
+   */
+  private bootBlocked: string | null = null;
   /** One {@link HostEndpoint} per generation and role. */
   private readonly endpoints = new Map<string, HostEndpoint>();
   /** P2.4 R26: each thread being adopted by the primary, until it is. */
   private readonly adoptions = new Map<string, Promise<void>>();
+  /**
+   * I5: every thread whose adoption has not completed, persisted as the registry's
+   * `pendingAdoptions` — removed only once the primary adopted it, so a daemon that dies in
+   * between adopts it at boot.
+   */
+  private readonly pendingAdoptionIds = new Set<string>();
+  /** P2.4 R26: the adoptions that failed, by thread, until they land. */
+  private readonly adoptFailures = new Map<string, AdoptionFailure>();
   /** The `POST …/adopt` requests on the wire: a `/retire` waits for them (I2). */
   private readonly adoptRequests = new Set<Promise<unknown>>();
   /** The host instance whose retire or replacement failed: Phase 1 for it (P2.6). */
@@ -588,7 +668,8 @@ export class AgentHostSupervisor implements HostDirectory {
     const hosts: HostEndpoint[] = [];
     const primary = this.primary();
     if (primary !== null) hosts.push(primary);
-    if (this.switching !== null) hosts.push(this.endpoint(this.primaryGeneration, "retiring"));
+    // Mid-switch, and after a failed one whose replacement is not confirmed gone: the old primary.
+    if (this.switching !== null || this.switchKeeps !== null) hosts.push(this.endpoint(this.primaryGeneration, "retiring"));
     for (const generation of [...this.retiring.keys()].sort((a, b) => b - a)) {
       hosts.push(this.endpoint(generation, "retiring"));
     }
@@ -607,7 +688,12 @@ export class AgentHostSupervisor implements HostDirectory {
       if (owner !== null) return this.endpoint(owner, "retiring");
       const keeps = this.switchKeeps;
       if (keeps?.threadIds.has(threadId)) return this.endpoint(keeps.generation, "retiring");
-      const pending = this.switching ?? this.adoptions.get(threadId) ?? null;
+      // Until the old primary's `/retire` answers, any thread may be one it keeps: wait for that
+      // answer, not for the whole switch (the old host serves what it keeps throughout).
+      const pending =
+        this.switching !== null
+          ? (this.retireAnswer?.promise ?? this.switching)
+          : (this.adoptions.get(threadId) ?? null);
       if (pending === null) return this.primary();
       const left = deadline - this.opts.adapters.now();
       if (left <= 0 || !(await this.settlesWithin(pending, left))) return null;
@@ -628,6 +714,7 @@ export class AgentHostSupervisor implements HostDirectory {
       await this.refreshRetiringOwnership();
       if (this.retiringOwnerOf(threadId) === null && !this.switchKeeps?.threadIds.has(threadId)) {
         this.startAdoption(threadId);
+        await this.persistRegistry();
       }
     }
     const adoption = this.adoptions.get(threadId);
@@ -654,9 +741,20 @@ export class AgentHostSupervisor implements HostDirectory {
   restartStatus(): AgentHostStatusResponse {
     const health = this.health;
     const status = this.status();
+    const stuck = [...this.adoptFailures]
+      .filter(([, failure]) => failure.attempts >= ADOPT_ATTEMPTS_BEFORE_REPORTING)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([threadId, failure]) => ({
+        threadId,
+        attempts: failure.attempts,
+        since: new Date(failure.since).toISOString(),
+        error: failure.error
+      }));
     const base: AgentHostStatusResponse = {
       state: status.state,
-      reason: status.reason,
+      // A healthy primary beside a host that could not be stopped still says why nothing spawns.
+      reason: status.reason ?? this.unstoppableReason(),
+      ...(stuck.length > 0 ? { stuckAdoptions: stuck } : {}),
       hostInstanceId: status.hostInstanceId,
       pid: status.pid,
       codeStamp: typeof health?.codeStamp === "string" ? health.codeStamp : null,
@@ -736,15 +834,47 @@ export class AgentHostSupervisor implements HostDirectory {
   init(): Promise<void> {
     return this.transition(async () => {
       this.supervising = true;
-      // Host updates (spec 2026-11-01 P2.4 R29): a registry names the hosts a previous daemon
-      // left running; without one, the single-host boot below is unchanged.
-      const registry = await this.loadRegistry();
-      if (registry !== null) {
-        await this.bootFromRegistry(registry);
+      await this.boot();
+    });
+  }
+
+  /**
+   * Host updates (spec 2026-11-01 P2.4 R29): a registry names the hosts a previous daemon left
+   * running; without one, the single-host boot is unchanged. A registry that exists but cannot be
+   * read, or names hosts this daemon cannot parse, is completed from the live hosts' own `/health`
+   * first; while a live host cannot be accounted for, nothing boots (I1) and this is tried again
+   * on every health tick.
+   */
+  private async boot(): Promise<void> {
+    const loaded = await this.loadRegistry();
+    let registry = loaded.registry;
+    if (loaded.problem) {
+      const accounted = await this.accountForLiveHosts(registry);
+      if (typeof accounted === "string") {
+        if (this.bootBlocked !== accounted) {
+          this.log(
+            "error",
+            `agent host boot blocked: ${accounted}; no host is started that could own the chats it runs`
+          );
+        }
+        this.bootBlocked = accounted;
+        this.setState("error", accounted);
         return;
       }
-      await this.bootPrimary();
-    });
+      registry = accounted;
+    }
+    if (this.bootBlocked !== null) {
+      this.log("log", "every live agent host is accounted for; booting");
+      this.bootBlocked = null;
+    }
+    if (registry !== null) {
+      this.registryInUse = true;
+      this.registryKept = registry;
+      this.highestGeneration = Math.max(this.highestGeneration, highestRecordedGeneration(registry));
+      await this.bootFromRegistry(registry);
+      return;
+    }
+    await this.bootPrimary();
   }
 
   /** The five §3.1 cases, for the primary's generation. */
@@ -772,8 +902,11 @@ export class AgentHostSupervisor implements HostDirectory {
       // service session with a token we can no longer produce (the token file
       // was lost). Ownership is verified by the session name, which a foreign
       // process cannot be in, so restarting it is not "killing a stranger".
+      // A tmux that cannot tell: not demonstrably ours, so never killed.
       const owned =
-        (await this.opts.adapters.tmux?.hasServiceSession(agentHostServiceSession(this.primaryGeneration))) ?? false;
+        (await this.opts.adapters.tmux
+          ?.hasServiceSession(agentHostServiceSession(this.primaryGeneration))
+          .catch(() => false)) ?? false;
       if (!owned) {
         this.setState("foreign", "another process owns the agent host socket");
         this.log("error", `agent host socket rejected our token and is not ours — not killed, not adopted`);
@@ -787,7 +920,10 @@ export class AgentHostSupervisor implements HostDirectory {
     // Case 5 (and "answers but unhealthy"): spawn and poll readiness. Kill a
     // leftover service session first so a wedged host cannot hold the socket.
     const leftover =
-      (await this.opts.adapters.tmux?.hasServiceSession(agentHostServiceSession(this.primaryGeneration))) ?? false;
+      (await this.opts.adapters.tmux
+        ?.hasServiceSession(agentHostServiceSession(this.primaryGeneration))
+        // A tmux that cannot tell: kill first, as for a leftover.
+        .catch(() => true)) ?? false;
     if (await this.spawnAndWait(leftover || (probed.ok === false && probed.reachable)) && this.health !== null) {
       this.log("log", `agent host spawned: ${describeHost(this.health)}`);
     }
@@ -802,6 +938,16 @@ export class AgentHostSupervisor implements HostDirectory {
     this.scheduleRetiringPoll();
     return this.transition(async () => {
       if (!this.supervising) return;
+      if (this.bootBlocked !== null) {
+        await this.boot();
+        return;
+      }
+      if (this.unstoppable.size > 0) {
+        await this.retryUnstoppable(false);
+        // A failed update still waits on its replacement's exit: the old host keeps what it kept,
+        // and nothing else is decided (the old primary is retired, not adoptable as primary).
+        if (this.switchKeeps !== null) return;
+      }
       // A replacement can miss the bounded prepared deadline and still finish
       // booting later. `error` used to be terminal, so the daemon kept
       // returning HOST_UNAVAILABLE even after that exact replacement answered
@@ -922,11 +1068,17 @@ export class AgentHostSupervisor implements HostDirectory {
    */
   restartNow(): Promise<string | null> {
     return this.transition(async () => {
+      // A host that could not be stopped is tried again first; while one is, nothing restarts (I1).
+      if (this.unstoppable.size > 0) await this.retryUnstoppable(true);
+      if (this.switchKeeps !== null) return null;
       const retiring = [...this.retiring.values()];
       if (retiring.length === 0 || this.state !== "healthy" || (this.health !== null && this.isStale(this.health))) {
         await this.drainAndRestart();
       }
-      for (const host of retiring) await this.endRetiringHost(host, "restart");
+      for (const host of retiring) {
+        if (host.killUnconfirmedSince !== null) await this.forgetRetiringHost(host);
+        else await this.endRetiringHost(host, "restart");
+      }
       return this.health?.hostInstanceId ?? null;
     });
   }
@@ -1009,12 +1161,13 @@ export class AgentHostSupervisor implements HostDirectory {
   /**
    * Whether our host's process still exists: its tmux service session (which
    * ends with its command), or the direct child. A host adopted from outside
-   * our session reads as not alive, so it is restarted as before.
+   * our session reads as not alive, so it is restarted as before. A tmux that cannot tell reads
+   * as alive: a death is never assumed (I1).
    */
   private async hostProcessAlive(generation = this.primaryGeneration): Promise<boolean> {
     const tmux = this.opts.adapters.tmux;
     if (tmux) {
-      return tmux.hasServiceSession(agentHostServiceSession(generation)).catch(() => false);
+      return tmux.hasServiceSession(agentHostServiceSession(generation)).catch(() => true);
     }
     return this.directHandles.get(generation)?.isAlive?.() === true;
   }
@@ -1063,6 +1216,8 @@ export class AgentHostSupervisor implements HostDirectory {
    */
   private async restartIfDrained(): Promise<void> {
     if (!this.pendingVersionRestart) return;
+    // I1: no replacement may start while a host that could not be stopped may own chats.
+    if (this.unstoppable.size > 0) return;
     const probed = await this.safeProbe();
     if (!probed.ok) return; // not healthy right now — the health tick owns it
     this.adopt(probed.health);
@@ -1079,10 +1234,12 @@ export class AgentHostSupervisor implements HostDirectory {
       // interrupted. Phase 1 below is the fallback (P2.6).
       if (this.phase2Available(probed.health)) {
         const outcome = await this.retireAndSwitch(probed.health, blockers);
-        if (outcome === "switched") return;
-        if (outcome === "drained") {
+        if (outcome === "switched" || outcome === "blocked") return;
+        if (outcome === "drained" || outcome === "restart") {
           this.lastDrainDeferral = null;
-          await this.drainAndRestart();
+          // "restart": the old host stays retired (its unretire failed) — never left as the
+          // primary; its /stop marks what it keeps for continuation, and a new host takes all.
+          await this.drainAndRestart(outcome === "restart");
           return;
         }
       }
@@ -1363,9 +1520,14 @@ export class AgentHostSupervisor implements HostDirectory {
    * that fails to reach readiness latches `error` and is retried with backoff,
    * rather than silently half-applied.
    */
-  private async drainAndRestart(): Promise<void> {
+  private async drainAndRestart(stopRetired = false): Promise<void> {
     this.clearGraceTimer();
-    if (this.state === "healthy") {
+    if (this.unstoppable.size > 0) {
+      // I1: its replacement could not be started (`spawnAndWait`), so the host is not stopped.
+      this.log("error", `agent host restart deferred: ${this.unstoppableReason()}`);
+      return;
+    }
+    if (this.state === "healthy" || stopRetired) {
       try {
         await this.opts.adapters.requestStop(this.primaryGeneration);
       } catch (error) {
@@ -1409,12 +1571,12 @@ export class AgentHostSupervisor implements HostDirectory {
    * no longer answers — bounded by {@link HOST_EXIT_GRACE_MS}. Returns true
    * when it is gone.
    */
-  private async awaitHostExit(generation = this.primaryGeneration): Promise<boolean> {
-    const deadline = this.opts.adapters.now() + HOST_EXIT_GRACE_MS;
+  private async awaitHostExit(generation = this.primaryGeneration, graceMs = HOST_EXIT_GRACE_MS): Promise<boolean> {
+    const deadline = this.opts.adapters.now() + graceMs;
     for (;;) {
       if (await this.hostGone(generation)) return true;
       if (this.opts.adapters.now() >= deadline) {
-        this.log("warn", "agent host did not exit within the drain grace; killing it");
+        if (graceMs === HOST_EXIT_GRACE_MS) this.log("warn", "agent host did not exit within the drain grace; killing it");
         return false;
       }
       await this.opts.adapters.sleep(HOST_EXIT_POLL_MS);
@@ -1434,8 +1596,8 @@ export class AgentHostSupervisor implements HostDirectory {
     if (tmux) {
       const sessionAlive = await tmux
         .hasServiceSession(agentHostServiceSession(generation))
-        // tmux itself failing to answer: fall back to the socket alone.
-        .catch(() => false);
+        // tmux itself failing to answer: not known to be gone (I1).
+        .catch(() => true);
       if (sessionAlive) return false;
     } else if (this.directHandles.get(generation)?.isAlive?.() === true) {
       return false;
@@ -1449,6 +1611,13 @@ export class AgentHostSupervisor implements HostDirectory {
    * the socket.
    */
   private async spawnAndWait(killFirst: boolean): Promise<boolean> {
+    if (this.unstoppable.size > 0) {
+      // I1: the new host would own every chat that one may still be writing.
+      const reason = this.unstoppableReason()!;
+      this.setState("error", reason);
+      this.log("error", `${reason}; not starting an agent host until it is`);
+      return false;
+    }
     this.setState("starting", null);
     this.health = null;
     // Both of these throw on ordinary operational failures — a full disk on the
@@ -1794,7 +1963,9 @@ export class AgentHostSupervisor implements HostDirectory {
       agentHostSupports(health, "retire") &&
       // A protocol change is still a hard restart: the daemon cannot route to both versions.
       health.protocolVersion === AGENT_HOST_PROTOCOL_VERSION &&
-      this.phase2RefusedInstance !== health.hostInstanceId
+      this.phase2RefusedInstance !== health.hostInstanceId &&
+      // I1/I3: a foreign file cannot list what a host that could not be stopped owns.
+      this.unstoppable.size === 0
     );
   }
 
@@ -1809,34 +1980,39 @@ export class AgentHostSupervisor implements HostDirectory {
    * (I3), and becomes the primary; on any failure the new host is killed, the old one unretired
    * and the registry restored, and the caller falls back to Phase 1. While it runs, `primary()`
    * is null and requests for threads outside K wait for it (`hostForThread`).
+   *
+   * `restart`: the old host could not be unretired, so it is never left as a retiring primary —
+   * the caller restarts it (Phase 1, its `/stop` marks what it keeps). `blocked`: the new host's
+   * kill could not be confirmed (I1), so the old one keeps K and takes nothing back until it is
+   * ({@link retryUnstoppable}).
    */
   private async retireAndSwitch(
     health: AgentHostHealthResponse,
     blockers: string
-  ): Promise<"switched" | "drained" | "unavailable"> {
+  ): Promise<"switched" | "drained" | "unavailable" | "restart" | "blocked"> {
     const requestRetire = this.opts.adapters.requestRetire;
     if (!requestRetire) return "unavailable";
     const oldGeneration = this.primaryGeneration;
     // P2.2: room for one more — the oldest retiring host is ended through the cap path first.
     while (this.retiring.size >= MAX_RETIRING_HOSTS) {
-      const oldest = [...this.retiring.values()].sort((a, b) => a.retiringSince - b.retiringSince)[0]!;
+      const oldest = [...this.retiring.values()]
+        .filter((host) => !host.ending)
+        .sort((a, b) => a.retiringSince - b.retiringSince)[0];
+      // Every one is already being ended (a kill not confirmed): no room now; Phase 1 meanwhile.
+      if (oldest === undefined) return "unavailable";
       await this.endRetiringHost(oldest, "limit");
+      // …or this one's exit could not be confirmed: its chats stay there, and so does it.
+      if (this.retiring.get(oldest.generation) === oldest) return "unavailable";
     }
-    let settle: () => void = () => undefined;
     this.switching = new Promise<void>((resolve) => {
-      settle = resolve;
+      this.switchDone = resolve;
     });
-    const endSwitch = (): void => {
-      this.switching = null;
-      this.switchKeeps = null;
-      settle();
-    };
-    const fallBack = async (why: string, error?: unknown): Promise<"unavailable"> => {
-      this.log("warn", `agent host update could not retire the old host (${why}); restarting it once drained instead`, ...(error === undefined ? [] : [error]));
-      this.phase2RefusedInstance = health.hostInstanceId;
-      endSwitch();
-      this.setState("healthy", null);
-      return "unavailable";
+    let answered: () => void = () => undefined;
+    this.retireAnswer = {
+      promise: new Promise<void>((resolve) => {
+        answered = resolve;
+      }),
+      resolve: () => answered()
     };
     this.setState("starting", "updating the agent host");
     try {
@@ -1847,13 +2023,13 @@ export class AgentHostSupervisor implements HostDirectory {
         keep = await requestRetire(oldGeneration);
       } catch (error) {
         // A retire that landed but whose answer was lost is undone, so the host serves again.
-        await this.unretire(oldGeneration);
-        return await fallBack("its /retire failed", error);
+        if (!(await this.unretire(oldGeneration))) return this.switchRestarts(health, "its /retire failed and it could not be unretired");
+        return this.switchFellBack(health, "its /retire failed", error);
       }
-      if (keep === null) return await fallBack("it predates /retire");
+      if (keep === null) return this.switchFellBack(health, "it predates /retire");
       if (keep.length === 0) {
         // Nothing runs any more: today's restart.
-        endSwitch();
+        this.endSwitch();
         this.setState("healthy", null);
         return "drained";
       }
@@ -1864,6 +2040,8 @@ export class AgentHostSupervisor implements HostDirectory {
         since: this.opts.adapters.now(),
         starting: generation
       };
+      // Requests for K that waited on the switch go to the old host now (`hostForThread`).
+      this.settleRetireAnswer();
       this.log(
         "log",
         `agent host update: generation ${oldGeneration} retires keeping ${keep.length} working chat(s) (${blockers}); starting generation ${generation}`
@@ -1883,29 +2061,36 @@ export class AgentHostSupervisor implements HostDirectory {
         failure = new Error("the agent host registry could not be written");
       }
       if (!ready.ok) {
-        await this.killHost(generation);
-        await this.removeHostFiles(generation);
-        this.switchKeeps = null;
-        await this.unretire(oldGeneration);
-        await this.persistRegistry();
-        return await fallBack(`generation ${generation} never became ready`, failure);
+        const why = `generation ${generation} never became ready`;
+        // I1: the new host may have booted far enough to own every chat the old one released;
+        // the old one takes them back only once it is confirmed gone.
+        if (!(await this.killHost(generation))) {
+          const reason = `agent host generation ${generation}, started by an update that failed, could not be confirmed stopped`;
+          const now = this.opts.adapters.now();
+          this.unstoppable.set(generation, {
+            reason,
+            nextKillAt: now + HOST_KILL_RETRY_MS,
+            onGone: async () => {
+              const outcome = await this.undoSwitch(health, oldGeneration, generation, why, failure);
+              if (outcome === "restart") await this.drainAndRestart(true);
+            }
+          });
+          // The old host keeps serving K (`switchKeeps`); everything else waits for the kill.
+          this.endSwitch(true);
+          this.setState("error", `${reason}; chats outside the update are unavailable until it is`);
+          return "blocked";
+        }
+        return await this.undoSwitch(health, oldGeneration, generation, why, failure);
       }
       // Promote. The old primary keeps K until each is idle; the new one serves everything else.
-      this.retiring.set(oldGeneration, {
-        generation: oldGeneration,
-        health,
-        owned: new Set(keep),
-        retiringSince: this.switchKeeps.since,
-        firstMissAt: null,
-        ending: false
-      });
+      this.addRetiringHost(oldGeneration, health, new Set(keep), this.switchKeeps.since);
       this.primaryGeneration = generation;
       this.health = null;
       this.lastDrainDeferral = null;
       this.goalHold = null;
       this.backgroundEndedAt.clear();
       this.lastBackgroundThreads = new Set();
-      endSwitch();
+      this.endSwitch();
       this.adopt(ready.health);
       // I5: persisted right after the promotion.
       await this.persistRegistry();
@@ -1916,18 +2101,108 @@ export class AgentHostSupervisor implements HostDirectory {
       this.scheduleRetiringPoll();
       return "switched";
     } finally {
-      if (this.switching !== null) endSwitch();
+      if (this.switching !== null) this.endSwitch();
     }
   }
 
-  private async unretire(generation: number): Promise<void> {
-    try {
-      await this.opts.adapters.requestUnretire?.(generation);
-    } catch (error) {
-      // It keeps refusing new threads; the Phase 1 restart that follows replaces it, and a
-      // thread it released is adopted back on demand (`ownershipStale`).
-      this.log("error", `agent host ${generation} could not be unretired`, error);
+  /** Settle the switch (`switching`), keeping what the old primary keeps only when asked. */
+  private endSwitch(keepKeeps = false): void {
+    this.switching = null;
+    if (!keepKeeps) this.switchKeeps = null;
+    const done = this.switchDone;
+    this.switchDone = null;
+    done?.();
+    this.settleRetireAnswer();
+  }
+
+  private settleRetireAnswer(): void {
+    const answer = this.retireAnswer;
+    this.retireAnswer = null;
+    answer?.resolve();
+  }
+
+  /**
+   * A failed update's replacement is confirmed gone: drop its files, give the old host back what
+   * it released (P2.3 R21) and fall back to Phase 1 — or, when it cannot be unretired, restart it.
+   */
+  private async undoSwitch(
+    health: AgentHostHealthResponse,
+    oldGeneration: number,
+    generation: number,
+    why: string,
+    failure: unknown
+  ): Promise<"unavailable" | "restart"> {
+    await this.removeHostFiles(generation);
+    this.switchKeeps = null;
+    const unretired = await this.unretire(oldGeneration);
+    await this.persistRegistry();
+    if (!unretired) return this.switchRestarts(health, `${why}, and the old host could not be unretired`);
+    return this.switchFellBack(health, why, failure);
+  }
+
+  /** The update did not happen and the old host serves everything again: Phase 1 for it (P2.6). */
+  private switchFellBack(health: AgentHostHealthResponse, why: string, error?: unknown): "unavailable" {
+    this.log(
+      "warn",
+      `agent host update could not retire the old host (${why}); restarting it once drained instead`,
+      ...(error === undefined ? [] : [error])
+    );
+    this.phase2RefusedInstance = health.hostInstanceId;
+    this.endSwitch();
+    this.setState("healthy", null);
+    return "unavailable";
+  }
+
+  /** The old host stays retired: it is never reported as a healthy primary; the caller restarts it. */
+  private switchRestarts(health: AgentHostHealthResponse, why: string): "restart" {
+    this.log("error", `agent host update failed (${why}); restarting the agent host — working chats are resumed on the new one`);
+    this.phase2RefusedInstance = health.hostInstanceId;
+    this.endSwitch();
+    return "restart";
+  }
+
+  /** P2.3 R21, retried a few times. False when the host still refuses (or cannot be reached). */
+  private async unretire(generation: number): Promise<boolean> {
+    const request = this.opts.adapters.requestUnretire;
+    if (!request) return true;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await request(generation);
+        return true;
+      } catch (error) {
+        this.log("warn", `agent host ${generation} could not be unretired (attempt ${attempt}/${UNRETIRE_ATTEMPTS})`, error);
+        if (attempt >= UNRETIRE_ATTEMPTS) return false;
+      }
+      await this.opts.adapters.sleep(UNRETIRE_RETRY_MS);
     }
+  }
+
+  /**
+   * I1: kill each host whose kill could not be confirmed again — when due, or at once when
+   * `now` — and run what its confirmed death unblocks. Once none is left and no primary serves,
+   * the primary boots as on a fresh start.
+   */
+  private async retryUnstoppable(now: boolean): Promise<void> {
+    for (const [generation, host] of [...this.unstoppable]) {
+      if (!now && this.opts.adapters.now() < host.nextKillAt) continue;
+      if (!(await this.killHost(generation))) {
+        host.nextKillAt = this.opts.adapters.now() + HOST_KILL_RETRY_MS;
+        continue;
+      }
+      this.unstoppable.delete(generation);
+      this.log("log", `agent host ${generation} is confirmed stopped`);
+      if (host.onGone) await host.onGone();
+      else await this.removeHostFiles(generation);
+    }
+    if (this.unstoppable.size === 0 && this.switchKeeps === null && this.state !== "healthy") {
+      await this.bootPrimary();
+    }
+  }
+
+  /** Why nothing may be spawned (I1), or null. */
+  private unstoppableReason(): string | null {
+    const reasons = [...this.unstoppable.values()].map((host) => host.reason);
+    return reasons.length === 0 ? null : reasons.join("; ");
   }
 
   /** Poll every retiring host each {@link RETIRING_HOST_POLL_MS} while there is one. */
@@ -1951,10 +2226,21 @@ export class AgentHostSupervisor implements HostDirectory {
    */
   private async pollRetiringHosts(): Promise<void> {
     for (const host of [...this.retiring.values()]) {
-      if (host.ending) continue;
+      if (host.ending) {
+        // Being ended, its exit not confirmed (I1): killed again when due; its chats stay there.
+        if (host.killUnconfirmedSince !== null && this.opts.adapters.now() >= host.nextKillAt) {
+          await this.forgetRetiringHost(host);
+        }
+        continue;
+      }
       const probed = await this.safeProbe(host.generation);
       const now = this.opts.adapters.now();
       if (probed.ok) {
+        if (probed.health.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION) {
+          // P2.6: a protocol change is a hard restart — the daemon cannot route to that host.
+          await this.endRetiringHost(host, "protocol");
+          continue;
+        }
         await this.applyRetiringHealth(host, probed.health);
         if (host.owned.size === 0) {
           await this.endRetiringHost(host, "drained");
@@ -2007,18 +2293,29 @@ export class AgentHostSupervisor implements HostDirectory {
     await this.persistRegistry();
   }
 
-  /** R26: adopt `threadId` on the primary, retried with backoff until it is — never dropped. */
+  /**
+   * R26: adopt `threadId` on the primary, retried with backoff until it is — never dropped. It
+   * stays in the registry's `pendingAdoptions` until then (I5): the caller persists the registry
+   * after registering it, and its completion persists it again.
+   */
   private startAdoption(threadId: string): void {
     if (this.adoptions.has(threadId) || this.opts.adapters.requestAdopt === undefined) return;
-    const run: Promise<void> = this.adoptUntilDone(threadId).finally(() => {
+    this.pendingAdoptionIds.add(threadId);
+    const run: Promise<void> = this.adoptUntilDone(threadId).then(async (adopted) => {
+      if (adopted) {
+        this.pendingAdoptionIds.delete(threadId);
+        this.adoptFailures.delete(threadId);
+        await this.persistRegistry();
+      }
       if (this.adoptions.get(threadId) === run) this.adoptions.delete(threadId);
     });
     this.adoptions.set(threadId, run);
   }
 
-  private async adoptUntilDone(threadId: string): Promise<void> {
+  /** True once the primary adopted it (or had it, or it is gone); false when supervision stopped. */
+  private async adoptUntilDone(threadId: string): Promise<boolean> {
     const request = this.opts.adapters.requestAdopt;
-    if (!request) return;
+    if (!request) return false;
     for (let attempt = 1; !this.halted; attempt += 1) {
       const switching = this.switching;
       if (switching !== null) await switching;
@@ -2029,14 +2326,32 @@ export class AgentHostSupervisor implements HostDirectory {
         try {
           const outcome = await sent;
           if (outcome === "adopted") this.log("log", `agent host ${primary.generation} adopted chat ${threadId}`);
-          return;
+          return true;
         } catch (error) {
-          this.log("warn", `agent host ${primary.generation} could not adopt chat ${threadId} (attempt ${attempt}); retrying`, error);
+          this.noteAdoptFailure(threadId, primary.generation, error);
         } finally {
           this.adoptRequests.delete(sent);
         }
       }
       await this.delay(Math.min(ADOPT_RETRY_MAX_MS, ADOPT_RETRY_BASE_MS * 2 ** (attempt - 1)));
+    }
+    return false;
+  }
+
+  /** One failed adoption: logged; reported (`stuckAdoptions`) once it keeps failing. */
+  private noteAdoptFailure(threadId: string, generation: number, error: unknown): void {
+    const failure = this.adoptFailures.get(threadId) ?? { attempts: 0, since: this.opts.adapters.now(), error: null };
+    failure.attempts += 1;
+    failure.error = error instanceof Error ? error.message : String(error);
+    this.adoptFailures.set(threadId, failure);
+    if (failure.attempts === ADOPT_ATTEMPTS_BEFORE_REPORTING) {
+      this.log(
+        "error",
+        `agent host ${generation} has failed to adopt chat ${threadId} ${failure.attempts} times; it is unreachable until it does — still retrying`,
+        error
+      );
+    } else {
+      this.log("warn", `agent host ${generation} could not adopt chat ${threadId} (attempt ${failure.attempts}); retrying`, error);
     }
   }
 
@@ -2045,7 +2360,10 @@ export class AgentHostSupervisor implements HostDirectory {
    * continuation; nothing when it owns nothing), wait for its process to exit, then forget it —
    * the primary adopts what it still owned.
    */
-  private async endRetiringHost(host: RetiringHost, why: "drained" | "cap" | "limit" | "restart"): Promise<void> {
+  private async endRetiringHost(
+    host: RetiringHost,
+    why: "drained" | "cap" | "limit" | "restart" | "protocol"
+  ): Promise<void> {
     if (host.ending || this.retiring.get(host.generation) !== host) return;
     host.ending = true;
     if (why === "drained") {
@@ -2056,7 +2374,9 @@ export class AgentHostSupervisor implements HostDirectory {
           ? `it retired ${Math.round(AGENT_HOST_RETIRE_MAX_MS / 3_600_000)} h ago`
           : why === "limit"
             ? `more than ${MAX_RETIRING_HOSTS} hosts would be retiring`
-            : "a restart was asked for";
+            : why === "protocol"
+              ? `it speaks agent host protocol ${host.health?.protocolVersion ?? "unknown"}, this daemon ${AGENT_HOST_PROTOCOL_VERSION}`
+              : "a restart was asked for";
       this.log("warn", `ending agent host ${host.generation} (${cause}): its ${host.owned.size} chat(s) are interrupted and resumed on the current host`);
     }
     // I5: what it owns is on disk before the stop — a daemon that dies from here adopts it at boot.
@@ -2079,27 +2399,54 @@ export class AgentHostSupervisor implements HostDirectory {
   }
 
   private async forgetRetiringHost(host: RetiringHost): Promise<void> {
-    await this.killHost(host.generation);
+    if (!(await this.killHost(host.generation))) {
+      // I1: a host that may still run keeps its chats — it may still be writing them. It stays
+      // listed (and in every foreign file); the poll kills it again.
+      const now = this.opts.adapters.now();
+      if (host.killUnconfirmedSince === null) {
+        host.killUnconfirmedSince = now;
+        this.log(
+          "error",
+          `retiring agent host ${host.generation} could not be confirmed stopped; its ${host.owned.size} chat(s) stay on it until it is`
+        );
+      }
+      host.nextKillAt = now + HOST_KILL_RETRY_MS;
+      return;
+    }
     // Each adoption is registered before the host leaves the set, in the same tick (I2). Its
-    // provider sessions died with it, so none is resumed twice (I4).
+    // process is gone, so none of its provider sessions is resumed twice (I4).
     for (const threadId of host.owned) this.startAdoption(threadId);
     this.retiring.delete(host.generation);
     await this.removeHostFiles(host.generation);
     await this.persistRegistry();
   }
 
-  /** Kill host `generation`'s process: its tmux service session, or its direct child. */
-  private async killHost(generation: number): Promise<void> {
-    await this.opts.adapters.tmux?.killServiceSession(agentHostServiceSession(generation)).catch(() => undefined);
-    const handle = this.directHandles.get(generation);
-    if (handle !== undefined) {
+  /**
+   * Kill host `generation` — its tmux service session, or its direct child — and wait until it is
+   * confirmed gone (I1/I4: nothing moves its threads while it may still write them, and a direct
+   * child's SIGTERM teardown writes them). Not gone within {@link HOST_KILL_GRACE_MS}: SIGKILL,
+   * the session killed again, and as long again. False when its death still is not confirmed.
+   */
+  private async killHost(generation: number): Promise<boolean> {
+    const tmux = this.opts.adapters.tmux;
+    const session = agentHostServiceSession(generation);
+    const kill = async (signal?: NodeJS.Signals): Promise<void> => {
+      await tmux?.killServiceSession(session).catch((error) => this.log("warn", `tmux could not kill ${session}`, error));
       try {
-        handle.kill();
+        this.directHandles.get(generation)?.kill(signal);
       } catch {
         /* already gone */
       }
-      this.directHandles.delete(generation);
+    };
+    await kill();
+    let gone = await this.awaitHostExit(generation, HOST_KILL_GRACE_MS);
+    if (!gone) {
+      this.log("warn", `agent host ${generation} did not exit after it was killed; killing it with SIGKILL`);
+      await kill("SIGKILL");
+      gone = await this.awaitHostExit(generation, HOST_KILL_GRACE_MS);
     }
+    if (gone) this.directHandles.delete(generation);
+    return gone;
   }
 
   /** R27: a gone host's socket, token and foreign file, and what the daemon held of it. */
@@ -2163,7 +2510,8 @@ export class AgentHostSupervisor implements HostDirectory {
         await writeHostRegistry(agentHostRegistryPath(this.opts.appdir), {
           entries,
           unparsed: this.registryKept.unparsed,
-          extra: this.registryKept.extra
+          extra: this.registryKept.extra,
+          pendingAdoptions: [...this.pendingAdoptionIds]
         });
         return true;
       } catch (error) {
@@ -2175,20 +2523,83 @@ export class AgentHostSupervisor implements HostDirectory {
     return write;
   }
 
-  /** The registry a previous daemon left, or null for the single-host layout. */
-  private async loadRegistry(): Promise<HostRegistryFile | null> {
+  /**
+   * The registry a previous daemon left, or null for the single-host layout. `problem`: it exists
+   * but cannot be read, or names hosts this daemon cannot parse — it may not list every live host.
+   */
+  private async loadRegistry(): Promise<{ registry: HostRegistryFile | null; problem: boolean }> {
     try {
       const registry = await readHostRegistry(agentHostRegistryPath(this.opts.appdir));
-      if (registry === null) return null;
-      this.registryInUse = true;
-      this.registryKept = registry;
-      this.highestGeneration = Math.max(this.highestGeneration, highestRecordedGeneration(registry));
-      return registry;
+      if (registry !== null && registry.unparsed.length > 0) {
+        this.log("warn", `the agent host registry names ${registry.unparsed.length} host record(s) this daemon cannot read`);
+      }
+      return { registry, problem: registry !== null && registry.unparsed.length > 0 };
     } catch (error) {
       if (!(error instanceof HostRegistryUnreadableError)) throw error;
-      this.log("error", "the agent host registry is unreadable; booting the single-host layout", error);
-      return null;
+      this.log("error", "the agent host registry is unreadable; accounting for the live agent hosts from their own health", error);
+      return { registry: null, problem: true };
     }
+  }
+
+  /**
+   * I1, a registry that may not list every live host: each live host session it does not name is
+   * accounted for from the host's own `/health` — its generation, whether it retires, what it owns
+   * — and added as an entry. The completed registry; null when only a plain generation 0 lives (the
+   * single-host layout); or why a live host cannot be accounted for (it does not answer, or tmux
+   * cannot list the sessions), in which case nothing may boot.
+   */
+  private async accountForLiveHosts(registry: HostRegistryFile | null): Promise<HostRegistryFile | null | string> {
+    const tmux = this.opts.adapters.tmux;
+    // Direct hosts are daemon children: none outlives the daemon that started it (P2.2).
+    if (!tmux) return registry;
+    const recorded = new Set(registry?.entries.map((entry) => entry.generation) ?? []);
+    let live: number[];
+    try {
+      live = await this.liveHostGenerations(tmux, registry);
+    } catch (error) {
+      return `tmux cannot list the agent host sessions (${error instanceof Error ? error.message : String(error)})`;
+    }
+    const entries = [...(registry?.entries ?? [])];
+    const unaccounted: number[] = [];
+    for (const generation of live) {
+      if (recorded.has(generation)) continue;
+      const probed = await this.probeRecorded(generation);
+      if (!probed.ok || (probed.health.retiring === true && !Array.isArray(probed.health.ownedThreadIds))) {
+        unaccounted.push(generation);
+        continue;
+      }
+      this.log("warn", `agent host ${generation} is live but not in the registry: ${describeHost(probed.health)}`);
+      entries.push(
+        probed.health.retiring === true
+          ? { generation, role: "retiring", retiringSince: null, ownedThreadIds: [...probed.health.ownedThreadIds!] }
+          : { generation, role: "primary" }
+      );
+    }
+    if (unaccounted.length > 0) {
+      return `agent host generation(s) ${unaccounted.join(", ")} run but the registry does not account for them and they do not answer`;
+    }
+    if (registry === null && entries.every((entry) => entry.generation === 0 && entry.role === "primary")) return null;
+    return { entries, unparsed: registry?.unparsed ?? [], extra: registry?.extra ?? {}, pendingAdoptions: registry?.pendingAdoptions ?? [] };
+  }
+
+  /** The generations whose host session is live. Throws when tmux cannot tell. */
+  private async liveHostGenerations(tmux: SupervisorTmux, registry: HostRegistryFile | null): Promise<number[]> {
+    const base = agentHostServiceSession(0);
+    if (tmux.listServiceSessions) {
+      const generations: number[] = [];
+      for (const name of await tmux.listServiceSessions(base)) {
+        if (name === base) generations.push(0);
+        const match = /^-(\d+)$/.exec(name.slice(base.length));
+        if (match) generations.push(Number(match[1]));
+      }
+      return generations;
+    }
+    const highest = registry === null ? 0 : Math.max(0, highestRecordedGeneration(registry));
+    const generations: number[] = [];
+    for (let generation = 0; generation <= highest; generation += 1) {
+      if (await tmux.hasServiceSession(agentHostServiceSession(generation))) generations.push(generation);
+    }
+    return generations;
   }
 
   /** Read a recorded generation's token and probe it. */
@@ -2199,10 +2610,21 @@ export class AgentHostSupervisor implements HostDirectory {
     return this.safeProbe(generation);
   }
 
-  /** A recorded host that does not answer: kill whatever is left of it and its files. */
-  private async discardHost(generation: number): Promise<void> {
-    await this.killHost(generation);
+  /**
+   * A recorded host that does not answer: kill whatever is left of it and its files. False when
+   * its death could not be confirmed (I1): it is then {@link unstoppable} — killed again on the
+   * health tick, and nothing that would own its chats is spawned meanwhile.
+   */
+  private async discardHost(generation: number): Promise<boolean> {
+    if (!(await this.killHost(generation))) {
+      const now = this.opts.adapters.now();
+      const reason = `agent host generation ${generation}, recorded but not answering, could not be confirmed stopped`;
+      this.log("error", reason);
+      this.unstoppable.set(generation, { reason, nextKillAt: now + HOST_KILL_RETRY_MS });
+      return false;
+    }
     await this.removeHostFiles(generation);
+    return true;
   }
 
   /**
@@ -2240,30 +2662,35 @@ export class AgentHostSupervisor implements HostDirectory {
         await this.discardHost(entry.generation);
       }
     }
+    // I5: adoptions a previous daemon started and did not see complete.
+    for (const threadId of registry.pendingAdoptions ?? []) toAdopt.add(threadId);
+    const otherProtocol: RetiringHost[] = [];
     for (const entry of retiringEntries) {
       const recorded = entry.ownedThreadIds ?? [];
       const probed = entry.role === "primary" ? await this.safeProbe(entry.generation) : await this.probeRecorded(entry.generation);
+      const parsedSince = typeof entry.retiringSince === "string" ? Date.parse(entry.retiringSince) : Number.NaN;
+      const since = Number.isFinite(parsedSince) ? parsedSince : now;
       if (probed.ok && probed.health.retiring === true) {
         const owned = new Set(probed.health.ownedThreadIds ?? recorded);
         // Released while no daemon watched: nobody adopted them yet.
         for (const threadId of recorded) if (!owned.has(threadId)) toAdopt.add(threadId);
-        const since = typeof entry.retiringSince === "string" ? Date.parse(entry.retiringSince) : Number.NaN;
-        this.retiring.set(entry.generation, {
-          generation: entry.generation,
-          health: probed.health,
-          owned,
-          retiringSince: Number.isFinite(since) ? since : now,
-          firstMissAt: null,
-          ending: false
-        });
+        const host = this.addRetiringHost(entry.generation, probed.health, owned, since);
         this.log("log", `retiring agent host ${entry.generation} adopted: ${describeHost(probed.health)}, ${owned.size} chat(s)`);
+        // P2.6: one this daemon cannot route to is ended through the cap path once a primary is up.
+        if (probed.health.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION) otherProtocol.push(host);
       } else if (probed.ok) {
         // Unretired, and the daemon died before it recorded that: a primary candidate.
         candidates.push({ generation: entry.generation, health: probed.health });
+      } else if ((await this.hostProcessAlive(entry.generation)) || !(await this.discardHost(entry.generation))) {
+        // Alive but silent — busy, or a tmux that cannot tell — or its kill not confirmed: one
+        // missed probe is no death (R28). It keeps its chats; the poll's patience decides.
+        const host = this.addRetiringHost(entry.generation, null, new Set(recorded), since);
+        host.firstMissAt = now;
+        this.unstoppable.delete(entry.generation);
+        this.log("warn", `retiring agent host ${entry.generation} did not answer; it keeps its ${recorded.length} chat(s) for now`);
       } else {
         for (const threadId of recorded) toAdopt.add(threadId);
         this.log("warn", `retiring agent host ${entry.generation} is gone; the primary adopts its ${recorded.length} chat(s)`);
-        await this.discardHost(entry.generation);
       }
     }
     const [primary, ...extra] = candidates;
@@ -2292,8 +2719,29 @@ export class AgentHostSupervisor implements HostDirectory {
       if (this.retiringOwnerOf(threadId) === null) this.startAdoption(threadId);
     }
     await this.persistRegistry();
+    for (const host of otherProtocol) await this.endRetiringHost(host, "protocol");
     this.scheduleRetiringPoll();
     if (this.pendingVersionRestart && primary !== undefined) await this.restartIfDrained();
+  }
+
+  private addRetiringHost(
+    generation: number,
+    health: AgentHostHealthResponse | null,
+    owned: Set<string>,
+    retiringSince: number
+  ): RetiringHost {
+    const host: RetiringHost = {
+      generation,
+      health,
+      owned,
+      retiringSince,
+      firstMissAt: null,
+      ending: false,
+      killUnconfirmedSince: null,
+      nextKillAt: 0
+    };
+    this.retiring.set(generation, host);
+    return host;
   }
 
   /**
@@ -2308,14 +2756,7 @@ export class AgentHostSupervisor implements HostDirectory {
       this.log("warn", `agent host ${generation} could not retire`, error);
     }
     if (keep !== null) {
-      this.retiring.set(generation, {
-        generation,
-        health,
-        owned: new Set(keep),
-        retiringSince: this.opts.adapters.now(),
-        firstMissAt: null,
-        ending: false
-      });
+      this.addRetiringHost(generation, health, new Set(keep), this.opts.adapters.now());
       return;
     }
     this.log("warn", `stopping agent host ${generation}: a second primary`);
@@ -2341,7 +2782,8 @@ export class AgentHostSupervisor implements HostDirectory {
       retiringSince: new Date(host.retiringSince).toISOString(),
       endsAt: new Date(host.retiringSince + AGENT_HOST_RETIRE_MAX_MS).toISOString(),
       threads: [...host.owned].sort().map((threadId) => ({ threadId })),
-      blockers
+      blockers,
+      ...(host.killUnconfirmedSince !== null ? { stopUnconfirmedSince: new Date(host.killUnconfirmedSince).toISOString() } : {})
     };
   }
 
