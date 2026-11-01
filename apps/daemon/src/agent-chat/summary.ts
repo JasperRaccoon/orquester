@@ -50,7 +50,8 @@ import {
   type ChatPushType
 } from "./activity-ladder.ts";
 import type { ChatSessionManager } from "./chat-sessions.ts";
-import { AgentHostClient } from "./host-client.ts";
+import type { HostClient } from "./host-client.ts";
+import type { HostDirectory } from "./host-directory.ts";
 
 /**
  * How often the open tabs' summaries are re-read. Fast enough that a tab's dot
@@ -78,12 +79,21 @@ export interface SummaryPush {
 }
 
 interface AgentChatSummaryOptions {
-  client: AgentHostClient;
+  /**
+   * The routing client (`RoutingHostClient`) in the daemon: each thread's summary is read from
+   * the host that owns it, so a thread on a retiring host (spec 2026-11-01 P2.4 R25) is folded,
+   * and fires every listener below, exactly like one on the primary.
+   */
+  client: HostClient;
   chat: ChatSessionManager;
   broadcaster: SummaryBroadcaster;
   push: SummaryPush;
-  /** False while the host is restarting or foreign — the poll then idles. */
+  /**
+   * False while the (primary) host is restarting or foreign — the poll then idles, unless
+   * `directory` still lists a retiring host: its threads keep running and are still read.
+   */
   isHostHealthy?: () => boolean;
+  directory?: Pick<HostDirectory, "hosts">;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
   /**
    * A turn reached a settled state. The supervisor's version drain-restart
@@ -231,7 +241,8 @@ export class AgentChatSummaryService {
    * Threads whose last summary reported live background work (a subagent
    * fleet, a watch loop) — the daemon's own view for the §3.1 drain-restart
    * (`SupervisorAdapters.backgroundWorkThreadIds`), which a host from before
-   * `GET /health` carried the field cannot report itself.
+   * `GET /health` carried the field cannot report itself. During an update it is the union over
+   * every host, each thread as its owner reported it.
    */
   threadsWithBackgroundLiveness(): string[] {
     const out: string[] = [];
@@ -249,7 +260,7 @@ export class AgentChatSummaryService {
   /** One tick: re-read every open chat tab's summary. Never throws. */
   async refreshAll(): Promise<void> {
     if (this.polling) return;
-    if (this.opts.isHostHealthy && !this.opts.isHostHealthy()) return;
+    if (this.opts.isHostHealthy && !this.opts.isHostHealthy() && !this.retiringHostLive()) return;
     const ids = this.opts.chat.list().map((s) => s.id);
     if (ids.length === 0) {
       // Nothing open: drop any stale state and do no I/O at all.
@@ -264,6 +275,11 @@ export class AgentChatSummaryService {
       this.polling = false;
       this.polledOnce = true;
     }
+  }
+
+  /** A retiring host is serving its threads, whatever the primary's state (P2.4 R25). */
+  private retiringHostLive(): boolean {
+    return this.opts.directory?.hosts().some((host) => host.role === "retiring") ?? false;
   }
 
   /**

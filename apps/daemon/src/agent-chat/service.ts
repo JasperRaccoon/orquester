@@ -62,7 +62,8 @@ import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import type { SessionIndexContributor } from "../sessions.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
-import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
+import { AgentHostClient, HostUnavailableError, RoutingHostClient, type HostClient } from "./host-client.ts";
+import { singleHostDirectory, type HostDirectory } from "./host-directory.ts";
 import { markClaudeProjectTrusted } from "./home-prep.ts";
 import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
@@ -405,7 +406,17 @@ function optionalField(value: unknown, name: string, max: number): string | unde
 
 export class AgentChatService {
   readonly chat: ChatSessionManager;
-  private readonly client: AgentHostClient;
+  /**
+   * "The agent host" for every thread and global route: routed per request to the host that
+   * serves it (spec 2026-11-01 P2.4 R24), so no caller knows an update runs several.
+   */
+  private readonly client: HostClient;
+  /**
+   * The supervised host's own socket, unrouted: its health probe, `/stop` and goal-handover calls
+   * address that one host (R24: "health, stop, retire and adopt address a generation").
+   */
+  private readonly hostClient: AgentHostClient;
+  private readonly hostDirectory: HostDirectory;
   private readonly supervisor: AgentHostSupervisor;
   private readonly summary: AgentChatSummaryService;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
@@ -426,7 +437,7 @@ export class AgentChatService {
         if (record.childId === id) record.closed = true;
       }
     });
-    this.client = new AgentHostClient({
+    this.hostClient = new AgentHostClient({
       socketPath,
       token: () => this.supervisor.currentToken()
     });
@@ -492,6 +503,10 @@ export class AgentChatService {
         logger: opts.logger
       }
     });
+    // The hosts the daemon talks to (P2.4 R24/R25). Until the supervisor implements
+    // `HostDirectory`, the one host it supervises; then this is `this.supervisor`.
+    this.hostDirectory = singleHostDirectory(this.hostClient);
+    this.client = new RoutingHostClient(this.hostDirectory);
     this.summary = new AgentChatSummaryService({
       client: this.client,
       chat: this.chat,
@@ -499,8 +514,10 @@ export class AgentChatService {
       push: opts.push,
       logger: opts.logger,
       // The poll idles while the host is restarting or foreign: every chat
-      // route answers 503 then anyway, and a read would only log noise.
+      // route answers 503 then anyway, and a read would only log noise. A
+      // retiring host's threads are still read (`directory`).
       isHostHealthy: () => this.supervisor.isHealthy(),
+      directory: this.hostDirectory,
       // A settled turn reopens the §3.1 drain window, so a deploy's version
       // handover happens the moment the host goes quiet — and so does a
       // subagent fleet or watch loop finishing, which the drain also waits on.
@@ -2176,17 +2193,28 @@ export class AgentChatService {
    * provider sessions launched from (`GET /profiles/leases`). REJECTS whenever that is not known
    * — no healthy host, a host that predates the route, an unreadable answer — so the GC deletes
    * nothing then.
+   *
+   * The union over EVERY live host (spec 2026-11-01 P2.4 R25): a retiring host's busy chats run
+   * from prepared versions too, so one host that cannot answer leaves every lease unknown.
    */
   async profileLeases(): Promise<ReadonlySet<string>> {
-    if (!this.supervisor.isHealthy()) throw new Error("The agent host is not running; prepared-dir leases are unknown.");
-    const response = await this.client.json<AgentHostProfileLeasesResponse>("GET", agentHostRoutes.profileLeases, undefined, {
-      timeoutMs: PROFILE_LEASES_DEADLINE_MS
-    });
-    const dirs = response.status === 200 ? response.value?.preparedDirs : undefined;
-    if (!Array.isArray(dirs) || !dirs.every((dir) => typeof dir === "string")) {
-      throw new Error(`The agent host did not report its prepared-dir leases (${response.status}).`);
+    const hosts = this.hostDirectory.hosts();
+    if (!this.supervisor.isHealthy() || hosts.length === 0) {
+      throw new Error("The agent host is not running; prepared-dir leases are unknown.");
     }
-    return new Set(dirs);
+    const answers = await Promise.all(
+      hosts.map(async (host) => {
+        const response = await host.client.json<AgentHostProfileLeasesResponse>("GET", agentHostRoutes.profileLeases, undefined, {
+          timeoutMs: PROFILE_LEASES_DEADLINE_MS
+        });
+        const dirs = response.status === 200 ? response.value?.preparedDirs : undefined;
+        if (!Array.isArray(dirs) || !dirs.every((dir) => typeof dir === "string")) {
+          throw new Error(`The agent host did not report its prepared-dir leases (${response.status}).`);
+        }
+        return dirs;
+      })
+    );
+    return new Set(answers.flat());
   }
 
   /**
@@ -2456,7 +2484,7 @@ export class AgentChatService {
   /** Authenticated `GET /health`; classifies exactly the five §3.1 cases. */
   private async probe(): Promise<ProbeOutcome> {
     try {
-      const response = await this.client.json<AgentHostHealthResponse>(
+      const response = await this.hostClient.json<AgentHostHealthResponse>(
         "GET",
         agentHostRoutes.health,
         undefined,
@@ -2475,7 +2503,7 @@ export class AgentChatService {
   }
 
   private async requestHostStop(): Promise<void> {
-    const response = await this.client.json<{ markedThreadIds?: unknown }>(
+    const response = await this.hostClient.json<{ markedThreadIds?: unknown }>(
       "POST",
       agentHostRoutes.stop,
       {},
@@ -2496,7 +2524,7 @@ export class AgentChatService {
    * reads as nothing held, and a non-string entry is dropped.
    */
   private async requestHostHoldGoals(): Promise<readonly string[] | null> {
-    const response = await this.client.json<{
+    const response = await this.hostClient.json<{
       heldThreadIds?: unknown;
       error?: { message?: unknown };
     }>("POST", agentHostRoutes.holdGoals, {}, { timeoutMs: GOAL_HOLD_DEADLINE_MS });
@@ -2515,7 +2543,7 @@ export class AgentChatService {
   /** Agent goals §5.7 legacy handover: one blocking thread's running turn, off the host's own snapshot. */
   private async inspectLegacyGoalTurn(threadId: string): Promise<LegacyGoalTurn | null> {
     try {
-      const response = await this.client.json<unknown>("GET", agentHostRoutes.read(threadId), undefined, {
+      const response = await this.hostClient.json<unknown>("GET", agentHostRoutes.read(threadId), undefined, {
         timeoutMs: LEGACY_GOAL_CALL_DEADLINE_MS
       });
       return response.status === 200 ? legacyGoalTurnOf(response.value) : null;
@@ -2526,7 +2554,7 @@ export class AgentChatService {
 
   /** Agent goals §5.7 legacy handover: stop one Codex goal thread's provider session. */
   private async requestHostSessionStop(threadId: string): Promise<void> {
-    const response = await this.client.json<{ error?: { message?: unknown } }>(
+    const response = await this.hostClient.json<{ error?: { message?: unknown } }>(
       "POST",
       agentHostRoutes.sessionStop(threadId),
       { commandId: `goal-handover:${randomUUID()}` },
@@ -2545,7 +2573,7 @@ export class AgentChatService {
   private async requestHostResumeGoalSessions(
     threadIds: readonly string[]
   ): Promise<readonly string[] | null> {
-    const response = await this.client.json<{ threadIds?: unknown; error?: { message?: unknown } }>(
+    const response = await this.hostClient.json<{ threadIds?: unknown; error?: { message?: unknown } }>(
       "POST",
       agentHostRoutes.resumeGoalSessions,
       { threadIds },
