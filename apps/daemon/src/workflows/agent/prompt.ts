@@ -117,12 +117,20 @@ export function handoffMessagesBudget(input: { contextWindow: number | undefined
 /** §5.4 step 3 for an account whose login was refused (the account moved for a sign-in failure). */
 const CONTINUE_AFTER_AUTH_SWITCH = `Your previous account's login failed and you have been moved to another account. Continue the task from exactly where you stopped. ${REVIVE_STOPPED_WORK}`;
 
+/** §5.4 — the same session resumed on the same account once its usage limit reset: nothing moved. */
+const CONTINUE_AFTER_RESET = `You were interrupted by a usage limit, which has now reset. Continue the task from exactly where you stopped. ${REVIVE_STOPPED_WORK}`;
+
 /**
- * The message sent after an account switch (or after waiting for a reset on the same session),
- * naming why the previous account stopped: a refused login reads as one, never as a usage limit.
+ * The message sent after an account switch, naming why the previous account stopped: a refused
+ * login reads as one, never as a usage limit.
  */
 export function continueMessage(autonomyNote: boolean, reason?: AgentFailureReason): string {
   return withAutonomyNote(reason === "auth" ? CONTINUE_AFTER_AUTH_SWITCH : CONTINUE_AFTER_SWITCH, autonomyNote);
+}
+
+/** The message sent when the same session resumes on the same account after its limit reset. */
+export function continueAfterResetMessage(autonomyNote: boolean): string {
+  return withAutonomyNote(CONTINUE_AFTER_RESET, autonomyNote);
 }
 
 export type PromptSourceResult = { ok: true; template: string } | { ok: false; message: string };

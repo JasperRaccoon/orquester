@@ -83,6 +83,7 @@ import { cooldownSubject } from "./families.ts";
 import {
   buildHandoffPrompt,
   clipUtf8,
+  continueAfterResetMessage,
   continueMessage,
   handoffMessagesBudget,
   promptSource,
@@ -704,7 +705,7 @@ class AgentBlockRun {
       this.st.afterReset = false;
       this.pushHop(c, this.st.sessionId!, "resumed");
       this.ctx.update({ hops: this.hopsCopy() });
-      return this.enterSending(continueMessage(this.config.autonomyNote));
+      return this.enterSending(continueAfterResetMessage(this.config.autonomyNote));
     }
     if (sameEntry && !this.st.switchRefused && isAccountful(c)) {
       this.st.next = c;

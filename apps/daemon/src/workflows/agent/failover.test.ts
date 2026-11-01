@@ -220,6 +220,9 @@ test("wait-for-reset: waits until the earliest reset, then resumes in the same s
   assert.equal(out.text, "after the reset");
   assert.equal(sc.host.sessions.size, 1);
   assert.deepEqual(out.hops.map((h) => [h.accountId, h.via]), [["a1", "initial"], ["a1", "resumed"]]);
+  const resumeTurn = sc.host.session(out.sessionId).commands.filter((c) => c.name === "turn").at(-1)!;
+  assert.match(String(resumeTurn.body.input), /reset/, "the resume says the limit reset");
+  assert.doesNotMatch(String(resumeTurn.body.input), /another account/, "the account never moved");
   assert.ok(sc.clock.now().getTime() >= Date.parse(resetsAt));
   assert.ok(fc.updates.some((u) => u.waitingUntil === resetsAt), "the block shows what it waits for");
   const waiting = fc.persisted.find((p) => p?.kind === "agent" && p.phase === "waiting-reset");
