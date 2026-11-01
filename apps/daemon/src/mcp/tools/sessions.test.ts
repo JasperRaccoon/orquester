@@ -169,6 +169,16 @@ test("create_session profile refusals: unknown → PROFILE_NOT_FOUND before any 
   await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", profile: "Video", runtimeMode: "full-access" }, h.ctx), (e: ToolError) => e.code === "UNAVAILABLE");
 });
 
+test("create_session: a create that fails with the daemon or its service down says the chat may exist and to check list_sessions; a refusal does not", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("POST", "/api/sessions", { status: 503, body: { message: "upstream down" } });
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", runtimeMode: "full-access" }, h.ctx),
+    (e: ToolError) => e.code === "HOST_UNAVAILABLE" && /may have been opened anyway: check list_sessions before retrying\.$/.test(e.message));
+  h.api.on("POST", "/api/sessions", { status: 400, body: { code: "INVALID_ARGUMENT", message: "bad cwd" } });
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", runtimeMode: "full-access" }, h.ctx),
+    (e: ToolError) => e.code === "INVALID_ARGUMENT" && !/list_sessions/.test(e.message));
+});
+
 test("get_session and list_sessions report each chat's Agent Profile ({id, name}, or null for Global); list_agents lists the profiles with per-agent readiness", async (t) => {
   const h = await harness([chatSummary({ profileId: "prof-1" }), chatSummary({ id: "c2", order: 3, profileId: null }), shellSummary()]); t.after(h.close);
   h.api.on("GET", "/api/session-profiles", { status: 200, body: PROFILES });

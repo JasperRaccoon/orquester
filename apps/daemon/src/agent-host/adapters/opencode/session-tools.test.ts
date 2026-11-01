@@ -18,7 +18,8 @@ import { test } from "node:test";
 
 import { catalogFor } from "../../../mcp/catalog/index.ts";
 import { buildOpenCodePermissionRules, type OpenCodePermissionRuleset } from "./ruleset.ts";
-import { openCodeSessionToolsServerName, withSessionToolRules } from "./session-tools.ts";
+import { SESSION_MENTION_HINT } from "../../session-tools/mention-hint.ts";
+import { openCodeSessionToolsServerName, withSessionToolInstructions, withSessionToolRules, type OpenCodeSessionToolsLaunch } from "./session-tools.ts";
 
 /** OpenCode's `Wildcard.match` (1.18.34). */
 function wildcardMatch(text: string, pattern: string): boolean {
@@ -128,4 +129,18 @@ test("the external /mcp under the name docs/orquester-mcp.md suggests keeps ever
   // Why the guide does not suggest `orquester-remote`: the deny's 16 `?` can
   // land on a `_` inside such a server's tool names (documented limitation).
   assert.ok(offered("orquester-remote").size > 0);
+});
+
+test("a turn that refers to another chat gets Orquester's hint after the block in its system, only while search_sessions is advertised", () => {
+  const launch: OpenCodeSessionToolsLaunch = {
+    serverName: "orquester-0123456789abcdef",
+    url: "u",
+    authorization: "Bearer x",
+    instructions: "## Orquester",
+    names: new Set(["search_sessions"]),
+    revoke: () => {}
+  };
+  assert.equal(withSessionToolInstructions("RUNTIME", launch, "the other chat already fixed it"), `RUNTIME\n\n## Orquester\n\n${SESSION_MENTION_HINT}`);
+  assert.equal(withSessionToolInstructions("RUNTIME", launch, "Fix the chat composer"), "RUNTIME\n\n## Orquester");
+  assert.equal(withSessionToolInstructions("RUNTIME", { ...launch, names: new Set(["send_message"]) }, "the other chat already fixed it"), "RUNTIME\n\n## Orquester");
 });

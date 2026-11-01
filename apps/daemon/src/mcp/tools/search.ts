@@ -125,6 +125,7 @@ async function chatSearchScope(api: DaemonApi, caller: ThreadCaller, project: st
 const searchSessions = defineTool({
   name: "search_sessions",
   title: "Search chats",
+  alwaysLoad: true,
   description: "Full-text search over chats' messages and tool activity, best first; snippets mark «matches». A hit's turn: read_transcript {sessionId, beforeTurn: turn + 1, turns: 1}. indexed:false: unavailable now.",
   chatNote: "\"all\": what you may read.",
   externalNote: "Default: every project.",

@@ -62,6 +62,7 @@
 import { CODEX_SESSION_TOOLS_ALTERNATE_NAME, SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 
 import { SESSION_TOOL_CALL_TIMEOUT_MS } from "../../../session-tools/contract.ts";
+import { sessionMentionHint } from "../../session-tools/mention-hint.ts";
 import type { CodexProtocol } from "./_generated/index.ts";
 
 /** The child env var the credential rides in. Its `_TOKEN` suffix also gets it masked in stderr. */
@@ -69,6 +70,8 @@ export const CODEX_SESSION_TOOLS_TOKEN_ENV = "ORQUESTER_SESSION_TOOLS_TOKEN";
 
 /** The `additionalContext` key the instruction block is filed under. */
 export const CODEX_SESSION_TOOLS_CONTEXT_KEY = "orquester";
+/** The key a turn's own Orquester hint is filed under (`codexTurnHintContext`). */
+export const CODEX_TURN_HINT_CONTEXT_KEY = "orquester-turn";
 
 /** What a Codex session is given when session tools are on. */
 export interface CodexSessionToolsLaunch {
@@ -78,6 +81,8 @@ export interface CodexSessionToolsLaunch {
   instructions: string;
   /** MCP servers to switch off in this thread (§12.1), by their config names. */
   deny?: readonly string[];
+  /** The tools advertised at launch (a Codex thread takes a new list only on restart). */
+  names?: ReadonlySet<string>;
   /** The name ours is registered under in this thread (default `orquester`). */
   serverName?: string;
   /** The servers the thread's effective config defines (`config/read`), when read. */
@@ -255,4 +260,18 @@ export function codexSessionToolsContext(
             : "The Codex config also has a server named `orquester`: that one is the user's own, not Orquester's."
         }`;
   return { [CODEX_SESSION_TOOLS_CONTEXT_KEY]: { kind: "application", value } };
+}
+
+/**
+ * `turn/start`'s `additionalContext` for a turn that refers to another chat, while
+ * `search_sessions` is advertised: Orquester's hint beside the user's input, never in it
+ * (`../../session-tools/mention-hint.ts`). Undefined for any other turn.
+ */
+export function codexTurnHintContext(
+  launch: CodexSessionToolsLaunch | undefined,
+  text: string
+): { [key: string]: CodexProtocol.v2.AdditionalContextEntry } | undefined {
+  if (launch?.names?.has("search_sessions") !== true) return undefined;
+  const hint = sessionMentionHint(text);
+  return hint === undefined ? undefined : { [CODEX_TURN_HINT_CONTEXT_KEY]: { kind: "application", value: hint } };
 }

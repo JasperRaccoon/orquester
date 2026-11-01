@@ -21,8 +21,11 @@ import {
   codexDenyConfig,
   codexSessionToolsConfig,
   codexSessionToolsContext,
-  codexSessionToolsServerName
+  codexSessionToolsServerName,
+  codexTurnHintContext,
+  CODEX_TURN_HINT_CONTEXT_KEY
 } from "./session-tools.ts";
+import { SESSION_MENTION_HINT } from "../../session-tools/mention-hint.ts";
 import { createFakeContext, EventCollector, writeMockCodexServer } from "./testing.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -64,6 +67,16 @@ describe("codex session tools — the builders", () => {
     });
     assert.equal(codexSessionToolsContext({ url: "u", instructions: "" }), undefined);
     assert.equal(codexSessionToolsContext(undefined), undefined);
+  });
+
+  it("a turn that refers to another chat gets Orquester's hint as its own context entry, only while search_sessions is advertised", () => {
+    const launch = { url: "u", instructions: "## Orquester", names: new Set(["search_sessions", "read_transcript"]) };
+    assert.deepEqual(codexTurnHintContext(launch, "In another session I'm porting the game"), {
+      [CODEX_TURN_HINT_CONTEXT_KEY]: { kind: "application", value: SESSION_MENTION_HINT }
+    });
+    assert.equal(codexTurnHintContext(launch, "Fix the session timeout"), undefined);
+    assert.equal(codexTurnHintContext({ ...launch, names: new Set(["send_message"]) }, "In another session I'm porting the game"), undefined);
+    assert.equal(codexTurnHintContext(undefined, "In another session I'm porting the game"), undefined);
   });
 });
 

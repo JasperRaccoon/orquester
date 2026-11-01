@@ -439,6 +439,7 @@ export const createCodexAdapter: AdapterFactory = async (
               url: grant.url,
               instructions: grant.prepared.instructions,
               deny: grant.prepared.deny,
+              names: grant.prepared.names,
               revoke: grant.revoke,
               ...(box?.bridge !== undefined ? { bridge: box.bridge } : {})
             }

@@ -19,6 +19,7 @@ import {
 } from "./launch.ts";
 import { claudeProfileLaunchFiles, type ClaudeProfileLaunch } from "./profile-launch.ts";
 import type { ClaudeSessionToolsLaunch } from "./session-tools.ts";
+import { SESSION_MENTION_HINT } from "../../session-tools/mention-hint.ts";
 import {
   FALLBACK_CLAUDE_MODELS,
   meetsMinimumClaudeVersion,
@@ -647,5 +648,35 @@ describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => 
     const { options } = buildWith({ ...rest, instructions: "" });
     assert.equal("skills" in options, false);
     assert.equal((options.systemPrompt as { append: string }).append.endsWith("ORQUESTER BLOCK"), true);
+  });
+});
+
+describe("claude launch — a turn that refers to another chat", () => {
+  async function contextFor(names: readonly string[], prompt: string): Promise<unknown> {
+    const { options } = buildClaudeQueryOptions({
+      cwd: "/work/project",
+      executablePath: "/usr/local/bin/claude",
+      env: { PATH: "/usr/bin" },
+      runtimeMode: "approval-required",
+      models: MODELS,
+      attachmentsDir: "/appdir/threads/t1/attachments",
+      canUseTool: noopCanUseTool,
+      sessionId: "11111111-2222-3333-4444-555555555555",
+      sessionTools: { ...SESSION_TOOLS, names: () => new Set(names) }
+    });
+    const hook = options.hooks?.UserPromptSubmit?.[0]?.hooks[0];
+    assert.ok(hook !== undefined, "a chat with session tools gets the hook");
+    const output = (await hook(
+      { hook_event_name: "UserPromptSubmit", prompt, session_id: "s", transcript_path: "/t", cwd: "/work/project" },
+      undefined,
+      { signal: new AbortController().signal }
+    )) as { hookSpecificOutput?: { additionalContext?: string } };
+    return output.hookSpecificOutput?.additionalContext;
+  }
+
+  it("gets Orquester's hint as context, not text, while search_sessions is advertised", async () => {
+    assert.equal(await contextFor(["search_sessions", "read_transcript"], "In another session I'm porting the game; that session said X."), SESSION_MENTION_HINT);
+    assert.equal(await contextFor(["search_sessions"], "Fix the login session timeout"), undefined);
+    assert.equal(await contextFor(["send_message"], "In another session I'm porting the game."), undefined);
   });
 });

@@ -362,7 +362,7 @@ const createBox = defineTool({
   name: "create_box",
   title: "Rent a temporary box",
   description:
-    "Rent a cloud machine for this chat when the host can't do the job (another OS, a GPU, isolation). It COSTS the owner money: every box needs their approval on a card (up to 30 min); if denied, don't retry — ask. Then waits until it is ready (minutes; Windows and macOS longer). Orquester copies nothing in: send what you need with box_upload (e.g. a git bundle), run with box_exec, fetch results with box_download. Destroy it with destroy_box as soon as you are done; it is also destroyed at its time limit and when this chat closes.",
+    "Rent a cloud machine for this chat when the host can't do the job (more CPU or RAM, another OS, a GPU, isolation). It COSTS the owner money: every box needs their approval on a card (up to 30 min); if denied, don't retry — ask. Then waits until ready (minutes; Windows and macOS longer). Orquester copies nothing in: send what you need with box_upload (e.g. a git bundle), run with box_exec, fetch results with box_download. Destroy it with destroy_box once done; it is also destroyed at its time limit and when this chat closes.",
   input: {
     kind: z.enum(BOX_KINDS as unknown as [BoxKind, ...BoxKind[]]),
     provider: z

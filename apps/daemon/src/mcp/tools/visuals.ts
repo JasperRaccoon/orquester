@@ -111,7 +111,7 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
   defineTool({
     name: HTML_RENDER_TOOL_NAME,
     title: "Render HTML",
-    description: `Show a finished HTML page (chart, table, diagram, mockup) inline in this chat above your final text reply; call it before writing that reply, which should not announce or restate the page. The frame fits the page's height at each reader's width; a height below contentHeight caps it and the rest scrolls inside. ${PAGE_RULES} ${LAYOUT} ${THEME}`,
+    description: `Show a finished HTML page (chart, table, diagram, mockup), checked first with html_preview, inline in this chat above your final text reply; call it before writing that reply, which should not announce or restate the page. The frame fits the page's height at each reader's width; a height below contentHeight caps it and the rest scrolls inside. ${PAGE_RULES} ${LAYOUT} ${THEME}`,
     input: {
       html,
       title: z.string().min(1).max(HTML_RENDER_MAX_TITLE_LENGTH).describe("Short name for the page."),

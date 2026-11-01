@@ -1028,6 +1028,7 @@ function toUpdateRequest(fields: UpdateFields): UpdateKnowledgeEntryRequest {
 const knowledgeSearch = defineTool({
   name: "knowledge_search",
   title: "Search the knowledge base",
+  alwaysLoad: true,
   description:
     "Search the shared knowledge base in the collections this chat can see, by meaning and keywords (query), by example (similarTo) or both; filters narrow it. Use it before deciding on a topic those collections cover; on your own while working, don't announce it. When the user asks you directly, answer from the entries found, paste each used entry's `cite` link verbatim, and never pass off general knowledge as from it. Never cite a weak hit as evidence.",
   input: {

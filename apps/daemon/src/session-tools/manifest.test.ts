@@ -188,6 +188,10 @@ test("knowledge gating matrix: plugin off/on × Global / profile with collection
     assert.ok(both.tools.includes(name), name);
     assert.ok(ownedRenting.tools.includes(name), `${name}: a workflow-owned chat may rent a box`);
   }
+  // The block names create_box exactly where it is advertised.
+  assert.doesNotMatch(build().instructions, /create_box/);
+  assert.match(both.instructions, /create_box/);
+  assert.match(ownedRenting.instructions, /create_box/);
 });
 
 test("knowledge: a workflow-owned chat keeps its tools and receives approval and collection guidance", () => {

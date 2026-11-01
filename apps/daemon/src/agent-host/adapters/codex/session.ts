@@ -158,6 +158,7 @@ import {
   codexSessionToolsConfig,
   codexSessionToolsServerName,
   codexSessionToolsContext,
+  codexTurnHintContext,
   type CodexConfigValue,
   type CodexSessionToolsLaunch
 } from "./session-tools.ts";
@@ -755,6 +756,7 @@ export class CodexSession {
     const effort = selectedOptionOf(this.modelSelection, "effort");
     const serviceTier = selectedOptionOf(this.modelSelection, "serviceTier");
     const sessionToolsContext = codexSessionToolsContext(this.sessionToolsLaunch());
+    const turnHintContext = codexTurnHintContext(this.sessionToolsLaunch(), input.input);
 
     const params: CodexProtocol.v2.TurnStartParams = {
       threadId: providerThreadId,
@@ -784,6 +786,9 @@ export class CodexSession {
     const appContext = this.additionalAppContext();
     if (appContext !== undefined) {
       params.additionalContext = { ...appContext, ...params.additionalContext };
+    }
+    if (turnHintContext !== undefined) {
+      params.additionalContext = { ...params.additionalContext, ...turnHintContext };
     }
 
     // Best-effort, before the turn (§4.5 "Turn"): an MCP server added to

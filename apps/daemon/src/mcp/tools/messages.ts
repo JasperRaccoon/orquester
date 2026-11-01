@@ -847,6 +847,14 @@ const PROFILE_REFUSALS: ReadonlySet<string> = new Set(["PROFILE_NOT_FOUND", "PRO
  * `chat.unattended`, and the profile, when one is named, as `profileId` — a profile that is gone or
  * cannot be prepared fails the call, never Global, and its refusal names the profile.
  */
+/**
+ * Failures after which the create may still have happened (the daemon or the service behind it
+ * failed mid-request): the agent is told to look before retrying, at the moment it decides —
+ * agents retried at once while the rule lived only in the instruction block (tool-use eval).
+ */
+const CREATE_OUTCOME_UNKNOWN = new Set(["HOST_UNAVAILABLE", "INTERNAL"]);
+export const CREATE_OUTCOME_UNKNOWN_HINT = "The chat may have been opened anyway: check list_sessions before retrying.";
+
 async function postCreate(api: ScopeContext["api"], body: CreateSessionRequest, profile: { id: string; name: string } | null): Promise<SessionSummary> {
   const launch: CreateSessionRequest = { ...body, ...(profile ? { profileId: profile.id } : {}), chat: { ...body.chat!, unattended: true } };
   try {
@@ -854,6 +862,9 @@ async function postCreate(api: ScopeContext["api"], body: CreateSessionRequest, 
   } catch (error) {
     if (profile && error instanceof ToolError && PROFILE_REFUSALS.has(error.code)) {
       throw new ToolError(error.code, `Agent Profile "${profile.name}" could not be used, so no chat was opened: ${error.message} Fix the profile (Agent Profiles in the right rail), pick another, or leave \`profile\` out for Global.`, error.detail);
+    }
+    if (error instanceof ToolError && CREATE_OUTCOME_UNKNOWN.has(error.code)) {
+      throw new ToolError(error.code, `${error.message} ${CREATE_OUTCOME_UNKNOWN_HINT}`, error.detail);
     }
     throw error;
   }
@@ -888,7 +899,7 @@ export const createSessionTool = defineTool({
   description:
     "Open an agent chat tab in a project, or resume a conversation (list_conversations). Agents, models, options, modes, accounts: list_agents. With `prompt` it starts at once: reply \"wait\" returns that turn's final reply (or at timeoutSeconds), \"none\" returns at once. The result says the model (isLegacy), mode, account and accountSource (requested, inherited, family-default) and Agent Profile it got. A `profile` that is missing or cannot be prepared fails the call, never Global.",
   chatNote:
-    "Defaults: this chat's project, agent, mode (only narrower) and, same agent, model, options, account. `prompt` (self-contained) required unless resuming. reply \"notify\": its final reply reaches you later as a message. `delegate: true`: your task, its final reply the result (reply default \"notify\", else \"none\"). Max 6 unfinished chats you opened, 2 levels deep.",
+    "Defaults: this chat's project, agent, mode (only narrower) and, same agent, model, options, account. `prompt` (self-contained) required unless resuming. reply \"notify\": its final reply reaches you later as a message. `delegate: true` for work you hand off (a subtask, another agent's review or opinion): its final reply is the result (reply default \"notify\", else \"none\"). Max 6 unfinished chats you opened, 2 levels deep.",
   externalNote: "`project` is required; runtimeMode defaults to full-access, reply to \"none\".",
   input: {
     project: z.string().min(1).optional().describe("Path or \"workspace/project\"."),

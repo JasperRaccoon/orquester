@@ -34,11 +34,12 @@
  * `mcp__orquester__*` namespace — where by-name pre-approval would wave them through.
  */
 
-import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import type { HookCallbackMatcher, HookEvent, McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 
 import type { SessionToolsHost, SessionToolsLaunch } from "../../session-tools/index.ts";
 import { buildSessionToolsMcpServer, type SessionToolsMcpServer } from "../../session-tools/mcp-server.ts";
+import { sessionMentionHint } from "../../session-tools/mention-hint.ts";
 
 /**
  * How long a live apply waits for the CLI's own `tools/list` after the notification (Task 6 probe:
@@ -141,5 +142,26 @@ export async function createClaudeSessionToolsLaunch(input: {
     deny: prepared.deny,
     names: () => names,
     release
+  };
+}
+
+/**
+ * The SDK hooks a chat with session tools gets: a user turn that refers to another chat is told,
+ * as the turn's `additionalContext` (never its text), that Orquester can read that chat — only
+ * while `search_sessions` is advertised to it (`../../session-tools/mention-hint.ts`).
+ */
+export function claudeSessionToolsHooks(launch: Pick<ClaudeSessionToolsLaunch, "names">): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+  return {
+    UserPromptSubmit: [
+      {
+        hooks: [
+          async (input) => {
+            if (input.hook_event_name !== "UserPromptSubmit" || !launch.names().has("search_sessions")) return {};
+            const hint = sessionMentionHint(input.prompt);
+            return hint === undefined ? {} : { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: hint } };
+          }
+        ]
+      }
+    ]
   };
 }

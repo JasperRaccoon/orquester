@@ -884,6 +884,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
                   authorization: grant.authorization,
                   instructions: grant.prepared.instructions,
                   deny: grant.prepared.deny,
+                  names: grant.prepared.names,
                   revoke: grant.revoke,
                   ...(sessionToolsBridge !== undefined
                     ? { bridge: { command: [sessionToolsBridge.command, ...sessionToolsBridge.args] } }

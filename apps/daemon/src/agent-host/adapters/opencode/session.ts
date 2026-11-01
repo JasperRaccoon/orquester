@@ -1987,7 +1987,8 @@ export class OpenCodeThreadSession {
       // OpenCode keeps it on the message's `system`, never in its parts.
       system: withSessionToolInstructions(
         buildRuntimeInstructions(`${input.model.providerID}/${input.model.modelID}`),
-        this.sessionTools
+        this.sessionTools,
+        input.text
       ),
       parts: [
         ...(input.text.length > 0 ? [{ type: "text" as const, text: input.text }] : []),

@@ -21,6 +21,9 @@ import type { AnyOrquesterTool } from "../../mcp/catalog/contract.ts";
 import { catalogFor } from "../../mcp/catalog/index.ts";
 import { LEGACY_SECRET_RESULT_KEYS, LEGACY_SESSION_TOOL_DEFINITIONS } from "./legacy-definitions.ts";
 
+/** Claude Code's per-tool `_meta` key: a tool it never defers behind tool search. */
+export const ALWAYS_LOAD_META = "anthropic/alwaysLoad";
+
 /** One tool as the host advertises it, and the result keys it masks. */
 export interface AdvertisedTool {
   readonly entry: Tool;
@@ -49,7 +52,8 @@ export async function serializeChatTools(tools: readonly AnyOrquesterTool[]): Pr
         title: tool.title,
         description: chatDescription(tool),
         inputSchema: Object.keys(shape).length > 0 ? shape : z.object({}).strict(),
-        annotations: tool.annotations
+        annotations: tool.annotations,
+        ...(tool.alwaysLoad === true ? { _meta: { [ALWAYS_LOAD_META]: true } } : {})
       },
       () => ({ content: [] })
     );

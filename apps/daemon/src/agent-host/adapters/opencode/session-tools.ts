@@ -55,6 +55,7 @@
 import { createHash } from "node:crypto";
 
 import { SESSION_TOOL_CALL_TIMEOUT_MS } from "../../../session-tools/contract.ts";
+import { sessionMentionHint } from "../../session-tools/mention-hint.ts";
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import type { OpenCodeClient } from "./http.ts";
 import type { OpenCodePermissionRuleset } from "./ruleset.ts";
@@ -71,6 +72,8 @@ export interface OpenCodeSessionToolsLaunch {
   instructions: string;
   /** MCP servers to deny in this thread's session (§12.1), by their config names. */
   deny?: readonly string[];
+  /** The tools advertised at launch (OpenCode takes a new list only on restart). */
+  names?: ReadonlySet<string>;
   revoke(): void;
   /**
    * boxes (spec 2026-10-19 §8.4): the server runs in a box, so ours registers as a LOCAL server
@@ -233,7 +236,13 @@ export async function disconnectOpenCodeSessionTools(client: OpenCodeClient, ser
   }
 }
 
-/** The per-turn `system` addendum with the instruction block appended. */
-export function withSessionToolInstructions(system: string, launch: OpenCodeSessionToolsLaunch | undefined): string {
-  return launch !== undefined && launch.instructions.length > 0 ? `${system}\n\n${launch.instructions}` : system;
+/**
+ * The per-turn `system` addendum with the instruction block appended, then — for a turn whose
+ * `text` refers to another chat, while `search_sessions` is advertised — Orquester's hint
+ * (`../../session-tools/mention-hint.ts`): beside the user's parts, never in them.
+ */
+export function withSessionToolInstructions(system: string, launch: OpenCodeSessionToolsLaunch | undefined, text = ""): string {
+  const withBlock = launch !== undefined && launch.instructions.length > 0 ? `${system}\n\n${launch.instructions}` : system;
+  const hint = launch?.names?.has("search_sessions") === true ? sessionMentionHint(text) : undefined;
+  return hint === undefined ? withBlock : `${withBlock}\n\n${hint}`;
 }

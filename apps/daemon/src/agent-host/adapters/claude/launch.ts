@@ -19,7 +19,7 @@ import type { ModelSelection, ProviderModel, RuntimeMode } from "@orquester/api/
 import { isPlainObject } from "../../../agent-isolation/claude-names.ts";
 import { CLAUDE_QUESTION_PREVIEW_FORMAT } from "./questions.ts";
 import { CLAUDE_PROFILE_ENV, type ClaudeProfileLaunch, type ClaudeProfileLaunchFiles } from "./profile-launch.ts";
-import { claudeDeniedMcpServers, claudeDisallowedTools, type ClaudeSessionToolsLaunch } from "./session-tools.ts";
+import { claudeDeniedMcpServers, claudeDisallowedTools, claudeSessionToolsHooks, type ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
   CLAUDE_OPTION_IDS,
   findModel,
@@ -342,6 +342,8 @@ export function buildClaudeQueryOptions(
     // Session tools never raise an approval card (§1.3): each one is
     // pre-approved by name in every permission mode (`session-tools.ts`).
     ...(input.sessionTools !== undefined ? { allowedTools: [...input.sessionTools.allowedTools] } : {}),
+    // ...and the turn-time hints that ride with them (a turn naming another chat).
+    ...(input.sessionTools !== undefined ? { hooks: claudeSessionToolsHooks(input.sessionTools) } : {}),
     // ...and the server-level rule of every denied server (§12.1): no tool of it reaches the model.
     ...(input.sessionTools !== undefined && claudeDisallowedTools(input.sessionTools.deny).length > 0
       ? { disallowedTools: claudeDisallowedTools(input.sessionTools.deny) }

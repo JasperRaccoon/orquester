@@ -168,6 +168,8 @@ export function buildSessionToolsManifest(input: ManifestInput): SessionToolsMan
       ? KNOWLEDGE_WORKER_INSTRUCTIONS
       : composeOrquesterInstructions({
           workflowOwned: input.thread.workflowOwned,
+          // The boxes line names create_box: only where it is advertised.
+          boxes: tools.includes("create_box"),
           // The devices line names list_devices: only where it is advertised.
           devices: tools.includes("list_devices"),
           // The line names knowledge_search: only where it is advertised.

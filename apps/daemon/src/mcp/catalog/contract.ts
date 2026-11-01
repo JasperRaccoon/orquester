@@ -368,6 +368,12 @@ export interface OrquesterTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
   resultKind: ToolResultKind;
   /** Result keys whose string values are secrets handed to the agent (masked by the host afterwards). */
   secretResultKeys?: readonly string[];
+  /**
+   * Chat: never deferred behind a harness's tool search (Claude Code's `_meta`
+   * `anthropic/alwaysLoad`): the full entry is in every request, not just its name. Only for a tool
+   * agents miss when they see the name alone, and that the tool-use eval shows they then use.
+   */
+  alwaysLoad?: boolean;
   /** Called ONLY by the executor, with the frozen arguments. */
   run(args: z.infer<z.ZodObject<Shape>>, ctx: CallContext): Promise<Record<string, unknown> | CallToolResult>;
 }
