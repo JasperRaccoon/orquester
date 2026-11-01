@@ -19,6 +19,7 @@ import type { AdapterCapabilities, DomainEvent, RuntimeEvent } from "@orquester/
 
 import { runtimeEventToActivities } from "../ingestion/activities.ts";
 import { CONTINUATION_PROMPT } from "../host-protocol.ts";
+import { isContinuationPrompt } from "./continuation-prompt.ts";
 import { isHostRestartPrompt, WAKE_NOTE_SUMMARY, wakePrompt } from "./pending-wake.ts";
 import {
   createScriptedAdapter,
@@ -287,7 +288,7 @@ describe("a host that stops on a pending wake: the next one hands the agent the 
     const third = nextHost({ ...scene, host }, { firstTurn: 4, continuationEnabled: () => true });
     await third.host.orchestrator.reconcile();
     await third.host.settle();
-    assert.equal(sendsOf(adapter).length + sendsOf(third.adapter).filter((input) => input !== CONTINUATION_PROMPT).length, 1);
+    assert.equal(sendsOf(adapter).length + sendsOf(third.adapter).filter((input) => !isContinuationPrompt(input)).length, 1);
     await third.host.stop();
   });
 
@@ -334,7 +335,7 @@ describe("a host that stops on a pending wake: the next one hands the agent the 
     const sends = sendsOf(adapter);
     assert.equal(sends.length, 1);
     assert.ok(sends[0]!.includes(RESULT));
-    assert.match(sends[0]!, /still running when the agent host stopped, and it was stopped with it: "Wait for daemon suite" \(background task\)/);
+    assert.match(sends[0]!, /The restart stopped these background commands: "Wait for daemon suite" \(background command\)\. Restart the background commands you still need\./);
     const log = host.store.logs.get(THREAD)!;
     const stoppedRow = log.find(
       (event) => event.type === "thread.activity-appended" && event.payload.activity.summary === "Background work stopped with the agent host"

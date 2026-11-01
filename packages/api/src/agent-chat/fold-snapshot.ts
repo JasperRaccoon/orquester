@@ -426,7 +426,12 @@ const isContinueAfterRestart = shaped<ContinueAfterRestart>({
   turnId: isString,
   prepared: optional(isBoolean),
   markedAt: optional(isString),
-  crashAttempt: optional(isNumber)
+  crashAttempt: optional(isNumber),
+  // Host updates (spec 2026-11-01 R2, R5): only the shape is checked.
+  revival: optional(isTrue),
+  stoppedWork: optional(listOf(isRecord)),
+  moreStoppedWork: optional(isNumber),
+  requestCancelled: optional(isTrue)
 });
 
 const isThreadHead = shaped<ThreadHead>({
@@ -448,6 +453,9 @@ const isThreadHead = shaped<ThreadHead>({
   crashResumedTurn: optional(isRecord),
   // Head-only too (a pending wake); a fold's own head never holds it.
   pendingWake: optional(isRecord),
+  // Head-only too (host updates R3, R4); a fold's own head never holds either.
+  backgroundWorkLive: optional(isTrue),
+  autoContinues: optional(listOf(isRecord)),
   // Goals §5.5 and §5.7. Head-only state, so a fold's own head never holds
   // either; only the shape is checked, as for the other marker.
   resumeGoalAfterRestart: optional(isTrue),
