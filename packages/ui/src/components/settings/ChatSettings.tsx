@@ -79,7 +79,7 @@ export const ChatSettings: React.FC = () => {
       <SettingsSection title="After a restart" description="Shared by every client of this server.">
         <SettingRow
           label="Continue interrupted turns"
-          description="After a crash, reboot or manual restart, threads with a saved resume point pick up where they left off; others wait for a new message. Off by default: resuming is wrong when a turn was halfway through something destructive."
+          description="On by default. After an update, crash or manual restart, chats that were working pick up where they left off: a turn the restart cut short continues, and the agent is told which subagents and background commands were stopped so it relaunches the ones it still needs. It is asked to check before repeating anything that changes state. Chats without a saved resume point wait for a new message."
         >
           <Switch
             label="Continue interrupted turns"

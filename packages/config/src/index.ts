@@ -989,12 +989,14 @@ export const agentPrefsSchema = z.object({
    */
   claudeSubagentCacheTtl: z.enum(["auto", "1h", "5m"]).default("auto"),
   /**
-   * Agent chat §3.3: after the host restarts, whether a thread whose turn was
-   * interrupted is continued from its saved provider resume cursor. Host-wide
-   * default, **off** — "pick up where you left off" is wrong for a project
-   * where a turn was halfway through a destructive operation.
+   * Agent chat §3.3: after the agent host restarts, whether a thread that was working is
+   * continued from its saved provider resume cursor — a turn the restart cut short, and a thread
+   * whose subagents or background commands it stopped (spec 2026-11-01 R2), which the continue
+   * prompt tells the agent to relaunch. Host-wide default, **on** (spec 2026-11-01 R1): a chat a
+   * restart left silently stopped is worse than one that checks before repeating an action. A
+   * stored `false` stays off; the per-project override below wins over either.
    */
-  continueThreadsAfterRestart: z.boolean().default(false),
+  continueThreadsAfterRestart: z.boolean().default(true),
   /**
    * Per-project override of the flag above, keyed by absolute project path.
    * Resolved per the thread's project over the host-wide default; an absent
@@ -1866,6 +1868,15 @@ const agentPendingWakeTaskSchema = z.object({
   exitCode: z.number().optional().catch(undefined)
 });
 
+/** One subagent or background command a restart stopped (`ContinuationStoppedWork`). */
+const continuationStoppedWorkSchema = z.object({
+  name: z.string().min(1),
+  kind: z.enum(["subagent", "background"])
+});
+
+/** One automatic continue turn (`AutoContinue`). */
+const autoContinueSchema = z.object({ turnId: z.string().min(1), at: z.string().min(1) });
+
 /**
  * `meta.json`. `continueAfterRestart` is a TURN ID, never a boolean (§3.3), so
  * a marker left over from an older turn is ignored rather than replaying the
@@ -1906,9 +1917,40 @@ export const agentThreadHeadSchema = z.object({
       markedAt: z.string().optional().catch(undefined),
       // Crash-safe resume: the attempt count of a prepared automatic resume. Unreadable reads
       // as none (a first attempt), never as a head nothing can read.
-      crashAttempt: z.number().int().positive().optional().catch(undefined)
+      crashAttempt: z.number().int().positive().optional().catch(undefined),
+      // Host updates (spec 2026-11-01 R2, R5): a revival (no turn was cut), what the stop
+      // killed, and a cancelled request — each unreadable one reads as none, an unreadable entry
+      // of the list is dropped. An older build strips all four and clears the marker.
+      revival: z.literal(true).optional().catch(undefined),
+      stoppedWork: z
+        .array(z.unknown())
+        .transform((entries) =>
+          entries.flatMap((entry) => {
+            const parsed = continuationStoppedWorkSchema.safeParse(entry);
+            return parsed.success ? [parsed.data] : [];
+          })
+        )
+        .optional()
+        .catch(undefined),
+      moreStoppedWork: z.number().int().nonnegative().optional().catch(undefined),
+      requestCancelled: z.literal(true).optional().catch(undefined)
     })
     .optional(),
+  // Host updates (R3): background work runs in the thread, so a crash leaves it to revive.
+  // Head-only; unreadable reads as none.
+  backgroundWorkLive: z.literal(true).optional().catch(undefined),
+  // Host updates (R4): the automatic continue turns in a row, for the loop cap. Head-only; an
+  // entry that does not read is dropped.
+  autoContinues: z
+    .array(z.unknown())
+    .transform((entries) =>
+      entries.flatMap((entry) => {
+        const parsed = autoContinueSchema.safeParse(entry);
+        return parsed.success ? [parsed.data] : [];
+      })
+    )
+    .optional()
+    .catch(undefined),
   // Crash-safe resume: the continuation a host started after an unexpected stop, and how many
   // in a row. Head-only; unreadable reads as none.
   crashResumedTurn: z

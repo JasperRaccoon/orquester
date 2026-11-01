@@ -139,13 +139,14 @@ import type {
   HostGoalCommand
 } from "../adapter.ts";
 import {
+  AUTO_CONTINUE_LOOP_MESSAGE,
   CONTINUATION_FAILED_MESSAGE,
-  CONTINUATION_PROMPT,
   CONTINUATION_SEND_FAILED_MESSAGE,
   COMPACTION_FAILED_MESSAGE,
   CRASH_RESUME_LIMIT_MESSAGE,
   CRASH_RESUME_SUMMARY,
   crashResumeDetail,
+  crashRevivalDetail,
   type AgentHostBackgroundTask,
   type AgentHostPendingWake,
   type CreateHostThreadRequest,
@@ -226,6 +227,21 @@ import {
   leftoverWorkClosings,
   type LeftoverClosing
 } from "./leftover-work.ts";
+import {
+  activeTopLevelWork,
+  autoContinueChain,
+  continuationRetryDelay,
+  loopCapReached,
+  mergeStoppedWork,
+  namedLiveWork,
+  promptlessAllowed,
+  requestPending,
+  revivalMarkFor,
+  stopMarkFor,
+  stoppedWorkFields,
+  withAutoContinue
+} from "./continuation-policy.ts";
+import { continuationPrompt } from "./continuation-prompt.ts";
 import {
   launchConfigFromRequest,
   parseHostThreadProfile,
@@ -375,9 +391,8 @@ export interface OrchestratorOptions {
     home: "system" | "account";
   }): Promise<AccountHome>;
   /**
-   * §3.3: continuation is opt-in per project over a host-wide default that is
-   * **off**, because "pick up where you left off" is wrong for a project where
-   * a turn was halfway through a destructive operation.
+   * §3.3: whether the project continues its chats after a restart — per
+   * project over a host-wide default that is **on** (spec 2026-11-01 R1).
    */
   continuationEnabled?(projectPath: string): boolean | Promise<boolean>;
   /** A tab the user closed: settled on the next boot, never continued (§3.3). */
@@ -516,6 +531,19 @@ interface ThreadRuntime {
    * (`pending-wake.ts`) — or, read off `meta.json`, one the previous host left undelivered.
    */
   pendingWake: ThreadHead["pendingWake"];
+  /**
+   * Host updates (spec 2026-11-01 R3), head-only like {@link continueAfterRestart}: the liveness
+   * registry holds a subagent or background command of this thread — on `meta.json`, so a host
+   * that dies with it running leaves the next boot a reason to fold the thread and revive it.
+   */
+  backgroundWorkLive: true | undefined;
+  /** Host updates (R4), head-only: the automatic continues in a row (`continuation-policy.ts`). */
+  autoContinues: ThreadHead["autoContinues"];
+  /**
+   * Host updates (R4), in memory: the turn the user's Stop asked to interrupt. A `/stop` that
+   * finds that turn still running does not mark it: the user's Stop is not undone by a restart.
+   */
+  userInterruptedTurnId: string | null;
   /**
    * Goals §5.5, head-only like {@link continueAfterRestart}: the handover
    * found this thread's goal continuing, so this host resumes its provider
@@ -725,6 +753,15 @@ const PENDING_TURN_GRACE_MS = 5 * 60_000;
  * settled instead, so a turn that keeps taking the host down never loops.
  */
 const MAX_CRASH_RESUME_ATTEMPTS = 2;
+
+/** The runtime events that move the liveness registry (`liveness.ts` `transitionFor`). */
+const LIVENESS_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "task.started",
+  "task.progress",
+  "task.updated",
+  "task.completed",
+  "session.exited"
+]);
 
 /**
  * Goals §5.7: the row a goal held for a deploy leaves on its timeline, the one
@@ -1380,6 +1417,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       continueAfterRestart: persistedHead?.continueAfterRestart,
       crashResumedTurn: persistedHead?.crashResumedTurn,
       pendingWake: persistedHead?.pendingWake,
+      backgroundWorkLive: persistedHead?.backgroundWorkLive === true ? true : undefined,
+      autoContinues: persistedHead?.autoContinues,
+      userInterruptedTurnId: null,
       resumeGoalAfterRestart: persistedHead?.resumeGoalAfterRestart === true ? true : undefined,
       goalHeldForHandover: persistedHead?.goalHeldForHandover === true ? true : undefined,
       forkStrategy: persistedHead?.forkStrategy,
@@ -1443,6 +1483,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     runtime.continueAfterRestart === undefined &&
     runtime.crashResumedTurn === undefined &&
     runtime.pendingWake === undefined &&
+    runtime.backgroundWorkLive === undefined &&
+    runtime.autoContinues === undefined &&
     runtime.resumeGoalAfterRestart === undefined &&
     runtime.goalHeldForHandover === undefined &&
     runtime.forkStrategy === undefined
@@ -1454,6 +1496,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             : {}),
           ...(runtime.crashResumedTurn !== undefined ? { crashResumedTurn: runtime.crashResumedTurn } : {}),
           ...(runtime.pendingWake !== undefined ? { pendingWake: runtime.pendingWake } : {}),
+          ...(runtime.backgroundWorkLive === true ? { backgroundWorkLive: true } : {}),
+          ...(runtime.autoContinues !== undefined ? { autoContinues: runtime.autoContinues } : {}),
           ...(runtime.resumeGoalAfterRestart === true ? { resumeGoalAfterRestart: true } : {}),
           ...(runtime.goalHeldForHandover === true ? { goalHeldForHandover: true } : {}),
           ...(runtime.forkStrategy !== undefined ? { forkStrategy: runtime.forkStrategy } : {})
@@ -2664,6 +2708,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     runtime.bound = null;
     releaseProviderThreads(runtime.id);
     liveness.clear(runtime.id);
+    await syncBackgroundWorkMark(runtime);
     // Goals §5.5, §5.7: a session the user stopped — or a thread they deleted,
     // which comes through here — is not a goal to resume. The stop wins over a
     // handover's mark the boot has not acted on yet, and over a deploy's hold,
@@ -3933,6 +3978,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // A cause that does not parse is dropped, never a refusal.
         const cause = parseInterruptCause(body.cause);
         const occurredAt = clock.nowIso();
+        // Host updates R4: a restart that lands while this Stop is under way does not undo it.
+        runtime.userInterruptedTurnId = turnId ?? currentSession(runtime).activeTurnId;
         const events: AppendableDomainEvent[] = [
           buildEvent(
             runtime.id,
@@ -6797,6 +6844,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           // read can fall between a task's end and its pending wake.
           const wakeWrite = runtime ? notePendingWake(runtime, adapter, event) : null;
           if (wakeWrite !== null) await wakeWrite;
+          if (runtime && LIVENESS_EVENT_TYPES.has(event.type)) await syncBackgroundWorkMark(runtime);
           if (runtime) {
             // §3.1 for EVERY live turn. A turn the provider starts by itself —
             // a goal's continuation, the turn Codex starts for a host `/goal`,
@@ -7135,6 +7183,25 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
+   * Host updates (spec 2026-11-01 R3): `meta.json` says whether background work runs in the
+   * thread — rewritten only when that changes, so a host that dies with work running leaves
+   * the mark the next boot revives the thread by. Null when nothing changed.
+   */
+  const syncBackgroundWorkMark = (runtime: ThreadRuntime): Promise<void> | null => {
+    if (runtime.deleted || !runtime.state.head) return null;
+    const live = liveness.liveTasks(runtime.id).length > 0 ? true : undefined;
+    if (live === runtime.backgroundWorkLive) return null;
+    runtime.backgroundWorkLive = live;
+    return saveHeadNow(runtime);
+  };
+
+  /** What `/stop` is about to kill in the thread, named for the continue prompt (R2). */
+  const liveWorkOf = (runtime: ThreadRuntime) =>
+    namedLiveWork(liveness.liveTasks(runtime.id), runtime.state.roster, (taskId) =>
+      launchCommandOf(runtime.state.activities, taskId)
+    );
+
+  /**
    * `GET /health` `backgroundTasks`: what the liveness registry holds live, named from the
    * thread's roster and, for a shell, its launching call's command.
    */
@@ -7406,18 +7473,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // can be resumed, and the head's copy is a projection that an event may
         // already have replaced.
         if (persistedResumeCursor(runtime, head) === undefined) continue;
-        // A running turn is continued only where the project opted in.
-        // Continuation is opt-in per project over a host-wide default that is
-        // OFF, so a marker written for an opted-out thread would make the next
-        // boot resume it — the reconcile trusts a marker on its own, exactly
-        // because the stop path is supposed to be the place that filter is
-        // applied.
-        const turnToContinue =
-          status === "running" &&
-          activeTurnId !== null &&
-          (await options.continuationEnabled?.(head.projectPath)) === true
-            ? activeTurnId
-            : null;
+        // A thread is continued only where the project opted in (a
+        // per-project choice over a host-wide default): a marker written for
+        // an opted-out thread would make the next boot resume it — the
+        // reconcile trusts a marker on its own, exactly because the stop path
+        // is supposed to be the place that filter is applied.
         // Goals §5.5: a goal the provider continues by itself is resumed
         // WITHOUT that opt-in — setting the goal was the user's opt-in to
         // autonomous work. Only one that IS continuing, on a live session: a
@@ -7426,6 +7486,25 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // project): the turn is continued and the goal's session resumed.
         const adapter = options.adapters.get(head.adapter);
         const resumeGoal = goalContinues(runtime, adapter) && sessionIsLive(runtime, head, adapter);
+        // Host updates R2 (`continuation-policy.ts`): the running turn — or,
+        // with none, a revival of the subagents and background commands this
+        // stop kills; never a turn the user's Stop is ending. A goal's own
+        // resume (or hold) brings its session back already: no revival turn.
+        const mark =
+          (await options.continuationEnabled?.(head.projectPath)) === true
+            ? stopMarkFor({
+                session: { status, activeTurnId },
+                turns: runtime.state.turns,
+                live: liveWorkOf(runtime),
+                requestPending: requestPending(runtime.state.pending),
+                userInterruptedTurnId: runtime.userInterruptedTurnId,
+                nowMs: clock.now().getTime()
+              })
+            : null;
+        const turnToContinue =
+          mark !== null && (mark.revival !== true || (!resumeGoal && runtime.goalHeldForHandover !== true))
+            ? mark
+            : null;
         if (turnToContinue === null && !resumeGoal) continue;
         if (resumeGoal) {
           runtime.resumeGoalAfterRestart = true;
@@ -7435,7 +7514,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         await writeMarker(
           runtime,
           turnToContinue !== null
-            ? { turnId: turnToContinue, markedAt: clock.nowIso() }
+            ? { ...turnToContinue, markedAt: clock.nowIso() }
             : runtime.continueAfterRestart
         );
         marked.push(threadId);
@@ -7742,6 +7821,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   ): Promise<void> => {
     await closeLeftoverWork(runtime, runningTurnId);
     await recordLegacyLaunches(runtime);
+    // Host updates R3: the work the mark said ran is closed now (or a live
+    // session of this host owns it): the mark has done its job.
+    await syncBackgroundWorkMark(runtime);
   };
 
   /**
@@ -8090,7 +8172,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (
         persistedHead !== null &&
         !isOrphanedHead(persistedHead) &&
-        persistedHead.pendingWake === undefined
+        persistedHead.pendingWake === undefined &&
+        // Host updates R3: work a dead process ran may be the agent's to revive.
+        persistedHead.backgroundWorkLive !== true
       ) {
         bootSettlePending.add(threadId);
         // Goals §5.5, §5.7, decided off the same `meta.json` read: the
@@ -8133,7 +8217,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     }
     const marker = head.continueAfterRestart;
-    const orphaned = isOrphanedHead(head, runtime.state.turns);
+    // Host updates R3 (`continuation-policy.ts`): a crash that killed
+    // subagents — or fresh background commands — in a thread with no turn
+    // running revives it as a `/stop`'s revival marker would, decided off the
+    // roster the dead process left.
+    const crashRevival =
+      marker === undefined && !isLiveOrphan(head) && head.backgroundWorkLive === true
+        ? revivalMarkFor({
+            turns: runtime.state.turns,
+            stopped: activeTopLevelWork(runtime.state.roster),
+            stopAtMs: clock.now().getTime()
+          })
+        : null;
+    const orphaned = isOrphanedHead(head, runtime.state.turns) || crashRevival !== null;
     // The intentional stop's handover: a marked turn the host's teardown
     // settled — continued, never settled again (`continuesSettledTurn`).
     const settledByTeardown = orphaned && !isLiveOrphan(head);
@@ -8169,8 +8265,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         : marker.turnId === session.activeTurnId);
     const optIn = (await options.continuationEnabled?.(head.projectPath)) === true;
     const hasCursor = persistedResumeCursor(runtime, head) !== undefined;
-    // The turn a continuation continues: the running one, else the marker's.
-    const turnId = session.activeTurnId ?? marker?.turnId;
+    // The turn a continuation continues: the running one, else the marker's
+    // (or, for a crash's revival, the thread's latest).
+    const turnId = session.activeTurnId ?? marker?.turnId ?? crashRevival?.turnId;
     // Crash-safe resume. A clean stop hands its running turns over: `/stop`
     // marks them first (an unprepared marker naming the turn), and the
     // teardown settles them. An orphan with no such marker — its head still
@@ -8191,9 +8288,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       !closed &&
       hasCursor &&
       !superseded &&
-      (markerMatches || (optIn && session.status === "running" && session.activeTurnId !== null));
+      (markerMatches ||
+        (optIn && session.status === "running" && session.activeTurnId !== null) ||
+        (optIn && crashRevival !== null));
     const exhausted = eligible && crashAttempt !== null && crashAttempt > MAX_CRASH_RESUME_ATTEMPTS;
-    const continuable = eligible && !exhausted;
+    // Host updates R4: a thread the hosts keep continuing — restart after
+    // restart, nobody writing in between — is not continued again.
+    const chain = autoContinueChain(head.autoContinues, runtime.state.turns, clock.now().getTime());
+    const looping = eligible && !exhausted && loopCapReached(chain);
+    const continuable = eligible && !exhausted && !looping;
+    // What the restart stopped, read before any repair below closes it: the
+    // marker's record of a `/stop`, and what the roster still shows running
+    // (a crash, or a teardown whose rows never reached the log) (R2, R3, R5).
+    const stopped = mergeStoppedWork(marker?.stoppedWork ?? [], activeTopLevelWork(runtime.state.roster));
+    const revival = marker?.revival === true || crashRevival !== null;
+    const requestCancelled = marker?.requestCancelled === true || requestPending(runtime.state.pending);
 
     // §3.4's bounded grace window. A `/turn` commits its message and its
     // pending turn row BEFORE the effect runs, so a host that dies in that
@@ -8204,7 +8313,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // turn with the pending one.
     await settleStalePendingTurns(runtime);
 
-    if (settledByTeardown && (!continuable || typeof turnId !== "string")) {
+    if (settledByTeardown && !looping && (!continuable || typeof turnId !== "string")) {
       // The teardown's rows already said what happened — the turn
       // interrupted, the session stopped — and the thread cannot be continued
       // (its tab closed, its cursor gone): the marker goes, nothing else is
@@ -8225,12 +8334,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // of the work the process left open — carries the clock's time. The
       // settle comes first, so the log's times never go back. A turn whose
       // automatic resumes after unexpected stops ran out says so instead.
+      // So does one the loop cap stopped (R4) — even when the teardown had
+      // settled its turn already: the user is told why nothing goes on.
       if (exhausted) {
         logger.warn(`agent-host: not resuming ${threadId} again: the agent host stopped unexpectedly ${crashAttempt! - 1} time(s) in a row while it ran`);
       }
-      await settleAsError(runtime, exhausted ? CRASH_RESUME_LIMIT_MESSAGE : CONTINUATION_FAILED_MESSAGE, {
-        settledAt: crashSettleAt(runtime)
-      });
+      if (looping) {
+        logger.warn(`agent-host: not continuing ${threadId} again: it was continued ${chain.length} times in a row after restarts`);
+        runtime.autoContinues = undefined;
+      }
+      await settleAsError(
+        runtime,
+        exhausted ? CRASH_RESUME_LIMIT_MESSAGE : looping ? AUTO_CONTINUE_LOOP_MESSAGE : CONTINUATION_FAILED_MESSAGE,
+        { settledAt: crashSettleAt(runtime) }
+      );
       // A parked request's cancellation rides the turn the head said was
       // running, as a Stop's does, though the settle has just cleared it.
       await repairLeftovers(runtime, session.activeTurnId);
@@ -8251,12 +8368,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // like a settled thread (*T3: `serverRuntimeStartup.ts:655-690`*).
     try {
       // An unexpected stop's resume carries its attempt, so a host that dies
-      // before the send below counts on from it.
+      // before the send below counts on from it — and what was stopped, which
+      // the repair above has just closed, so its prompt still names it.
       await writeMarker(runtime, {
         turnId,
         prepared: true,
         markedAt: clock.nowIso(),
-        ...(crashAttempt !== null ? { crashAttempt } : {})
+        ...(crashAttempt !== null ? { crashAttempt } : {}),
+        ...(revival ? { revival: true as const } : {}),
+        ...stoppedWorkFields(stopped, marker?.moreStoppedWork ?? 0),
+        ...(requestCancelled ? { requestCancelled: true as const } : {})
       });
       await upsertBinding(runtime, { status: "starting" });
       await persistSession(runtime, { ...session, status: "starting", activeTurnId: null });
@@ -8278,7 +8399,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         kind: "runtime.warning",
         tone: "info",
         summary: CRASH_RESUME_SUMMARY,
-        detail: crashResumeDetail(crashAttempt, MAX_CRASH_RESUME_ATTEMPTS),
+        detail: (revival ? crashRevivalDetail : crashResumeDetail)(crashAttempt, MAX_CRASH_RESUME_ATTEMPTS),
         turnId,
         payload: { crashResume: { attempt: crashAttempt, maxAttempts: MAX_CRASH_RESUME_ATTEMPTS } }
       }).catch((error: unknown) => {
@@ -8286,17 +8407,34 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       });
     }
 
-    // 3. Forked: the loop only prepares the continuation (§3.3).
-    void runEffect(runtime, async () => {
+    // R8: what was cut and what was stopped, named, so the agent relaunches
+    // what it still needs (`continuation-prompt.ts`).
+    const prompt = continuationPrompt({
+      cause: crashAttempt !== null ? "crash" : "restart",
+      revival,
+      stopped,
+      moreStopped: marker?.moreStoppedWork ?? 0,
+      requestCancelled
+    });
+    const promptlessOk = promptlessAllowed({
+      stopped,
+      ...(revival ? { revival: true as const } : {}),
+      ...(marker?.moreStoppedWork !== undefined ? { moreStoppedWork: marker.moreStoppedWork } : {}),
+      ...(requestCancelled ? { requestCancelled: true as const } : {})
+    });
+
+    // 3. Forked: the loop only prepares the continuation (§3.3). A start that
+    // fails for a transient reason is tried again later (R6).
+    const sendContinuation = async (retriesDone: number): Promise<void> => {
       try {
         await ensureSession(runtime, { pendingTurnStart: true });
         const adapter = adapterFor(head.adapter);
-        const promptless = adapter.capabilities.promptlessTurnContinuation === true;
+        // Promptless where the adapter declares it (Codex) and nothing but the
+        // turn was cut (R7); otherwise the prompt that says what was.
+        const promptless = adapter.capabilities.promptlessTurnContinuation === true && promptlessOk;
         const result = await adapter.sendTurn({
           threadId,
-          // Promptless where the adapter declares it (Codex), otherwise the
-          // literal continuation prompt.
-          input: promptless ? "" : CONTINUATION_PROMPT,
+          input: promptless ? "" : prompt,
           attachments: [],
           interactionMode: "default",
           ...(promptless ? { continuation: true } : {})
@@ -8320,14 +8458,60 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // dies during it counts on (`priorCrashAttempts`).
         runtime.crashResumedTurn =
           crashAttempt !== null ? { turnId: result.turnId, attempt: crashAttempt } : undefined;
+        // R4: and the loop cap's count onto it, in the same write.
+        runtime.autoContinues = withAutoContinue(chain, { turnId: result.turnId, at: clock.nowIso() });
         await writeMarker(runtime, undefined);
       } catch (error) {
+        const retryInMs = hostStopping() ? null : continuationRetryDelay(error, retriesDone);
+        if (retryInMs !== null) {
+          logger.warn(`agent-host: could not continue ${threadId} after a restart yet; trying again in ${retryInMs} ms`, error);
+          await retryContinuationLater(runtime, error, retryInMs, () => sendContinuation(retriesDone + 1));
+          return;
+        }
         logger.warn(`agent-host: failed to continue ${threadId} after a restart`, error);
         // A continuation that was ATTEMPTED and failed says so; the orphan
         // message above is for a thread that was never eligible (§3.3 step 4).
         await settleAsError(runtime, CONTINUATION_SEND_FAILED_MESSAGE);
       }
+    };
+    void runEffect(runtime, () => sendContinuation(0));
+  };
+
+  /** R6: continuations waiting to try their start again, by thread; cleared at the stop. */
+  const continuationRetryTimers = new Map<string, NodeJS.Timeout>();
+
+  /**
+   * R6: a continuation whose start failed for a transient reason is tried
+   * again after `delayMs`, with a row that says so. Its prepared marker and
+   * the session's `starting` stay as they are meanwhile, so a host that stops
+   * before the retry leaves the next one the same continuation. The retry is
+   * dropped when the thread moved on — a turn started (the user's message: the
+   * marker went with it), the session was ended, the thread deleted — or this
+   * host began to stop.
+   */
+  const retryContinuationLater = async (
+    runtime: ThreadRuntime,
+    error: unknown,
+    delayMs: number,
+    retry: () => Promise<void>
+  ): Promise<void> => {
+    await appendActivity(runtime, {
+      kind: "runtime.warning",
+      tone: "info",
+      summary: "Could not continue after the restart yet",
+      detail: `The agent did not start (${describeFailure(error)}). Trying again in ${Math.round(delayMs / 1000)} seconds.`,
+      turnId: null
+    }).catch((appendError: unknown) => {
+      logger.warn(`agent-host: could not note the continuation retry of ${runtime.id}`, appendError);
     });
+    clearTimeout(continuationRetryTimers.get(runtime.id));
+    const timer = setTimeout(() => {
+      continuationRetryTimers.delete(runtime.id);
+      if (hostStopping() || runtime.deleted || runtime.continueAfterRestart?.prepared !== true) return;
+      void runEffect(runtime, retry);
+    }, delayMs);
+    timer.unref?.();
+    continuationRetryTimers.set(runtime.id, timer);
   };
 
   // -------------------------------------------------------------------------
@@ -9072,6 +9256,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // host's expiry clocks go.
     for (const timer of pendingWakeTimers.values()) clearTimeout(timer);
     pendingWakeTimers.clear();
+    // Likewise a continuation waiting to retry (R6): its prepared marker is the next host's.
+    for (const timer of continuationRetryTimers.values()) clearTimeout(timer);
+    continuationRetryTimers.clear();
     await drain(true);
     for (const runtime of runtimes.values()) {
       await noteWorkTheTeardownStopped(runtime);
@@ -9261,7 +9448,9 @@ function continuesSettledTurn(head: ThreadHead, turns: readonly Turn[] | undefin
     marker.markedAt !== undefined &&
     latest !== undefined &&
     latest.turnId === marker.turnId &&
-    latest.state === "interrupted"
+    // Host updates R2b: a revival names the turn that had ENDED when the stop
+    // killed its subagents — still the latest, so nothing came after it.
+    (latest.state === "interrupted" || marker.revival === true)
   );
 }
 

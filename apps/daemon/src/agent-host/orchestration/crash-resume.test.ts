@@ -15,7 +15,6 @@ import type { DomainEvent, RuntimeEvent } from "@orquester/api/agent-chat";
 
 import {
   CONTINUATION_FAILED_MESSAGE,
-  CONTINUATION_PROMPT,
   CRASH_RESUME_LIMIT_MESSAGE,
   CRASH_RESUME_SUMMARY,
   type HostThreadBox
@@ -27,6 +26,7 @@ import {
   type TestHost,
   type TestHostOptions
 } from "./testing/index.ts";
+import { isContinuationPrompt } from "./continuation-prompt.ts";
 
 let commandSeq = 0;
 const cmd = (): string => `cr-${(commandSeq += 1)}`;
@@ -56,7 +56,7 @@ async function crashedMidTurn(options: HostOptions = {}): Promise<{ store: FakeT
 
 const resumesOf = (host: TestHost, threadId: string) =>
   host.adapter.calls.filter(
-    (call) => call.kind === "sendTurn" && call.threadId === threadId && (call.detail as { input?: string }).input === CONTINUATION_PROMPT
+    (call) => call.kind === "sendTurn" && call.threadId === threadId && isContinuationPrompt((call.detail as { input?: string }).input ?? "")
   );
 
 const activitiesOf = (store: FakeThreadStore, threadId: string) =>

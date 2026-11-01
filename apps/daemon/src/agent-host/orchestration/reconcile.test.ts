@@ -47,6 +47,7 @@ import {
   type FakeThreadStore,
   type TestHost
 } from "./testing/index.ts";
+import { isContinuationPrompt } from "./continuation-prompt.ts";
 
 let commandSeq = 0;
 const cmd = (): string => `rc-${(commandSeq += 1)}`;
@@ -849,7 +850,7 @@ describe("reconcile — an intentional stop's marked turn the host's own teardow
 
   const continuationSends = (host: TestHost) =>
     host.adapter.calls.filter(
-      (call) => call.kind === "sendTurn" && (call.detail as { input?: string }).input === "Continue where you left off."
+      (call) => call.kind === "sendTurn" && isContinuationPrompt((call.detail as { input?: string }).input ?? "")
     );
 
   it("continues it: the next host resumes the turn the teardown settled, and never settles it again", async () => {
