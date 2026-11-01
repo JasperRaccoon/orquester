@@ -225,6 +225,7 @@ import {
   stoppedWorkNotice,
   legacyLaunchStarts,
   leftoverWorkClosings,
+  leftRunningAfterHostStopNote,
   type LeftoverClosing
 } from "./leftover-work.ts";
 import {
@@ -7815,6 +7816,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           now: occurredAt,
           nextId: () => ids.eventId(),
           closed,
+          ...(stopSurvivalOf(runtime)?.backgroundShellsOutliveSession === true
+            ? { backgroundLeftRunningNote: leftRunningAfterHostStopNote() }
+            : {}),
           ...(runningTurnId !== undefined ? { runningTurnId } : {})
         });
         if (closings.length === 0) break;

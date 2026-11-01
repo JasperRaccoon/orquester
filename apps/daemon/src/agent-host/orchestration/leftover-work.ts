@@ -149,6 +149,13 @@ export interface LeftoverClosing {
 interface LeftoverWorkInput {
   /** Stamped on every row. */
   readonly now: string;
+  /**
+   * The thread's adapter runs background shells and monitors that outlive its process
+   * (`AdapterCapabilities.backgroundShellsOutliveSession`, Grok): the process that died did not
+   * take them with it. Their closer then says so, `leftRunning` with this note as its summary, as
+   * the adapter's own teardown writes it — never a bare "stopped" for work that runs on.
+   */
+  readonly backgroundLeftRunningNote?: string;
   /** A fresh activity id, asked once per row. */
   readonly nextId: () => string;
   /** Keys of units already closed: a later pass skips them. */
@@ -250,7 +257,8 @@ export function backgroundWorkStoppedNotice(
 ): { summary: string; detail: string } | null {
   return stoppedWorkNotice(
     closings
-      .filter((closing) => closing.key.startsWith("task:"))
+      // A task left running did not stop: its own row says where it runs on.
+      .filter((closing) => closing.key.startsWith("task:") && asRecord(closing.activity.payload)?.leftRunning !== true)
       .map((closing) => {
         const payload = asRecord(closing.activity.payload) ?? {};
         return {
@@ -447,6 +455,22 @@ function taskRowsOf(activities: readonly ThreadActivityItem[]): Map<string, Task
   return rows;
 }
 
+/** Whether `agent` is a shell or monitor whose process outlived the one that died. */
+function leftRunning(agent: RuntimeSubagent, input: LeftoverWorkInput): boolean {
+  return input.backgroundLeftRunningNote !== undefined && agent.agentKind === "background";
+}
+
+/**
+ * The note a closer left running says (`LeftoverWorkInput.backgroundLeftRunningNote`), worded as
+ * the Grok adapter's own teardown words it. Settings → System lists such processes from `/proc`,
+ * so only Linux points there.
+ */
+export function leftRunningAfterHostStopNote(platform: NodeJS.Platform = process.platform): string {
+  return platform === "linux"
+    ? "Left running when the agent host stopped — stop it from Settings → System."
+    : "Left running when the agent host stopped.";
+}
+
 /** `task.completed {status: "stopped"}`, as a teardown's `closeLiveTasks` writes it. */
 function taskCloser(agent: RuntimeSubagent, rows: TaskRows, input: LeftoverWorkInput): ThreadActivityItem {
   const source = asRecord(rows.latest.payload) ?? {};
@@ -471,7 +495,8 @@ function taskCloser(agent: RuntimeSubagent, rows: TaskRows, input: LeftoverWorkI
       // The rows' own spelling: `openWorkOf` keys a task on it untrimmed.
       taskId: nonBlank(asRecord(rows.start?.payload)?.taskId) ?? nonBlank(source.taskId) ?? agent.id,
       status: "stopped",
-      ...linkage
+      ...linkage,
+      ...(leftRunning(agent, input) ? { summary: input.backgroundLeftRunningNote, leftRunning: true } : {})
     },
     turnId: opener.turnId,
     ...(owner !== undefined ? { agentId: owner } : {}),

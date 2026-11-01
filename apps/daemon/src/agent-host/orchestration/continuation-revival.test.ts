@@ -314,6 +314,16 @@ describe("work that outlives the stop is never counted as stopped (Grok's shells
     await shutDown(first); // a crash
     const { next, sends } = await boot(first.host.store, grok(2));
     assert.deepEqual(sends, []);
+    // The timeline says it runs on, as Grok's own teardown would: never "stopped with the host".
+    const activities = (first.host.store.logs.get(THREAD) ?? []).flatMap((event) =>
+      event.type === "thread.activity-appended" ? [(event.payload as { activity: { activityKind?: string; kind?: string; summary?: string; payload?: Record<string, unknown> } }).activity] : []
+    );
+    const closer = activities.find((activity) => activity.activityKind === "task.completed" && activity.payload?.taskId === SHELL.taskId);
+    assert.equal(closer?.payload?.leftRunning, true, "the shell's closing row says it was left running");
+    assert.ok(
+      !activities.some((activity) => /stopped with the agent host/.test(activity.summary ?? "")),
+      "no notice says it stopped"
+    );
     await shutDown(next);
   });
 });
