@@ -623,7 +623,7 @@ export class AgentHostSupervisor implements HostDirectory {
   async ownershipStale(threadId: string, generation: number): Promise<void> {
     const host = this.retiring.get(generation);
     if (host !== undefined && host.owned.has(threadId)) {
-      this.releaseThreads(host, [threadId]);
+      await this.releaseThreads(host, [threadId]);
     } else {
       await this.refreshRetiringOwnership();
       if (this.retiringOwnerOf(threadId) === null && !this.switchKeeps?.threadIds.has(threadId)) {
@@ -1955,7 +1955,7 @@ export class AgentHostSupervisor implements HostDirectory {
       const probed = await this.safeProbe(host.generation);
       const now = this.opts.adapters.now();
       if (probed.ok) {
-        this.applyRetiringHealth(host, probed.health);
+        await this.applyRetiringHealth(host, probed.health);
         if (host.owned.size === 0) {
           await this.endRetiringHost(host, "drained");
           continue;
@@ -1976,13 +1976,13 @@ export class AgentHostSupervisor implements HostDirectory {
   }
 
   /** A fresh `/health` of a retiring host: every thread missing from its owned set was released. */
-  private applyRetiringHealth(host: RetiringHost, health: AgentHostHealthResponse): void {
+  private async applyRetiringHealth(host: RetiringHost, health: AgentHostHealthResponse): Promise<void> {
     host.health = health;
     host.firstMissAt = null;
     if (!Array.isArray(health.ownedThreadIds)) return;
     const owned = new Set(health.ownedThreadIds);
     const released = [...host.owned].filter((threadId) => !owned.has(threadId));
-    if (released.length > 0) this.releaseThreads(host, released);
+    if (released.length > 0) await this.releaseThreads(host, released);
   }
 
   /** Re-read every retiring host's owned set now (a 409 said ours is stale). Never throws. */
@@ -1991,20 +1991,20 @@ export class AgentHostSupervisor implements HostDirectory {
       [...this.retiring.values()].map(async (host) => {
         if (host.ending) return;
         const probed = await this.safeProbe(host.generation);
-        if (probed.ok && this.retiring.get(host.generation) === host) this.applyRetiringHealth(host, probed.health);
+        if (probed.ok && this.retiring.get(host.generation) === host) await this.applyRetiringHealth(host, probed.health);
       })
     );
   }
 
   /** R26: `host` no longer owns these: the primary adopts each. */
-  private releaseThreads(host: RetiringHost, threadIds: readonly string[]): void {
+  private async releaseThreads(host: RetiringHost, threadIds: readonly string[]): Promise<void> {
     for (const threadId of threadIds) {
       // Registered before the owner changes, in the same tick: no request routes in between.
       this.startAdoption(threadId);
       host.owned.delete(threadId);
     }
     this.log("log", `agent host ${host.generation} released ${threadIds.length} chat(s); the current host adopts them`);
-    void this.persistRegistry();
+    await this.persistRegistry();
   }
 
   /** R26: adopt `threadId` on the primary, retried with backoff until it is — never dropped. */
