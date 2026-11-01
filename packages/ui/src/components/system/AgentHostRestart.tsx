@@ -24,9 +24,10 @@ function failureText(error: unknown): string {
 
 /**
  * Settings → Host status: the agent host, and the restart a deploy left pending. A pending
- * restart waits until no chat has a turn running or background work live — it never kills a
- * running shell, however long it runs — so a dev server left running holds it indefinitely. This
- * says what it waits on, per chat, with a Stop for each task, and restarts at once on request.
+ * restart waits until no chat has a turn running or background work live, for at most the update
+ * grace on a host that resumes the chats it interrupts (spec 2026-11-01 P1.4 R12–R14), and
+ * without limit on one that cannot. This says what it waits on, per chat, with a Stop for each
+ * task, when it goes ahead anyway, and restarts at once on request.
  */
 export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
   const api = useApi();
@@ -86,7 +87,7 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
     <SettingsSection
       bare
       title="Agent host"
-      description="The process that runs every agent chat. A restart a deploy needs waits until no chat has a turn running or background work live."
+      description="The process that runs every agent chat. It updates automatically after a deploy, without stopping the chats that are working."
       actions={
         <Button variant="outline" size="sm" disabled={!data || restarting} onClick={() => setConfirmRestart(true)}>
           {restarting ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
@@ -119,8 +120,14 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
         {pending && (
           <Notice tone="warn" title="A restart is pending">
             <p>
-              The agent host runs older code than this checkout and restarts as soon as nothing below is running
-              {pending.since ? ` (waiting since ${new Date(pending.since).toLocaleString()})` : ""}.
+              The agent host runs older code than this checkout. It updates automatically as soon as nothing below is
+              running
+              {pending.since ? ` (waiting since ${new Date(pending.since).toLocaleString()})` : ""}
+              {pending.restartsAt
+                ? `, and at ${new Date(pending.restartsAt).toLocaleString()} at the latest. Chats still working then are resumed on the new host, and their subagents relaunched.`
+                : data?.restartResumesChats === false
+                  ? ". This host cannot resume the chats a restart interrupts, so it waits for them however long they run."
+                  : ". Chats still working when it restarts are resumed on the new host, and their subagents relaunched."}
             </p>
           </Notice>
         )}
@@ -165,7 +172,11 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
         confirmLabel="Restart now"
         message={
           <>
-            <p className="mb-2">Every agent chat's provider process is restarted. This stops:</p>
+            <p className="mb-2">
+              {data?.restartResumesChats === true
+                ? "Every agent chat's provider process is restarted. The chats working now are resumed on the new host and their subagents relaunched, not stopped:"
+                : "Every agent chat's provider process is restarted. This host cannot resume chats, so this stops, without resuming:"}
+            </p>
             <ul className="list-disc space-y-0.5 pl-4">
               {restartNowConsequences(data).map((line) => (
                 <li key={line}>{line}</li>

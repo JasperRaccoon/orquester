@@ -24,6 +24,7 @@ import {
   AGENT_HOST_PREPARED_TIMEOUT_MS,
   AGENT_HOST_PROTOCOL_VERSION,
   AGENT_HOST_SERVICE_SESSION,
+  AGENT_HOST_UPDATE_GRACE_MS,
   agentHostSupports,
   type AgentHostCapabilities,
   type AgentHostHealthResponse
@@ -222,6 +223,12 @@ export interface SupervisorAdapters {
   now(): number;
   sleep(ms: number): Promise<void>;
   /**
+   * Run `fn` once after `ms`; the returned function cancels it. Defaults to an unref'd
+   * `setTimeout`, so a test drives it with `mock.timers`. For deadlines that must fire without a
+   * health tick: the update grace (spec 2026-11-01 P1.4 R12).
+   */
+  setTimer?(ms: number, fn: () => void): () => void;
+  /**
    * The host reported a NEW `providersRevision` — its own background /
    * session-start refresh changed a snapshot (§4.6.4). The daemon raises the
    * coarse `agent.providers.changed` from here; without it only the explicit
@@ -339,6 +346,8 @@ export class AgentHostSupervisor {
   private pendingRestartSince: number | null = null;
   /** When {@link warnIfRestartLongPending} last warned, or null. */
   private lastPendingWarnAt: number | null = null;
+  /** Cancels the timer that re-evaluates the drain when the update grace runs out (R12). */
+  private cancelGraceTimer: (() => void) | null = null;
   /** What the host a deploy waits on answered to its §5.7 goal hold ({@link GoalHoldState}). */
   private goalHold: GoalHoldState | null = null;
   /** The §5.7 hold request still waiting for its answer, if any: one at a time. */
@@ -407,7 +416,8 @@ export class AgentHostSupervisor {
       pid: status.pid,
       codeStamp: typeof health?.codeStamp === "string" ? health.codeStamp : null,
       checkoutCodeStamp: this.opts.codeStamp ?? null,
-      pendingRestart: null
+      pendingRestart: null,
+      restartResumesChats: agentHostSupports(health, "continuationRevival")
     };
     if (!this.pendingVersionRestart || health === null) return base;
     const blockers: AgentHostRestartBlocker[] = [];
@@ -441,7 +451,8 @@ export class AgentHostSupervisor {
         reason: this.staleReason(health),
         since: this.pendingRestartSince === null ? null : new Date(this.pendingRestartSince).toISOString(),
         deferredBy: this.lastDrainDeferral,
-        blockers
+        blockers,
+        restartsAt: isoOrNull(this.graceDeadline(health))
       }
     };
   }
@@ -708,6 +719,7 @@ export class AgentHostSupervisor {
    */
   stop(): void {
     this.listeners.clear();
+    this.clearGraceTimer();
     if (!this.opts.adapters.tmux && this.directHandle) {
       try {
         this.directHandle.kill();
@@ -802,6 +814,22 @@ export class AgentHostSupervisor {
         this.log("log", `agent host restart deferred: ${blockers}`);
       }
       this.warnIfRestartLongPending(blockers);
+      // Spec 2026-11-01 P1.4 R12/R13: a host that resumes what a restart cuts waits for the
+      // drain only for the update grace, then restarts through the same `/stop`, which marks
+      // every working chat for continuation. One that cannot keeps waiting without limit.
+      const deadline = this.graceDeadline(probed.health);
+      if (deadline !== null) {
+        if (this.opts.adapters.now() >= deadline) {
+          this.log(
+            "warn",
+            `agent host update grace (${Math.round(AGENT_HOST_UPDATE_GRACE_MS / 60_000)} min) is over: restarting it under ${blockers}; working chats are resumed on the new host`
+          );
+          this.lastDrainDeferral = null;
+          await this.drainAndRestart();
+          return;
+        }
+        this.armGraceTimer(deadline);
+      }
       // Agent goals §5.7. A continuing Codex goal starts its next turn within
       // milliseconds of the last, so `activeTurnThreadIds` is almost never
       // empty and this drain used to wait out the whole goal — hours. Ask the
@@ -1058,6 +1086,7 @@ export class AgentHostSupervisor {
    * rather than silently half-applied.
    */
   private async drainAndRestart(): Promise<void> {
+    this.clearGraceTimer();
     if (this.state === "healthy") {
       try {
         await this.opts.adapters.requestStop();
@@ -1264,8 +1293,42 @@ export class AgentHostSupervisor {
     if (!this.isStale(health)) {
       this.pendingVersionRestart = false;
       this.pendingRestartSince = null;
+      this.clearGraceTimer();
     }
     this.setState("healthy", null);
+  }
+
+  /**
+   * Spec 2026-11-01 P1.4 R12/R13: when a pending restart of `health`'s host goes ahead although
+   * the host has not drained — {@link AGENT_HOST_UPDATE_GRACE_MS} after the restart was first
+   * deferred. Null before that, and for a host without `continuationRevival`: its `/stop` would
+   * leave the chats it cut stopped, so it is never forced.
+   */
+  private graceDeadline(health: AgentHostHealthResponse | null): number | null {
+    if (this.pendingRestartSince === null || !agentHostSupports(health, "continuationRevival")) return null;
+    return this.pendingRestartSince + AGENT_HOST_UPDATE_GRACE_MS;
+  }
+
+  /** One timer at a time re-evaluates the drain at the grace deadline, without a health tick. */
+  private armGraceTimer(deadline: number): void {
+    if (this.cancelGraceTimer !== null) return;
+    this.cancelGraceTimer = this.setTimer(Math.max(0, deadline - this.opts.adapters.now()), () => {
+      this.cancelGraceTimer = null;
+      this.evaluateDrainSoon();
+    });
+  }
+
+  private clearGraceTimer(): void {
+    this.cancelGraceTimer?.();
+    this.cancelGraceTimer = null;
+  }
+
+  private setTimer(ms: number, fn: () => void): () => void {
+    const own = this.opts.adapters.setTimer;
+    if (own) return own(ms, fn);
+    const timer = setTimeout(fn, ms);
+    timer.unref?.();
+    return () => clearTimeout(timer);
   }
 
   /**
@@ -1354,6 +1417,11 @@ export class AgentHostSupervisor {
     this.queue = run.catch(() => undefined);
     return run;
   }
+}
+
+/** An epoch-ms instant as ISO, or null. */
+function isoOrNull(ms: number | null): string | null {
+  return ms === null ? null : new Date(ms).toISOString();
 }
 
 /** A code stamp for a log line: its first 12 characters, or `unknown`. */
