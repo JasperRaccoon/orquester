@@ -536,6 +536,15 @@ test("codex parser state (session, cwd, speed, fork suppression) carries across 
   assert.deepEqual(w.scanner.historyRecords()!.map((r) => [r.session, r.cwd, r.speed, r.model, r.input, r.output, r.requests]), [["child", "/work/ws/a", "ultrafast", "gpt-6-sol", 20, 10, 1]]);
 });
 
+test("a request without its own timestamp counts in the Cost tab but not in the history records, whose hours must not move", async (t) => {
+  const w = await historyWorld(t, "orq-utok-hist-undated-");
+  const { timestamp: _, ...undated } = claudeTurn({ id: "u", at: "", usage: { input_tokens: 7, output_tokens: 1 } });
+  await writeFile(join(w.claudeDir, "a.jsonl"), jsonl(undated, claudeTurn({ id: "d", at: "2026-07-07T08:00:00Z", usage: { input_tokens: 3, output_tokens: 1 } })));
+  const rows = (await w.scanner.snapshot(true)).rows;
+  assert.equal(rows.reduce((sum, row) => sum + row.inputTokens, 0), 10);
+  assert.deepEqual(w.scanner.historyRecords()!.map((r) => [r.hour, r.input]), [[hourOf("2026-07-07T08:00:00Z"), 3]]);
+});
+
 test("history records are de-duplicated across transcripts, and a deleted winner's copy takes its place", async (t) => {
   const w = await historyWorld(t, "orq-utok-hist-dedup-");
   const turn = claudeTurn({ id: "x", at: "2026-07-07T08:00:00Z", usage: { input_tokens: 3, output_tokens: 4 } });

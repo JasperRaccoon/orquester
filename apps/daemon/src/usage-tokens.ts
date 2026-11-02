@@ -14,6 +14,8 @@ interface RawRow {
   model: string;
   /** When the request ran (epoch ms): the event's timestamp, else the file's mtime. */
   ts: number;
+  /** {@link ts} is the file's mtime (the line has no timestamp): it moves with every later write. */
+  undated?: true;
   /** Provider session id (interned per file), or null. */
   session: string | null;
   /** The working directory the request ran in (interned per file), or null. */
@@ -106,10 +108,15 @@ function priceSlices(slices: readonly DaySlice[]): UsageTokenRow[] {
   return [...byKey.values()].sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : a.model.localeCompare(b.model)));
 }
 
-/** Rows summed per agent, model, UTC hour, cwd, session and speed: the usage ledger's input. */
+/**
+ * Rows summed per agent, model, UTC hour, cwd, session and speed: the usage ledger's input. A row
+ * without its own timestamp is left out: its hour (the file's mtime) moves on every later write,
+ * and the ledger would keep each hour it was once seen in.
+ */
 function historyOf(raw: RawRow[]): UsageRecord[] {
   const byKey = new Map<string, UsageRecord>();
   for (const r of raw) {
+    if (r.undated) continue;
     const hour = Math.floor(r.ts / HOUR_MS);
     // null and "" never meet (interned strings are never empty); NUL never occurs in a path or an id.
     const key = `${r.agent}|${r.model}|${hour}|${r.speed}\0${r.cwd ?? ""}\0${r.session ?? ""}`;
@@ -151,10 +158,10 @@ async function walkJsonl(dir: string): Promise<string[]> {
   return out;
 }
 
-/** An event's time (epoch ms), else `fallbackMs` (the file's mtime). */
-function tsOf(timestamp: unknown, fallbackMs: number): number {
+/** An event's time (epoch ms), else `fallbackMs` (the file's mtime) and `undated`. */
+function tsOf(timestamp: unknown, fallbackMs: number): Pick<RawRow, "ts" | "undated"> {
   const t = timestamp ? new Date(timestamp as string).getTime() : Number.NaN;
-  return Number.isNaN(t) ? fallbackMs : t;
+  return Number.isNaN(t) ? { ts: fallbackMs, undated: true } : { ts: t };
 }
 
 /** A file's string pool: one instance per distinct session or cwd, however many rows carry it. */
@@ -197,7 +204,7 @@ function parseClaudeFile(text: string, mtimeMs: number, path: string, strings: S
     const requestId = obj?.requestId;
     const dedupId =
       typeof messageId === "string" && typeof requestId === "string" ? `${messageId}:${requestId}` : undefined;
-    const ts = tsOf(obj?.timestamp, mtimeMs);
+    const when = tsOf(obj?.timestamp, mtimeMs);
     const session = intern(strings, obj?.sessionId);
     const cwd = intern(strings, obj?.cwd);
     const speed: UsageSpeed = u.speed === "fast" ? "fast" : "standard";
@@ -216,7 +223,7 @@ function parseClaudeFile(text: string, mtimeMs: number, path: string, strings: S
       const row: RawRow = {
         agent: "claude",
         model: rowModel,
-        ts,
+        ...when,
         session,
         cwd,
         speed,
@@ -353,7 +360,7 @@ function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState, s
     rows.push({
       agent: "codex",
       model: state.model,
-      ts: tsOf(obj?.timestamp, mtimeMs),
+      ...tsOf(obj?.timestamp, mtimeMs),
       session: state.session,
       cwd: state.cwd,
       speed: state.speed,
