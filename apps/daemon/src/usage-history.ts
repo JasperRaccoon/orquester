@@ -18,8 +18,6 @@ import { access, readFile, rename } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import type {
-  UsageCostParts,
-  UsageCostSource,
   UsageHistoryBucket,
   UsageHistoryProjectBucket,
   UsageHistoryResponse,
@@ -627,12 +625,16 @@ function mergeInto(stored: Bucket, live: Bucket): boolean {
   return changed;
 }
 
-/** Price one (agent, model after aliasing, speed) cell: override > reported > built-in > unpriced. */
+/**
+ * Price one (agent, model after aliasing, speed) cell: override > reported > built-in > unpriced. A
+ * fast or ultrafast cell at built-in rates also says what it costs at standard rates (an override
+ * has no tiers, so there it would only repeat the cost).
+ */
 function priceCell(
   model: string,
   speed: UsageSpeed,
   sums: Sums
-): { costUsd: number | null; cost: UsageCostParts | null; costSource: UsageCostSource; cacheSavingsUsd: number; unpricedTokens: number } {
+): Pick<UsageHistoryBucket, "costUsd" | "cost" | "costSource" | "cacheSavingsUsd" | "unpricedTokens" | "standardCostUsd"> {
   const tokens = processed(sums);
   if (!overrideFor(model) && sums.reportedRequests > 0) {
     const unreported = sums.requests > 0 ? Math.max(0, sums.requests - sums.reportedRequests) / sums.requests : 0;
@@ -640,5 +642,7 @@ function priceCell(
   }
   const priced = priceSlice(model, speed, sums);
   if (!priced) return { costUsd: null, cost: null, costSource: "unpriced", cacheSavingsUsd: 0, unpricedTokens: tokens };
-  return { costUsd: priced.costUsd, cost: priced.parts, costSource: "estimated", cacheSavingsUsd: priced.cacheSavingsUsd, unpricedTokens: 0 };
+  const cell = { costUsd: priced.costUsd, cost: priced.parts, costSource: "estimated" as const, cacheSavingsUsd: priced.cacheSavingsUsd, unpricedTokens: 0 };
+  if (speed === "standard" || priced.rateSource === "override") return cell;
+  return { ...cell, standardCostUsd: priceSlice(model, "standard", sums)!.costUsd };
 }

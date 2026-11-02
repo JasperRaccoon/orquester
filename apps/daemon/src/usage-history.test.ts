@@ -326,6 +326,19 @@ test("a new workspaces root moves the projects of all history, and the same usag
   assert.deepEqual(reloaded.query({ range: range("1d"), timeZone: "UTC", scanning: false }), answer());
 });
 
+test("a fast cell at built-in rates also says what it costs at standard rates; at an override it does not", async (t) => {
+  const { make } = await world(t);
+  const history = make();
+  history.ingest(source([
+    rec({ model: "claude-opus-5-5", speed: "fast", input: M, output: M, session: "f" }),
+    rec({ model: "claude-opus-5-5", input: M, output: 0, session: "s" })
+  ]));
+  const cells = () => history.query({ range: range("1d"), timeZone: "UTC", scanning: false }).buckets;
+  assert.deepEqual(cells().map((b) => [b.speed, b.costUsd, b.standardCostUsd]), [["fast", 48, 24], ["standard", 4, undefined]]);
+  setUsagePricingConfig({ overrides: { "claude-opus-5-5": { input: 1, output: 1 } }, aliases: {} });
+  assert.deepEqual(cells().map((b) => [b.speed, b.costUsd, b.standardCostUsd]), [["fast", 2, undefined], ["standard", 1, undefined]]);
+});
+
 test("cells are priced override > reported > built-in > unpriced, after aliases fold models", async (t) => {
   const { make } = await world(t);
   const history = make();
