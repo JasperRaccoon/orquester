@@ -855,6 +855,8 @@ export interface UsageWindow {
   used?: number;
   limit?: number;
   remaining?: number;
+  /** The window's full length in minutes, when the provider states it (pace markers). */
+  windowMinutes?: number;
 }
 
 /** A model-scoped quota window (e.g. the Fable weekly cap on Max plans),
@@ -1026,6 +1028,9 @@ export interface UsageHistoryBucket {
   cacheSavingsUsd: number;
   /** Processed tokens with no price (excluded from cost). */
   unpricedTokens: number;
+  /** For an estimated fast/ultrafast cell: what the same tokens cost at standard rates
+   *  (the premium is costUsd − standardCostUsd). Absent otherwise. */
+  standardCostUsd?: number;
 }
 /** One (project, agent, model) over the whole range. `project` is "<workspace>/<project>",
  *  or "" for use outside the workspaces root. */
@@ -1046,6 +1051,9 @@ export interface UsageHistorySessions {
   byModel: Record<string, number>;
   /** Keyed by project ("" = outside the workspaces root). */
   byProject: Record<string, number>;
+  /** Keyed `${agent}:${project}`: a session belongs to one agent, so summing the visible
+   *  agents' entries of a project is exact when some agents are filtered out. */
+  byProjectAgent: Record<string, number>;
 }
 /** Where an agent's usage comes from and how far back it reaches. */
 export interface UsageHistorySource {

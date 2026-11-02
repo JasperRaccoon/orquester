@@ -24,7 +24,7 @@ function answer(range: string, over: Partial<UsageHistoryResponse> = {}): UsageH
     periods: [],
     buckets: [],
     projectBuckets: [],
-    sessions: { total: 0, byAgent: {}, byModel: {}, byProject: {} },
+    sessions: { total: 0, byAgent: {}, byModel: {}, byProject: {}, byProjectAgent: {} },
     sources: [],
     recordedSince: null,
     scanning: false,

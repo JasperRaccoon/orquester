@@ -65,7 +65,7 @@ const data = historyResponse({
       unpricedTokens: 5000
     })
   ],
-  sessions: { total: 3, byAgent: { claude: 2, codex: 1 }, byModel: { "claude:claude-opus-5": 2, "codex:gpt-6-mystery": 1 }, byProject: {} }
+  sessions: { total: 3, byAgent: { claude: 2, codex: 1 }, byModel: { "claude:claude-opus-5": 2, "codex:gpt-6-mystery": 1 }, byProject: {}, byProjectAgent: {} }
 });
 
 function render(onSetPrice: (model: string) => void): HTMLElement {

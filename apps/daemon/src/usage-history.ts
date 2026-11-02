@@ -375,7 +375,8 @@ export class UsageHistory {
       total: new Set<string>(),
       byAgent: new Map<string, Set<string>>(),
       byModel: new Map<string, Set<string>>(),
-      byProject: new Map<string, Set<string>>()
+      byProject: new Map<string, Set<string>>(),
+      byProjectAgent: new Map<string, Set<string>>()
     };
     const addSessions = (map: Map<string, Set<string>>, key: string, ids: Iterable<string>) => {
       let set = map.get(key);
@@ -403,6 +404,7 @@ export class UsageHistory {
       addSessions(sessions.byAgent, bucket.agent, ids);
       addSessions(sessions.byModel, `${bucket.agent}:${model}`, ids);
       addSessions(sessions.byProject, bucket.project, ids);
+      addSessions(sessions.byProjectAgent, `${bucket.agent}:${bucket.project}`, ids);
     }
 
     const buckets: UsageHistoryBucket[] = [...cells.values()]
@@ -429,7 +431,8 @@ export class UsageHistory {
       total: sessions.total.size,
       byAgent: counts(sessions.byAgent),
       byModel: counts(sessions.byModel),
-      byProject: counts(sessions.byProject)
+      byProject: counts(sessions.byProject),
+      byProjectAgent: counts(sessions.byProjectAgent)
     };
 
     return {

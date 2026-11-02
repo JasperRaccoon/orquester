@@ -60,7 +60,8 @@ const data = historyResponse({
     total: 9,
     byAgent: { claude: 4, codex: 3, grok: 2 },
     byModel: { "claude:claude-opus-5": 4, "codex:gpt-6-sol": 2, "codex:gpt-6-mystery": 1, "grok:grok-build": 2 },
-    byProject: { "acme/web": 5, "": 1 }
+    byProject: { "acme/web": 5, "": 1 },
+    byProjectAgent: { "claude:acme/web": 3, "codex:acme/web": 2, "grok:": 1 }
   }
 });
 

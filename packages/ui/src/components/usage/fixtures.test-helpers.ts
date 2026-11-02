@@ -42,7 +42,7 @@ export function historyResponse(partial: Partial<UsageHistoryResponse> = {}): Us
     periods: ["2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"],
     buckets: [],
     projectBuckets: [],
-    sessions: { total: 0, byAgent: {}, byModel: {}, byProject: {} },
+    sessions: { total: 0, byAgent: {}, byModel: {}, byProject: {}, byProjectAgent: {} },
     sources: [],
     recordedSince: null,
     scanning: false,
