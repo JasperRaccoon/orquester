@@ -95,7 +95,7 @@ This feature adds a full **Usage** view that shows token consumption and an "API
 - **Lookup** (`resolvePricingKey`), in order:
   1. Trim the id and drop a trailing `[…]` tag.
   2. Exact match.
-  3. The longest key that the id starts with followed by `-`, when the rest is only dash-separated version stamps: all-digit tokens (dates such as `20260115` or `2025-09-29`, `0309`) and `preview`, `latest`, `exp`, `experimental`, `beta`, `reasoning`, `non-reasoning`. A name part (`-mini`, `-nano`, `-pro`, `-lite`) is another model, so `gpt-5-mini` is not priced as `gpt-5`.
+  3. The longest key that the id starts with followed by `-`, when the rest is only dash-separated version stamps: dates (`20260115`, `2025-09-29`), digit runs of 4 or more (`0309`), month-day (`05-20`) and month-year (`09-2025`) stamps, and `preview`, `latest`, `exp`, `experimental`, `beta`, `reasoning`, `non-reasoning`. A name part (`-mini`, `-nano`, `-pro`, `-lite`) or a short minor version (`claude-opus-5-6`) is another model, so `gpt-5-mini` is not priced as `gpt-5`.
   4. For a qualified id like `anthropic/claude-sonnet-4-5`, repeat steps 2–3 on the segment after the last `/`.
 
   Ambiguous slugs (`opus`, `sonnet`, `haiku`, `fable`, `default`, `<synthetic>`) are unpriced.
