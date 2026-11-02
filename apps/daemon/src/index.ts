@@ -237,7 +237,7 @@ import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
 import { ChatThreadUsageScanner } from "./usage-chat-threads.ts";
 import { parseUsageHistoryRange, UsageHistory } from "./usage-history.ts";
-import { UsagePricingStore, UsagePricingValidationError } from "./usage-pricing-store.ts";
+import { UsagePricingStore, UsagePricingUnavailableError, UsagePricingValidationError } from "./usage-pricing-store.ts";
 import { SubagentCacheTtlController, type SubagentCacheTtl } from "./subagent-cache-ttl";
 import {
   createClaudeSource,
@@ -4323,6 +4323,7 @@ export function createServer(
       await services.usagePricing.update(request.body as UsagePricesPatch);
     } catch (error) {
       if (error instanceof UsagePricingValidationError) return reply.code(400).send({ code: error.code, message: error.message });
+      if (error instanceof UsagePricingUnavailableError) return reply.code(503).send({ code: error.code, message: error.message });
       throw error;
     }
     return services.usagePricing.response(services.usageHistory?.seenModels() ?? []);

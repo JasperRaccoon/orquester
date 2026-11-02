@@ -14,7 +14,7 @@
 // `@orquester/config`.
 
 import { realpathSync } from "node:fs";
-import { readFile, rename } from "node:fs/promises";
+import { access, readFile, rename } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import type {
@@ -218,13 +218,21 @@ export class UsageHistory {
     return (this.opts.now ?? Date.now)();
   }
 
-  /** Read the ledger. Never throws: anything unreadable starts empty. */
+  /**
+   * Read the ledger. Never throws: a missing file is the first run; one that can't be read (EACCES,
+   * EIO) is never overwritten, the ledger only records in memory; one that does not parse is moved
+   * aside and the ledger starts empty.
+   */
   async load(): Promise<void> {
     let text: string;
     try {
       text = await readFile(this.opts.path, "utf8");
-    } catch {
-      return; // ENOENT (first run) or unreadable
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return;
+      this.writable = false;
+      this.opts.logger?.warn(`usage history: could not read ${this.opts.path} (${code ?? String(error)}); not recording to it until the daemon restarts`);
+      return;
     }
     let parsed: unknown;
     try {
@@ -235,7 +243,7 @@ export class UsageHistory {
     const read = parseUsageHistoryFile(parsed, { minHour: this.cutoffHour() });
     if (!read.ok) {
       if (read.version === null) await this.moveAside(`${this.opts.path}.corrupt-${this.now()}`, "did not parse");
-      else await this.moveAside(`${this.opts.path}.v${read.version}.bak`, `has version ${read.version}`);
+      else await this.moveAside(`${this.opts.path}.v${read.version}.${this.now()}`, `has version ${read.version}`, ".bak");
       return;
     }
     const { recordedSince, rows, ...kept } = read.file;
@@ -251,7 +259,10 @@ export class UsageHistory {
     }
   }
 
-  private async moveAside(to: string, why: string): Promise<void> {
+  /** Rename the file to `<base><suffix>`, or to `<base>-<n><suffix>` when that is taken: never over another backup. */
+  private async moveAside(base: string, why: string, suffix = ""): Promise<void> {
+    let to = `${base}${suffix}`;
+    for (let n = 1; await access(to).then(() => true, () => false); n++) to = `${base}-${n}${suffix}`;
     try {
       await rename(this.opts.path, to);
       this.opts.logger?.warn(`usage history: ${this.opts.path} ${why}; moved aside to ${to}, starting empty`);

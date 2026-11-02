@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, mock, test } from "node:test";
@@ -134,8 +134,26 @@ test("a corrupt ledger is moved aside, and a newer version is kept as a backup t
   assert.equal(fromNewer.query({ range: range("7d"), scanning: false }).recordedSince, null);
   fromNewer.ingest(source([rec()]));
   await fromNewer.flush();
-  assert.equal(await readFile(`${path}.v2.bak`, "utf8"), newer);
   assert.equal(JSON.parse(await readFile(path, "utf8")).version, 1);
+
+  // The newer daemon runs again, then this one: its second file is backed up beside the first.
+  const newerAgain = JSON.stringify({ version: 2, buckets: "later" });
+  await writeFile(path, newerAgain);
+  await make().load();
+  const backups = (await readdir(dir)).filter((name) => name.startsWith("usage-history.json.v2.") && name.endsWith(".bak"));
+  assert.equal(backups.length, 2);
+  assert.deepEqual((await Promise.all(backups.map((name) => readFile(join(dir, name), "utf8")))).sort(), [newer, newerAgain].sort());
+});
+
+test("a ledger that can't be read is never overwritten", async (t) => {
+  const { path, make } = await world(t);
+  // A link to itself reads as ELOOP: unreadable as EACCES or EIO would be, whoever runs the test.
+  await symlink(path, path);
+  const history = make();
+  await history.load();
+  history.ingest(source([rec()]));
+  await history.flush();
+  assert.ok((await lstat(path)).isSymbolicLink());
 });
 
 test("changes are written at most once a minute, and only when something changed", async (t) => {

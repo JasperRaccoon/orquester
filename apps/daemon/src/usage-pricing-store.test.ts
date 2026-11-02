@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { setUsagePricingConfig, usagePricingConfig } from "./usage-pricing.ts";
-import { UsagePricingStore, UsagePricingValidationError } from "./usage-pricing-store.ts";
+import { UsagePricingStore, UsagePricingUnavailableError, UsagePricingValidationError } from "./usage-pricing-store.ts";
 
 afterEach(() => setUsagePricingConfig({ overrides: {}, aliases: {} }));
 
@@ -38,6 +38,19 @@ test("loading installs the valid entries, keeps unknown fields, and a corrupt fi
   const corrupt = await store(t, "{oops");
   assert.deepEqual(usagePricingConfig(), { overrides: {}, aliases: {} });
   assert.deepEqual(await readdir(corrupt.dir), ["usage-pricing.json.corrupt-1234"]);
+});
+
+test("prices that can't be read are never replaced: edits are refused", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-usage-pricing-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "usage-pricing.json");
+  // A link to itself reads as ELOOP: unreadable as EACCES or EIO would be, whoever runs the test.
+  await symlink(path, path);
+  const prices = new UsagePricingStore({ path });
+  await prices.load();
+  assert.deepEqual(usagePricingConfig(), { overrides: {}, aliases: {} });
+  await assert.rejects(prices.update({ overrides: { m: { input: 1, output: 1 } } }), UsagePricingUnavailableError);
+  assert.ok((await lstat(path)).isSymbolicLink());
 });
 
 test("a patch sets and removes entries; a saved override keeps its input and output when a patch omits them", async (t) => {

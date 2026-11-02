@@ -26,6 +26,11 @@ export class UsagePricingValidationError extends Error {
   readonly code = "INVALID_REQUEST";
 }
 
+/** The prices file could not be read at boot: an edit would replace the user's prices, so none is saved. */
+export class UsagePricingUnavailableError extends Error {
+  readonly code = "UNAVAILABLE";
+}
+
 const RATE_FIELDS = ["input", "output", "cacheRead", "cacheWrite5m", "cacheWrite1h"] as const;
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -61,6 +66,8 @@ function overrideRates(model: string, value: unknown, saved: UsageModelRates | u
 
 export class UsagePricingStore {
   private file: UsagePricingFile = parseUsagePricingFile({});
+  /** The file could not be read (or a corrupt one moved aside): writing it would lose the user's prices. */
+  private readOnly = false;
   private writes: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -71,21 +78,33 @@ export class UsagePricingStore {
     }
   ) {}
 
-  /** Read the file and install its prices. Never throws: anything unreadable is the defaults. */
+  /**
+   * Read the file and install its prices. Never throws: a missing file is no prices yet; one that
+   * can't be read (EACCES, EIO) is the defaults, and edits are refused until a restart reads it.
+   */
   async load(): Promise<void> {
     let text: string | null = null;
     try {
       text = await readFile(this.opts.path, "utf8");
-    } catch {
-      // ENOENT (no prices yet) or unreadable → defaults
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        this.readOnly = true;
+        this.opts.logger?.warn(`usage prices: could not read ${this.opts.path} (${code ?? String(error)}); using the built-in prices, and edits are not saved`);
+      }
     }
     if (text !== null) {
       try {
         this.file = parseUsagePricingFile(JSON.parse(text));
       } catch {
         const aside = `${this.opts.path}.corrupt-${(this.opts.now ?? Date.now)()}`;
-        await rename(this.opts.path, aside).catch(() => undefined);
-        this.opts.logger?.warn(`usage prices: ${this.opts.path} did not parse; moved aside to ${aside}`);
+        try {
+          await rename(this.opts.path, aside);
+          this.opts.logger?.warn(`usage prices: ${this.opts.path} did not parse; moved aside to ${aside}`);
+        } catch {
+          this.readOnly = true;
+          this.opts.logger?.warn(`usage prices: ${this.opts.path} did not parse and could not be moved aside; using the built-in prices, and edits are not saved`);
+        }
       }
     }
     setUsagePricingConfig(this.config());
@@ -98,7 +117,8 @@ export class UsagePricingStore {
   /**
    * Apply a patch (`null` removes an entry): validate the whole result, persist it, then install it,
    * so every later estimate is repriced. Throws {@link UsagePricingValidationError} and changes
-   * nothing when the patch is invalid. Edits are applied one at a time.
+   * nothing when the patch is invalid, {@link UsagePricingUnavailableError} when the file could not
+   * be read at boot. Edits are applied one at a time.
    */
   update(patch: UsagePricesPatch): Promise<UsagePricingConfig> {
     const run = this.writes.then(() => this.apply(patch));
@@ -113,6 +133,9 @@ export class UsagePricingStore {
   }
 
   private async apply(patch: unknown): Promise<UsagePricingConfig> {
+    if (this.readOnly) {
+      throw new UsagePricingUnavailableError("Prices can't be saved: the daemon could not read its prices file at start (see its log). Fix the file and restart the daemon.");
+    }
     if (!isRecord(patch)) throw new UsagePricingValidationError("The body must be an object of overrides and aliases.");
     const overrides: Record<string, UsageModelRates | null> = {};
     const aliases: Record<string, string | null> = {};

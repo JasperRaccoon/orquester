@@ -121,6 +121,7 @@ This feature adds a full **Usage** view that shows token consumption and an "API
   - `pricingTable()` → the built-in table for the price editor.
 - **Persistence:** `<appdir>/daemon/usage-pricing.json`, mode 0600, with path helper `usagePricingFile` in `packages/config` and zod schema `usagePricingFileSchema`.
   - Reading is tolerant: an invalid entry is not used, and a corrupt file is moved aside and the defaults are used.
+  - A file that can't be read (other than missing) gives the defaults, and `PUT` answers 503 until a restart reads it.
   - Invalid entries and unknown fields (top-level or inside an entry) are written back as read. An edit replaces only the entries of the models it sets or removes.
   - Writes are atomic (temp file + rename).
   - The store loads at boot and calls `setUsagePricingConfig`.
@@ -177,7 +178,8 @@ export interface UsageRecordSource {
 
 - `<appdir>/daemon/usage-history.json`, mode 0600, `{ version: 1, recordedSince, sessions: string[], cwds: string[], buckets: [...] }`, in compact arrays.
 - Writes happen only when something changed, coalesced to at most one per 60 s, atomically. Pending changes are flushed on daemon stop.
-- Reading is tolerant: an unknown or newer `version` starts empty but keeps the old file as `.v<n>.bak`; a corrupt file is moved aside.
+- Reading is tolerant: an unknown or newer `version` starts empty but keeps the old file as `.v<n>.<ms>.bak` (never renamed over an earlier backup); a corrupt file is moved aside.
+- Only a missing file is a first run. A file that can't be read (EACCES, EIO) is never overwritten: the ledger records in memory only until a restart reads it.
 - A row this version can't read (a newer writer's source or speed), trailing columns and unknown top-level fields are written back unchanged. The parser and serializer are `parseUsageHistoryFile` / `serializeUsageHistoryFile` in `packages/config`.
 - `recordedSince` is the first time this daemon wrote the ledger.
 
