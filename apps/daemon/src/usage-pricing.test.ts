@@ -55,6 +55,21 @@ test("models the table can't place are unpriced: family slugs and unknown ids", 
   assert.equal(resolvePricingKey("claude-sonnet-5-5"), "claude-sonnet-5-5");
 });
 
+test("a key absorbs date, version and release suffixes, never a name part that makes another model", () => {
+  for (const [model, key] of [
+    ["claude-opus-4-8-20260115", "claude-opus-4-8"],
+    ["claude-sonnet-4-5-2025-09-29", "claude-sonnet-4-5"],
+    ["gpt-5.4-codex-preview", "gpt-5.4-codex"],
+    ["grok-4.20-0309-non-reasoning", "grok-4.20"],
+    ["o4-mini-2025-04-16", "o4-mini"],
+    ["gemini-2.5-flash-preview-05-20", "gemini-2.5-flash"]
+  ]) assert.equal(resolvePricingKey(model), key, model);
+  for (const model of [
+    "gpt-5-mini", "gpt-5-nano", "gpt-5-pro", "gpt-5-codex-mini", "o3-mini", "o3-pro", "gpt-5.2-pro", "gpt-5.5-pro",
+    "gpt-5.4-nano", "gemini-2.5-flash-lite", "gpt-5-mini-2025-08-07"
+  ]) assert.equal(resolvePricingKey(model), null, model);
+});
+
 test("installing prices bumps the revision the scanners reprice on", () => {
   const before = usagePricingRevision();
   setUsagePricingConfig({ overrides: {}, aliases: {} });
