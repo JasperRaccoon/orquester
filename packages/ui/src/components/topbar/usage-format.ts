@@ -205,7 +205,12 @@ export interface NormalizedUsageWindow {
   limit?: number;
   remaining?: number;
   resetsAt?: string;
+  /** The window's length when known (the Usage view's pace tick needs it). */
+  durationMins?: number;
 }
+
+const SESSION_MINS = 5 * 60;
+const WEEK_MINS = 7 * 24 * 60;
 
 /**
  * The unit an agent's pool is denominated in. No daemon source declares one on
@@ -229,17 +234,17 @@ export function normalizeUsageWindows(
   // `...src.*` FIRST: the wire window only carries numbers today, but spreading
   // it last would let a future field silently clobber the presentation ones.
   if (src.session) {
-    out.push({ ...src.session, id: "session", label: "5h", longLabel: "Session (5h)", period: "rolling", unit });
+    out.push({ ...src.session, id: "session", label: "5h", longLabel: "Session (5h)", period: "rolling", unit, durationMins: SESSION_MINS });
   }
   if (src.weekly) {
     // "Current period", not "This week": Grok's pool is a billing period and
     // Codex's weekly window is longer than 7 days for some plans.
-    out.push({ ...src.weekly, id: "weekly", label: "Week", longLabel: "Current period", period: "weekly", unit });
+    out.push({ ...src.weekly, id: "weekly", label: "Week", longLabel: "Current period", period: "weekly", unit, durationMins: WEEK_MINS });
   }
   // Model-scoped weekly caps (Claude's Fable bar) render after the shared pool,
   // labeled with the provider's own model name.
   for (const w of src.scopedWindows ?? []) {
-    out.push({ ...w, id: `scoped:${w.label}`, label: w.label, longLabel: `${w.label} (week)`, period: "weekly", unit });
+    out.push({ ...w, id: `scoped:${w.label}`, label: w.label, longLabel: `${w.label} (week)`, period: "weekly", unit, durationMins: WEEK_MINS });
   }
   return out;
 }
@@ -309,7 +314,8 @@ export function providerWindowsToNormalized(
       period: PROVIDER_WINDOW_PERIOD[w.kind] ?? "rolling",
       unit,
       percent: Math.max(0, Math.min(100, w.usedPercent)),
-      resetsAt: w.resetsAt
+      resetsAt: w.resetsAt,
+      durationMins: w.windowDurationMins
     });
   }
   return out;

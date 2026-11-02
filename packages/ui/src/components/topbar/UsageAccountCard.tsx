@@ -1,11 +1,13 @@
 import React from "react";
-import { Clock } from "lucide-react";
+import { Clock, Gauge, TrendingDown, TrendingUp } from "lucide-react";
+import { useElementWidth } from "../../hooks/use-element-width";
 import { cn } from "../../lib/cn";
 import type { AgentUsage } from "@orquester/api";
 import type { UsageResetFormat } from "../../lib/usage-display";
 import { LoginExpiryWarning } from "../auth/LoginExpiryWarning";
 import type { LoginStatus } from "../../lib/login-expiry";
 import { barClass, formatAgo, formatReset, formatUsageCapacity, normalizeUsageWindows, type NormalizedUsageWindow } from "./usage-format";
+import { usagePace, type UsagePace, type UsagePaceStatus } from "./usage-pace";
 
 /**
  * Side-by-side columns per window count, from `sm` up (stacked below). Static
@@ -23,14 +25,45 @@ export function maxWindowCount(agent: AgentUsage): number {
   return Math.max(1, ...sources.map((s) => Math.min(3, normalizeUsageWindows(agent.id, s.lastKnown ?? s).length)));
 }
 
-const Meter: React.FC<{ pct: number; muted: boolean; className?: string }> = ({ pct, muted, className }) => (
-  <div className={cn("h-1.5 overflow-hidden rounded-full bg-neutral-800", className)}>
-    <div
-      className={cn("h-full rounded-full transition-[width] duration-500", muted ? "bg-neutral-600" : barClass(pct))}
-      style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
-    />
+/** A bar narrower than this (px) has no room for a readable pace tick. */
+const fitsPaceTick = (width: number) => width >= 24;
+
+/** The even-spend mark: a 2px stroke over the bar where the window's elapsed time sits. */
+const PaceTick: React.FC<{ elapsed: number }> = ({ elapsed }) => {
+  const [ref, fits] = useElementWidth<HTMLSpanElement, boolean>(fitsPaceTick);
+  return (
+    <span ref={ref} aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-1.5">
+      {fits !== false && (
+        <span
+          className="absolute -inset-y-0.5 w-0.5 -translate-x-1/2 rounded-full bg-neutral-100 ring-1 ring-neutral-900"
+          style={{ left: `clamp(1px, ${(elapsed * 100).toFixed(2)}%, calc(100% - 1px))` }}
+        />
+      )}
+    </span>
+  );
+};
+
+const Meter: React.FC<{ pct: number; muted: boolean; className?: string; pace?: UsagePace | null }> = ({
+  pct,
+  muted,
+  className,
+  pace
+}) => (
+  <div
+    className={cn("relative", className)}
+    title={pace ? `${Math.round(pct)}% used, ${Math.round(pace.elapsed * 100)}% of the window passed: ${pace.label}` : undefined}
+  >
+    <div className="h-1.5 overflow-hidden rounded-full bg-neutral-800">
+      <div
+        className={cn("h-full rounded-full transition-[width] duration-500", muted ? "bg-neutral-600" : barClass(pct))}
+        style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
+      />
+    </div>
+    {pace && <PaceTick elapsed={pace.elapsed} />}
   </div>
 );
+
+const PACE_ICON: Record<UsagePaceStatus, typeof Gauge> = { ahead: TrendingUp, on: Gauge, under: TrendingDown };
 
 /**
  * One window. In a multi-window row the percent sits beside the bar so each
@@ -45,7 +78,11 @@ const WindowCell: React.FC<{
   resetFormat: UsageResetFormat;
   now: number;
   historical?: boolean;
-}> = ({ window, long, lone, muted, resetFormat, now, historical }) => {
+  showPace?: boolean;
+}> = ({ window, long, lone, muted, resetFormat, now, historical, showPace }) => {
+  // A muted or last-known reading is old or empty: its pace against the clock would be fiction.
+  const pace = showPace && !muted && !historical ? usagePace(window, now) : null;
+  const PaceIcon = pace ? PACE_ICON[pace.status] : null;
   const label = long ? (historical && window.id === "weekly" ? "Weekly" : window.longLabel) : window.label;
   const pct = (
     <span
@@ -69,13 +106,13 @@ const WindowCell: React.FC<{
             <span className="min-w-0 truncate text-xs text-neutral-300">{label}</span>
             {pct}
           </div>
-          <Meter pct={window.percent} muted={muted} className="mt-1.5" />
+          <Meter pct={window.percent} muted={muted} className="mt-1.5" pace={pace} />
         </>
       ) : (
         <>
           <p className="truncate text-xs text-neutral-300">{label}</p>
           <div className="mt-1.5 flex items-center gap-2">
-            <Meter pct={window.percent} muted={muted} className="flex-1" />
+            <Meter pct={window.percent} muted={muted} className="flex-1" pace={pace} />
             {pct}
           </div>
         </>
@@ -87,6 +124,17 @@ const WindowCell: React.FC<{
         <p className="mt-1.5 flex items-start gap-1 text-[11px] leading-4 text-neutral-500">
           <Clock size={11} className="mt-[2.5px] shrink-0" aria-hidden />
           <span className="min-w-0 tabular-nums">{reset}</span>
+        </p>
+      )}
+      {pace && PaceIcon && (
+        <p
+          className={cn(
+            "mt-1 flex items-center gap-1 text-[11px] leading-4",
+            pace.status === "ahead" ? "text-warn" : "text-neutral-500"
+          )}
+        >
+          <PaceIcon size={11} className="shrink-0" aria-hidden />
+          <span className="min-w-0">{pace.label}</span>
         </p>
       )}
     </div>
@@ -102,7 +150,9 @@ export const UsageWindowGrid: React.FC<{
   /** Spelled-out labels ("Session (5h)") instead of the compact "5h". */
   long?: boolean;
   historical?: boolean;
-}> = ({ windows, muted, resetFormat, now, long = false, historical }) => (
+  /** Mark each bar's even-spend position and label the pace (the Usage view's Limits tab). */
+  showPace?: boolean;
+}> = ({ windows, muted, resetFormat, now, long = false, historical, showPace }) => (
   <div
     className={cn(
       "grid grid-cols-1 gap-x-3 gap-y-3 [&>*:first-child]:border-l-0 [&>*:first-child]:pl-0",
@@ -119,6 +169,7 @@ export const UsageWindowGrid: React.FC<{
         resetFormat={resetFormat}
         now={now}
         historical={historical}
+        showPace={showPace}
       />
     ))}
   </div>
@@ -141,7 +192,8 @@ export const UsageAccountCard: React.FC<{
   login?: LoginStatus;
   lastKnown?: boolean;
   asOf?: string;
-}> = ({ name, meta, windows, muted, resetFormat, now, long, login, lastKnown, asOf }) => (
+  showPace?: boolean;
+}> = ({ name, meta, windows, muted, resetFormat, now, long, login, lastKnown, asOf, showPace }) => (
   <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2.5">
     {name != null && (
       <div className="mb-2.5 flex items-center justify-between gap-2 border-b border-neutral-800/70 pb-2">
@@ -156,7 +208,15 @@ export const UsageAccountCard: React.FC<{
       </p>
     )}
     {windows.length > 0 ? (
-      <UsageWindowGrid windows={windows} muted={muted} resetFormat={resetFormat} now={now} long={long} historical={lastKnown} />
+      <UsageWindowGrid
+        windows={windows}
+        muted={muted}
+        resetFormat={resetFormat}
+        now={now}
+        long={long}
+        historical={lastKnown}
+        showPace={showPace}
+      />
     ) : (
       <p className="text-[11px] text-neutral-500">No reading yet.</p>
     )}
