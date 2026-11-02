@@ -151,24 +151,20 @@ const AgentRow: React.FC<{ row: UsageAgentRow; metric: UsageMetric; figures: str
   const unpriced = row.costUsd === null;
   const value =
     metric === "cost" ? (unpriced ? <span className="text-neutral-500">Unpriced</span> : formatUsd(row.costUsd)) : formatTokens(row.processed);
-  const detail =
+  const share =
     metric === "cost"
       ? row.costShare === null
         ? `${formatTokens(row.processed)} tokens · no known price`
         : `${formatPercent(row.costShare)} of cost · ${formatTokens(row.processed)} tokens`
       : `${formatPercent(row.tokenShare)} of tokens · ${unpriced ? "Unpriced" : formatUsd(row.costUsd)}`;
+  const detail = `${plural(row.sessions, "session")} · ${share}`;
   return (
     <li className="flex flex-col gap-0.5">
       <div className="flex items-baseline justify-between gap-4">
         <span className="flex min-w-0 items-center gap-2 text-sm text-neutral-100">
           <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: agentColor(row.agent) }} />
           <span className="shrink-0 self-center">{getRegistryIcon("agent", row.agent, 16)}</span>
-          <span className="flex min-w-0 items-baseline gap-1.5">
-            <span className="shrink-0 whitespace-nowrap">{labelForAgent(row.agent)}</span>
-            <span className={cn("min-w-0 truncate text-[11px] tabular-nums text-neutral-500", figures)}>
-              {plural(row.sessions, "session")}
-            </span>
-          </span>
+          <span className="truncate">{labelForAgent(row.agent)}</span>
         </span>
         <span className={cn("shrink-0 text-sm font-medium tabular-nums text-neutral-100", figures)}>{value}</span>
       </div>

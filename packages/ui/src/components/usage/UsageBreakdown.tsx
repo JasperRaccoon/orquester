@@ -193,42 +193,59 @@ const PeriodTable: React.FC<{
   </div>
 );
 
-const ProjectTable: React.FC<{ view: UsageView; figures: string }> = ({ view, figures }) => (
-  <div className="overflow-x-auto">
-    <table className="w-full whitespace-nowrap text-left">
-      <thead>
-        <HeadRow>
-          <th className={cn(TH, "w-full text-left")}>Project</th>
-          <th className={TH}>Sessions</th>
-          <th className={TH}>Cost</th>
-          <th className={cn(TH, "hidden sm:table-cell")}>Share</th>
-          <th className={TH}>Tokens</th>
-        </HeadRow>
-      </thead>
-      <tbody>
-        {view.projects.length === 0 ? (
-          <Empty colSpan={5} />
-        ) : (
-          view.projects.map((p) => (
-            <tr key={p.project} className={cn(ROW, "text-right text-neutral-400")}>
-              <td className={cn(TD, "whitespace-normal break-words text-left")}>
-                {p.project === "" ? (
-                  <span className="italic text-neutral-400">Outside workspaces</span>
-                ) : (
-                  <>
-                    {p.workspace ? <span className="block text-[11px] text-neutral-500 sm:inline sm:text-xs">{p.workspace}/</span> : null}
-                    <span className="font-medium text-neutral-100">{p.name}</span>
-                  </>
-                )}
-              </td>
-              <td className={cn(TD, figures)}>{formatCount(p.sessions)}</td>
-              <td className={cn(TD, "text-neutral-100", figures)}>{p.costUsd === null ? <Unpriced /> : formatUsd(p.costUsd)}</td>
-              <td className={cn(TD, "hidden sm:table-cell", figures)}>{p.share === null ? "" : formatPercent(p.share)}</td>
-              <td className={cn(TD, figures)}>{formatTokens(p.processed)}</td>
-            </tr>
-          ))
-        )}
-      </tbody>
-    </table>
-  </div>
-);
+/** Projects listed before "Show all": the long tail of one-off directories stays a click away. */
+const PROJECTS_SHOWN = 12;
+
+const ProjectTable: React.FC<{ view: UsageView; figures: string }> = ({ view, figures }) => {
+  const [showAll, setShowAll] = React.useState(false);
+  const projects = showAll ? view.projects : view.projects.slice(0, PROJECTS_SHOWN);
+  const hidden = view.projects.length - PROJECTS_SHOWN;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full whitespace-nowrap text-left">
+        <thead>
+          <HeadRow>
+            <th className={cn(TH, "w-full text-left")}>Project</th>
+            <th className={TH}>Sessions</th>
+            <th className={TH}>Cost</th>
+            <th className={cn(TH, "hidden sm:table-cell")}>Share</th>
+            <th className={TH}>Tokens</th>
+          </HeadRow>
+        </thead>
+        <tbody>
+          {view.projects.length === 0 ? (
+            <Empty colSpan={5} />
+          ) : (
+            projects.map((p) => (
+              <tr key={p.project} className={cn(ROW, "text-right text-neutral-400")}>
+                <td className={cn(TD, "whitespace-normal break-words text-left")}>
+                  {p.project === "" ? (
+                    <span className="italic text-neutral-400">Outside workspaces</span>
+                  ) : (
+                    <>
+                      {p.workspace ? <span className="block text-[11px] text-neutral-500 sm:inline sm:text-xs">{p.workspace}/</span> : null}
+                      <span className="font-medium text-neutral-100">{p.name}</span>
+                    </>
+                  )}
+                </td>
+                <td className={cn(TD, figures)}>{formatCount(p.sessions)}</td>
+                <td className={cn(TD, "text-neutral-100", figures)}>{p.costUsd === null ? <Unpriced /> : formatUsd(p.costUsd)}</td>
+                <td className={cn(TD, "hidden sm:table-cell", figures)}>{p.share === null ? "" : formatPercent(p.share)}</td>
+                <td className={cn(TD, figures)}>{formatTokens(p.processed)}</td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+      {hidden > 0 ? (
+        <button
+          type="button"
+          onClick={() => setShowAll((v) => !v)}
+          className="w-full border-t border-neutral-800/60 px-3 py-2 text-left text-xs text-neutral-400 transition-colors hover:bg-neutral-800/40 hover:text-neutral-200"
+        >
+          {showAll ? "Show fewer" : `Show all ${formatCount(view.projects.length)} projects`}
+        </button>
+      ) : null}
+    </div>
+  );
+};
