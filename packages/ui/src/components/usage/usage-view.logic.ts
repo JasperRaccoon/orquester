@@ -100,7 +100,7 @@ export interface UsageProjectRow {
   project: string;
   workspace: string | null;
   name: string;
-  /** Distinct sessions over the range (all agents: the response has no per-agent split). */
+  /** Distinct sessions of the visible agents over the range. */
   sessions: number;
   processed: number;
   costUsd: number | null;
@@ -344,8 +344,22 @@ export function deriveUsageView(
   return { agents, totals, agentRows, series, models, periodRows, projects };
 }
 
+/** Distinct sessions per project of the visible agents (a session belongs to one agent, so they add up). */
+function projectSessions(data: UsageHistoryResponse, hidden: ReadonlySet<string>): Record<string, number> {
+  if (hidden.size === 0) return data.sessions.byProject;
+  const out: Record<string, number> = {};
+  for (const [key, count] of Object.entries(data.sessions.byProjectAgent ?? {})) {
+    const colon = key.indexOf(":");
+    if (colon < 0 || hidden.has(key.slice(0, colon))) continue;
+    const project = key.slice(colon + 1);
+    out[project] = (out[project] ?? 0) + count;
+  }
+  return out;
+}
+
 function deriveProjects(data: UsageHistoryResponse, metric: UsageMetric, hidden: ReadonlySet<string>): UsageProjectRow[] {
   const visible = data.projectBuckets.filter((b) => !hidden.has(b.agent));
+  const sessions = projectSessions(data, hidden);
   const rows: Omit<UsageProjectRow, "share">[] = [];
   const total = new CostSum();
   let totalProcessed = 0;
@@ -367,7 +381,7 @@ function deriveProjects(data: UsageHistoryResponse, metric: UsageMetric, hidden:
       project,
       workspace: slash > 0 ? project.slice(0, slash) : null,
       name: slash > 0 ? project.slice(slash + 1) : project,
-      sessions: data.sessions.byProject[project] ?? 0,
+      sessions: sessions[project] ?? 0,
       processed,
       costUsd: cost.value,
       unpricedTokens

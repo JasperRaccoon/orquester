@@ -102,7 +102,7 @@ describe("deriveUsageView", () => {
     assert.equal(view.totals.sessions, 4);
     assert.deepEqual(view.models.map((m) => m.key), ["claude:claude-opus-5"]);
     assert.deepEqual(view.periodRows.map((p) => p.period), ["2026-10-30", "2026-10-28"]);
-    assert.deepEqual(view.projects.map((p) => [p.project, p.costUsd, p.share]), [["acme/web", 8, 1]]);
+    assert.deepEqual(view.projects.map((p) => [p.project, p.sessions, p.costUsd, p.share]), [["acme/web", 3, 8, 1]], "only Claude's sessions of the project");
   });
 
   it("zero-fills each agent's series over every period of the window", () => {
