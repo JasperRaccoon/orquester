@@ -670,8 +670,8 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   // Token usage (the Cost tab's scanner over this world's home) and the quota snapshot.
   const usageTokens = new UsageTokensScanner({ userhome: home, cacheFile: usageTokensCacheFile(appdir), now: () => Date.now() });
   await usageTokens.init();
-  // Grok's usage from this world's chat logs (the daemon's own scanner and route).
-  const chatThreadUsage = new ChatThreadUsageScanner({ threadsDir: agentChatThreadsDir(appdir), agents: ["grok"], now: () => Date.now() });
+  // Grok's and OpenCode's usage from this world's chat logs (the daemon's own scanner and route).
+  const chatThreadUsage = new ChatThreadUsageScanner({ threadsDir: agentChatThreadsDir(appdir), agents: ["grok", "opencode"], now: () => Date.now() });
   const world = {
     quota: { agents: [] } as UsageResponse,
     agentAccounts: { accounts: [], defaults: { claude: null, codex: null, grok: null } } as AgentAccountsResponse
@@ -721,7 +721,9 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     app.get("/api/usage", async () => world.quota);
     app.get<{ Querystring: { refresh?: string } }>("/api/usage/tokens", async (request) => usageTokens.snapshot(request.query.refresh === "1"));
     app.get<{ Querystring: { agent?: string } }>("/api/usage/chat-threads", async (request, reply) =>
-      request.query.agent === "grok" ? chatThreadUsage.snapshot("grok") : reply.code(400).send({ code: "INVALID_REQUEST", message: "agent must be grok." })
+      request.query.agent === "grok" || request.query.agent === "opencode"
+        ? chatThreadUsage.snapshot(request.query.agent)
+        : reply.code(400).send({ code: "INVALID_REQUEST", message: "agent must be grok or opencode." })
     );
     registerSavedPromptRoutes(app, { service: savedPrompts, workflowReferences: () => service.references, workspacesDir: () => workspacesDir });
     registerWorkflowRoutes(app, {

@@ -1,6 +1,6 @@
-import React, { useContext, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, Gauge, RefreshCw } from "lucide-react";
-import type { AgentUsage, UsageAccount, UsageTokenRow } from "@orquester/api";
+import React, { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { ArrowUpRight, ChevronDown, ChevronRight, Gauge, RefreshCw } from "lucide-react";
+import type { AgentUsage, UsageAccount, UsageHistoryResponse } from "@orquester/api";
 import { shortAccountLabel } from "../../lib/account-label";
 import { usageAgentEnabled } from "@orquester/config";
 import { AdaptiveMenu, DropdownContext } from "../ui";
@@ -8,84 +8,144 @@ import { SegmentedControl } from "../settings/primitives";
 import { UsageAccountCard, maxWindowCount } from "./UsageAccountCard";
 import { getRegistryIcon } from "../../icons";
 import { useUsageNow, useUsageResetFormat } from "../../hooks";
+import { ApiError, type ApiClient } from "../../lib/api-client";
+import {
+  formatCostFigure,
+  formatTokens,
+  formatUsd,
+  labelForModel,
+  localTimeZone,
+  PARTLY_UNPRICED_NOTE,
+  type CostFigure
+} from "../../lib/usage-history-format";
+import { onUsagePricesChanged } from "../../lib/usage-prices-events";
 import { useAppStore } from "../../store/app";
-import { STALE_MIN, compactCount, formatAgo, formatChipWindows, formatClock, gaugeClass, labelForAgent, minutesSince, missingUsageAgents, normalizeUsageWindows, pickDriver, usageLoginHint, windowMax } from "./usage-format";
+import { popoverCostFromHistory, popoverCostFromTokenRows, type PopoverCostSummary } from "./usage-cost.logic";
+import { STALE_MIN, formatAgo, formatChipWindows, formatClock, gaugeClass, labelForAgent, minutesSince, missingUsageAgents, normalizeUsageWindows, pickDriver, usageLoginHint, windowMax } from "./usage-format";
 
-/** "claude-opus-4-8-20260115" → "Opus 4.8", "gpt-5.6-sol" → "GPT-5.6 Sol". */
-function labelForModel(model: string): string {
-  const bare = model.replace(/-\d{8}$/, "");
-  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-  const claude = bare.match(/^claude-([a-z]+)-([\d-]+)$/);
-  if (claude) return `${cap(claude[1])} ${claude[2].replace(/-/g, ".")}`;
-  const gpt = bare.match(/^gpt-([\d.]+)(?:-([a-z-]+))?$/);
-  if (gpt) return `GPT-${gpt[1]}${gpt[2] ? ` ${gpt[2].split("-").map(cap).join(" ")}` : ""}`;
-  return bare;
+/**
+ * The Cost tab's data: the Usage view's 14-day history (local days, every agent), or the older
+ * `/api/usage/tokens` rows from a daemon without it (404) or while it fails. Kept per API client,
+ * so one daemon's figures never show under another; refetched when the model prices change.
+ * An answer taken mid-scan is shown, then asked for once more with `refresh=1` (as the view
+ * does); when the history and the fallback both fail, `failed` says so instead of loading on.
+ */
+function usePopoverCost(): { summary: PopoverCostSummary | null; failed: boolean; load: (force?: boolean) => void } {
+  const api = useAppStore((s) => s.api);
+  const usageTokens = useAppStore((s) => s.usageTokens);
+  const loadUsageTokens = useAppStore((s) => s.loadUsageTokens);
+  const [history, setHistory] = useState<{ api: ApiClient; data: UsageHistoryResponse } | null>(null);
+  const [legacyFor, setLegacyFor] = useState<ApiClient | null>(null);
+  const [failedFor, setFailedFor] = useState<ApiClient | null>(null);
+  const [tokensFailedFor, setTokensFailedFor] = useState<ApiClient | null>(null);
+  const seq = useRef(0);
+  const loaded = useRef(false);
+
+  const load = useCallback(
+    (force = false) => {
+      if (!api) return;
+      loaded.current = true;
+      const id = ++seq.current;
+      const loadTokens = () =>
+        void loadUsageTokens(force).then((ok) => {
+          if (id === seq.current) setTokensFailedFor(ok ? null : api);
+        });
+      if (legacyFor === api) {
+        loadTokens();
+        return;
+      }
+      const fetchHistory = (forced: boolean) =>
+        api.getUsageHistory("14d", localTimeZone(), forced).then(
+          (data) => {
+            if (id !== seq.current) return;
+            setHistory({ api, data });
+            setFailedFor(null);
+            // Mid-scan totals may still grow: ask once more, awaiting the scan.
+            if (data.scanning && !forced) fetchHistory(true);
+          },
+          (error: unknown) => {
+            if (id !== seq.current) return;
+            if (error instanceof ApiError && error.status === 404) setLegacyFor(api);
+            else setFailedFor(api);
+            loadTokens();
+          }
+        );
+      fetchHistory(force);
+    },
+    [api, legacyFor, loadUsageTokens]
+  );
+
+  // Saved prices reprice all history: refetch what the tab has shown.
+  useEffect(() => onUsagePricesChanged(() => loaded.current && load()), [load]);
+
+  const live = history?.api === api ? history.data : null;
+  const fallback = legacyFor === api || failedFor === api;
+  const summary = live
+    ? popoverCostFromHistory(live)
+    : fallback && usageTokens
+      ? popoverCostFromTokenRows(usageTokens.rows, Date.now())
+      : null;
+  return { summary, failed: summary === null && fallback && tokensFailedFor === api, load };
 }
 
-/** Adaptive precision: tiny costs keep 4 decimals so they don't read as $0.00. */
-function formatCost(v: number | null): string {
-  if (v == null) return "—";
-  if (v > 0 && v < 0.01) return `$${v.toFixed(4)}`;
-  return `$${v.toFixed(2)}`;
+/** The hover note of a cost figure that is not fully priced. */
+function unpricedTitle(figure: CostFigure): string | undefined {
+  if (figure.unpriced === "all") return "No known price";
+  return figure.unpriced === "some" ? PARTLY_UNPRICED_NOTE : undefined;
 }
 
-/** UTC day string → "Today" / "Yesterday" / "Jul 21" (days are UTC-bucketed). */
-function labelForDay(day: string, nowMs: number): string {
-  const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-  if (day === iso(nowMs)) return "Today";
-  if (day === iso(nowMs - 86_400_000)) return "Yesterday";
-  const d = new Date(`${day}T00:00:00Z`);
-  return Number.isNaN(d.getTime()) ? day : d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
-}
+const CostTab: React.FC<{ summary: PopoverCostSummary | null; failed: boolean; load: () => void }> = ({ summary, failed, load }) => {
+  // Mounted while the popover shows the tab: each opening asks for fresh figures.
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  useEffect(() => loadRef.current(), []);
 
-const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
-  const now = Date.now();
-  const visible = rows.filter((r) => r.inputTokens + r.outputTokens + r.cacheReadTokens + r.cacheWriteTokens > 0);
-  const days: { day: string; rows: UsageTokenRow[]; total: number | null }[] = [];
-  for (const r of visible) {
-    let group = days.at(-1);
-    if (!group || group.day !== r.day) {
-      group = { day: r.day, rows: [], total: null };
-      days.push(group);
-    }
-    group.rows.push(r);
-    if (r.costUsd != null) group.total = (group.total ?? 0) + r.costUsd;
-  }
-
-  // Continuous last-14-day series for the spend chart (zero-usage days included
-  // so gaps read as gaps, not missing bars).
-  const totalByDay = new Map(days.map((d) => [d.day, d.total ?? 0]));
-  const isoDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-  const chart: { day: string; cost: number }[] = [];
-  for (let i = 13; i >= 0; i--) {
-    const day = isoDay(now - i * 86_400_000);
-    chart.push({ day, cost: totalByDay.get(day) ?? 0 });
-  }
-  const chartMax = Math.max(...chart.map((c) => c.cost));
-  const todayCost = totalByDay.get(isoDay(now)) ?? 0;
-  const weekCost = chart.slice(-7).reduce((a, c) => a + c.cost, 0);
-  const hasUnpriced = visible.some((r) => r.costUsd == null);
-
-  if (visible.length === 0) {
+  if (failed) {
     return (
       <div className="px-3 pb-3 pt-2">
-        <div className="rounded border border-dashed border-neutral-800 px-3 py-4 text-center text-xs text-neutral-500">
-          No agent usage recorded yet. Costs appear after the next Claude Code or Codex session.
+        <div className="flex items-center justify-between gap-3 rounded border border-dashed border-neutral-800 px-3 py-3 text-xs text-neutral-400">
+          <span role="alert">Couldn't load costs.</span>
+          <button
+            type="button"
+            className="rounded px-2 py-1 text-neutral-200 hover:bg-neutral-800"
+            onClick={(e) => {
+              e.stopPropagation();
+              load();
+            }}
+          >
+            Retry
+          </button>
         </div>
       </div>
     );
   }
 
+  if (!summary || summary.days.length === 0) {
+    return (
+      <div className="px-3 pb-3 pt-2">
+        <div className="rounded border border-dashed border-neutral-800 px-3 py-4 text-center text-xs text-neutral-500">
+          {summary ? "No agent usage recorded yet. Costs appear after the next agent session." : "Loading…"}
+        </div>
+      </div>
+    );
+  }
+
+  const { chart, days } = summary;
+  const chartMax = Math.max(...chart.map((c) => c.cost));
   return (
     <div className="pb-2">
       <div className="flex items-end justify-between px-3 pt-2">
         <div>
           <p className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">Est. cost · today</p>
-          <p className="text-xl font-semibold leading-tight tabular-nums text-neutral-100">{formatCost(todayCost)}</p>
+          <p className="text-xl font-semibold leading-tight tabular-nums text-neutral-100" title={unpricedTitle(summary.today)}>
+            {formatCostFigure(summary.today, "Unpriced")}
+          </p>
         </div>
         <div className="text-right">
           <p className="text-[10px] uppercase tracking-wider text-neutral-500">7 days</p>
-          <p className="text-xs font-medium tabular-nums text-neutral-300">{formatCost(weekCost)}</p>
+          <p className="text-xs font-medium tabular-nums text-neutral-300" title={unpricedTitle(summary.week)}>
+            {formatCostFigure(summary.week, "Unpriced")}
+          </p>
         </div>
       </div>
       <div className="px-3 pt-2">
@@ -97,7 +157,7 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
               <div
                 key={c.day}
                 className="group flex h-full flex-1 items-end"
-                title={`${labelForDay(c.day, now)} · ${formatCost(c.cost)}`}
+                title={`${c.label} · ${formatCostFigure({ usd: c.cost, unpriced: c.unpriced }, "Unpriced")}`}
               >
                 <div
                   className={`w-full rounded-t-[2px] ${
@@ -110,7 +170,7 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
           })}
         </div>
         <div className="flex justify-between pt-0.5 text-[9px] text-neutral-600">
-          <span>{labelForDay(chart[0].day, now)}</span>
+          <span>{chart[0]?.label}</span>
           <span>Today</span>
         </div>
       </div>
@@ -118,12 +178,13 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
         {days.map((d) => (
           <div key={d.day} className="pt-2">
             <div className="flex items-baseline justify-between border-b border-neutral-800/80 pb-1">
-              <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">{labelForDay(d.day, now)}</span>
-              <span className="text-[11px] font-medium tabular-nums text-neutral-300">{formatCost(d.total)}</span>
+              <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">{d.label}</span>
+              <span className="text-[11px] font-medium tabular-nums text-neutral-300" title={unpricedTitle(d.total)}>
+                {formatCostFigure(d.total)}
+              </span>
             </div>
             {d.rows.map((r) => {
-              const cache = r.cacheReadTokens + r.cacheWriteTokens;
-              const bd = r.costBreakdown ?? null;
+              const bd = r.split;
               const bdTotal = bd ? bd.input + bd.output + bd.cache : 0;
               const seg = (n: number) => `${(n / bdTotal) * 100}%`;
               return (
@@ -137,17 +198,14 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
                       <span className="shrink-0">{getRegistryIcon("agent", r.agent, 14)}</span>
                       <p className="truncate text-xs text-neutral-200">{labelForModel(r.model)}</p>
                     </div>
-                    <span
-                      className="shrink-0 text-xs tabular-nums text-neutral-200"
-                      title={r.costUsd == null ? "No pricing data for this model" : undefined}
-                    >
-                      {formatCost(r.costUsd)}
+                    <span className="shrink-0 text-xs tabular-nums text-neutral-200" title={unpricedTitle(r.cost)}>
+                      {formatCostFigure(r.cost)}
                     </span>
                   </div>
                   {bd != null && bdTotal > 0 && (
                     <div
                       className="mt-1.5 flex h-1 gap-[2px]"
-                      title={`Cost split — input ${formatCost(bd.input)} · output ${formatCost(bd.output)} · cache ${formatCost(bd.cache)}`}
+                      title={`Cost split — input ${formatUsd(bd.input)} · output ${formatUsd(bd.output)} · cache ${formatUsd(bd.cache)}`}
                     >
                       {bd.input > 0 && (
                         <div className="min-w-[3px] rounded-full bg-emerald-700" style={{ width: seg(bd.input) }} />
@@ -161,11 +219,11 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
                     </div>
                   )}
                   <p className="mt-1 truncate text-[10px] tabular-nums text-neutral-500">
-                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-700 align-middle" /> {compactCount(r.inputTokens)} in
+                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-700 align-middle" /> {formatTokens(r.input)} in
                     <span className="mx-1 text-neutral-700">·</span>
-                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-fuchsia-500 align-middle" /> {compactCount(r.outputTokens)} out
+                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-fuchsia-500 align-middle" /> {formatTokens(r.output)} out
                     <span className="mx-1 text-neutral-700">·</span>
-                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-sky-600 align-middle" /> {compactCount(cache)} cache
+                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-sky-600 align-middle" /> {formatTokens(r.cache)} cache
                   </p>
                 </div>
               );
@@ -175,9 +233,28 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
       </div>
       <p className="mx-3 mt-2 border-t border-neutral-800/80 pt-2 text-[10px] leading-relaxed text-neutral-600">
         API-equivalent estimate, including prompt-cache reads and writes. Subscription usage isn't billed per token.
-        {hasUnpriced && " Rows marked — have no pricing data and are excluded from totals."}
+        {summary.hasUnpriced && " — has no known price; a + marks a cost that leaves out usage with none."}
       </p>
     </div>
+  );
+};
+
+/** The popover header's way to the Usage view, on the tab matching the popover's (Windows → Limits). */
+const OpenUsageLink: React.FC<{ tab: "windows" | "cost" }> = ({ tab }) => {
+  const openUsageView = useAppStore((s) => s.openUsageView);
+  const { close } = useContext(DropdownContext);
+  return (
+    <button
+      type="button"
+      className="flex items-center gap-1 rounded px-1.5 py-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+      onClick={() => {
+        close();
+        openUsageView(tab === "cost" ? "cost" : "limits");
+      }}
+    >
+      Open usage
+      <ArrowUpRight size={12} aria-hidden />
+    </button>
   );
 };
 
@@ -274,16 +351,10 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
 
 export const UsageWidget: React.FC = () => {
   const usage = useAppStore((s) => s.usage);
-  const usageTokens = useAppStore((s) => s.usageTokens);
   const prefs = useAppStore((s) => s.appConfig.usage);
   const loadUsage = useAppStore((s) => s.loadUsage);
-  const loadUsageTokens = useAppStore((s) => s.loadUsageTokens);
   const [tab, setTab] = useState<"windows" | "cost">("windows");
-
-  // Fetch token/cost aggregates the first time the Cost tab is opened.
-  useEffect(() => {
-    if (tab === "cost" && !usageTokens) void loadUsageTokens();
-  }, [tab, usageTokens, loadUsageTokens]);
+  const cost = usePopoverCost();
 
   if (!prefs.enabled || !usage) return null;
   const agents = usage.agents.filter((a) => a.available && usageAgentEnabled(prefs, a.id));
@@ -337,17 +408,21 @@ export const UsageWidget: React.FC = () => {
       >
         <div className="flex items-center justify-between px-3 pt-2 text-[11px] text-neutral-500">
           <span>{freshestAsOf ? `Updated ${formatClock(freshestAsOf)}` : "Updating…"}</span>
-          <button
-            type="button"
-            className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
-            onClick={(e) => {
-              e.stopPropagation();
-              void loadUsage(true);
-            }}
-            aria-label="Refresh usage"
-          >
-            <RefreshCw size={13} />
-          </button>
+          <div className="flex items-center gap-0.5">
+            <OpenUsageLink tab={tab} />
+            <button
+              type="button"
+              className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+              onClick={(e) => {
+                e.stopPropagation();
+                void loadUsage(true);
+                if (tab === "cost") cost.load(true);
+              }}
+              aria-label="Refresh usage"
+            >
+              <RefreshCw size={13} />
+            </button>
+          </div>
         </div>
         <div className="px-3 pb-1 pt-1">
           <SegmentedControl
@@ -377,7 +452,7 @@ export const UsageWidget: React.FC = () => {
             ))}
           </>
         ) : null}
-        {tab === "cost" ? <CostTab rows={usageTokens?.rows ?? []} /> : null}
+        {tab === "cost" ? <CostTab summary={cost.summary} failed={cost.failed} load={cost.load} /> : null}
       </div>
     </AdaptiveMenu>
   );

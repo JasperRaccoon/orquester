@@ -12,6 +12,8 @@ import { readThread, requireChatSession } from "../reads.ts";
 import { costView, sessionUsageView, usageView } from "../usage-view.ts";
 
 const INCLUDES = ["quota", "cost", "session"] as const;
+/** The agents whose cost comes from Orquester's own chat logs (`/api/usage/chat-threads`). */
+const CHAT_AGENTS = ["grok", "opencode"] as const;
 type Include = (typeof INCLUDES)[number];
 
 /** `include` as given, else `session` when a sessionId is named, else `quota` (§4.1). */
@@ -41,7 +43,7 @@ async function modelResolver(api: DaemonApi, adapter: string): Promise<(slug: st
 const getUsage = defineTool({
   name: "get_usage",
   title: "Get usage and cost",
-  description: "quota: % USED per account window, with resets. cost: API-equivalent USD per agent/model by UTC day or ISO week (Grok: its reported cost in Orquester chats only). session: one chat's tokens and cost (see costSource; partial: older turns uncounted). Never poll.",
+  description: "quota: % USED per account window, with resets. cost: API-equivalent USD per agent/model by UTC day or ISO week (Grok, OpenCode: their reported cost in Orquester chats only). session: one chat's tokens and cost (see costSource; partial: older turns uncounted). Never poll.",
   input: {
     include: z.array(z.enum(INCLUDES)).min(1).max(3).optional().describe("Default quota (session with sessionId)."),
     bucket: z.enum(["day", "week"]).default("day"),
@@ -75,10 +77,14 @@ const getUsage = defineTool({
     }
     if (wanted.has("cost")) {
       const tokens = expectOk<UsageTokensResponse>(await api.request("GET", "/api/usage/tokens"));
-      // Grok has no transcript the Cost tab scans: its reported cost from Orquester's own chats (labelled so).
-      const grokRes = await api.request("GET", "/api/usage/chat-threads", { query: { agent: "grok" } }).catch(() => null);
-      const grok = grokRes !== null && grokRes.status < 400 ? (grokRes.body as ChatThreadUsageResponse) : null;
-      result.cost = costView(tokens, { days: args.days, bucket: args.bucket, now: now() }, [{ agent: "grok", usage: grok }]);
+      // Grok and OpenCode have no transcript the Cost tab scans: their reported cost from Orquester's own chats (labelled so).
+      const chats = await Promise.all(
+        CHAT_AGENTS.map(async (agent) => {
+          const res = await api.request("GET", "/api/usage/chat-threads", { query: { agent } }).catch(() => null);
+          return { agent, usage: res !== null && res.status < 400 ? (res.body as ChatThreadUsageResponse) : null };
+        })
+      );
+      result.cost = costView(tokens, { days: args.days, bucket: args.bucket, now: now() }, chats);
     }
     if (wanted.has("session") && args.sessionId !== undefined) {
       await requireChatSession(api, args.sessionId);

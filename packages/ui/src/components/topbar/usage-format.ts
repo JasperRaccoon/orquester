@@ -205,7 +205,12 @@ export interface NormalizedUsageWindow {
   limit?: number;
   remaining?: number;
   resetsAt?: string;
+  /** The window's length when known (the Usage view's pace tick needs it). */
+  durationMins?: number;
 }
+
+const SESSION_MINS = 5 * 60;
+const WEEK_MINS = 7 * 24 * 60;
 
 /**
  * The unit an agent's pool is denominated in. No daemon source declares one on
@@ -214,6 +219,17 @@ export interface NormalizedUsageWindow {
  */
 export function usageUnitFor(agentId: string): UsageUnit {
   return agentId === "grok" ? "credits" : "unknown";
+}
+
+/**
+ * A window's length for the pace tick: the provider's stated length when it gives
+ * one, else only a length known for certain (Claude's 5h session and 7-day week).
+ * Codex's weekly window can be longer than 7 days and Grok's pool is a billing
+ * period, so an unstated length there stays unknown (no tick) rather than wrong.
+ */
+function windowDuration(agentId: string, window: UsageWindow, claudeMins: number): number | undefined {
+  if (typeof window.windowMinutes === "number" && window.windowMinutes > 0) return window.windowMinutes;
+  return agentId === "claude" ? claudeMins : undefined;
 }
 
 /**
@@ -229,17 +245,20 @@ export function normalizeUsageWindows(
   // `...src.*` FIRST: the wire window only carries numbers today, but spreading
   // it last would let a future field silently clobber the presentation ones.
   if (src.session) {
-    out.push({ ...src.session, id: "session", label: "5h", longLabel: "Session (5h)", period: "rolling", unit });
+    const durationMins = windowDuration(agentId, src.session, SESSION_MINS);
+    out.push({ ...src.session, id: "session", label: "5h", longLabel: "Session (5h)", period: "rolling", unit, durationMins });
   }
   if (src.weekly) {
     // "Current period", not "This week": Grok's pool is a billing period and
     // Codex's weekly window is longer than 7 days for some plans.
-    out.push({ ...src.weekly, id: "weekly", label: "Week", longLabel: "Current period", period: "weekly", unit });
+    const durationMins = windowDuration(agentId, src.weekly, WEEK_MINS);
+    out.push({ ...src.weekly, id: "weekly", label: "Week", longLabel: "Current period", period: "weekly", unit, durationMins });
   }
   // Model-scoped weekly caps (Claude's Fable bar) render after the shared pool,
   // labeled with the provider's own model name.
   for (const w of src.scopedWindows ?? []) {
-    out.push({ ...w, id: `scoped:${w.label}`, label: w.label, longLabel: `${w.label} (week)`, period: "weekly", unit });
+    const durationMins = windowDuration(agentId, w, WEEK_MINS);
+    out.push({ ...w, id: `scoped:${w.label}`, label: w.label, longLabel: `${w.label} (week)`, period: "weekly", unit, durationMins });
   }
   return out;
 }
@@ -309,7 +328,8 @@ export function providerWindowsToNormalized(
       period: PROVIDER_WINDOW_PERIOD[w.kind] ?? "rolling",
       unit,
       percent: Math.max(0, Math.min(100, w.usedPercent)),
-      resetsAt: w.resetsAt
+      resetsAt: w.resetsAt,
+      durationMins: w.windowDurationMins
     });
   }
   return out;

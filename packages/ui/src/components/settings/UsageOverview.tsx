@@ -34,7 +34,8 @@ const AccountBlock: React.FC<{
   account: UsageAccount;
   resetFormat: UsageResetFormat;
   now: number;
-}> = ({ agentId, account, resetFormat, now }) => {
+  showPace: boolean;
+}> = ({ agentId, account, resetFormat, now, showPace }) => {
   const windows = normalizeUsageWindows(agentId, account.lastKnown ?? account);
   return (
     <UsageAccountCard
@@ -53,6 +54,7 @@ const AccountBlock: React.FC<{
       lastKnown={account.stale || !!account.lastKnown}
       asOf={account.lastKnown?.asOf ?? account.asOf}
       long
+      showPace={showPace}
     />
   );
 };
@@ -64,7 +66,8 @@ const AgentCard: React.FC<{
   now: number;
   /** Merged `account.rate-limits.updated` windows for this agent (§7.7). */
   liveWindows: readonly ProviderUsageWindow[];
-}> = ({ agent, hidden, resetFormat, now, liveWindows }) => {
+  showPace: boolean;
+}> = ({ agent, hidden, resetFormat, now, liveWindows, showPace }) => {
   const accounts = agent.accounts ?? [];
   const pollWindows = normalizeUsageWindows(agent.id, agent.lastKnown ?? agent);
   // Windows an open chat thread reported through `account.rate-limits.updated`
@@ -122,7 +125,14 @@ const AgentCard: React.FC<{
         {accounts.length > 0 || agent.system ? (
           <>
             {accounts.map((a) => (
-              <AccountBlock key={a.id} agentId={agent.id} account={a} resetFormat={resetFormat} now={now} />
+              <AccountBlock
+                key={a.id}
+                agentId={agent.id}
+                account={a}
+                resetFormat={resetFormat}
+                now={now}
+                showPace={showPace}
+              />
             ))}
             {/* The System (daemon-home) login pools into the head numbers, so it
                 stays visible here for the same reason as in the top-bar panel. */}
@@ -133,13 +143,21 @@ const AgentCard: React.FC<{
                 account={agent.system}
                 resetFormat={resetFormat}
                 now={now}
+                showPace={showPace}
               />
             )}
             {/* A pooling agent still gets its live provider windows: they are
                 per credential, not per account, so they sit below the cards
                 rather than inside one. */}
             {providerWindows.length > 0 && (
-              <UsageAccountCard windows={providerWindows} muted={muted} resetFormat={resetFormat} now={now} long />
+              <UsageAccountCard
+                windows={providerWindows}
+                muted={muted}
+                resetFormat={resetFormat}
+                now={now}
+                long
+                showPace={showPace}
+              />
             )}
           </>
         ) : ownWindows.length > 0 ? (
@@ -152,6 +170,7 @@ const AgentCard: React.FC<{
             login={agent}
             lastKnown={agent.stale || !!agent.lastKnown}
             asOf={agent.lastKnown?.asOf ?? agent.asOf}
+            showPace={showPace}
           />
         ) : (
           <p className="py-1 text-center text-[11px] text-neutral-500">No quota windows reported yet.</p>
@@ -195,7 +214,9 @@ const MissingCard: React.FC<{ id: string }> = ({ id }) => (
 export const UsageOverview: React.FC<{
   refreshing: boolean;
   onRefresh: () => void;
-}> = ({ refreshing, onRefresh }) => {
+  /** Mark each window's even-spend pace (the Usage view's Limits tab; off in Settings). */
+  showPace?: boolean;
+}> = ({ refreshing, onRefresh, showPace = false }) => {
   const usage = useAppStore((s) => s.usage);
   const prefs = useAppStore((s) => s.appConfig.usage);
   const providerRateLimits = useAppStore((s) => s.providerRateLimits);
@@ -256,6 +277,7 @@ export const UsageOverview: React.FC<{
             resetFormat={resetFormat}
             now={now}
             liveWindows={providerRateLimits[a.id] ?? NO_PROVIDER_WINDOWS}
+            showPace={showPace}
           />
         </div>
       ))}

@@ -855,6 +855,8 @@ export interface UsageWindow {
   used?: number;
   limit?: number;
   remaining?: number;
+  /** The window's full length in minutes, when the provider states it (pace markers). */
+  windowMinutes?: number;
 }
 
 /** A model-scoped quota window (e.g. the Fable weekly cap on Max plans),
@@ -971,6 +973,150 @@ export interface ChatThreadUsageResponse {
   asOf: string;
   /** Log lines too long to read (over 4 MiB) that were skipped; absent when none. */
   skippedLines?: number;
+}
+
+// --- Usage history (the Usage view) -----------------------------------------
+// `GET /api/usage/history?range=24h|<N>d&tz=<IANA>[&refresh=1]`: token use and its
+// API-equivalent cost from the daemon's hourly ledger, grouped into periods (local
+// days, or UTC hours for 24h). Additive: an older daemon answers 404.
+
+/** A request's service tier: Claude fast mode and Codex priority are `fast`. */
+export type UsageSpeed = "standard" | "fast" | "ultrafast";
+/** USD per 1,000,000 tokens. Omitted cache rates fall back (see the pricing module). */
+export interface UsageModelRates {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite5m?: number;
+  cacheWrite1h?: number;
+}
+/** Token sums. `input` is uncached input; `cacheWrite` includes its `cacheWrite1h`
+ *  subset; `output` includes `reasoning`. Processed = input + cacheRead + cacheWrite + output. */
+export interface UsageTokenTotals {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cacheWrite1h: number;
+  output: number;
+  reasoning: number;
+}
+/** USD split of an estimated cost. */
+export interface UsageCostParts {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+}
+/** `estimated`: priced from tokens (built-in or user rates); `reported`: the provider's
+ *  own per-turn cost; `unpriced`: no known price — unknown, not zero. */
+export type UsageCostSource = "estimated" | "reported" | "unpriced";
+/** One (period, agent, model, speed) cell. `model` is after the user's "map to" aliases. */
+export interface UsageHistoryBucket {
+  /** Index into {@link UsageHistoryResponse.periods}. */
+  period: number;
+  agent: string;
+  model: string;
+  speed: UsageSpeed;
+  tokens: UsageTokenTotals;
+  requests: number;
+  /** Null when no part of the cell has a price. */
+  costUsd: number | null;
+  /** Split of an estimated cost; null for reported or unpriced cells. */
+  cost: UsageCostParts | null;
+  costSource: UsageCostSource;
+  /** cacheRead × (input rate − cache-read rate); 0 when unpriced or reported. */
+  cacheSavingsUsd: number;
+  /** Processed tokens with no price (excluded from cost). */
+  unpricedTokens: number;
+  /** For an estimated fast/ultrafast cell: what the same tokens cost at standard rates
+   *  (the premium is costUsd − standardCostUsd). Absent otherwise. */
+  standardCostUsd?: number;
+}
+/** One (project, agent, model) over the whole range. `project` is "<workspace>/<project>",
+ *  or "" for use outside the workspaces root. */
+export interface UsageHistoryProjectBucket {
+  project: string;
+  agent: string;
+  model: string;
+  tokens: UsageTokenTotals;
+  requests: number;
+  costUsd: number | null;
+  unpricedTokens: number;
+}
+/** Distinct sessions active in the range (a session spanning days counts once). */
+export interface UsageHistorySessions {
+  total: number;
+  byAgent: Record<string, number>;
+  /** Keyed `${agent}:${model}`. */
+  byModel: Record<string, number>;
+  /** Keyed by project ("" = outside the workspaces root). */
+  byProject: Record<string, number>;
+  /** Keyed `${agent}:${project}`: a session belongs to one agent, so summing the visible
+   *  agents' entries of a project is exact when some agents are filtered out. */
+  byProjectAgent: Record<string, number>;
+}
+/** Where an agent's usage comes from and how far back it reaches. */
+export interface UsageHistorySource {
+  agent: string;
+  /** `orquester-chats`: only chats run in Orquester (Grok, OpenCode). */
+  scope: "transcripts" | "orquester-chats";
+  /** Oldest recorded hour for this agent (ISO), or null when none. */
+  oldestAt: string | null;
+}
+export interface UsageHistoryResponse {
+  /** As requested: "24h" or "<N>d" (1 ≤ N ≤ 90). */
+  range: string;
+  resolution: "hour" | "day";
+  /** The zone periods were cut in (UTC when the requested zone was invalid). */
+  timeZone: string;
+  /** Window bounds, ISO instants: inclusive start, exclusive end. */
+  since: string;
+  until: string;
+  /** Oldest first: "YYYY-MM-DD" days, or ISO hour starts. Zero-activity periods included. */
+  periods: string[];
+  buckets: UsageHistoryBucket[];
+  projectBuckets: UsageHistoryProjectBucket[];
+  sessions: UsageHistorySessions;
+  sources: UsageHistorySource[];
+  /** When this daemon started keeping its usage ledger (ISO), or null before the first write. */
+  recordedSince: string | null;
+  /** The first transcript scan since the daemon started is still running: totals may grow. */
+  scanning: boolean;
+  asOf: string;
+  costSource: "api_equivalent";
+}
+
+/** `GET/PUT /api/usage/prices`: the connected daemon's model prices. */
+export interface UsagePriceModelInfo {
+  agent: string;
+  model: string;
+  status: "override" | "alias" | "builtin" | "reported" | "unpriced";
+  /** The built-in table key the model resolves to, or null. */
+  pricingKey: string | null;
+  /** The model this one is counted as ("map to"), or null. */
+  aliasOf: string | null;
+  /** Processed tokens over the last 90 days. */
+  tokens: number;
+}
+export interface UsageBuiltinPrice {
+  model: string;
+  rates: UsageModelRates;
+  fast?: UsageModelRates;
+  ultrafast?: UsageModelRates;
+}
+export interface UsagePricesResponse {
+  currency: "USD";
+  unit: "per_million_tokens";
+  builtin: UsageBuiltinPrice[];
+  overrides: Record<string, UsageModelRates>;
+  aliases: Record<string, string>;
+  /** Every model in the ledger's last 90 days, processed tokens desc. */
+  seenModels: UsagePriceModelInfo[];
+}
+/** Only the models named change; `null` removes an override or mapping. */
+export interface UsagePricesPatch {
+  overrides?: Record<string, UsageModelRates | null>;
+  aliases?: Record<string, string | null>;
 }
 
 /** One auto-mode check of the Claude subagent prompt-cache lifetime. */
@@ -2103,6 +2249,7 @@ export interface OrquesterApi {
   listWorkspaces(): Promise<WorkspaceSummary[]>;
   listProjects(workspace: string): Promise<ProjectSummary[]>;
   usage(force?: boolean): Promise<UsageResponse>;
+  usageHistory(range: string, timeZone: string, force?: boolean): Promise<UsageHistoryResponse>;
 }
 
 export interface HttpApiClientOptions {
@@ -2228,6 +2375,13 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   usage(force?: boolean): Promise<UsageResponse> {
     return this.get(`/api/usage${force ? "?refresh=1" : ""}`);
+  }
+
+  /** `range` is "24h" or "<N>d" (1–90); days are cut in `timeZone`. `force` waits for a fresh scan. */
+  usageHistory(range: string, timeZone: string, force?: boolean): Promise<UsageHistoryResponse> {
+    const query = new URLSearchParams({ range, tz: timeZone });
+    if (force) query.set("refresh", "1");
+    return this.get(`/api/usage/history?${query.toString()}`);
   }
 
   // Device-code account links (Settings → Accounts) for Grok and Codex. Start

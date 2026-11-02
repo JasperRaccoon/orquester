@@ -45,7 +45,8 @@ export function currentWindow(w: UsageWindow | null, now: number): UsageWindow |
  *  whole again and nothing runs until the next message, which the endpoint
  *  itself reports as 0% with no reset. So an expired one reads that, not absent. */
 export function currentSessionWindow(w: UsageWindow | null, now: number): UsageWindow | null {
-  return w && currentWindow(w, now) == null ? { percent: 0 } : w;
+  if (!w || currentWindow(w, now) != null) return w;
+  return w.windowMinutes === undefined ? { percent: 0 } : { percent: 0, windowMinutes: w.windowMinutes };
 }
 
 /** Still-current scoped windows, or undefined when none survive (so a stale
@@ -57,6 +58,10 @@ export function currentScopedWindows(
   const kept = (windows ?? []).filter((w) => currentWindow(w, now) != null);
   return kept.length > 0 ? kept : undefined;
 }
+
+/** Claude's account windows have fixed lengths: the session is 5 hours, the weekly ones 7 days. */
+export const CLAUDE_SESSION_WINDOW_MINUTES = 5 * 60;
+export const CLAUDE_WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
 
 export function parseClaudeUsage(body: unknown, creds: ClaudeCreds, now: number): AgentUsage {
   const b = (body ?? {}) as Record<string, any>;
@@ -73,22 +78,22 @@ export function parseClaudeUsage(body: unknown, creds: ClaudeCreds, now: number)
       if (typeof label !== "string" || !label) continue;
       const p = clampPercent(lim?.percent);
       if (p == null) continue;
-      scoped.push({ percent: p, resetsAt: isoOrUndefined(lim?.resets_at), label });
+      scoped.push({ percent: p, resetsAt: isoOrUndefined(lim?.resets_at), windowMinutes: CLAUDE_WEEKLY_WINDOW_MINUTES, label });
     }
   }
 
   if (b.five_hour || b.seven_day) {
     const s = clampPercent(b.five_hour?.utilization);
-    if (s != null) session = { percent: s, resetsAt: isoOrUndefined(b.five_hour?.resets_at) };
+    if (s != null) session = { percent: s, resetsAt: isoOrUndefined(b.five_hour?.resets_at), windowMinutes: CLAUDE_SESSION_WINDOW_MINUTES };
     const w = clampPercent(b.seven_day?.utilization);
-    if (w != null) weekly = { percent: w, resetsAt: isoOrUndefined(b.seven_day?.resets_at) };
+    if (w != null) weekly = { percent: w, resetsAt: isoOrUndefined(b.seven_day?.resets_at), windowMinutes: CLAUDE_WEEKLY_WINDOW_MINUTES };
   } else if (Array.isArray(b.limits)) {
     for (const lim of b.limits) {
       const p = clampPercent(lim?.percent);
       if (p == null) continue;
-      const win = { percent: p, resetsAt: isoOrUndefined(lim?.resets_at) };
-      if (lim?.kind === "session") session = win;
-      else if (lim?.kind === "weekly_all") weekly = win;
+      const resetsAt = isoOrUndefined(lim?.resets_at);
+      if (lim?.kind === "session") session = { percent: p, resetsAt, windowMinutes: CLAUDE_SESSION_WINDOW_MINUTES };
+      else if (lim?.kind === "weekly_all") weekly = { percent: p, resetsAt, windowMinutes: CLAUDE_WEEKLY_WINDOW_MINUTES };
     }
   }
 
@@ -106,12 +111,17 @@ export function parseClaudeUsage(body: unknown, creds: ClaudeCreds, now: number)
   };
 }
 
+/** The window's length as the provider states it, in whole minutes (absent when it does not). */
+function withWindowMinutes(win: UsageWindow | null, limitSeconds: number | null): UsageWindow | null {
+  return win && limitSeconds != null ? { ...win, windowMinutes: Math.round(limitSeconds / 60) } : win;
+}
+
 function codexWindow(w: any, now: number): UsageWindow | null {
   if (!w) return null;
   const resetsAt = epochSecondsToIso(w.resets_at);
   if (resetsAt && Date.parse(resetsAt) < now) return null; // stale window
   const percent = clampPercent(w.used_percent);
-  return percent == null ? null : { percent, resetsAt };
+  return percent == null ? null : withWindowMinutes({ percent, resetsAt }, codexLimitSeconds(w));
 }
 
 /**
@@ -194,7 +204,7 @@ function whamWindow(w: unknown, now: number): UsageWindow | null {
   const resetSec = typeof o.reset_at === "number" ? o.reset_at : null;
   const win: UsageWindow = { percent: Math.max(0, Math.min(100, pct)) };
   if (resetSec !== null && resetSec * 1000 > now - 86_400_000) win.resetsAt = new Date(resetSec * 1000).toISOString();
-  return win;
+  return withWindowMinutes(win, codexLimitSeconds(o));
 }
 
 export function parseCodexWhamUsage(json: unknown, now: number): AgentUsage {
@@ -234,7 +244,13 @@ export function parseGrokBilling(json: unknown, now: number): AgentUsage {
   if (cfg) {
     const percent = clampPercent(cfg.creditUsagePercent ?? 0);
     if (percent != null) {
-      weekly = { percent, resetsAt: isoOrUndefined(cfg.currentPeriod?.end ?? cfg.billingPeriodEnd) };
+      const resetsAt = isoOrUndefined(cfg.currentPeriod?.end ?? cfg.billingPeriodEnd);
+      weekly = { percent, resetsAt };
+      // The period's length, when it states both ends.
+      const start = isoOrUndefined(cfg.currentPeriod?.start);
+      const end = isoOrUndefined(cfg.currentPeriod?.end);
+      const minutes = start && end ? Math.round((Date.parse(end) - Date.parse(start)) / 60_000) : 0;
+      if (minutes > 0) weekly.windowMinutes = minutes;
     }
   }
   weekly = currentWindow(weekly, now);

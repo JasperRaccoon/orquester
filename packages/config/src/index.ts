@@ -605,6 +605,16 @@ export function usageStateFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "usage-state.json");
 }
 
+/** The user's model prices for usage estimates (overrides and "map to" aliases); 0600. */
+export function usagePricingFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "usage-pricing.json");
+}
+
+/** The hourly usage ledger the Usage view reads (outlives deleted transcripts); 0600. */
+export function usageHistoryFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "usage-history.json");
+}
+
 /** Auto mode's current subagent prompt-cache decision and when it is next checked; 0600. */
 export function subagentCacheTtlStateFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "subagent-cache-ttl.json");
@@ -960,6 +970,248 @@ export type UsagePrefs = z.infer<typeof usagePrefsSchema>;
 
 export function usageAgentEnabled(prefs: UsagePrefs, id: string): boolean {
   return prefs.enabled && (prefs.agents[id] ?? true);
+}
+
+// daemon/usage-pricing.json — the user's model prices for usage estimates.
+
+/** Longest model id a price or mapping may name. */
+export const USAGE_MODEL_ID_MAX = 200;
+const usageRate = z.number().finite().nonnegative();
+/** USD per 1,000,000 tokens; omitted cache rates fall back in the daemon's pricing. */
+export const usageModelRatesSchema = z.object({
+  input: usageRate,
+  output: usageRate,
+  cacheRead: usageRate.optional(),
+  cacheWrite5m: usageRate.optional(),
+  cacheWrite1h: usageRate.optional()
+});
+export type UsageModelRatesConfig = z.infer<typeof usageModelRatesSchema>;
+
+/**
+ * The parsed file: its valid entries, plus everything this version can't read, written back as
+ * read (unknown top-level fields, invalid entries, fields of an entry a newer writer added).
+ */
+export interface UsagePricingFile {
+  overrides: Record<string, UsageModelRatesConfig>;
+  aliases: Record<string, string>;
+  /** Unknown top-level fields, written back untouched. */
+  extra: Record<string, unknown>;
+  /** The `overrides` and `aliases` objects as read, every entry: what is written back. */
+  raw: { overrides: Record<string, unknown>; aliases: Record<string, unknown> };
+}
+
+/** A trimmed, non-empty model id of at most {@link USAGE_MODEL_ID_MAX} characters, or null. */
+export function normalizeUsageModelId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const id = value.trim();
+  return id && id.length <= USAGE_MODEL_ID_MAX ? id : null;
+}
+
+const plainRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+
+/** Tolerant read: a malformed entry is left out of the prices on its own, never the whole file. */
+export function parseUsagePricingFile(raw: unknown): UsagePricingFile {
+  const record = plainRecord(raw);
+  const { overrides, aliases, ...extra } = record;
+  const out: UsagePricingFile = { overrides: {}, aliases: {}, extra, raw: { overrides: plainRecord(overrides), aliases: plainRecord(aliases) } };
+  for (const [model, rates] of Object.entries(out.raw.overrides)) {
+    const id = normalizeUsageModelId(model);
+    const parsed = usageModelRatesSchema.safeParse(rates);
+    if (id && parsed.success) out.overrides[id] = parsed.data;
+  }
+  for (const [model, target] of Object.entries(out.raw.aliases)) {
+    const from = normalizeUsageModelId(model);
+    const to = normalizeUsageModelId(target);
+    if (from && to && from !== to) out.aliases[from] = to;
+  }
+  return out;
+}
+
+/**
+ * The file after a validated edit (`null` removes): an edited model's entries as read (under any
+ * spelling of its id) are replaced; every other entry stays as read.
+ */
+export function patchUsagePricingFile(
+  file: UsagePricingFile,
+  patch: { overrides?: Record<string, UsageModelRatesConfig | null>; aliases?: Record<string, string | null> }
+): UsagePricingFile {
+  const apply = (entries: Record<string, unknown>, edits: Record<string, unknown> | undefined) => {
+    const next = { ...entries };
+    for (const [model, value] of Object.entries(edits ?? {})) {
+      for (const key of Object.keys(next)) if (normalizeUsageModelId(key) === model) delete next[key];
+      if (value !== null) next[model] = value;
+    }
+    return next;
+  };
+  return parseUsagePricingFile({
+    ...file.extra,
+    overrides: apply(file.raw.overrides, patch.overrides),
+    aliases: apply(file.raw.aliases, patch.aliases)
+  });
+}
+
+export function serializeUsagePricingFile(file: UsagePricingFile): Record<string, unknown> {
+  return { ...file.extra, version: 1, overrides: file.raw.overrides, aliases: file.raw.aliases };
+}
+
+// daemon/usage-history.json — the hourly usage ledger (apps/daemon/src/usage-history.ts).
+//
+// `{ version: 1, recordedSince, sessions: string[], cwds: string[], buckets: Row[] }`, where a Row is
+// `[source, agent, model, speed, hour, cwdIndex | null, input, cacheRead, cacheWrite, cacheWrite1h,
+// output, reasoning, requests, reportedCostUsd, reportedRequests, sessionIndexes[]]` and the indexes
+// point into `cwds` and `sessions`. What this version can't read (unknown top-level fields, extra
+// trailing columns, whole rows of a newer writer's source or speed) is written back unchanged.
+
+// 2: buckets keyed by a cwd index (version 1 rows carried a derived project string).
+export const USAGE_HISTORY_VERSION = 2;
+export const USAGE_HISTORY_SOURCES = ["transcripts", "orquester-chats"] as const;
+export const USAGE_HISTORY_SPEEDS = ["standard", "fast", "ultrafast"] as const;
+/** The summed columns of a row, in file order (columns 6–14). */
+export const USAGE_HISTORY_SUM_FIELDS = [
+  "input", "cacheRead", "cacheWrite", "cacheWrite1h", "output", "reasoning", "requests", "reportedCostUsd", "reportedRequests"
+] as const;
+/** Row columns 0–15; anything after is a newer writer's and kept as is. */
+const USAGE_HISTORY_ROW_COLUMNS = 16;
+
+export type UsageHistorySums = Record<(typeof USAGE_HISTORY_SUM_FIELDS)[number], number>;
+
+/** One hour of one (source, agent, raw model, speed, cwd). */
+export interface UsageHistoryRow extends UsageHistorySums {
+  source: (typeof USAGE_HISTORY_SOURCES)[number];
+  agent: string;
+  model: string;
+  speed: (typeof USAGE_HISTORY_SPEEDS)[number];
+  /** UTC hour index (epoch ms / 3,600,000). */
+  hour: number;
+  /** The working directory, "" when unknown. */
+  cwd: string;
+  sessions: string[];
+  /** Trailing columns a newer writer added, written back as read. */
+  tail?: unknown[];
+}
+
+export interface UsageHistoryFile {
+  recordedSince: string | null;
+  rows: UsageHistoryRow[];
+  /** Rows this version can't read (a newer writer's source or speed), written back unchanged. */
+  unreadRows: unknown[];
+  /** The string tables as read: unread rows point into them, so a rewrite keeps them as its first entries. */
+  sessions: unknown[];
+  cwds: unknown[];
+  /** Unknown top-level fields, written back untouched. */
+  extra: Record<string, unknown>;
+}
+
+export type UsageHistoryFileRead =
+  | { ok: true; file: UsageHistoryFile; /** Rows older than `minHour` were left out. */ pruned: boolean }
+  /** `version` null: not a ledger at all; else a ledger of another version. */
+  | { ok: false; version: number | null };
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+function parseUsageHistoryRow(row: unknown[], sessions: unknown[], cwds: unknown[]): UsageHistoryRow | null {
+  const [source, agent, model, speed, hour, cwdIndex] = row;
+  if (!USAGE_HISTORY_SOURCES.includes(source as never) || !USAGE_HISTORY_SPEEDS.includes(speed as never)) return null;
+  if (typeof agent !== "string" || !agent || typeof model !== "string" || !Number.isSafeInteger(hour)) return null;
+  const cwd = cwdIndex === null ? "" : Number.isInteger(cwdIndex) ? cwds[cwdIndex as number] : undefined;
+  if (typeof cwd !== "string") return null;
+  const sums = {} as UsageHistorySums;
+  for (const [i, field] of USAGE_HISTORY_SUM_FIELDS.entries()) {
+    const value = row[6 + i];
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+    sums[field] = value;
+  }
+  const indexes = row[USAGE_HISTORY_ROW_COLUMNS - 1];
+  if (!Array.isArray(indexes)) return null;
+  const ids = new Set<string>();
+  for (const i of indexes) {
+    const id = Number.isInteger(i) ? sessions[i as number] : undefined;
+    if (typeof id === "string" && id) ids.add(id);
+  }
+  const parsed: UsageHistoryRow = {
+    source: source as UsageHistoryRow["source"], agent, model, speed: speed as UsageHistoryRow["speed"], hour: hour as number, cwd, ...sums, sessions: [...ids]
+  };
+  if (row.length > USAGE_HISTORY_ROW_COLUMNS) parsed.tail = row.slice(USAGE_HISTORY_ROW_COLUMNS);
+  return parsed;
+}
+
+/**
+ * Tolerant read of a parsed ledger document. A row that does not read as this version's (a newer
+ * writer's source or speed) is kept in `unreadRows`; one too short to be any writer's is dropped. Rows
+ * whose hour is before `minHour` are left out (retention).
+ */
+export function parseUsageHistoryFile(raw: unknown, opts: { minHour?: number } = {}): UsageHistoryFileRead {
+  if (!isPlainObject(raw) || typeof raw.version !== "number") return { ok: false, version: null };
+  if (raw.version !== USAGE_HISTORY_VERSION) return { ok: false, version: raw.version };
+  const { version: _version, recordedSince, sessions, cwds, buckets, ...extra } = raw;
+  const file: UsageHistoryFile = {
+    recordedSince: typeof recordedSince === "string" && Number.isFinite(Date.parse(recordedSince)) ? recordedSince : null,
+    rows: [],
+    unreadRows: [],
+    sessions: Array.isArray(sessions) ? sessions : [],
+    cwds: Array.isArray(cwds) ? cwds : [],
+    extra
+  };
+  const minHour = opts.minHour ?? Number.NEGATIVE_INFINITY;
+  let pruned = false;
+  for (const row of Array.isArray(buckets) ? buckets : []) {
+    // Shorter than a row of this version: no writer's row (a newer one only adds columns).
+    if (!Array.isArray(row) || row.length < USAGE_HISTORY_ROW_COLUMNS) continue;
+    if (typeof row[4] === "number" && row[4] < minHour) {
+      pruned = true;
+      continue;
+    }
+    const parsed = parseUsageHistoryRow(row, file.sessions, file.cwds);
+    if (parsed) file.rows.push(parsed);
+    else file.unreadRows.push(row);
+  }
+  return { ok: true, file, pruned };
+}
+
+/** A string table: each distinct value once, after the `seed` entries (kept at their indexes). */
+function stringTable(seed: readonly unknown[]): { values: unknown[]; index: (value: string) => number } {
+  const values = [...seed];
+  const indexes = new Map<string, number>();
+  values.forEach((value, i) => {
+    if (typeof value === "string" && !indexes.has(value)) indexes.set(value, i);
+  });
+  return {
+    values,
+    index: (value) => {
+      let i = indexes.get(value);
+      if (i === undefined) {
+        indexes.set(value, (i = values.length));
+        values.push(value);
+      }
+      return i;
+    }
+  };
+}
+
+/**
+ * The document to write. The tables are rebuilt from the rows, after the tables as read when unread
+ * rows still point into them.
+ */
+export function serializeUsageHistoryFile(file: UsageHistoryFile): Record<string, unknown> {
+  const keepTables = file.unreadRows.length > 0;
+  const sessions = stringTable(keepTables ? file.sessions : []);
+  const cwds = stringTable(keepTables ? file.cwds : []);
+  const rows: unknown[] = file.rows.map((r) => {
+    const row: unknown[] = [r.source, r.agent, r.model, r.speed, r.hour, r.cwd ? cwds.index(r.cwd) : null];
+    for (const field of USAGE_HISTORY_SUM_FIELDS) row.push(r[field]);
+    row.push(r.sessions.map(sessions.index));
+    return r.tail ? [...row, ...r.tail] : row;
+  });
+  return {
+    ...file.extra,
+    version: USAGE_HISTORY_VERSION,
+    recordedSince: file.recordedSince,
+    sessions: sessions.values,
+    cwds: cwds.values,
+    buckets: [...rows, ...file.unreadRows]
+  };
 }
 
 // Adapted from T3 Code (MIT): packages/contracts/src/settings.ts

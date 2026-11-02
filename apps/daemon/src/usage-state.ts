@@ -28,7 +28,12 @@ function parseWindow(value: unknown): UsageWindow | null {
   if (!value || typeof value !== "object") return null;
   const row = value as Record<string, unknown>;
   if (typeof row.percent !== "number" || !Number.isFinite(row.percent)) return null;
-  return { percent: row.percent, ...(typeof row.resetsAt === "string" ? { resetsAt: row.resetsAt } : {}) };
+  const minutes = row.windowMinutes;
+  return {
+    percent: row.percent,
+    ...(typeof row.resetsAt === "string" ? { resetsAt: row.resetsAt } : {}),
+    ...(typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0 ? { windowMinutes: minutes } : {})
+  };
 }
 
 function parseUsage(value: unknown): AgentUsage | null {

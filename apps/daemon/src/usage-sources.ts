@@ -2,7 +2,19 @@ import { open, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentUsage, UsageWindow } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
-import { claudePlanLabel, currentScopedWindows, currentSessionWindow, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage, parseGrokBilling } from "./usage-parse";
+import {
+  CLAUDE_SESSION_WINDOW_MINUTES,
+  CLAUDE_WEEKLY_WINDOW_MINUTES,
+  claudePlanLabel,
+  currentScopedWindows,
+  currentSessionWindow,
+  currentWindow,
+  findLastCodexTokenCount,
+  parseClaudeUsage,
+  parseCodexUsage,
+  parseCodexWhamUsage,
+  parseGrokBilling
+} from "./usage-parse";
 import { claudeLoginStatus, decodeJwtPayload, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity";
 import { CLAUDE_SESSION_WINDOW_ID, CLAUDE_WEEKLY_WINDOW_ID } from "./agent-host/adapters/claude/usage.ts";
 
@@ -80,14 +92,14 @@ export function claudeLiveUsageFromWindows(
 ): ClaudeLiveUsage | null {
   const observedAtMs = Date.parse(observedAt);
   if (!Number.isFinite(observedAtMs)) return null;
-  const window = (id: string): UsageWindow | undefined => {
+  const window = (id: string, windowMinutes: number): UsageWindow | undefined => {
     const found = windows.find((w) => w.id === id);
     if (!found || !Number.isFinite(found.usedPercent)) return undefined;
     const percent = Math.max(0, Math.min(100, found.usedPercent));
-    return { percent, ...(found.resetsAt ? { resetsAt: found.resetsAt } : {}) };
+    return { percent, ...(found.resetsAt ? { resetsAt: found.resetsAt } : {}), windowMinutes };
   };
-  const session = window(CLAUDE_SESSION_WINDOW_ID);
-  const weekly = window(CLAUDE_WEEKLY_WINDOW_ID);
+  const session = window(CLAUDE_SESSION_WINDOW_ID, CLAUDE_SESSION_WINDOW_MINUTES);
+  const weekly = window(CLAUDE_WEEKLY_WINDOW_ID, CLAUDE_WEEKLY_WINDOW_MINUTES);
   if (!session && !weekly) return null;
   return { ...(session ? { session } : {}), ...(weekly ? { weekly } : {}), observedAt: observedAtMs };
 }

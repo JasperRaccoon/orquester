@@ -5,7 +5,8 @@
 // `thread.session-set` with `payload.turn {tokenUsage?, totalCostUsd?}` in
 // `<appdir>/daemon/agent/threads/<id>/events.ndjson`. This scanner sums those per UTC day and model
 // for one agent — Orquester's chats only (closed ones included; the agent's use outside Orquester is
-// not here).
+// not here). Alongside, it keeps per-thread sums by UTC hour and model with the full token split, for
+// the usage ledger (`historyRecords`).
 //
 // Read-only: the agent host owns and appends the logs; this never writes them. A thread's agent is
 // read once from its first line (`thread.created`), and a log is re-read only from the byte it was
@@ -16,6 +17,8 @@ import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ChatThreadUsageResponse, ChatThreadUsageRow } from "@orquester/api";
+
+import { HOUR_MS, type UsageRecord, type UsageRecordSource } from "./usage-records.ts";
 
 const CHUNK_BYTES = 4 * 1024 * 1024;
 /** A line longer than this is skipped (counted in `skippedLines`), never buffered whole. */
@@ -32,14 +35,33 @@ interface RowSums {
   costUsd: number;
 }
 
+/** One thread's settled turns in one UTC hour on one model, input split as the ledger counts it. */
+interface HourSums {
+  hour: number;
+  model: string;
+  requests: number;
+  /** Uncached input: the adapters' `inputTokens` hold the cache reads and writes too. */
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  reasoning: number;
+  reportedCostUsd: number;
+  reportedRequests: number;
+}
+
 interface ThreadEntry {
   /** The thread's agent adapter; null when its first line did not say (yet). */
   adapter: string | null;
+  /** The project the thread runs in (`thread.created`'s `projectPath`), or null. */
+  cwd: string | null;
   bytesParsed: number;
   /** The model selection in force at `bytesParsed` (created / meta-updated / turn-start). */
   model: string;
   /** `day|model` → sums. */
   rows: Map<string, RowSums>;
+  /** `hour|model` → sums. */
+  hours: Map<string, HourSums>;
   /** Inside an over-long line at `bytesParsed` (read up to there): skip to its newline. */
   skipping: boolean;
   /** Over-long lines skipped so far. */
@@ -47,6 +69,8 @@ interface ThreadEntry {
 }
 
 const finite = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+/** A token count as the ledger sums it: a finite number, never below 0. */
+const count = (value: unknown): number => Math.max(0, finite(value) ?? 0);
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
 function modelOf(payload: Record<string, unknown>): string | undefined {
@@ -89,10 +113,30 @@ function applyLine(entry: ThreadEntry, line: string): void {
     sums.costUsd += cost;
   }
   entry.rows.set(key, sums);
+
+  const hour = Math.floor(at / HOUR_MS);
+  const hourKey = `${hour}|${entry.model}`;
+  let hourly = entry.hours.get(hourKey);
+  if (!hourly) {
+    hourly = { hour, model: entry.model, requests: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reportedCostUsd: 0, reportedRequests: 0 };
+    entry.hours.set(hourKey, hourly);
+  }
+  const cacheRead = count(usage.cachedInputTokens);
+  const cacheWrite = count(usage.cacheCreationTokens);
+  hourly.requests += 1;
+  hourly.input += Math.max(0, count(usage.inputTokens) - cacheRead - cacheWrite);
+  hourly.cacheRead += cacheRead;
+  hourly.cacheWrite += cacheWrite;
+  hourly.output += count(usage.outputTokens);
+  hourly.reasoning += count(usage.reasoningTokens);
+  if (cost !== undefined) {
+    hourly.reportedRequests += 1;
+    hourly.reportedCostUsd += cost;
+  }
 }
 
-/** The adapter a log's first line (`thread.created`) names, or null. */
-async function adapterOf(path: string): Promise<string | null> {
+/** What a log's first line (`thread.created`) says of the thread, or null. */
+async function headOf(path: string): Promise<{ adapter: string; cwd: string | null } | null> {
   const fh = await open(path, "r");
   try {
     const buffer = Buffer.alloc(HEAD_BYTES);
@@ -101,8 +145,9 @@ async function adapterOf(path: string): Promise<string | null> {
     const newline = head.indexOf("\n");
     if (newline < 0) return null;
     const event = JSON.parse(head.slice(0, newline)) as unknown;
-    if (isRecord(event) && event.type === "thread.created" && isRecord(event.payload) && typeof event.payload.adapter === "string") return event.payload.adapter;
-    return null;
+    if (!isRecord(event) || event.type !== "thread.created" || !isRecord(event.payload) || typeof event.payload.adapter !== "string") return null;
+    const projectPath = event.payload.projectPath;
+    return { adapter: event.payload.adapter, cwd: typeof projectPath === "string" && projectPath !== "" ? projectPath : null };
   } catch {
     return null;
   } finally {
@@ -110,9 +155,11 @@ async function adapterOf(path: string): Promise<string | null> {
   }
 }
 
-export class ChatThreadUsageScanner {
+export class ChatThreadUsageScanner implements UsageRecordSource {
   private readonly threads = new Map<string, ThreadEntry>();
   private inflight: Promise<void> | null = null;
+  /** False until one scan has read every thread. */
+  private scanned = false;
 
   constructor(
     private readonly opts: {
@@ -154,6 +201,28 @@ export class ChatThreadUsageScanner {
     return { agent, scope: "orquester-chats", rows, asOf: new Date(this.opts.now()).toISOString(), ...(skippedLines > 0 ? { skippedLines } : {}) };
   }
 
+  /** Read what the logs appended since the last scan (single-flight). */
+  refresh(): Promise<void> {
+    return this.scan();
+  }
+
+  /** Hourly per-thread records of every scanned agent for the usage ledger; null before the first scan. */
+  historyRecords(): UsageRecord[] | null {
+    if (!this.scanned) return null;
+    const records: UsageRecord[] = [];
+    for (const [id, entry] of this.threads) {
+      if (entry.adapter === null || !this.opts.agents.includes(entry.adapter)) continue;
+      for (const s of entry.hours.values()) {
+        records.push({
+          source: "orquester-chats", agent: entry.adapter, model: s.model, hour: s.hour, cwd: entry.cwd, session: id, speed: "standard",
+          input: s.input, cacheRead: s.cacheRead, cacheWrite: s.cacheWrite, cacheWrite1h: 0, output: s.output, reasoning: s.reasoning,
+          requests: s.requests, reportedCostUsd: s.reportedCostUsd, reportedRequests: s.reportedRequests
+        });
+      }
+    }
+    return records;
+  }
+
   /** Single-flight: a scan asked for while one runs waits for that one. */
   private scan(): Promise<void> {
     this.inflight ??= this.doScan().finally(() => {
@@ -179,6 +248,7 @@ export class ChatThreadUsageScanner {
         this.threads.delete(id);
       }
     }
+    this.scanned = true;
   }
 
   private async updateThread(id: string): Promise<void> {
@@ -193,10 +263,14 @@ export class ChatThreadUsageScanner {
     let entry = this.threads.get(id);
     if (entry && size < entry.bytesParsed) entry = undefined; // rebuilt: read again from the start
     if (!entry) {
-      entry = { adapter: await adapterOf(path), bytesParsed: 0, model: "unknown", rows: new Map(), skipping: false, skippedLines: 0 };
+      const head = await headOf(path);
+      entry = { adapter: head?.adapter ?? null, cwd: head?.cwd ?? null, bytesParsed: 0, model: "unknown", rows: new Map(), hours: new Map(), skipping: false, skippedLines: 0 };
       this.threads.set(id, entry);
+    } else if (entry.adapter === null) {
+      const head = await headOf(path);
+      entry.adapter = head?.adapter ?? null;
+      entry.cwd = head?.cwd ?? null;
     }
-    if (entry.adapter === null) entry.adapter = await adapterOf(path);
     // Another agent's thread is never read past its first line (a thread's agent never changes).
     if (entry.adapter === null || !this.opts.agents.includes(entry.adapter)) return;
     if (size === entry.bytesParsed) return;

@@ -76,6 +76,38 @@ test("appended turns are counted once; a partial last line waits for its newline
   assert.deepEqual((await w.scanner.snapshot("grok")).rows, []);
 });
 
+test("history records: each scanned agent's threads summed per UTC hour and model, with the project, the thread as session and input split into uncached, cache reads and writes", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "chat-usage-history-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const scanner = new ChatThreadUsageScanner({ threadsDir: dir, agents: ["grok", "opencode"], now: () => 0 });
+  const thread = async (id: string, text: string) => {
+    await mkdir(join(dir, id), { recursive: true });
+    await writeFile(join(dir, id, "events.ndjson"), text);
+  };
+  const turn = (at: string, cost: number | undefined, usage: Record<string, unknown>) =>
+    line({ type: "thread.session-set", occurredAt: at, payload: { turn: { turnId: `t-${at}`, tokenUsage: { usageScope: "main_agent", usageStatus: "complete", hasSubagents: false, ...usage }, ...(cost !== undefined ? { totalCostUsd: cost } : {}) } } });
+  const createdIn = (adapter: string, model: string, projectPath: string) =>
+    line({ type: "thread.created", occurredAt: "2026-10-01T00:00:00Z", payload: { adapter, projectPath, cwd: `${projectPath}/sub`, modelSelection: { model } } });
+  await thread(
+    "oc1",
+    createdIn("opencode", "anthropic/claude-sonnet-4-5", "/work/ws/proj") +
+      turn("2026-10-14T10:05:00Z", 0.02, { inputTokens: 1_000, cachedInputTokens: 600, cacheCreationTokens: 100, outputTokens: 50, reasoningTokens: 20 }) +
+      turn("2026-10-14T10:55:00Z", undefined, { inputTokens: 300, cachedInputTokens: 100, outputTokens: 10 }) +
+      turn("2026-10-14T11:00:00Z", 0.01, { inputTokens: 10, cachedInputTokens: 20, outputTokens: 1 })
+  );
+  await thread("c1", createdIn("claude", "claude-opus-5", "/work/ws/proj") + turn("2026-10-14T10:05:00Z", 9, { inputTokens: 1, outputTokens: 1 }));
+  assert.equal(scanner.historyRecords(), null, "unknown before the first scan");
+  await scanner.refresh();
+  const hour = (iso: string) => Math.floor(Date.parse(iso) / 3_600_000);
+  const base = { source: "orquester-chats", agent: "opencode", model: "anthropic/claude-sonnet-4-5", cwd: "/work/ws/proj", session: "oc1", speed: "standard", cacheWrite1h: 0 };
+  assert.deepEqual(scanner.historyRecords(), [
+    { ...base, hour: hour("2026-10-14T10:00:00Z"), input: 300 + 200, cacheRead: 700, cacheWrite: 100, output: 60, reasoning: 20, requests: 2, reportedCostUsd: 0.02, reportedRequests: 1 },
+    // Cached above the input (an odd report): no negative uncached input.
+    { ...base, hour: hour("2026-10-14T11:00:00Z"), input: 0, cacheRead: 20, cacheWrite: 0, output: 1, reasoning: 0, requests: 1, reportedCostUsd: 0.01, reportedRequests: 1 }
+  ]);
+  assert.equal((await scanner.snapshot("opencode")).rows[0]?.turns, 3, "the daily rows answer for opencode too");
+});
+
 test("no threads directory yet: no rows", async () => {
   const scanner = new ChatThreadUsageScanner({ threadsDir: join(tmpdir(), "chat-usage-missing-dir-x"), agents: ["grok"], now: () => 0 });
   assert.deepEqual((await scanner.snapshot("grok")).rows, []);

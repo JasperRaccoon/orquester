@@ -1,5 +1,5 @@
 import React from "react";
-import { Boxes, Settings, TabletSmartphone, Waypoints, type LucideIcon } from "lucide-react";
+import { Boxes, ChartNoAxesColumn, Settings, TabletSmartphone, Waypoints, type LucideIcon } from "lucide-react";
 import { KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import { useDevicesEnabled } from "../../lib/devices/hooks";
@@ -54,9 +54,9 @@ const ActivityButton: React.FC<{
 /**
  * The desktop sidebar's leftmost column: one button per sidebar view — the
  * projects tree, workflows, Agent Profiles — then, while their plugins are on,
- * Knowledge and Devices, and settings at the bottom. Neither is a sidebar
- * view: each shows its server-level view in the main area (pressed while it
- * shows; a second click goes back to the project).
+ * Knowledge and Devices, then Usage, and settings at the bottom. None is a
+ * sidebar view: each shows its server-level view in the main area (pressed
+ * while it shows; a second click goes back to the project).
  * A view that is not showing carries a dot when it holds something that wants
  * the user: an agent blocked on them, a failed workflow run.
  */
@@ -67,6 +67,7 @@ export const ActivityBar: React.FC = () => {
   const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
   const devicesOn = useDevicesEnabled();
   const devicesOpen = useAppStore((s) => s.devicesFleetOpen);
+  const usageOpen = useAppStore((s) => s.usageViewOpen);
   const agentWaiting = useAgentSessions().some((entry) => entry.bucket === "attention");
   const workflowFailed = useWorkflowAttention().length > 0;
 
@@ -116,6 +117,16 @@ export const ActivityBar: React.FC = () => {
           }}
         />
       )}
+      <ActivityButton
+        title="Usage"
+        Icon={ChartNoAxesColumn}
+        active={usageOpen}
+        onClick={() => {
+          const state = useAppStore.getState();
+          if (state.usageViewOpen) state.closeUsageView();
+          else state.openUsageView();
+        }}
+      />
       <div className="flex-1" />
       <ActivityButton title="Settings" Icon={Settings} onClick={() => setSettingsOpen(true)} />
     </nav>
