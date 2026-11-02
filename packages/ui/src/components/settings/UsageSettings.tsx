@@ -7,8 +7,28 @@ import { getRegistryIcon } from "../../icons";
 import { useRegistry, useUsageResetFormat } from "../../hooks";
 import { useAppStore } from "../../store/app";
 import { Button, Switch } from "../ui";
+import { UsagePricesDialog } from "../usage/UsagePricesDialog";
 import { Badge, SegmentedControl, SettingRow, SettingsPage, SettingsSection, type Tone } from "./primitives";
 import { UsageOverview } from "./UsageOverview";
+
+/** "Model prices": opens the editor for the connected daemon's per-model prices. */
+const ModelPricesSection: React.FC = () => {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <SettingsSection
+      title="Model prices"
+      description="Set or map the per-model prices behind the API-equivalent cost estimates on this daemon."
+      actions={
+        <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
+          Edit prices…
+        </Button>
+      }
+      bare
+    >
+      <UsagePricesDialog open={open} onClose={() => setOpen(false)} />
+    </SettingsSection>
+  );
+};
 
 type UsageAgentId = "claude" | "codex" | "grok";
 
@@ -27,7 +47,7 @@ const CHIP_OPTIONS: { value: UsagePrefs["chip"]; label: string }[] = [
   { value: "grok", label: "Grok" }
 ];
 
-const RESET_OPTIONS: { value: UsageResetFormat; label: string }[] = [
+export const RESET_OPTIONS: { value: UsageResetFormat; label: string }[] = [
   { value: "relative", label: "Countdown" },
   { value: "absolute", label: "Clock" },
   { value: "both", label: "Both" }
@@ -159,6 +179,8 @@ export const UsageSettings: React.FC = () => {
           );
         })}
       </SettingsSection>
+
+      <ModelPricesSection />
     </SettingsPage>
   );
 };
