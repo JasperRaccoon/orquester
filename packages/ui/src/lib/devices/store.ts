@@ -89,6 +89,8 @@ export interface DevicesState {
   /** The latest setup job per platform. */
   setupJobs: Readonly<Partial<Record<DevicePlatform, DeviceSetupJob>>>;
   pool: DevicePoolSummary | null;
+  /** The daemon's hub answers on its unix socket: false until it says so (an older daemon never does). */
+  localStreams: boolean;
   /** Action logs by lease id, oldest first: present once loaded (`loadDeviceActions`) or an event arrived. */
   actions: Readonly<Record<string, readonly DeviceActionEntry[]>>;
 }
@@ -103,6 +105,7 @@ const INITIAL: DevicesState = {
   settings: null,
   setupJobs: {},
   pool: null,
+  localStreams: false,
   actions: {}
 };
 
@@ -192,7 +195,7 @@ function applySetupJob(job: DeviceSetupJob): void {
 
 function applyState(state: DevicesStateResponse, taken: Record<Slot, number>): void {
   if (pluginOff) return;
-  const patch: Partial<DevicesState> = { enabled: state.enabled, profiles: state.profiles };
+  const patch: Partial<DevicesState> = { enabled: state.enabled, profiles: state.profiles, localStreams: state.localStreams === true };
   if (revisions.hosts === taken.hosts) patch.hosts = state.hosts;
   if (revisions.leases === taken.leases) patch.leases = sortLeases(state.leases);
   if (revisions.settings === taken.settings) patch.settings = state.settings;

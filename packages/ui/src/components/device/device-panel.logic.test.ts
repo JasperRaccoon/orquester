@@ -67,6 +67,12 @@ describe("panel state machine", () => {
     assert.deepEqual(devicePanelView({ ...base, loaded: false }), { kind: "loading" });
     assert.deepEqual(devicePanelView({ ...base, leases: [lease()], picking: true }), { kind: "picker" });
   });
+  it("names an older daemon, not the connection, when the relay has nothing to reach", () => {
+    const older = devicePanelView({ ...base, leases: [lease()], daemonOutdated: true });
+    assert.ok(older.kind === "live" && !older.stream.ok && older.stream.reason === "daemon");
+    const noRelay = devicePanelView({ ...base, leases: [lease()], streamsAvailable: false, daemonOutdated: true });
+    assert.ok(noRelay.kind === "live" && !noRelay.stream.ok && noRelay.stream.reason === "transport");
+  });
   it("preserves failed boot and suspended connection states", () => {
     const failed = devicePanelView({ ...base, leases: [lease({ state: "starting", error: "no KVM" })] });
     assert.ok(failed.kind === "booting" && failed.failed);

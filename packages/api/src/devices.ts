@@ -838,6 +838,8 @@ export interface DevicesStateResponse {
   /** Running and recently finished setup jobs: one per platform at most, and one per research host. */
   setupJobs: DeviceSetupJob[];
   pool?: DevicePoolSummary;
+  /** The hub proxy answers on the unix socket too (absent from an older daemon: the desktop's relay has nothing to reach). */
+  localStreams?: boolean;
 }
 
 export interface DeviceHostsResponse {

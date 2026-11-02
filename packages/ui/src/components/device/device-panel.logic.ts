@@ -81,9 +81,10 @@ export type DevicePanelView =
 
 export type DeviceStreamAvailability =
   | { ok: true }
-  | { ok: false; reason: "transport" | "no-stream" | "unsupported"; message: string };
+  | { ok: false; reason: "transport" | "daemon" | "no-stream" | "unsupported"; message: string };
 
 const NO_TRANSPORT_MESSAGE = "Live devices need a server connection";
+const OLDER_DAEMON_MESSAGE = "Restart Orquester to watch this device";
 
 export interface DevicePanelInput {
   sessionId: string | null;
@@ -92,14 +93,17 @@ export interface DevicePanelInput {
   selectedLeaseId?: string | null;
   /** The user asked for the picker over the chat's devices ("+"). */
   picking?: boolean;
-  /** The connection can carry hub streams (HTTP); false on the desktop app's unix socket. */
+  /** The connection can carry hub streams (HTTP, or the desktop app's relay); false on an older desktop's unix socket. */
   streamsAvailable: boolean;
+  /** The desktop's relay is up, but the daemon behind it predates the hub on its unix socket. */
+  daemonOutdated?: boolean;
 }
 
-export function streamAvailability(lease: Pick<DeviceLeaseSummary, "stream">, streamsAvailable: boolean): DeviceStreamAvailability {
+export function streamAvailability(lease: Pick<DeviceLeaseSummary, "stream">, streamsAvailable: boolean, daemonOutdated = false): DeviceStreamAvailability {
   if (!streamsAvailable) {
     return { ok: false, reason: "transport", message: NO_TRANSPORT_MESSAGE };
   }
+  if (daemonOutdated) return { ok: false, reason: "daemon", message: OLDER_DAEMON_MESSAGE };
   if (!lease.stream) return { ok: false, reason: "no-stream", message: "Waiting for the device's video…" };
   if (lease.stream.kind === "vphone") {
     return { ok: false, reason: "unsupported", message: "This device's video can't be shown in this version of Orquester." };
@@ -117,7 +121,7 @@ export function devicePanelView(input: DevicePanelInput): DevicePanelView {
     case "starting":
       return { kind: "booting", lease, failed: Boolean(lease.error) };
     case "ready":
-      return { kind: "live", lease, stream: streamAvailability(lease, input.streamsAvailable) };
+      return { kind: "live", lease, stream: streamAvailability(lease, input.streamsAvailable, input.daemonOutdated) };
     case "suspended":
       return { kind: "suspended", lease };
     case "lost":

@@ -8,7 +8,8 @@
  * - A booting device's steps with elapsed time, a failed boot or a lost device with Retry.
  * - A ready device live (`DeviceLiveView`): stream, input, toolbar, controller pill, agent overlay
  *   and the action log; streams connect only while the panel is on screen, over HTTP or the desktop
- *   app's loopback relay ("Live devices need a server connection" with neither: an older desktop).
+ *   app's loopback relay ("Live devices need a server connection" with neither: an older desktop;
+ *   "Restart Orquester…" when the relay's daemon predates the hub on its unix socket).
  * - Docked, the toolbar is a rail beside the device; on a phone it is a bar under it and Back
  *   closes the picker first.
  *
@@ -36,6 +37,12 @@ import { activeLeaseOf, bootElapsed, bootSteps, devicePanelView, leaseName, pick
 import { DeviceActionLog } from "./DeviceActionLog";
 import { DeviceLiveView } from "./DeviceLiveView";
 import { DeviceBooting, DeviceGone, DevicePicker, DeviceTabs, PanelMessage } from "./DeviceStates";
+
+/** Under a message that a live device can't be shown: what to do about it, where there is something. */
+const STREAM_HINTS: Readonly<Partial<Record<string, string>>> = {
+  transport: "Connect to this server over HTTP (the web app, or a remote connection in the desktop app) to watch and drive it. Its actions still show below.",
+  daemon: "The Orquester service still running is older than this app, so it can't show devices here yet. Quit it and start Orquester again, or connect over HTTP. Its actions still show below."
+};
 
 function errorText(err: unknown): string {
   const server = (err as { serverMessage?: unknown } | null)?.serverMessage;
@@ -91,6 +98,7 @@ export const DevicePanel: React.FC<RightRailPanelProps> = ({ sessionId, variant 
   const storeProfiles = useDevicesState((state) => state.profiles);
   const profiles = storeProfiles.length > 0 ? storeProfiles : DEVICE_PROFILES;
   const rentable = useDevicesState((state) => state.pool?.rentable);
+  const localStreams = useDevicesState((state) => state.localStreams);
   const selectedId = useSelectedDeviceLease(sessionId);
   const [picking, setPicking] = React.useState(false);
   const [opening, setOpening] = React.useState<string | null>(null);
@@ -103,7 +111,10 @@ export const DevicePanel: React.FC<RightRailPanelProps> = ({ sessionId, variant 
   // Streams need the HTTP transport or the desktop app's relay.
   const streamsAvailable = React.useMemo(() => (api ? api.deviceSocketUrl(deviceRoutes.socket("local", "probe")) !== null : false), [api]);
 
-  const view = devicePanelView({ sessionId, loaded, leases, selectedLeaseId: selectedId, picking, streamsAvailable });
+  // The relay answers whatever the daemon behind it is; only the daemon can say it serves the hub there.
+  const daemonOutdated = streamsAvailable && api?.transportKind === "unix" && !localStreams;
+
+  const view = devicePanelView({ sessionId, loaded, leases, selectedLeaseId: selectedId, picking, streamsAvailable, daemonOutdated });
   const active = activeLeaseOf(leases, selectedId);
   const liveCount = leases.filter((lease) => isActiveDeviceLease(lease)).length;
   const maxPerChat = settings?.maxLeasesPerChat ?? 3;
@@ -265,8 +276,8 @@ export const DevicePanel: React.FC<RightRailPanelProps> = ({ sessionId, variant 
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
-          <PanelMessage title={view.stream.message} hint={view.stream.reason === "transport" ? "Connect to this server over HTTP (the web app, or a remote connection in the desktop app) to watch and drive it. Its actions still show below." : undefined}>
-            {view.stream.reason === "transport" ? <Link2Off size={18} aria-hidden className="mt-2 text-neutral-600" /> : null}
+          <PanelMessage title={view.stream.message} hint={STREAM_HINTS[view.stream.reason]}>
+            {view.stream.reason === "transport" || view.stream.reason === "daemon" ? <Link2Off size={18} aria-hidden className="mt-2 text-neutral-600" /> : null}
           </PanelMessage>
           <div className="shrink-0">
             <DeviceActionLog rows={logRows} open={logOpen} onToggle={toggleLog} loading={logState.loading} error={logState.error} />

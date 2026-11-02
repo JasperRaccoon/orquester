@@ -422,7 +422,8 @@ export class DeviceService implements DeviceToolsPort {
       profiles: [...DEVICE_PROFILES],
       settings: this.settings(),
       setupJobs: this.setupJobs(),
-      pool: this.pool.summary()
+      pool: this.pool.summary(),
+      localStreams: true
     };
   }
 

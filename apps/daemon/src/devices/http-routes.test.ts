@@ -108,6 +108,7 @@ test("settings and setup over HTTP", async () => {
     assert.equal((await app.inject({ method: "GET", url: "/api/devices/setup/windows" })).statusCode, 400);
     const state = (await app.inject({ method: "GET", url: deviceRoutes.state })).json() as DevicesStateResponse;
     assert.equal(state.enabled, true);
+    assert.equal(state.localStreams, true, "the desktop's relay trusts the hub on the unix socket only on this word");
     assert.deepEqual(state.hosts.map((entry) => entry.id), ["local"]);
   } finally {
     await app.close();

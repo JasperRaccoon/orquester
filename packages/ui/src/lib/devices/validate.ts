@@ -264,7 +264,8 @@ export function sanitizeDevicesState(value: unknown): DevicesStateResponse | nul
     profiles,
     settings,
     setupJobs: listOf(value.setupJobs, sanitizeSetupJob) ?? [],
-    ...(pool ? { pool } : {})
+    ...(pool ? { pool } : {}),
+    ...(value.localStreams === true ? { localStreams: true } : {})
   };
 }
 

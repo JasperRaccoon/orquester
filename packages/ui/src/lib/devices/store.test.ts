@@ -220,6 +220,24 @@ describe("devices validation", () => {
     assert.equal(plain?.notice, undefined);
   });
 
+  it("learns the daemon streams over its unix socket when it reloads, as it does on a reconnect", async () => {
+    setDevicesPluginOn(true);
+    resetDevices();
+    let answer = state();
+    const api = { connection: { id: "older-then-restarted" }, devicesState: async () => answer } as never;
+    await loadDevices(api);
+    assert.equal(devicesStore.getState().localStreams, false);
+    answer = state({ localStreams: true });
+    await loadDevices(api);
+    assert.equal(devicesStore.getState().localStreams, true);
+  });
+
+  it("reads whether the daemon streams over its unix socket: an older daemon does not say", () => {
+    assert.equal(sanitizeDevicesState(state({ localStreams: true }))?.localStreams, true);
+    assert.equal(sanitizeDevicesState(state())?.localStreams, undefined);
+    assert.equal(sanitizeDevicesState(state({ localStreams: "yes" } as never))?.localStreams, undefined);
+  });
+
   it("keeps which platforms can be rented, and leaves an older daemon's answer unknown", () => {
     const pool = { hosts: 0, capacity: { used: 0, total: 0 }, hourlyUsd: 0, queue: 0 };
     assert.deepEqual(sanitizeDevicesState(state({ pool: { ...pool, rentable: ["ios", "plan9"] } } as never))?.pool?.rentable, ["ios"]);

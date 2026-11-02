@@ -312,7 +312,9 @@ A section in the "server" group:
 Streams need the HTTP transport (as desktops/browsers). The desktop app's Unix-socket connection
 gets one from its loopback relay (`apps/desktop/src/device-relay.ts`: device media only, a
 per-launch token). Without it (an older desktop) the panel shows "Live devices need a server
-connection" and still lists leases and action logs.
+connection" and still lists leases and action logs. A daemon older than the relay does not set
+`localStreams` in its state, so the panel says to restart Orquester instead of opening streams
+that would fail, until a reconnect reloads the state.
 
 ## 11. Contracts and persistence
 

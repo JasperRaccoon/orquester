@@ -117,11 +117,11 @@ describe("DevicePanel", () => {
     };
   }
 
-  async function render(leases: DeviceLeaseSummary[], hosts: DeviceHostSummary[] = [localHost], patch: (s: DevicesSettings) => void = () => {}) {
-    useAppStore.setState({ api: api() as never, openSettings: ((id: string) => calls.push(`settings ${id}`)) as never });
+  async function render(leases: DeviceLeaseSummary[], hosts: DeviceHostSummary[] = [localHost], patch: (s: DevicesSettings) => void = () => {}, apiOverrides: Record<string, unknown> = {}) {
+    useAppStore.setState({ api: { ...api(), ...apiOverrides } as never, openSettings: ((id: string) => calls.push(`settings ${id}`)) as never });
     const current = settings();
     patch(current);
-    devicesStore.setState({ enabled: true, hosts, leases, profiles: DEVICE_PROFILES, settings: current, setupJobs: {}, pool: null, actions: {} });
+    devicesStore.setState({ enabled: true, hosts, leases, profiles: DEVICE_PROFILES, settings: current, setupJobs: {}, pool: null, actions: {}, localStreams: false });
     await act(async () => {
       root.render(createElement(DevicePanel, { sessionId: "chat-1", projectPath: "/w/p", variant: "docked" }));
     });
@@ -213,6 +213,17 @@ describe("DevicePanel", () => {
     const tab = host.querySelector('[role="tab"]')!;
     await act(async () => tab.dispatchEvent(new dom.window.MouseEvent("auxclick", { bubbles: true, button: 1 })));
     assert.deepEqual(calls, ["release l1"]);
+  });
+
+  it("on the desktop's relay, an older daemon gets a restart message instead of streams that fail", async () => {
+    await render([lease()], [localHost], () => {}, {
+      transportKind: "unix",
+      deviceSocketUrl: (path: string) => `ws://127.0.0.1:4100${path}?token=t`,
+      deviceHttpRequest: (path: string) => ({ url: `http://127.0.0.1:4100${path}`, headers: { Authorization: "Bearer t" } })
+    });
+    assert.match(text(), /Restart Orquester/);
+    assert.doesNotMatch(text(), /server connection/);
+    assert.equal(host.querySelector("[data-device-view]"), null);
   });
 
   it("toolbar dispatches Rotate and Restart app and refuses disabled Rotate", async () => {
