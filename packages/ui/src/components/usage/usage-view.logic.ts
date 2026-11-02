@@ -41,6 +41,8 @@ export interface UsageSummary {
   cacheSavingsUsd: number;
   costByType: UsageCostByType;
   costBySpeed: UsageCostBySpeed;
+  /** What the estimated fast/ultrafast cells cost over the same tokens at standard rates. */
+  speedPremiumUsd: number;
 }
 
 export interface UsageTotals extends UsageSummary {
@@ -188,6 +190,7 @@ function summarize(buckets: readonly UsageHistoryBucket[]): UsageSummary {
   let split = 0;
   const costByType: UsageCostByType = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, other: 0 };
   const costBySpeed: UsageCostBySpeed = { standard: 0, fast: 0, ultrafast: 0 };
+  let speedPremiumUsd = 0;
   for (const b of buckets) {
     addTokens(tokens, b.tokens);
     cost.add(b.costUsd, processedTokens(b.tokens));
@@ -201,6 +204,9 @@ function summarize(buckets: readonly UsageHistoryBucket[]): UsageSummary {
       split += b.cost.input + b.cost.cacheRead + b.cost.cacheWrite + b.cost.output;
     }
     if (b.costUsd !== null) costBySpeed[b.speed] = (costBySpeed[b.speed] ?? 0) + b.costUsd;
+    if (b.speed !== "standard" && b.costUsd !== null && typeof b.standardCostUsd === "number") {
+      speedPremiumUsd += b.costUsd - b.standardCostUsd;
+    }
   }
   const costUsd = cost.value;
   const unsplit = (costUsd ?? 0) - split;
@@ -214,7 +220,8 @@ function summarize(buckets: readonly UsageHistoryBucket[]): UsageSummary {
     unpricedShare: processed > 0 ? unpricedTokens / processed : 0,
     cacheSavingsUsd,
     costByType,
-    costBySpeed
+    costBySpeed,
+    speedPremiumUsd
   };
 }
 

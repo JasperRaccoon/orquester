@@ -82,6 +82,20 @@ describe("deriveUsageView", () => {
     assert.deepEqual(totals.costBySpeed, { standard: 16.5, fast: 4, ultrafast: 0 });
   });
 
+  it("counts the speed premium as what estimated fast cells cost over standard rates", () => {
+    const fast = historyResponse({
+      buckets: [
+        bucket({ period: 0, agent: "claude", model: "claude-opus-5", speed: "fast", tokens: tokens({ input: 10 }), costUsd: 6, standardCostUsd: 1 }),
+        bucket({ period: 1, agent: "claude", model: "claude-opus-5", speed: "fast", tokens: tokens({ input: 10 }), costUsd: 4, standardCostUsd: 2 }),
+        bucket({ period: 1, agent: "claude", model: "claude-opus-5", tokens: tokens({ input: 10 }), costUsd: 3 }),
+        // Reported cost has no standard-rate counterpart: no premium to tell.
+        bucket({ period: 1, agent: "codex", model: "gpt-6-sol", speed: "fast", tokens: tokens({ input: 10 }), costUsd: 9, costSource: "reported" })
+      ]
+    });
+    assert.equal(deriveUsageView(fast, "cost", []).totals.speedPremiumUsd, 7);
+    assert.equal(deriveModelDetail(fast, "claude:claude-opus-5", "cost", [])!.speedPremiumUsd, 7);
+  });
+
   it("gives every agent its share of the known cost and of tokens, in the fixed agent order", () => {
     const rows = deriveUsageView(data, "cost", []).agentRows;
     assert.deepEqual(

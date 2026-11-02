@@ -2,8 +2,11 @@ import React from "react";
 
 import type { UsageTokenTotals } from "@orquester/api";
 
-import { formatPercent } from "../../lib/usage-history-format";
+import { formatPercent, formatUsd } from "../../lib/usage-history-format";
 import type { UsageCostBySpeed, UsageCostByType } from "./usage-view.logic";
+
+/** A premium under half a cent is rounding noise. */
+const PREMIUM_MIN = 0.005;
 
 export interface ShareSegment {
   label: string;
@@ -44,6 +47,16 @@ export function speedCostSegments(c: UsageCostBySpeed): ShareSegment[] {
     { label: "Fast", value: c.fast, color: ink(68) },
     { label: "Ultrafast", value: c.ultrafast, color: ink(100) }
   ];
+}
+
+/** "Cost by speed"'s aside: what fast/ultrafast cost over standard rates, when anything. */
+export function speedPremiumAside(premiumUsd: number): React.ReactNode {
+  if (!(premiumUsd >= PREMIUM_MIN)) return undefined;
+  return (
+    <span className="text-xs tabular-nums text-neutral-500" title="What these requests cost over the same tokens at standard rates">
+      Premium {formatUsd(premiumUsd)}
+    </span>
+  );
 }
 
 /** A labelled, segmented proportion bar with a legend; nothing when every segment is zero. */

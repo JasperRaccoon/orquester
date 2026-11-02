@@ -6,7 +6,7 @@ import { Button } from "../ui/button";
 import { Modal, ModalCloseButton } from "../ui/modal";
 import { labelForAgent } from "../topbar/usage-format";
 import { UsageChart } from "./UsageChart";
-import { costTypeSegments, speedCostSegments, tokenTypeSegments, UsageShareBar } from "./UsageShareBar";
+import { costTypeSegments, speedCostSegments, speedPremiumAside, tokenTypeSegments, UsageShareBar } from "./UsageShareBar";
 import type { UsageModelDetail } from "./usage-view.logic";
 
 /** One model's drill-down: its figures, its own trend, and how its cost and tokens split. */
@@ -97,7 +97,14 @@ const ModelDialogBody: React.FC<{
         <div className="grid gap-x-10 gap-y-7 sm:grid-cols-2">
           {detail.costUnknown ? null : <UsageShareBar label="Cost by type" segments={costTypeSegments(detail.costByType)} format={formatUsd} />}
           <UsageShareBar label="Tokens by type" segments={tokenTypeSegments(detail.tokens)} format={formatTokens} />
-          {hasSpeed ? <UsageShareBar label="Cost by speed" segments={speedCostSegments(detail.costBySpeed)} format={formatUsd} /> : null}
+          {hasSpeed ? (
+            <UsageShareBar
+              label="Cost by speed"
+              segments={speedCostSegments(detail.costBySpeed)}
+              format={formatUsd}
+              aside={speedPremiumAside(detail.speedPremiumUsd)}
+            />
+          ) : null}
         </div>
       </div>
       {detail.unpricedTokens > 0 ? (
