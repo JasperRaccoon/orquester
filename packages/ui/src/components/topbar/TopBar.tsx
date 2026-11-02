@@ -13,6 +13,7 @@ import { useIsDesktop } from "../../hooks";
 import { useOrquester } from "../../context/orquester-context";
 import { serverViewOpen, useAppStore, useCurrentContext } from "../../store/app";
 import { DevicesFleetHeader } from "../devices-fleet/DevicesFleetEntry";
+import { UsageHeader } from "../usage/UsageEntry";
 
 /**
  * Mobile-only opener for the command palette: a phone has no Ctrl+K, and the
@@ -64,7 +65,7 @@ const KnowledgeHeader: React.FC = () => {
  * Mobile: a two-row header (menu · project · usage · settings) then a tab row
  * (current tab switcher · new tab); the right rail's panels are the bottom
  * section bar's (`MobileSections.tsx`). While a server-level view (Knowledge,
- * Devices) shows, its header takes the project's place and the tab row goes.
+ * Devices, Usage) shows, its header takes the project's place and the tab row goes.
  */
 export const TopBar: React.FC = () => {
   const { useTitlebar } = useOrquester();
@@ -73,8 +74,15 @@ export const TopBar: React.FC = () => {
   const setSidebarDrawer = useAppStore((s) => s.setSidebarDrawer);
   const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
   const devicesOpen = useAppStore((s) => s.devicesFleetOpen);
+  const usageOpen = useAppStore((s) => s.usageViewOpen);
   const serverView = useAppStore(serverViewOpen);
-  const serverHeader = knowledgeOpen ? <KnowledgeHeader /> : devicesOpen ? <DevicesFleetHeader /> : null;
+  const serverHeader = knowledgeOpen ? (
+    <KnowledgeHeader />
+  ) : devicesOpen ? (
+    <DevicesFleetHeader />
+  ) : usageOpen ? (
+    <UsageHeader />
+  ) : null;
 
   if (!isDesktop) {
     return (

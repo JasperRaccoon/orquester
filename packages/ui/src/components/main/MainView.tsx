@@ -34,6 +34,8 @@ import {
 const KnowledgeView = React.lazy(() => import("../knowledge/KnowledgeView"));
 // The Devices fleet view likewise.
 const DevicesFleetView = React.lazy(() => import("../devices-fleet/DevicesFleetView"));
+// The Usage view likewise.
+const UsageView = React.lazy(() => import("../usage/UsageView"));
 // Every other tab but the agent chat loads with the first tab of its kind: the
 // terminal (xterm), the file browser (CodeMirror, the PDF and Parquet
 // viewers), the workflow editor (React Flow), the remote desktop (noVNC)… An
@@ -104,7 +106,7 @@ function isUniform(weights: number[]): boolean {
 
 /**
  * Main panel: the current project's tabs (or the landing view), or a
- * server-level view (Knowledge, the Devices fleet) over them while one is
+ * server-level view (Knowledge, the Devices fleet, Usage) over them while one is
  * open. The project side stays mounted under it, only hidden and inactive, so
  * leaving it finds every terminal and chat as it was.
  */
@@ -115,6 +117,7 @@ export const MainView: React.FC = () => {
       <ProjectMain hidden={serverView} />
       <KnowledgeMain />
       <DevicesFleetMain />
+      <UsageMain />
     </main>
   );
 };
@@ -135,6 +138,28 @@ const DevicesFleetMain: React.FC = () => {
       <LazyBoundary>
         <React.Suspense fallback={<LoadingPane label="Opening the device fleet…" />}>
           <DevicesFleetView key={connectionId ?? ""} />
+        </React.Suspense>
+      </LazyBoundary>
+    </div>
+  );
+};
+
+/**
+ * The Usage view, mounted only while it shows (its poll stops with it), and
+ * keyed by the connection: one daemon's figures never show under another.
+ */
+const UsageMain: React.FC = () => {
+  const open = useAppStore((s) => s.usageViewOpen);
+  const connectionId = useAppStore((s) => s.activeConnectionId);
+  const closeUsageView = useAppStore((s) => s.closeUsageView);
+  // A phone's Back goes back to the project, like leaving any full-screen layer.
+  useBackClose(open, closeUsageView);
+  if (!open) return null;
+  return (
+    <div className="flex min-h-0 w-full flex-1 flex-col">
+      <LazyBoundary>
+        <React.Suspense fallback={<LoadingPane label="Opening usage…" />}>
+          <UsageView key={connectionId ?? ""} />
         </React.Suspense>
       </LazyBoundary>
     </div>

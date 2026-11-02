@@ -1,5 +1,5 @@
 import React from "react";
-import { Gauge, Loader2, RefreshCw } from "lucide-react";
+import { ChartNoAxesColumn, Gauge, Loader2, RefreshCw } from "lucide-react";
 import type { UsagePrefs } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import type { UsageResetFormat } from "../../lib/usage-display";
@@ -100,10 +100,24 @@ export const UsageSettings: React.FC = () => {
       description="Quota for each agent login, read from the active daemon — credentials never leave it."
       wide
       actions={
-        <Button size="sm" variant="outline" disabled={refreshing} onClick={() => void refresh()}>
-          {refreshing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-          Refresh
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              const state = useAppStore.getState();
+              state.setSettingsOpen(false);
+              state.openUsageView("cost");
+            }}
+          >
+            <ChartNoAxesColumn size={13} />
+            View usage history
+          </Button>
+          <Button size="sm" variant="outline" disabled={refreshing} onClick={() => void refresh()}>
+            {refreshing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+            Refresh
+          </Button>
+        </div>
       }
     >
       <SettingsSection
