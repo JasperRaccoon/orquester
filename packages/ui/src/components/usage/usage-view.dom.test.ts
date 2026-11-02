@@ -96,12 +96,15 @@ interface FakeApi {
   calls: string[];
   /** The next history answers (or errors), in order; the last one repeats. */
   answers: Array<UsageHistoryResponse | Error>;
+  /** `force` per quota (`/api/usage`) request. */
+  usageCalls: boolean[];
 }
 
 function fakeApi(answers: FakeApi["answers"] = []): FakeApi & ApiClient {
   const fake: FakeApi & Record<string, unknown> = {
     calls: [],
     answers,
+    usageCalls: [],
     connection: { id: "c1" },
     async getUsageHistory(range: string, _timeZone: string, force?: boolean) {
       fake.calls.push(`${range}:${force === true}`);
@@ -109,7 +112,8 @@ function fakeApi(answers: FakeApi["answers"] = []): FakeApi & ApiClient {
       if (next instanceof Error) throw next;
       return { ...next, range };
     },
-    async getUsage(): Promise<UsageResponse> {
+    async getUsage(force?: boolean): Promise<UsageResponse> {
+      fake.usageCalls.push(force === true);
       return { agents: [] };
     },
     async getUsageTokens() {
@@ -278,6 +282,20 @@ describe("the Usage view", () => {
     // Asked again while it shows (the popover's link): the view moves to that tab.
     await act(async () => store().openUsageView("limits"));
     assert.equal(checkedIn("Usage tab"), "Limits");
+  });
+
+  it("entering Limits forces a quota read only when the snapshot arrived over a minute ago", async () => {
+    const api = fakeApi();
+    useAppStore.setState({ api, activeConnectionId: "c1", usage: { agents: [] }, usageReceivedAt: Date.now() });
+    store().openUsageView("limits");
+    await render(createElement(UsageView));
+    assert.equal(checkedIn("Usage tab"), "Limits");
+    assert.deepEqual(api.usageCalls, [], "a snapshot this fresh shows as is");
+
+    await press({ key: "c" });
+    useAppStore.setState({ usageReceivedAt: Date.now() - 61_000 });
+    await press({ key: "l" });
+    assert.deepEqual(api.usageCalls, [true]);
   });
 
   it("says when the daemon is too old, and offers a retry that recovers after a failure", async () => {

@@ -7,6 +7,9 @@ import { UsageOverview } from "../settings/UsageOverview";
 import { RESET_OPTIONS } from "../settings/UsageSettings";
 import type { UsageLimitsPanelProps } from "./types";
 
+/** A quota snapshot received this recently needs no forced read on entering the tab. */
+const FRESH_MS = 60_000;
+
 /** The Limits tab: each agent's quota windows with a pace marker. */
 export const UsageLimitsPanel: React.FC<UsageLimitsPanelProps> = ({ active }) => {
   const loadUsage = useAppStore((s) => s.loadUsage);
@@ -29,9 +32,13 @@ export const UsageLimitsPanel: React.FC<UsageLimitsPanelProps> = ({ active }) =>
     }
   }, [loadUsage]);
 
-  // Entering the tab reads the quotas afresh: the snapshot the store holds may be minutes old.
+  // Entering the tab reads the quotas afresh when the store's snapshot arrived over a minute
+  // ago (by this device's clock); a fresher one shows as is, without a forced recompute.
   useEffect(() => {
-    if (active) void refresh();
+    if (!active) return;
+    const receivedAt = useAppStore.getState().usageReceivedAt;
+    if (receivedAt !== null && Date.now() - receivedAt < FRESH_MS) return;
+    void refresh();
   }, [active, refresh]);
 
   return (
