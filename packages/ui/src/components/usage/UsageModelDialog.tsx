@@ -115,8 +115,10 @@ const ModelDialogBody: React.FC<{
           <Button
             size="sm"
             onClick={() => {
-              onClose();
+              // The editor opens first, in the same commit as this dialog closes, and takes focus
+              // in; closing first would hand focus back to the row behind the editor's backdrop.
               onSetPrice(detail.model);
+              onClose();
             }}
           >
             Set price

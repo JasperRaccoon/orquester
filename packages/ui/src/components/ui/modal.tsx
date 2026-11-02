@@ -8,6 +8,8 @@ import { openTrackedLayer } from "../../lib/open-layers";
 export interface ModalProps {
   open: boolean;
   onClose: () => void;
+  /** A click on the backdrop; `onClose` when absent (a dialog with unsaved edits may ignore it). */
+  onBackdropClick?: () => void;
   children: React.ReactNode;
   className?: string;
 }
@@ -35,7 +37,7 @@ const escapeStack: object[] = [];
  * On a phone, Back closes it too (`useBackClose`): one modal at a time, the
  * newest first.
  */
-export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className }) => {
+export const Modal: React.FC<ModalProps> = ({ open, onClose, onBackdropClick, children, className }) => {
   const layerRef = useRef<{ release: () => void; isTopmost: () => boolean } | null>(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -116,7 +118,7 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className
   return createPortal(
     <div
       className="app-no-drag fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-3 sm:p-6"
-      onMouseDown={onClose}
+      onMouseDown={onBackdropClick ?? onClose}
     >
       <div
         ref={dialogRef}

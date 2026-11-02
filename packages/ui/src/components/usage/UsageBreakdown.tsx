@@ -106,6 +106,7 @@ const ModelTable: React.FC<{
                 <td className="whitespace-normal py-2 pr-3 text-left">
                   <button
                     type="button"
+                    data-usage-model={m.model}
                     onClick={() => onSelectModel(m.key)}
                     title={`${labelForAgent(m.agent)} · ${m.model}`}
                     className={cn(
