@@ -20,7 +20,6 @@ import {
 } from "../../lib/usage-history-data";
 import { readUsageViewPrefs, writeUsageViewPrefs, type UsageViewPrefs } from "../../lib/usage-view-prefs";
 import { useAppStore } from "../../store/app";
-import { isAppleLike } from "../agent-chat/primitives/shortcut";
 import { SegmentedControl } from "../settings/primitives";
 import { labelForAgent } from "../topbar/usage-format";
 import { AdaptiveMenu, Button, DropdownItem, DropdownSeparator, IconButton } from "../ui";
@@ -171,7 +170,7 @@ export const UsageView: React.FC = () => {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const shortcut = resolveUsageShortcut(event, { tab, layerOpen: isAnyLayerOpen(), apple: isAppleLike() });
+      const shortcut = resolveUsageShortcut(event, { tab, layerOpen: isAnyLayerOpen() });
       if (!shortcut) return;
       event.preventDefault();
       if (shortcut.kind === "tab") update({ tab: shortcut.tab });

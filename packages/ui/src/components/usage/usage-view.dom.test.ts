@@ -259,11 +259,13 @@ describe("the Usage view", () => {
     assert.deepEqual(api.calls, ["7d:false"]);
     assert.equal(document.querySelector('[role="radiogroup"][aria-label="Period"]')?.closest('[aria-hidden="true"]') != null, true, "no period on Limits");
 
-    await press({ key: "@", code: "Digit2", ctrlKey: true, shiftKey: true });
+    await press({ key: "2" });
     assert.deepEqual(api.calls, ["7d:false"], "ranges do nothing on Limits");
     await press({ key: "c" });
     assert.equal(checkedIn("Usage tab"), "Cost");
-    await press({ key: "$", code: "Digit4", ctrlKey: true, shiftKey: true });
+    await press({ key: "3", metaKey: true, shiftKey: true });
+    assert.equal(checkedIn("Period"), "7d", "⌘⇧3 is the system's screenshot");
+    await press({ key: "4" });
     assert.equal(checkedIn("Period"), "90d");
     assert.equal(api.calls.at(-1), "90d:false");
 

@@ -382,7 +382,7 @@ Content is `max-w-5xl`, centred, `px-5 sm:px-6 py-6`, sections `gap-6`. The page
 While the view is open and focus is not in an input, textarea, select, contenteditable or an open dialog:
 
 - `c`, `t`, `l` switch tabs.
-- `mod+shift+1..4` switch the range (ignored on Limits).
+- `1`–`4` (no modifiers; ⌘⇧3 / ⌘⇧4 are macOS screenshots) switch the range (ignored on Limits).
 - `Esc` closes dialogs first (the existing Modal escape stack).
 - Each control's title shows its shortcut.
 
