@@ -83,6 +83,9 @@ import type {
   UpdateWorkspaceRequest,
   UsageAccount,
   UsageResponse,
+  UsageHistoryResponse,
+  UsagePricesPatch,
+  UsagePricesResponse,
   SubagentCacheTtlStatus,
   UsageWindow,
   WorkspaceSummary
@@ -233,6 +236,8 @@ import { GitError, GitService, GitWatcher, passesGitEventFilter, workingDiffMaxB
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
 import { ChatThreadUsageScanner } from "./usage-chat-threads.ts";
+import { parseUsageHistoryRange, UsageHistory } from "./usage-history.ts";
+import { UsagePricingStore, UsagePricingValidationError } from "./usage-pricing-store.ts";
 import { SubagentCacheTtlController, type SubagentCacheTtl } from "./subagent-cache-ttl";
 import {
   createClaudeSource,
@@ -321,6 +326,8 @@ import {
   agentChatThreadsDir,
   subagentCacheTtlStateFile,
   usageStateFile,
+  usageHistoryFile,
+  usagePricingFile,
   workspacesMetaPath,
   isValidName,
   agentChatMergeOutboxFile
@@ -563,10 +570,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     now: () => Date.now(),
     logger: console
   });
-  const usageTokens = new UsageTokensScanner({
+  // The user's model prices, installed before anything prices usage.
+  const usagePricing = new UsagePricingStore({ path: usagePricingFile(paths.baseDir), logger: console });
+  await usagePricing.load();
+  // The hourly usage ledger the Usage view reads: it keeps what the scanners saw after the
+  // transcripts are gone. Loaded before the first scan folds records in.
+  const usageHistory = new UsageHistory({ path: usageHistoryFile(paths.baseDir), workspacesDir: () => resolved.workspacesDir, logger: console });
+  await usageHistory.load();
+  const usageTokens: UsageTokensScanner = new UsageTokensScanner({
     userhome: resolved.vars.userhome,
     cacheFile: usageTokensCacheFile(paths.baseDir),
     now: () => Date.now(),
+    onScanned: () => {
+      usageHistory.ingest(usageTokens);
+    },
     accountHomes: () => [
       // Token-transcript scanning knows the Claude/Codex session formats only;
       // grok homes are skipped (Grok Build has no scanner support yet).
@@ -576,8 +593,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         .map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) }))
     ]
   });
-  // Grok's usage per day, from Orquester's own chat logs (it has no transcript the scanner reads).
-  const chatThreadUsage = new ChatThreadUsageScanner({ threadsDir: agentChatThreadsDir(paths.baseDir), agents: ["grok"], now: () => Date.now(), logger: console });
+  // Grok's and OpenCode's usage, from Orquester's own chat logs (they have no transcript the scanner reads).
+  const chatThreadUsage = new ChatThreadUsageScanner({ threadsDir: agentChatThreadsDir(paths.baseDir), agents: ["grok", "opencode"], now: () => Date.now(), logger: console });
   // Auto mode of the Claude subagent cache lifetime decides from the requests
   // the scanner already holds. A daemon that just started has scanned nothing:
   // ask for a scan and keep the stored decision until it is in.
@@ -1576,7 +1593,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     buildInfo,
     authSessions,
     secretRequests,
-    registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, usagePricing, usageHistory, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
     secretFiles,
     knowledge,
@@ -1867,6 +1884,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     usage.stop();
     clearTimeout(liveRecompute);
     await usageState.flush();
+    await usageHistory.flush();
     // Workflows first: the engine stops its timers, triggers and sweepers (never a sandbox child —
     // those are detached and survive, §5.8), then every workflow store's write chain is flushed.
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
@@ -2063,8 +2081,12 @@ interface Services {
   temporaryBoxTools?: TemporaryBoxTools;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
-  /** Per-day usage from Orquester's own chat logs, for agents without a transcript scanner (Grok). Optional: route tests build a partial `services`. */
+  /** Per-day usage from Orquester's own chat logs, for agents without a transcript scanner (Grok, OpenCode). Optional: route tests build a partial `services`. */
   chatThreadUsage?: ChatThreadUsageScanner;
+  /** The user's model prices (`usage-pricing.json`). Optional: route tests build a partial `services`. */
+  usagePricing?: UsagePricingStore;
+  /** The hourly usage ledger behind the Usage view. Optional: route tests build a partial `services`. */
+  usageHistory?: UsageHistory;
   /** The Claude subagent cache lifetime as it applies now (auto mode's decision). */
   subagentCacheTtl: SubagentCacheTtlController;
   push: PushService;
@@ -4262,12 +4284,49 @@ export function createServer(
     return usageTokens.snapshot(force);
   });
 
-  // Grok's usage from Orquester's own chat logs ("Orquester chats only"): get_usage's weekly cost.
+  // Grok's and OpenCode's usage from Orquester's own chat logs ("Orquester chats only"): get_usage's weekly cost.
   app.get<{ Querystring: { agent?: string } }>("/api/usage/chat-threads", async (request, reply) => {
     const agent = request.query.agent;
-    if (agent !== "grok") return reply.code(400).send({ code: "INVALID_REQUEST", message: "agent must be grok." });
+    if (agent !== "grok" && agent !== "opencode") return reply.code(400).send({ code: "INVALID_REQUEST", message: "agent must be grok or opencode." });
     if (!services.chatThreadUsage) return reply.code(503).send({ code: "UNAVAILABLE", message: "Chat usage is not available." });
     return services.chatThreadUsage.snapshot(agent);
+  });
+
+  // The Usage view's history from the ledger. The chat logs are read and merged first; the
+  // transcripts are merged after each scan (`refresh=1` waits for one). Until the first transcript
+  // scan is in, the answer says `scanning` (and asks for that scan).
+  app.get<{ Querystring: { range?: string; tz?: string; refresh?: string } }>(
+    "/api/usage/history",
+    async (request, reply): Promise<UsageHistoryResponse | void> => {
+      const range = parseUsageHistoryRange(request.query.range);
+      if (!range) return reply.code(400).send({ code: "INVALID_REQUEST", message: "range must be 24h or <N>d with N from 1 to 90." });
+      const history = services.usageHistory;
+      if (!history) return reply.code(503).send({ code: "UNAVAILABLE", message: "Usage history is not available." });
+      if (request.query.refresh === "1") await usageTokens.recompute();
+      else if (!history.hasIngested(usageTokens)) usageTokens.requestRecompute();
+      if (services.chatThreadUsage) {
+        await services.chatThreadUsage.refresh();
+        history.ingest(services.chatThreadUsage);
+      }
+      return history.query({ range, timeZone: request.query.tz, scanning: !history.hasIngested(usageTokens) });
+    }
+  );
+
+  app.get("/api/usage/prices", async (_request, reply): Promise<UsagePricesResponse | void> => {
+    if (!services.usagePricing) return reply.code(503).send({ code: "UNAVAILABLE", message: "Usage prices are not available." });
+    return services.usagePricing.response(services.usageHistory?.seenModels() ?? []);
+  });
+
+  // A price edit applies to all past and future usage: costs are priced when they are read.
+  app.put("/api/usage/prices", async (request, reply): Promise<UsagePricesResponse | void> => {
+    if (!services.usagePricing) return reply.code(503).send({ code: "UNAVAILABLE", message: "Usage prices are not available." });
+    try {
+      await services.usagePricing.update(request.body as UsagePricesPatch);
+    } catch (error) {
+      if (error instanceof UsagePricingValidationError) return reply.code(400).send({ code: error.code, message: error.message });
+      throw error;
+    }
+    return services.usagePricing.response(services.usageHistory?.seenModels() ?? []);
   });
 
   // Read fresh, like a launch does: this is what the next Claude session gets.
