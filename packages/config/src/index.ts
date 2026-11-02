@@ -605,6 +605,16 @@ export function usageStateFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "usage-state.json");
 }
 
+/** The user's model prices for usage estimates (overrides and "map to" aliases); 0600. */
+export function usagePricingFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "usage-pricing.json");
+}
+
+/** The hourly usage ledger the Usage view reads (outlives deleted transcripts); 0600. */
+export function usageHistoryFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "usage-history.json");
+}
+
 /** Auto mode's current subagent prompt-cache decision and when it is next checked; 0600. */
 export function subagentCacheTtlStateFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "subagent-cache-ttl.json");
@@ -960,6 +970,66 @@ export type UsagePrefs = z.infer<typeof usagePrefsSchema>;
 
 export function usageAgentEnabled(prefs: UsagePrefs, id: string): boolean {
   return prefs.enabled && (prefs.agents[id] ?? true);
+}
+
+// daemon/usage-pricing.json — the user's model prices for usage estimates.
+
+/** Longest model id a price or mapping may name. */
+export const USAGE_MODEL_ID_MAX = 200;
+const usageRate = z.number().finite().nonnegative();
+/** USD per 1,000,000 tokens; omitted cache rates fall back in the daemon's pricing. */
+export const usageModelRatesSchema = z.object({
+  input: usageRate,
+  output: usageRate,
+  cacheRead: usageRate.optional(),
+  cacheWrite5m: usageRate.optional(),
+  cacheWrite1h: usageRate.optional()
+});
+export type UsageModelRatesConfig = z.infer<typeof usageModelRatesSchema>;
+
+/** The parsed file: valid entries only, plus every unknown top-level field kept as read. */
+export interface UsagePricingFile {
+  overrides: Record<string, UsageModelRatesConfig>;
+  aliases: Record<string, string>;
+  /** Unknown top-level fields, written back untouched. */
+  extra: Record<string, unknown>;
+}
+
+/** A trimmed, non-empty model id of at most {@link USAGE_MODEL_ID_MAX} characters, or null. */
+export function normalizeUsageModelId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const id = value.trim();
+  return id && id.length <= USAGE_MODEL_ID_MAX ? id : null;
+}
+
+/** Tolerant read: a malformed entry is dropped on its own, never the whole file. */
+export function parseUsagePricingFile(raw: unknown): UsagePricingFile {
+  const out: UsagePricingFile = { overrides: {}, aliases: {}, extra: {} };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === "overrides" || key === "aliases") continue;
+    out.extra[key] = value;
+  }
+  const record = raw as { overrides?: unknown; aliases?: unknown };
+  if (record.overrides && typeof record.overrides === "object" && !Array.isArray(record.overrides)) {
+    for (const [model, rates] of Object.entries(record.overrides as Record<string, unknown>)) {
+      const id = normalizeUsageModelId(model);
+      const parsed = usageModelRatesSchema.safeParse(rates);
+      if (id && parsed.success) out.overrides[id] = parsed.data;
+    }
+  }
+  if (record.aliases && typeof record.aliases === "object" && !Array.isArray(record.aliases)) {
+    for (const [model, target] of Object.entries(record.aliases as Record<string, unknown>)) {
+      const from = normalizeUsageModelId(model);
+      const to = normalizeUsageModelId(target);
+      if (from && to && from !== to) out.aliases[from] = to;
+    }
+  }
+  return out;
+}
+
+export function serializeUsagePricingFile(file: UsagePricingFile): Record<string, unknown> {
+  return { ...file.extra, version: 1, overrides: file.overrides, aliases: file.aliases };
 }
 
 // Adapted from T3 Code (MIT): packages/contracts/src/settings.ts

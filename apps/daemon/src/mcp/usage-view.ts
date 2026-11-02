@@ -1,7 +1,7 @@
 import type { AgentAccount, AgentUsage, ChatThreadUsageResponse, UsageAccount, UsageResponse, UsageTokenRow, UsageTokensResponse, UsageWindow } from "@orquester/api";
 import { isSettledConversationCompaction, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 // The Cost tab's own price table (API-equivalent USD per token class): one table for both views.
-import { estimateCostParts } from "../usage-tokens.ts";
+import { estimateCostParts } from "../usage-pricing.ts";
 
 interface UsageWindowView { id: string; label: string; percentUsed: number; resetsAt?: string; resetsIn?: string }
 interface UsageAccountView { id: string; label: string; plan?: string; available: boolean; stale: boolean; asOf?: string; ageMinutes?: number; needsReauth?: boolean; email?: string; windows: UsageWindowView[] }

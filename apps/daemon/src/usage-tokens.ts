@@ -2,60 +2,11 @@ import { open, readFile, readdir, stat, writeFile, mkdir, realpath } from "node:
 import { join, dirname } from "node:path";
 import type { UsageTokenRow, UsageTokensResponse } from "@orquester/api";
 import type { SubagentRequest } from "./subagent-cache-ttl.ts";
+import { estimateCostParts } from "./usage-pricing.ts";
 
-// USD per 1,000,000 tokens. Update when models ship. Subscription users don't
-// pay per token — this is an "API-equivalent" estimate, labeled as such.
-// cacheWrite5m/1h: prompt-cache writes bill 1.25x/2x input depending on TTL.
-const MODEL_PRICING: Record<
-  string,
-  { input: number; output: number; cacheRead?: number; cacheWrite5m?: number; cacheWrite1h?: number }
-> = {
-  "claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 20 },
-  "claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
-  // Derived from the CLI's own charges (claude fixtures 17, 18, 19: per-turn costUSD over the frames' token counts).
-  "claude-opus-5-5": { input: 4, output: 20, cacheRead: 0.2, cacheWrite5m: 5, cacheWrite1h: 8 },
-  "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
-  "claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 3.75, cacheWrite1h: 6 },
-  "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
-  "gpt-5.6-sol": { input: 5, output: 30, cacheRead: 0.5 },
-  "gpt-5.6-terra": { input: 2.5, output: 15, cacheRead: 0.25 },
-  "gpt-5.6-luna": { input: 1, output: 6, cacheRead: 0.1 },
-  "gpt-5.1-codex": { input: 1.25, output: 10, cacheRead: 0.125 },
-  "gpt-5.4-codex": { input: 1.25, output: 10, cacheRead: 0.125 }
-};
-
-// Transcripts record versioned model ids (e.g. "claude-opus-4-8-20260115") that
-// never equal the bare pricing keys. Resolve a raw id to a known key by exact
-// match, then by longest matching prefix (which also absorbs a trailing
-// `-YYYYMMDD` release-date suffix). A trailing context tag (`claude-opus-4-8[1m]`, the CLI's 1M-context variant) is
-// dropped first: the CLI bills it at the model's standard rates (claude fixture 01). Unknown models resolve to null.
-function resolveModelKey(raw: string): string | null {
-  const model = raw.replace(/\[[^\]]*\]$/, "");
-  if (MODEL_PRICING[model]) return model;
-  let best: string | null = null;
-  for (const key of Object.keys(MODEL_PRICING)) {
-    if (model.startsWith(key + "-") && (!best || key.length > best.length)) best = key;
-  }
-  return best;
-}
-
-export function estimateCostParts(
-  model: string,
-  tok: { input: number; output: number; cacheRead: number; cacheWrite: number; cacheWrite1h: number }
-): { input: number; output: number; cache: number } | null {
-  const key = resolveModelKey(model);
-  const p = key ? MODEL_PRICING[key] : undefined;
-  if (!p) return null;
-  const per = (n: number, price: number | undefined) => (price ? (n / 1_000_000) * price : 0);
-  // cacheWrite is the total; cacheWrite1h is the (possibly zero) 1h-TTL subset.
-  const write1h = Math.min(tok.cacheWrite, tok.cacheWrite1h);
-  const write5m = tok.cacheWrite - write1h;
-  return {
-    input: per(tok.input, p.input),
-    output: per(tok.output, p.output),
-    cache: per(tok.cacheRead, p.cacheRead) + per(write5m, p.cacheWrite5m) + per(write1h, p.cacheWrite1h ?? p.cacheWrite5m)
-  };
-}
+// Prices live in `usage-pricing.ts` (built-in table plus the user's overrides and aliases);
+// re-exported here for the callers that predate it.
+export { estimateCostParts };
 
 interface RawRow {
   agent: string;
