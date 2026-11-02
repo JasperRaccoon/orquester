@@ -1,9 +1,9 @@
 /**
  * The devices HTTP routes (`deviceRoutes`, devices spec §8, §10): state, hosts, leases, the
  * controller, the action log, kept screenshots, settings and setup jobs, and (phase 2) host
- * drain, cache warms, the pool summary and lease thumbnails, on both transports (the
- * bearer hook gates remote HTTP like every other route), and the hub proxy on the remote transport
- * only (streams need HTTP; the desktop app's unix socket lists and drives leases without video).
+ * drain, cache warms, the pool summary and lease thumbnails, and the hub proxy, on both transports
+ * (the bearer hook gates remote HTTP like every other route; the desktop app reaches the proxy on
+ * the unix socket through its loopback relay, `apps/desktop/src/device-relay.ts`).
  *
  * While the plugin is off there is no service: `GET /api/devices` answers `enabled: false` with
  * the default settings, everything else 409 `DEVICES_DISABLED`.
@@ -71,7 +71,7 @@ export function hubSearch(url: string): string {
   return rest ? `?${rest}` : "";
 }
 
-export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpRoutesDeps, mode: "local" | "remote"): void {
+export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpRoutesDeps): void {
   const logger = deps.logger ?? console;
   /** Run `handle` with the service, answering the plugin's refusal while it is off and any `DeviceError`. */
   const withService =
@@ -264,13 +264,11 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
       if (!isDevicePlatform(platform)) throw new DeviceError("INVALID_ARGUMENT", "`platform` must be ios or android.");
       const parsed = parseDeviceSetupRequest(request.body);
       if (!parsed.ok) throw new DeviceError("INVALID_ARGUMENT", parsed.message);
-      return reply.code(202).send({ job: service.startSetup(platform, parsed.value.actions) } satisfies DeviceSetupResponse);
+      return reply.code(202).send({ job: service.startSetup(platform, parsed.value.actions, parsed.value.hostId) } satisfies DeviceSetupResponse);
     })
   );
 
-  if (mode !== "remote") return;
-
-  // The hub proxy (spec §8): the bearer hook already authenticated the request (the
+  // The hub proxy (spec §8): the bearer hook already authenticated a remote request (the
   // `Authorization` header only: no `?token=` here, `deviceQueryTokenAllowed`); viewing a
   // host's hub needs a live lease on it. Its own scope hands every body through raw, so the proxy
   // can stream it upstream; the proxy owns the allowlists and header rewriting.

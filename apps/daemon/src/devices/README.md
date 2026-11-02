@@ -35,7 +35,7 @@ Foundation (shared seams; change them only with the other work packages in mind)
 | `thumbnails.ts` | Lease thumbnails for the fleet view: the hub's screenshot → downscaled JPEG (in the image workers), ≤ 1 s cache per lease. |
 | `service.ts` | `DeviceService`: hosts, settings, leases, setup jobs, action log, the agent tools' operations. |
 | `tools-port.ts` | `DeviceToolsPort` and `runDeviceTool` (principal → thread, `DeviceError` → outcome). |
-| `http-routes.ts` | `deviceRoutes` on both transports (`user-action` refuses agent and external principals); the hub proxy route on remote only (raw bodies, `?token=` accepted). |
+| `http-routes.ts` | `deviceRoutes` on both transports (`user-action` refuses agent and external principals), the hub proxy route too (raw bodies, `?token=` accepted on remote; the desktop app's unix connection gets here through `apps/desktop/src/device-relay.ts`). |
 | `user-actions.ts` | The panel's buttons that are not hub input (`rotate`, `restart_app`, `appearance`, `power_off`): control goes to the user first, rows are logged as the user's (failures too). |
 | `ws-routes.ts` | `/ws-device/:hostId/*`: token, plugin, host and lease checks, then `HubProxy.handleWebSocket`. |
 | `wiring.ts` | `createDaemonDevices`: follows the plugin (service on/off), builds the factories and executor, routes. |

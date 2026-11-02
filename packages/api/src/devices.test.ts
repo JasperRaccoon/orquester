@@ -99,6 +99,8 @@ test("controller and setup requests", () => {
     value: { actions: ["install-android-sdk"] }
   });
   assert.equal(parseDeviceSetupRequest({ actions: ["; rm"] }).ok, false);
+  assert.deepEqual(parseDeviceSetupRequest({ hostId: "vphone:box1", actions: ["vphone-template"] }), { ok: true, value: { hostId: "vphone:box1", actions: ["vphone-template"] } });
+  assert.equal(parseDeviceSetupRequest({ hostId: "../x" }).ok, false);
 });
 
 test("settings patch: each field checked against its range; unknown fields refused", () => {

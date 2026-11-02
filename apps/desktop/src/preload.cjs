@@ -81,6 +81,9 @@ contextBridge.exposeInMainWorld("orquesterDesktop", {
   // the renderer frames them without an http URL it may not reach. Absent on
   // an older build, where the renderer falls back to the daemon's http URL.
   visualScheme: "orq-visual",
+  // Live devices on the local connection (`device-relay.ts`): its loopback origin and this launch's
+  // token, or null. Never logged; it stays with the page that needs it.
+  deviceRelay: ipcRenderer.sendSync("orquester:device-relay"),
   // Native integration (`DesktopHost` in packages/ui/src/lib/desktop-host.ts).
   // Payloads are validated in the main process, and what comes back in the UI.
   host: {

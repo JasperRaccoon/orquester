@@ -61,4 +61,41 @@ describe("ApiClient device URLs", () => {
     assert.equal(unix.deviceHttpRequest(deviceRoutes.hub("local", "api/devices")), null);
     assert.equal(unix.deviceImageUrl(deviceRoutes.screenshot("l1", "s1")), null);
   });
+
+  describe("the desktop's device relay", () => {
+    const TOKEN = "t".repeat(43);
+    const unix = () => new ApiClient({ id: "c2" } as never, { kind: "unix", request: async () => ({ status: 200, ok: true, data: {} }), openStream: () => ({ close() {} }) } as never);
+    const withRelay = (relay: unknown, run: () => void) => {
+      (globalThis as { window?: unknown }).window = { orquesterDesktop: { deviceRelay: relay } };
+      try {
+        run();
+      } finally {
+        delete (globalThis as { window?: unknown }).window;
+      }
+    };
+
+    it("carries a unix connection's devices over loopback", () => {
+      withRelay({ origin: "http://127.0.0.1:4100", token: TOKEN }, () => {
+        const api = unix();
+        const hub = deviceRoutes.hub("local", "vendor/serve-sim/x/stream.avcc");
+        assert.deepEqual(api.deviceHttpRequest(hub), { url: `http://127.0.0.1:4100${hub}`, headers: { Authorization: `Bearer ${TOKEN}` } });
+        const socket = deviceRoutes.socket("local", "vendor/serve-emu/ws");
+        assert.equal(api.deviceSocketUrl(socket), `ws://127.0.0.1:4100${socket}?token=${TOKEN}`);
+        const shot = deviceRoutes.screenshot("l1", "s1");
+        assert.equal(api.deviceImageUrl(shot), `http://127.0.0.1:4100${shot}?token=${TOKEN}`);
+      });
+    });
+
+    it("trusts only a well-formed loopback relay", () => {
+      for (const relay of [{ origin: "http://evil.test:80", token: TOKEN }, { origin: "http://127.0.0.1:4100", token: "" }, "http://127.0.0.1:4100", null]) {
+        withRelay(relay, () => assert.equal(unix().deviceSocketUrl(deviceRoutes.socket("local", "x")), null));
+      }
+    });
+
+    it("leaves a remote connection on its own server", () => {
+      withRelay({ origin: "http://127.0.0.1:4100", token: TOKEN }, () => {
+        assert.match(api.deviceSocketUrl(deviceRoutes.socket("local", "x")) ?? "", /^ws:\/\/daemon\.test/);
+      });
+    });
+  });
 });

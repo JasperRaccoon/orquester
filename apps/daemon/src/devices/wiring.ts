@@ -7,7 +7,7 @@
  *
  * 1. {@link createDaemonDevices} — once the plugins, the box wiring and the agent chat exist.
  * 2. `start()` — after `plugins.start()`: follows the plugin from then on.
- * 3. Routes, per transport: `registerRoutes(app, mode)` and `registerWsRoutes(instance, …)`.
+ * 3. Routes, per transport: `registerRoutes(app)` and `registerWsRoutes(instance, …)`.
  * 4. `chatClosed(id)` — a chat tab closed: its leases end.
  * 5. `toolsAvailable()` / `onToolsChange` — the session-tools manifest advertises the `devices`
  *    toolset while it is true.
@@ -79,7 +79,7 @@ export interface DaemonDevices {
   onToolsChange(listener: () => void): () => void;
   /** Resolves once a pending plugin switch has been applied (tests, and routes that must see it). */
   settled(): Promise<void>;
-  registerRoutes(app: FastifyInstance, mode: "local" | "remote"): void;
+  registerRoutes(app: FastifyInstance): void;
   registerWsRoutes(app: FastifyInstance, deps: { authorize(token: string | undefined, socket: WebSocket): boolean }): Promise<void>;
 }
 
@@ -228,8 +228,8 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
 
     settled: () => queue,
 
-    registerRoutes(app, mode) {
-      registerDeviceHttpRoutes(app, { devices: () => service, hubProxy: () => hubProxy, logger }, mode);
+    registerRoutes(app) {
+      registerDeviceHttpRoutes(app, { devices: () => service, hubProxy: () => hubProxy, logger });
     },
 
     registerWsRoutes(app, ws) {

@@ -24,6 +24,7 @@ import { pipeline } from "node:stream/promises";
 
 import {
   deviceKey,
+  VPHONE_HOST_PREFIX,
   VPHONE_RESEARCH_LABEL,
   VPHONE_RESEARCH_NOTICE,
   type DeviceCapacity,
@@ -733,7 +734,7 @@ export class VphoneDeviceHost implements DeviceHost {
 
 /** A vphone host's id: `vphone:<boxId>` (the box's own `box:<boxId>` host runs its simulators). */
 export function vphoneHostId(boxId: string): string {
-  return `vphone:${boxId}`;
+  return `${VPHONE_HOST_PREFIX}${boxId}`;
 }
 
 /** The screen in points from `device.screen` (tolerant of IcliKit's key names). */

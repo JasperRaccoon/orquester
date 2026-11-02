@@ -9,7 +9,7 @@ import { AlertTriangle, Check, CircleDashed, Loader2, Plus, Settings2, Smartphon
 import type { DeviceFormFactor, DeviceLeaseSummary, DevicePlatform, DeviceProfile } from "@orquester/api";
 
 import { cn } from "../../lib/cn";
-import { lostDeviceText, type BootStep, type PickerGroup } from "./device-panel.logic";
+import { lostDeviceText, pickerRowKey, type BootStep, type PickerGroup } from "./device-panel.logic";
 
 // ---------------------------------------------------------------------------
 // Glyphs and small pieces
@@ -160,7 +160,7 @@ export function DevicePicker(props: {
   error: string | null;
   /** The chat already has devices: the picker is "add another". */
   adding: boolean;
-  onOpen: (profile: DeviceProfile) => void;
+  onOpen: (profile: DeviceProfile, hostId: string | undefined) => void;
   onSettings: () => void;
   onCancel?: () => void;
 }): React.ReactElement {
@@ -206,7 +206,7 @@ export function DevicePicker(props: {
       ) : null}
       <div className="flex flex-col gap-4">
         {props.groups.map((group) => (
-          <section key={group.platform} aria-label={group.title}>
+          <section key={group.hostId ?? group.platform} aria-label={group.title}>
             <div className="mb-1.5 flex items-center gap-1.5 px-0.5">
               <PlatformGlyph platform={group.platform} className="text-neutral-500" />
               <h4 className="text-[11px] font-medium uppercase tracking-wider text-neutral-500">{group.title}</h4>
@@ -214,7 +214,7 @@ export function DevicePicker(props: {
             {group.note ? <p className="mb-2 px-0.5 text-[11.5px] leading-relaxed text-neutral-500">{group.note}</p> : null}
             <ul className="divide-y divide-neutral-800/70 overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40">
               {group.rows.map((row) => {
-                const opening = props.opening === row.profile.id;
+                const opening = props.opening === pickerRowKey(row);
                 return (
                   <li key={row.profile.id} className="flex items-center gap-3 px-3 py-2.5" aria-disabled={!row.enabled || undefined} title={row.hint ?? undefined}>
                     <FormFactorIcon formFactor={row.profile.formFactor} className={row.enabled ? "text-neutral-400" : "text-neutral-600"} />
@@ -241,7 +241,7 @@ export function DevicePicker(props: {
                         <PanelButton
                           tone="primary"
                           disabled={props.opening !== null}
-                          onClick={() => props.onOpen(row.profile)}
+                          onClick={() => props.onOpen(row.profile, row.hostId)}
                           aria-label={`${row.action === "queue" ? "Queue" : "Open"} ${row.profile.label}`}
                           title={row.hint ?? undefined}
                         >

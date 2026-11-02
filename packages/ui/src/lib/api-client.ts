@@ -313,6 +313,7 @@ import {
   type McpAppOperation
 } from "@orquester/api/agent-chat";
 import { desktopVisualScheme, visualFrameSrc, type VisualFrameUrl } from "./agent-chat/visual-frame";
+import { desktopDeviceRelay, type DesktopDeviceRelay } from "./devices/desktop-relay";
 import type {
   ForkSessionRequest,
   ForkSessionResponse,
@@ -1046,11 +1047,18 @@ export class ApiClient {
 
   /**
    * Authenticated ws(s):// URL for a device hub path (`deviceRoutes.socket(hostId, path)`), or null
-   * on transports without WebSockets (the desktop app's unix socket: live devices need a server
-   * connection). The bearer rides as ?token=, as for desktops.
+   * on transports without WebSockets (the desktop app's unix socket without its loopback relay:
+   * an older desktop). The bearer rides as ?token=, as for desktops.
    */
   deviceSocketUrl(path: string): string | null {
+    const relay = this.deviceRelay();
+    if (relay) return `${relay.origin.replace(/^http/, "ws")}${path}?token=${relay.token}`;
     return this.desktopSocketUrl(path);
+  }
+
+  /** The desktop's device relay, for the connection on its unix socket (a remote one has its own server). */
+  private deviceRelay(): DesktopDeviceRelay | null {
+    return this.transportKind === "unix" ? desktopDeviceRelay() : null;
   }
 
   /**
@@ -1060,6 +1068,8 @@ export class ApiClient {
    * Anything this app fetches itself goes through {@link deviceHttpRequest} instead.
    */
   deviceImageUrl(path: string): string | null {
+    const relay = this.deviceRelay();
+    if (relay) return `${relay.origin}${path}${path.includes("?") ? "&" : "?"}token=${relay.token}`;
     if (this.transportKind !== "http") {
       return null;
     }
@@ -1071,9 +1081,11 @@ export class ApiClient {
   /**
    * A device path this app fetches itself (hub streams, screenshots, thumbnails, the fold route):
    * the absolute http(s):// URL — no token in it — and the transport's auth headers to send with
-   * it. Null off HTTP (the desktop app's unix socket shows no live devices).
+   * it. Null off HTTP without the desktop's relay.
    */
   deviceHttpRequest(path: string): DeviceHttpRequest | null {
+    const relay = this.deviceRelay();
+    if (relay) return { url: `${relay.origin}${path}`, headers: { Authorization: `Bearer ${relay.token}` } };
     if (this.transportKind !== "http") {
       return null;
     }

@@ -47,6 +47,8 @@ export interface DeviceOpenPlan {
 export interface DeviceToolOpenInput {
   platform: DevicePlatform;
   profile?: string;
+  /** A research host, by id: they open only when named. */
+  hostId?: string;
   app?: string;
   fresh?: boolean;
   /** The owner approved the rental this open may need (its spend card). */
@@ -61,6 +63,8 @@ export interface DeviceToolOpenResult {
   progress?: string;
   /** A note (the `app` could not be launched, …). */
   note?: string;
+  /** What the owner must know about the research host it runs on. */
+  notice?: string;
 }
 
 export interface DeviceToolActionResult {

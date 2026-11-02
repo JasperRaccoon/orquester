@@ -219,4 +219,10 @@ describe("devices validation", () => {
     assert.equal(plain?.research, undefined);
     assert.equal(plain?.notice, undefined);
   });
+
+  it("keeps which platforms can be rented, and leaves an older daemon's answer unknown", () => {
+    const pool = { hosts: 0, capacity: { used: 0, total: 0 }, hourlyUsd: 0, queue: 0 };
+    assert.deepEqual(sanitizeDevicesState(state({ pool: { ...pool, rentable: ["ios", "plan9"] } } as never))?.pool?.rentable, ["ios"]);
+    assert.equal(sanitizeDevicesState(state({ pool }))?.pool?.rentable, undefined);
+  });
 });

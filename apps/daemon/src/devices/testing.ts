@@ -25,6 +25,8 @@ export class FakeDeviceHost implements DeviceHost {
   status: DeviceHostState = { status: "ready", detail: null };
   checks: DeviceHostReadiness["checks"] = [];
   total = 2;
+  /** Set: a research host with this notice. */
+  researchNotice: string | null = null;
   booted: DeviceBootRequest[] = [];
   released: { lease: StoredDeviceLease; shutdown: boolean }[] = [];
   ensured: (readonly string[] | undefined)[] = [];
@@ -70,6 +72,10 @@ export class FakeDeviceHost implements DeviceHost {
 
   state(): DeviceHostState {
     return this.status;
+  }
+
+  research(): { notice: string } | null {
+    return this.researchNotice !== null ? { notice: this.researchNotice } : null;
   }
 
   readiness(): DeviceHostReadiness {

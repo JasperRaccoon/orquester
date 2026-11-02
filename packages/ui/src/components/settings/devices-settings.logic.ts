@@ -187,7 +187,12 @@ export function macHostView(host: Pick<DeviceHostSummary, "box" | "statusDetail"
 
 /** The Mac device hosts (rented boxes running iOS). */
 export function macHosts(hosts: readonly DeviceHostSummary[]): DeviceHostSummary[] {
-  return hosts.filter((host) => host.kind !== "local" && host.platforms.includes("ios"));
+  return hosts.filter((host) => host.kind !== "local" && host.platforms.includes("ios") && host.research !== true);
+}
+
+/** The owner's own Macs marked for devices: the ones that may run virtual iPhones. */
+export function ownMacHosts(hosts: readonly DeviceHostSummary[]): DeviceHostSummary[] {
+  return macHosts(hosts).filter((host) => host.kind === "byo" && host.box !== undefined);
 }
 
 /** The empty state's words, with the size's price when the quote is known. */

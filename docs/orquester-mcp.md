@@ -2374,8 +2374,8 @@ agents use devices, and at least one platform is enabled. Design:
 
 | Tool | Tier | Input | Returns |
 |---|---|---|---|
-| `list_devices` | Read | — | `{platforms: [{platform, enabled, ready, detail?}], hosts: [{id, kind, label, platforms, status, capacity: "used/total", missing?}], profiles: [{id, platform, name, form, os}], my_devices: [Lease], busy: [{device, platform, name, chat?}]}` |
-| `open_device` | Act (a `devices` **spend** card when it must rent a host the owner did not pre-approve) | `platform` (`"ios"` \| `"android"`), `profile?`, `app?` (bundle id / package to launch), `fresh?` | `Lease` + `ready`, `quick_start` (≤ 6 lines, per platform), `deviceRef`; after 9 minutes still booting: `ready: false`, `progress`, a note to check `list_devices` |
+| `list_devices` | Read | — | `{platforms: [{platform, enabled, ready, detail?}], hosts: [{id, kind, label, platforms, status, capacity: "used/total", research?, notice?, missing?}], profiles: [{id, platform, name, form, os}], my_devices: [Lease], busy: [{device, platform, name, chat?}]}` |
+| `open_device` | Act (a `devices` **spend** card when it must rent a host the owner did not pre-approve) | `platform` (`"ios"` \| `"android"`), `profile?`, `host?` (a ready research host's id), `app?` (bundle id / package to launch), `fresh?` | `Lease` + `ready`, `notice?` (a research host's), `quick_start` (≤ 6 lines, per platform), `deviceRef`; after 9 minutes still booting: `ready: false`, `progress`, a note to check `list_devices` |
 | `device_action` | Read for `snapshot`, `screenshot`, `logs`, `wait`; Act otherwise | `device?`, `action`, and the action's fields (below) | `{device, action, summary, result?, screenshot?: {width, height, mime_type}, note?, deviceRef}`; `screenshot` also returns an MCP image block (PNG, or a JPEG scaled to fit) |
 | `device_install` | Act | `device?`, `path` (a build inside the chat's project; relative = from the chat's cwd): an `.apk`, or a simulator `.app` (or `.ipa`) | `{device, app, summary, deviceRef}` — `app` is the bundle id / package to `open_app` |
 | `close_device` | Act | `device?`, `shutdown?` | `{closed: true, device, deviceRef}` |
@@ -2390,6 +2390,10 @@ agents use devices, and at least one platform is enabled. Design:
   owner enabled in Settings → Devices (the panel's picker offers the same); `open_device` refuses
   another (`INVALID_ARGUMENT`, naming the enabled ones) and, without `profile`, opens `iphone-17-pro`
   / `pixel-9` when enabled, else the platform's first enabled profile.
+- **Research hosts** (`research: true` in `list_devices`, with a `notice`: virtual iPhones on the
+  owner's own Mac) never take a device unless `open_device` names them in `host`, once they are
+  ready; their setup is the owner's, in Settings → Devices. Naming any other host is
+  `INVALID_ARGUMENT`. A research iPhone installs `.ipa` builds for real devices.
 - **Leases** are exclusive: a chat holds at most 3 devices (`DEVICE_LEASE_LIMIT`), another chat's
   device is never reachable (`DEVICE_NOT_LEASED`). A lease ends with `close_device`, the user's
   Release, the chat closing, or an hour with no agent or viewer activity.
@@ -2418,7 +2422,8 @@ agents use devices, and at least one platform is enabled. Design:
 - **Errors**: `DEVICES_DISABLED`, `DEVICE_NOT_LEASED` (call `open_device`), `DEVICE_LOST` (its host
   or device is gone: call `open_device` again), `DEVICE_CONTROLLED_BY_USER`, `DEVICE_CAPACITY` (every
   host is full; names the leases), `DEVICE_LEASE_LIMIT`, `PLATFORM_NOT_READY` (off, or not set up —
-  names the missing readiness items; the owner fixes it in Settings → Devices).
+  names the missing readiness items, or that no Mac host can be rented; the owner fixes it in
+  Settings → Devices).
 
 ---
 

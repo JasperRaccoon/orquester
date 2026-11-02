@@ -24,6 +24,7 @@ import {
   VISUAL_SCHEME,
   type NavigationAction
 } from "./navigation";
+import { startDeviceRelay, type DeviceRelay } from "./device-relay";
 import { pipeHttpStream } from "./http-stream";
 import { applicationMenuTemplate, contextMenuTemplate } from "./menus";
 import {
@@ -144,6 +145,8 @@ let daemon: RunningDaemon | undefined;
 let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let daemonSocketPath: string | undefined;
+/** Live devices for the local connection; null when it could not listen (the panel then says so). */
+let deviceRelay: DeviceRelay | null = null;
 let isDaemonOwner = false;
 let quitting = false;
 /** Startup reached window creation: from here a second launch may open a window. */
@@ -833,6 +836,11 @@ function registerIpc(): void {
     (event, payload: { streamId: string; url: string; headers?: http.OutgoingHttpHeaders }) => openHttpStream(event, payload)
   );
   ipcMain.on("orquester:http-stream:close", (_event, streamId: string) => closeStream(streamId));
+  // Synchronous: the preload hands it to the page before the page's first script runs.
+  ipcMain.on("orquester:device-relay", (event) => {
+    const fromWindow = fromMainWindow(event) || (replacementWindow !== undefined && event.sender === replacementWindow.webContents);
+    event.returnValue = deviceRelay && fromWindow ? { origin: deviceRelay.origin, token: deviceRelay.token } : null;
+  });
   ipcMain.on("orquester:window-background", (_event, payload: unknown) => applyWindowBackground(payload));
   ipcMain.on("orquester:window", (event, action: string) => {
     // The sender's own window: while a rebuilt window loads, the old one is still on screen.
@@ -1098,6 +1106,10 @@ app.whenReady().then(async () => {
   }
 
   listenForDaemonShutdown();
+  deviceRelay = await startDeviceRelay(() => daemonSocketPath).catch((error: unknown) => {
+    console.error("The device relay did not start", error instanceof Error ? error.message : String(error));
+    return null;
+  });
   registerIpc();
   registerVisualProtocol();
   if (isDaemonOwner) {
@@ -1126,6 +1138,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", (event) => {
   quitting = true;
+  void deviceRelay?.close();
   if (daemon) {
     event.preventDefault();
     void stopIntegratedDaemon().finally(() => app.quit());

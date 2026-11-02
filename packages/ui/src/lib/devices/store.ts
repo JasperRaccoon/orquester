@@ -327,10 +327,10 @@ export function updateDevicesSettings(api: DevicesApi, patch: DevicesSettingsPat
 }
 
 /** Settings → Devices "Install all" / "Repair". */
-export function startDeviceSetup(api: DevicesApi, platform: DevicePlatform, actions?: string[]): Promise<DeviceSetupJob | null> {
+export function startDeviceSetup(api: DevicesApi, platform: DevicePlatform, actions?: string[], hostId?: string): Promise<DeviceSetupJob | null> {
   return mutate(
     api,
-    () => api.startDeviceSetup(platform, actions ? { actions } : {}),
+    () => api.startDeviceSetup(platform, { ...(actions ? { actions } : {}), ...(hostId ? { hostId } : {}) }),
     sanitizeSetupPayload,
     ({ job }) => {
       if (job) applySetupJob(job);

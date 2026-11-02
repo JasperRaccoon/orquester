@@ -259,7 +259,7 @@ export interface PoolDecision {
   perHostCapacity: Record<DevicePlatform, number>;
 }
 
-const EPSILON = 1e-9;
+export const EPSILON = 1e-9;
 
 /** The capacity a host may use: Android never above the hard cap. */
 export function hostCap(platform: DevicePlatform, total: number): number {

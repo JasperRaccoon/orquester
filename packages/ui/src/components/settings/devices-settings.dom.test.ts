@@ -12,6 +12,8 @@ import { JSDOM } from "jsdom";
 import {
   DEFAULT_DEVICES_SETTINGS,
   DEVICES_PLUGIN_ID,
+  VPHONE_RESEARCH_LABEL,
+  VPHONE_RESEARCH_NOTICE,
   type DeviceHostSummary,
   type DeviceSetupJob,
   type DevicesSettings as DevicesSettingsValue,
@@ -115,8 +117,8 @@ describe("DevicesSettings", () => {
     resetDevices();
   });
 
-  const show = async () => {
-    const state: DevicesStateResponse = { enabled: true, hosts: [localHost], leases: [], profiles: [], settings: settings(), setupJobs: [] };
+  const show = async (hosts: DeviceHostSummary[] = [localHost], current: DevicesSettingsValue = settings()) => {
+    const state: DevicesStateResponse = { enabled: true, hosts, leases: [], profiles: [], settings: current, setupJobs: [] };
     const api = {
       connection: { id: "test" },
       devicesState: async () => state,
@@ -201,6 +203,43 @@ describe("DevicesSettings", () => {
     assert.equal(useAppStore.getState().settingsSection, "plugins");
     const lifetime = doc().querySelector<HTMLInputElement>('input[aria-label="Lifetime in minutes"]')!;
     assert.equal(lifetime.disabled, true);
+  });
+
+  const ownMac: DeviceHostSummary = {
+    ...localHost,
+    id: "box:b1",
+    kind: "byo",
+    label: "Studio Mac",
+    platforms: ["ios"],
+    status: "ready",
+    readiness: { ready: true, checks: [], checkedAt: null },
+    box: { boxId: "b1", provider: "byo", hourlyUsd: 0, startedAt: "2026-10-27T10:00:00.000Z", deadlineAt: null }
+  };
+
+  it("an own Mac offers virtual iPhones behind the research notice", async () => {
+    await show([localHost, ownMac]);
+    assert.match(doc().body.textContent ?? "", new RegExp(VPHONE_RESEARCH_NOTICE));
+    await click(doc().querySelector(`[role="switch"][aria-label="${VPHONE_RESEARCH_LABEL} on Studio Mac"]`)!);
+    assert.deepEqual(calls, [["settings", { research: { vphoneHosts: { b1: { enabled: true } } } }]]);
+  });
+
+  it("a research host takes its firmware, shows its checklist and sets itself up", async () => {
+    const current = settings();
+    current.research.vphoneHosts.b1 = { enabled: true, iphoneSource: null, cloudosSource: null };
+    const research: DeviceHostSummary = {
+      ...ownMac,
+      id: "vphone:b1",
+      research: true,
+      notice: VPHONE_RESEARCH_NOTICE,
+      status: "needs-setup",
+      readiness: { ready: false, checkedAt: null, checks: [{ id: "template", label: "VM template", state: "missing", detail: "Not built yet", fixActionId: "vphone-template" }] }
+    };
+    await show([localHost, ownMac, research], current);
+    await type(doc().querySelector<HTMLInputElement>('input[aria-label="iPhone firmware (IPSW) on Studio Mac"]')!, "/Users/me/iPhone.ipsw");
+    assert.deepEqual(calls, [["settings", { research: { vphoneHosts: { b1: { iphoneSource: "/Users/me/iPhone.ipsw" } } } }]]);
+    // The last Install: Android's checklist has its own, above.
+    await click([...doc().querySelectorAll("button")].filter((b) => b.textContent?.trim() === "Install").at(-1)!);
+    assert.deepEqual(calls.at(-1), ["setup", ["ios", { actions: ["vphone-template"], hostId: "vphone:b1" }]]);
   });
 
   it("saves fleet placement and validates Android host lifetime", async () => {

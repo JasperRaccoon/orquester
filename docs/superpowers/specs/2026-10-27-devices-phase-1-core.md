@@ -309,9 +309,10 @@ A section in the "server" group:
 
 ### 10.6 Transports
 
-Streams need the HTTP transport (as desktops/browsers). On the desktop app's Unix-socket
-connection the panel shows "Live devices need a server connection" and still lists leases and
-action logs.
+Streams need the HTTP transport (as desktops/browsers). The desktop app's Unix-socket connection
+gets one from its loopback relay (`apps/desktop/src/device-relay.ts`: device media only, a
+per-launch token). Without it (an older desktop) the panel shows "Live devices need a server
+connection" and still lists leases and action logs.
 
 ## 11. Contracts and persistence
 

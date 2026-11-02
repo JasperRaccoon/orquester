@@ -38,6 +38,8 @@ import {
   DEVICES_SETTINGS_LIMITS,
   deviceProfilesFor,
   isBoxProviderId,
+  VPHONE_RESEARCH_LABEL,
+  VPHONE_RESEARCH_NOTICE,
   type BoxSizeOffer,
   type DeviceHostSummary,
   type DevicePlacementMode,
@@ -62,6 +64,7 @@ import {
   macHostView,
   noMacHostText,
   nullableText,
+  ownMacHosts,
   parseSettingNumber,
   PLACEMENT_HINTS,
   PLACEMENT_LABELS,
@@ -454,6 +457,58 @@ const MacHostRow: React.FC<{ host: DeviceHostSummary; now: number; onDestroy: (h
   );
 };
 
+/** One own Mac's "Virtual iPhones (research)": the switch behind its notice, then its firmware and checklist. */
+const ResearchMacRows: React.FC<{
+  mac: DeviceHostSummary;
+  research: DeviceHostSummary | undefined;
+  settings: DevicesSettingsValue;
+  busy: boolean;
+  ctx: SaveContext;
+  onFix: (hostId: string, actionId: string) => void;
+}> = ({ mac, research, settings, busy, ctx, onFix }) => {
+  const boxId = mac.box!.boxId;
+  const entry = settings.research.vphoneHosts[boxId];
+  const patch = (changes: { enabled?: boolean; iphoneSource?: string | null; cloudosSource?: string | null }): DevicesSettingsPatch => ({ research: { vphoneHosts: { [boxId]: changes } } });
+  return (
+    <>
+      <SettingRow label={`${VPHONE_RESEARCH_LABEL} · ${mac.label}`} description={VPHONE_RESEARCH_NOTICE}>
+        <SettingSwitch
+          id={`research.${boxId}.enabled`}
+          label={`${VPHONE_RESEARCH_LABEL} on ${mac.label}`}
+          checked={entry?.enabled === true}
+          ctx={ctx}
+          patch={(enabled) => patch({ enabled })}
+        />
+      </SettingRow>
+      {entry?.enabled === true && (
+        <>
+          <SettingRow label="iPhone firmware (IPSW)" description="A path on that Mac, or a download link. Building the VM template needs it.">
+            <TextField
+              id={`research.${boxId}.iphoneSource`}
+              label={`iPhone firmware (IPSW) on ${mac.label}`}
+              value={entry.iphoneSource}
+              placeholder="/path/to/iPhone.ipsw"
+              ctx={ctx}
+              patch={(iphoneSource) => patch({ iphoneSource })}
+            />
+          </SettingRow>
+          <SettingRow label="cloudOS firmware (IPSW)" description="A path on that Mac, or a download link. Building the VM template needs it.">
+            <TextField
+              id={`research.${boxId}.cloudosSource`}
+              label={`cloudOS firmware (IPSW) on ${mac.label}`}
+              value={entry.cloudosSource}
+              placeholder="/path/to/cloudOS.ipsw"
+              ctx={ctx}
+              patch={(cloudosSource) => patch({ cloudosSource })}
+            />
+          </SettingRow>
+          {research && <ReadinessList host={research} busy={busy} onFix={(actionId) => onFix(research.id, actionId)} />}
+        </>
+      )}
+    </>
+  );
+};
+
 const IosSection: React.FC<{ settings: DevicesSettingsValue; hosts: readonly DeviceHostSummary[]; ctx: SaveContext; onError: (text: string) => void }> = ({
   settings,
   hosts,
@@ -473,6 +528,16 @@ const IosSection: React.FC<{ settings: DevicesSettingsValue; hosts: readonly Dev
   const [destroying, setDestroying] = React.useState<string | null>(null);
   const running = macHosts(hosts);
   const now = useNow(30_000, running.length > 0);
+  const ownMacs = ownMacHosts(hosts);
+  const setupRunning = useDeviceSetupJob("ios")?.state === "running";
+  const [settingUp, setSettingUp] = React.useState(false);
+  const setUpResearchHost = (hostId: string, actionId: string) => {
+    if (!api) return;
+    setSettingUp(true);
+    void startDeviceSetup(api, "ios", [actionId], hostId)
+      .catch((err) => onError(boxesErrorText(err)))
+      .finally(() => setSettingUp(false));
+  };
 
   React.useEffect(() => {
     if (api && boxesOn && providers === null) void loadBoxProviders(api).catch(() => undefined);
@@ -609,10 +674,25 @@ const IosSection: React.FC<{ settings: DevicesSettingsValue; hosts: readonly Dev
       )}
       {(enabled || running.length > 0) &&
         (running.length === 0 ? (
-          <EmptyState icon={<Apple size={16} />} title="No Mac host running" description={noMacHostText(hourly).replace(/^No Mac host running — /, "")} className="py-5" />
+          providerReady ? (
+            <EmptyState icon={<Apple size={16} />} title="No Mac host running" description={noMacHostText(hourly).replace(/^No Mac host running — /, "")} className="py-5" />
+          ) : null
         ) : (
           running.map((host) => <MacHostRow key={host.id} host={host} now={now} destroying={destroying === host.id} onDestroy={setDestroyTarget} />)
         ))}
+      {enabled &&
+        ownMacs.map((mac) => (
+          <ResearchMacRows
+            key={mac.id}
+            mac={mac}
+            research={hosts.find((host) => host.research === true && host.box?.boxId === mac.box?.boxId)}
+            settings={settings}
+            busy={settingUp || setupRunning}
+            ctx={ctx}
+            onFix={setUpResearchHost}
+          />
+        ))}
+      {enabled && ownMacs.length > 0 && <SetupProgress platform="ios" />}
       <ConfirmDialog
         open={destroyTarget !== null}
         title="Destroy this Mac host?"

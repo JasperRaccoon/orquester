@@ -239,7 +239,13 @@ function sanitizeDevicesSettings(value: unknown): DevicesSettings | null {
 
 export function sanitizePoolSummary(value: unknown): DevicePoolSummary | null {
   if (!isRecord(value) || !num(value.hosts) || !num(value.hourlyUsd) || !num(value.queue)) return null;
-  return { hosts: value.hosts, capacity: capacity(value.capacity), hourlyUsd: value.hourlyUsd, queue: value.queue };
+  return {
+    hosts: value.hosts,
+    capacity: capacity(value.capacity),
+    hourlyUsd: value.hourlyUsd,
+    queue: value.queue,
+    ...(Array.isArray(value.rentable) ? { rentable: value.rentable.filter(isDevicePlatform) } : {})
+  };
 }
 
 /** `GET /api/devices`. */

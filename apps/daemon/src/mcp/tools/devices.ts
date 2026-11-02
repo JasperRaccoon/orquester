@@ -124,16 +124,18 @@ function deviceRef(lease: DeviceLeaseSummary, extra: { screenshotId?: string; ac
  * leaves out, per platform (devices spikes: iOS needs an app session before a snapshot, and its
  * first call warms agent-device's runner; `open` re-issues refs).
  */
-function deviceQuickStart(platform: "ios" | "android"): string {
+function deviceQuickStart(platform: "ios" | "android", research = false): string {
   return [
     platform === "ios"
       ? 'Open the app first ({action:"open_app",app:"<bundle id>"}; Settings is com.apple.Preferences), then {action:"snapshot"}: the screen as @eN refs. The first iOS call may take ~30 s.'
       : '{action:"snapshot"} first: the screen as an accessibility tree with @eN refs.',
     'Prefer refs to x/y points: {action:"tap",ref:"@e3"}, {action:"fill",ref:"@e5",text:"…"}. Input returns the diff with current refs; after open_app, open_url or rotate, snapshot again (refs expire).',
     '{action:"screenshot"} returns an image; {action:"logs",seconds:10} recent logs; {action:"wait",text:"…"} for slow screens.',
-    platform === "ios"
-      ? "device_install {path} takes a simulator .app (or .ipa) in this project and answers its bundle id; press home for the home screen."
-      : "device_install {path} takes an .apk in this project and answers its package; press back/home to navigate.",
+    research
+      ? "device_install {path} takes an .ipa built for a real device in this project and answers its bundle id; press home for the home screen."
+      : platform === "ios"
+        ? "device_install {path} takes a simulator .app (or .ipa) in this project and answers its bundle id; press home for the home screen."
+        : "device_install {path} takes an .apk in this project and answers its package; press back/home to navigate.",
     "The user watches the Device panel and may take control: input then fails DEVICE_CONTROLLED_BY_USER (reads still work); wait, or ask them to give it back.",
     "close_device when done."
   ].join("\n");
@@ -153,6 +155,7 @@ function listView(list: DeviceToolList): Record<string, unknown> {
       platforms: host.platforms,
       status: host.status,
       capacity: `${host.capacity.used}/${host.capacity.total}`,
+      ...(host.research ? { research: true, ...(host.notice ? { notice: host.notice } : {}) } : {}),
       ...(host.readiness.ready ? {} : { missing: host.readiness.checks.filter((check) => check.state !== "ok").map((check) => check.label) })
     })),
     profiles: list.profiles.map((profile) => ({ id: profile.id, platform: profile.platform, name: profile.label, form: profile.formFactor, os: profile.os })),
@@ -165,7 +168,7 @@ const listDevices = defineTool({
   name: "list_devices",
   title: "List devices",
   description:
-    "The device platforms (iOS, Android) and whether each is ready, the hosts that run devices (status, capacity, what is missing), the device profiles you can open, this chat's devices (`device` handles for the other device tools) and devices other chats hold (busy).",
+    "The device platforms (iOS, Android) and whether each is ready, the hosts that run devices (status, capacity, what is missing; a research host says so, with a notice, and opens only by name), the device profiles you can open, this chat's devices (`device` handles for the other device tools) and devices other chats hold (busy).",
   chatNote: "Call it before open_device, and to check on a device that was still starting.",
   input: {},
   audiences: ["chat"],
@@ -203,6 +206,7 @@ const openDevice = defineTool({
   input: {
     platform: z.enum(["ios", "android"]),
     profile: z.enum(PROFILE_IDS).optional().describe("An enabled profile id from list_devices; default: iPhone 17 Pro / Pixel 9 when enabled, else the platform's first enabled profile."),
+    host: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/, "a host id").optional().describe("A ready research host's id from list_devices. Use one only when the user asks for it, and pass on its notice; other devices need no host."),
     app: APP_ID.optional().describe("Launch this installed app once booted."),
     fresh: z.boolean().optional().describe("A clean device, never a reused one.")
   },
@@ -213,7 +217,8 @@ const openDevice = defineTool({
   spendFamily: (_args, scope) => scope.resolved?.spendFamily,
   async scope(args, ctx) {
     const claim = ownScope(ctx, "none", true);
-    if (ctx.caller.kind !== "thread" || !ctx.api.devicesPlanOpen) return claim;
+    // A named research host is the owner's own machine: nothing to rent.
+    if (ctx.caller.kind !== "thread" || !ctx.api.devicesPlanOpen || args.host !== undefined) return claim;
     const plan = await ctx.api.devicesPlanOpen(args.platform, { signal: ctx.signal });
     if (!plan.ok || !plan.value.rental?.needsApproval) return claim;
     return { ...claim, resolved: { tier: "act", spendFamily: "devices" } };
@@ -272,6 +277,7 @@ const openDevice = defineTool({
         {
           platform: args.platform,
           ...(args.profile !== undefined ? { profile: args.profile } : {}),
+          ...(args.host !== undefined ? { hostId: args.host } : {}),
           ...(args.app !== undefined ? { app: args.app } : {}),
           ...(args.fresh !== undefined ? { fresh: args.fresh } : {}),
           // The card pinned the rental the owner approved.
@@ -285,7 +291,8 @@ const openDevice = defineTool({
       ready: opened.ready,
       ...(opened.progress ? { progress: opened.progress, note: "Still starting: check it with list_devices." } : {}),
       ...(opened.note ? { note: opened.note } : {}),
-      ...(opened.ready ? { quick_start: deviceQuickStart(opened.lease.platform) } : {}),
+      ...(opened.notice ? { notice: opened.notice } : {}),
+      ...(opened.ready ? { quick_start: deviceQuickStart(opened.lease.platform, opened.notice !== undefined) } : {}),
       deviceRef: deviceRef(opened.lease)
     };
   }

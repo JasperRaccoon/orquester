@@ -83,7 +83,7 @@ async function startApp(t: TestContext, service: DeviceService): Promise<number>
   });
   const app = Fastify();
   await app.register(websocketPlugin);
-  registerDeviceHttpRoutes(app, { devices: () => service, hubProxy: () => proxy, logger: quiet }, "remote");
+  registerDeviceHttpRoutes(app, { devices: () => service, hubProxy: () => proxy, logger: quiet });
   await registerDeviceWsRoutes(app, { authorize: (token) => token === "good", devices: () => service, hubProxy: () => proxy });
   await app.listen({ host: "127.0.0.1", port: 0 });
   t.after(async () => {

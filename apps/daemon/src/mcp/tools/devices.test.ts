@@ -220,3 +220,29 @@ test("open_device: a rental the owner did not pre-approve raises a devices spend
     await t.cleanup();
   }
 });
+
+test("research hosts: list_devices marks them, and open_device reaches one by name with its notice and no spend card", async () => {
+  const research = new FakeDeviceHost("vphone:b1", "byo", ["ios"], "Studio Mac");
+  research.researchNotice = "Research — real iOS in a VM";
+  const factory = new FakeHostFactory("box", ["ios"], [], () => new FakeDeviceHost("box:m1", "box", ["ios"], "Mac host"));
+  factory.quote = { platform: "ios", provider: "blacksmith", providerLabel: "Blacksmith", size: "6vcpu", sizeLabel: "6 vCPU macOS", hourlyUsd: 4.8, lifetimeMinutes: 240, needsApproval: true };
+  const t = await startTestDeviceService({ factories: [factory, new FakeHostFactory("byo", ["ios"], [research])], settings: { ios: { enabled: true } } });
+  try {
+    const api = apiFor(t.service);
+    const listed = await call(api, "list_devices", {});
+    assert.ok(listed.ok, JSON.stringify(listed));
+    const hosts = listed.value.hosts as { id: string; research?: boolean; notice?: string }[];
+    assert.deepEqual(hosts.find((host) => host.id === "vphone:b1"), { ...hosts.find((host) => host.id === "vphone:b1"), research: true, notice: research.researchNotice });
+
+    const port = new FakeApprovalPort();
+    const opened = await call(api, "open_device", { platform: "ios", host: "vphone:b1" }, { port });
+    assert.ok(opened.ok, JSON.stringify(opened));
+    assert.equal(port.cards.length, 0);
+    assert.deepEqual(factory.provisioned, []);
+    assert.equal(opened.value.notice, research.researchNotice);
+    assert.match(String(opened.value.quick_start), /\.ipa/);
+    assert.doesNotMatch(String(opened.value.quick_start), /simulator/);
+  } finally {
+    await t.cleanup();
+  }
+});

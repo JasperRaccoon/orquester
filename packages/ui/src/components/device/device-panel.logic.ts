@@ -339,6 +339,8 @@ export interface PickerRow {
   action: "open" | "queue";
   /** A tooltip for an enabled row (what queueing means). */
   hint: string | null;
+  /** Opens on this host (a research host, which opens only by name). */
+  hostId?: string;
 }
 
 export interface PickerGroup {
@@ -347,6 +349,8 @@ export interface PickerGroup {
   /** One line under the title: the host's state ("No Mac host — opening an iPhone rents one (~$4.80/h)"). */
   note: string | null;
   rows: PickerRow[];
+  /** A research host's own group. */
+  hostId?: string;
 }
 
 export interface PickerInput {
@@ -357,13 +361,44 @@ export interface PickerInput {
   chatLeases: number;
   /** The Mac host quote ($/h) for the configured size, when known. */
   macHourlyUsd: number | null;
+  /** The platforms the daemon can rent a host for now (absent from an older daemon: unknown). */
+  rentable?: readonly DevicePlatform[] | undefined;
 }
 
 function hourly(value: number | null): string {
   return value != null && value > 0 ? ` (~$${value.toFixed(2)}/h)` : "";
 }
 
-/** The picker's groups: Android on this host, then iPhone & iPad on Mac hosts, each row explaining a disabled Open. */
+/** A row's identity among every group's rows (the same profile opens on several research hosts). */
+export function pickerRowKey(row: Pick<PickerRow, "hostId"> & { profile: Pick<DeviceProfile, "id"> }): string {
+  return row.hostId ? `${row.hostId}/${row.profile.id}` : row.profile.id;
+}
+
+/** The research host's row: a virtual iPhone, whatever the profile says (the host boots its own). */
+function researchGroup(host: DeviceHostSummary, profile: DeviceProfile, input: PickerInput, fullReason: string | null): PickerGroup {
+  const off = !(input.settings?.ios.enabled ?? false);
+  let reason: string | null = fullReason;
+  let badge = fullReason ? "Limit reached" : "Research";
+  if (off) {
+    reason = `${DEVICE_PLATFORM_LABELS.ios} is off. Turn it on in Settings → Devices.`;
+    badge = "Off";
+  } else if (host.status !== "ready") {
+    reason = `${host.statusDetail ?? "This host needs setup."} Check Settings → Devices.`;
+    badge = "Needs setup";
+  } else if (host.capacity.used >= host.capacity.total) {
+    reason = `All ${host.capacity.total} virtual iPhones on this Mac are in use.`;
+    badge = "Full";
+  }
+  return {
+    platform: "ios",
+    title: host.label,
+    note: host.notice ?? null,
+    hostId: host.id,
+    rows: [{ profile: { ...profile, label: "Virtual iPhone", os: "Real iOS in a VM" }, enabled: reason === null, reason, badge, action: "open", hint: null, hostId: host.id }]
+  };
+}
+
+/** The picker's groups: Android on this host, iPhone & iPad on Mac hosts, then each research host, each row explaining a disabled Open. */
 export function pickerGroups(input: PickerInput): PickerGroup[] {
   const max = input.settings?.maxLeasesPerChat ?? 3;
   const full = input.chatLeases >= max;
@@ -374,7 +409,7 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
     const offered = input.settings?.[platform].profiles;
     const profiles = input.profiles.filter((profile) => profile.platform === platform && (!offered || offered.includes(profile.id)));
     if (profiles.length === 0) continue;
-    const hosts = input.hosts.filter((host) => host.platforms.includes(platform));
+    const hosts = input.hosts.filter((host) => host.platforms.includes(platform) && host.research !== true);
     let note: string | null = null;
     let reason: string | null = null;
     let badge = "Ready";
@@ -419,6 +454,15 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
       } else if (starting) {
         note = "A Mac host is starting · the device opens when it's ready";
         badge = "Host starting";
+      } else if (input.rentable && !input.rentable.includes("ios")) {
+        if (hosts.length === 0) {
+          reason = "No Mac host, and renting one isn't set up. Check Settings → Devices.";
+          badge = "Needs setup";
+        } else {
+          // An own Mac that is full or needs setup: Open queues on it, or sets it up.
+          note = "No Mac host is free · the device opens when one is";
+          badge = "Waits for a Mac";
+        }
       } else {
         note = `No Mac host — opening an iPhone rents one${hourly(input.macHourlyUsd)}`;
         badge = input.settings?.pool.rentWithoutAsking ? "Rents a Mac" : "Asks to rent";
@@ -438,6 +482,11 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
         hint: reason === null ? queueHint : null
       }))
     });
+  }
+  const offered = input.settings?.ios.profiles;
+  const iphone = input.profiles.find((profile) => profile.platform === "ios" && (!offered || offered.includes(profile.id)));
+  if (iphone) {
+    for (const host of input.hosts) if (host.research === true && host.platforms.includes("ios")) groups.push(researchGroup(host, iphone, input, full ? fullReason : null));
   }
   return groups;
 }

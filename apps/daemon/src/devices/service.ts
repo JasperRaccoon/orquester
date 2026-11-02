@@ -204,7 +204,8 @@ export class DeviceService implements DeviceToolsPort {
   private readonly opening = new Map<string, AbortController>();
   /** Panel Opens still waiting for a host, by lease id (memory only: a restart ends the wait). */
   private readonly waitingOpens = new Map<string, WaitingOpen>();
-  private readonly setups = new Map<DevicePlatform, SetupRun>();
+  /** By platform; a research host's by its id (see {@link setupKey}). */
+  private readonly setups = new Map<string, SetupRun>();
   private readonly unsubscribers: (() => void)[] = [];
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private deviceSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -435,13 +436,19 @@ export class DeviceService implements DeviceToolsPort {
 
   /**
    * Start (or join) the platform's install/repair job on its host: `actions` limits it to those
-   * fix actions. Refuses `PLATFORM_NOT_READY` when the platform has no host to set up (iOS before a
-   * Mac host is rented: opening an iPhone rents and prepares one).
+   * fix actions, `hostId` to that host (a research host is set up only by name). Refuses
+   * `PLATFORM_NOT_READY` when the platform has no host to set up (iOS before a Mac host is rented:
+   * opening an iPhone rents and prepares one).
    */
-  startSetup(platform: DevicePlatform, actions?: readonly string[]): DeviceSetupJob {
-    const running = this.setups.get(platform);
-    if (running?.job.state === "running") return structuredClone(running.job);
-    const host = this.hosts.list().find((entry) => entry.platforms.includes(platform) && entry.state().status !== "disabled");
+  startSetup(platform: DevicePlatform, actions?: readonly string[], hostId?: string): DeviceSetupJob {
+    const named = hostId !== undefined ? this.hosts.get(hostId) : undefined;
+    if (hostId !== undefined && !named?.platforms.includes(platform)) throw new DeviceError(DEVICE_ERROR_CODES.HOST_NOT_FOUND, `There is no ${DEVICE_PLATFORM_LABELS[platform]} device host ${hostId}.`);
+    const running = this.setups.get(this.setupKey(named, platform));
+    if (running?.job.state === "running") {
+      if (named && running.job.hostId !== named.id) throw new DeviceError("UNAVAILABLE", `Another ${DEVICE_PLATFORM_LABELS[platform]} setup is running. Try again when it finishes.`);
+      return structuredClone(running.job);
+    }
+    const host = named ?? this.hosts.list().find((entry) => entry.platforms.includes(platform) && entry.research?.() == null && entry.state().status !== "disabled");
     if (!host) {
       throw new DeviceError(
         DEVICE_ERROR_CODES.PLATFORM_NOT_READY,
@@ -451,6 +458,11 @@ export class DeviceService implements DeviceToolsPort {
       );
     }
     return structuredClone(this.runSetup(host, platform, actions).job);
+  }
+
+  /** A research host's setup runs apart: a template build takes hours, and the platform's own setups never wait on it. */
+  private setupKey(host: DeviceHost | undefined, platform: DevicePlatform): string {
+    return host?.research?.() ? host.id : platform;
   }
 
   private runSetup(host: DeviceHost, platform: DevicePlatform, actions?: readonly string[]): SetupRun {
@@ -499,7 +511,7 @@ export class DeviceService implements DeviceToolsPort {
       }
     })();
     const run: SetupRun = { job, done, abort };
-    this.setups.set(platform, run);
+    this.setups.set(this.setupKey(host, platform), run);
     publish();
     return run;
   }
@@ -733,8 +745,9 @@ export class DeviceService implements DeviceToolsPort {
           await this.waitForHost(placement.hostId, signal);
           continue;
         case "setup": {
-          const run = this.setups.get(request.platform);
-          const setup = run?.job.state === "running" ? run : this.runSetup(this.hosts.get(placement.hostId)!, request.platform, placement.actions);
+          const host = this.hosts.get(placement.hostId)!;
+          const run = this.setups.get(this.setupKey(host, request.platform));
+          const setup = run?.job.state === "running" ? run : this.runSetup(host, request.platform, placement.actions);
           onWait?.("prepare-host", `Setting up ${label}`);
           await setup.done;
           if (setup.job.state !== "done") throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Setting up ${DEVICE_PLATFORM_LABELS[request.platform]} failed: ${setup.job.error ?? "unknown error"}. Ask the owner to check Settings → Devices.`);
@@ -1183,16 +1196,20 @@ export class DeviceService implements DeviceToolsPort {
     this.assertRunning();
     const settings = this.settings();
     const hosts = this.hostSummaries();
+    const rentable = this.pool.rentablePlatforms();
     const platforms = DEVICE_PLATFORMS.map((platform) => {
       const enabled = platform === "android" ? settings.android.enabled : settings.ios.enabled;
-      const ready = hosts.some((host) => host.platforms.includes(platform) && host.status === "ready");
+      // Research hosts open only by name, so they say nothing about the platform.
+      const ordinary = hosts.filter((host) => host.platforms.includes(platform) && host.research !== true);
+      const ready = ordinary.some((host) => host.status === "ready");
+      const notSetUp = platform === "ios" ? "No Mac host, and none can be rented: ask the owner to check Settings → Devices and Settings → Ephemeral AI VMs." : "Not set up.";
       const detail = !enabled
         ? "Off in Settings → Devices."
         : ready
           ? null
-          : platform === "ios" && this.provisioner("ios")
+          : platform === "ios" && rentable.includes("ios")
             ? "No Mac host yet: open_device rents one."
-            : (hosts.find((host) => host.platforms.includes(platform))?.statusDetail ?? "Not set up.");
+            : (ordinary[0]?.statusDetail ?? notSetUp);
       return { platform, enabled, ready, detail };
     });
     const enabledPlatforms = platforms.filter((entry) => entry.enabled).map((entry) => entry.platform);
@@ -1223,10 +1240,12 @@ export class DeviceService implements DeviceToolsPort {
     this.assertAgentsAllowed();
     // A platform that is off answers as such (`beginOpen`); otherwise only an offered profile opens.
     const profile = this.settings()[input.platform].enabled ? this.agentProfile(input.platform, input.profile) : input.profile;
+    const research = input.hostId !== undefined ? this.researchTarget(input.platform, input.hostId) : null;
     const opening = await this.beginOpen(
       {
         threadId,
         platform: input.platform,
+        ...(input.hostId !== undefined ? { hostId: input.hostId } : {}),
         ...(profile !== undefined ? { profile } : {}),
         ...(input.app !== undefined ? { app: input.app } : {}),
         ...(input.fresh !== undefined ? { fresh: input.fresh } : {}),
@@ -1247,11 +1266,24 @@ export class DeviceService implements DeviceToolsPort {
       // Still booting: the boot carries on; the agent checks back with list_devices.
       opening.done.catch(() => undefined);
       const lease = this.lease(opening.lease.id) ?? opening.lease;
-      return { lease, ready: false, progress: lease.progress?.label ?? "Starting" };
+      return { lease, ready: false, progress: lease.progress?.label ?? "Starting", ...(research ? { notice: research.notice } : {}) };
     }
     const note = this.launchNotes.get(waited.lease.id);
     this.launchNotes.delete(waited.lease.id);
-    return { lease: this.lease(waited.lease.id) ?? waited.lease, ready: true, ...(note ? { note } : {}) };
+    return { lease: this.lease(waited.lease.id) ?? waited.lease, ready: true, ...(note ? { note } : {}), ...(research ? { notice: research.notice } : {}) };
+  }
+
+  /**
+   * The research host an agent named: agents open no other host by name, and only a ready one (the
+   * owner starts its setup: a template build takes hours).
+   */
+  private researchTarget(platform: DevicePlatform, hostId: string): { notice: string } {
+    const host = this.hosts.get(hostId);
+    const research = host?.platforms.includes(platform) ? (host.research?.() ?? null) : null;
+    if (!host || !research) throw new DeviceError("INVALID_ARGUMENT", `${hostId} is not a research host. Open other devices without \`host\`.`);
+    const { status, detail } = host.state();
+    if (status !== "ready") throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `${host.label} is not ready${detail ? `: ${detail}` : ""}. Ask the owner to check Settings → Devices.`);
+    return research;
   }
 
   async toolAction(threadId: string, device: string | undefined, input: DeviceActionInput, signal: AbortSignal): Promise<DeviceToolActionResult> {

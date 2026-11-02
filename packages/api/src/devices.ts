@@ -240,6 +240,9 @@ export interface DeviceHostSummary {
   stream?: DeviceHostStreamInfo;
 }
 
+/** How a vphone research host's id starts: `vphone:<boxId>`. */
+export const VPHONE_HOST_PREFIX = "vphone:";
+
 /** The per-machine switch's label in Settings (phase 3 §2.3). */
 export const VPHONE_RESEARCH_LABEL = "Virtual iPhones (research)";
 /** Shown with every vphone research host, in Settings and in the device picker. */
@@ -656,6 +659,8 @@ export interface DevicePoolSummary {
   cacheJobs?: DeviceSetupJob[];
   /** When each platform's caches were last warmed (ISO); null: never from this daemon. */
   cacheWarmedAt?: Partial<Record<DevicePlatform, string | null>>;
+  /** The platforms a new host can be rented for now (absent from an older daemon: unknown). */
+  rentable?: DevicePlatform[];
   updatedAt?: string;
 }
 
@@ -716,8 +721,8 @@ export function deviceQueryTokenAllowed(method: string, routePath: string | unde
 }
 
 /**
- * Every devices route, on both transports (bearer on HTTP). Hub streams need HTTP: the desktop
- * app's unix socket lists and drives leases but shows no video.
+ * Every devices route, on both transports (bearer on HTTP). Hub streams need a URL a page can open:
+ * the desktop app's unix connection gets one from its loopback relay.
  */
 export const deviceRoutes = {
   /** GET → {@link DevicesStateResponse}: everything the panel and Settings start from. */
@@ -819,6 +824,8 @@ export const DEVICE_USER_ACTION_KINDS: readonly DeviceUserActionKind[] = ["rotat
 /** POST {@link deviceRoutes.setup}: the fix actions to run; absent: every one the host's readiness names. */
 export interface DeviceSetupRequest {
   actions?: string[];
+  /** Only this host (a research host's own setup); absent: the platform's first ordinary host. */
+  hostId?: string;
 }
 
 export interface DevicesStateResponse {
@@ -828,7 +835,7 @@ export interface DevicesStateResponse {
   leases: DeviceLeaseSummary[];
   profiles: DeviceProfile[];
   settings: DevicesSettings;
-  /** Running and recently finished setup jobs, one per platform at most. */
+  /** Running and recently finished setup jobs: one per platform at most, and one per research host. */
   setupJobs: DeviceSetupJob[];
   pool?: DevicePoolSummary;
 }
@@ -1044,11 +1051,14 @@ export function parseDeviceUserActionRequest(value: unknown): DeviceParseResult<
 export function parseDeviceSetupRequest(value: unknown): DeviceParseResult<DeviceSetupRequest> {
   if (value === undefined || value === null) return { ok: true, value: {} };
   if (!isRecord(value)) return { ok: false, message: "The body must be a JSON object." };
-  if (value.actions === undefined) return { ok: true, value: {} };
+  const hostId = optionalString(value, "hostId", ID_PATTERN);
+  if (hostId instanceof Error) return { ok: false, message: hostId.message };
+  const host = hostId !== undefined ? { hostId } : {};
+  if (value.actions === undefined) return { ok: true, value: host };
   if (!Array.isArray(value.actions) || value.actions.length > 64 || !value.actions.every((id) => typeof id === "string" && /^[a-z0-9][a-z0-9:._-]{0,127}$/.test(id))) {
     return { ok: false, message: "`actions` must be a list of setup action ids." };
   }
-  return { ok: true, value: { actions: [...new Set(value.actions as string[])] } };
+  return { ok: true, value: { ...host, actions: [...new Set(value.actions as string[])] } };
 }
 
 type FieldRule =

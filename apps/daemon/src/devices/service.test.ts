@@ -376,3 +376,115 @@ test("a lease waiting for a starting host sits through its progress lines and go
     await t.cleanup();
   }
 });
+
+test("a Mac rental is promised only while one can be rented: a provider that quotes, and placement that may rent", async () => {
+  const factory = new FakeHostFactory("box", ["ios"], [], () => new FakeDeviceHost("box:m1", "box", ["ios"], "Mac host"));
+  const t = await startTestDeviceService({ factories: [factory], settings: { ios: { enabled: true } } });
+  const ios = () => t.service.toolList("t1").platforms.find((entry) => entry.platform === "ios")!;
+  try {
+    assert.equal(ios().ready, false);
+    assert.match(ios().detail ?? "", /can be rented/);
+    assert.doesNotMatch(ios().detail ?? "", /rents one/);
+    assert.deepEqual(t.service.snapshot().pool?.rentable, []);
+
+    factory.quote = { platform: "ios", provider: "blacksmith", providerLabel: "Blacksmith", size: "6vcpu", sizeLabel: "6 vCPU macOS", hourlyUsd: 4.8, lifetimeMinutes: 240, needsApproval: true };
+    assert.match(ios().detail ?? "", /rents one/);
+    assert.deepEqual(t.service.snapshot().pool?.rentable, ["ios"]);
+
+    await t.service.updateSettings({ pool: { placement: "local-only" } });
+    assert.doesNotMatch(ios().detail ?? "", /rents one/);
+    assert.deepEqual(t.service.snapshot().pool?.rentable, []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+const NOTICE = "Research — real iOS in a VM";
+function researchHost(): FakeDeviceHost {
+  const host = new FakeDeviceHost("vphone:b1", "byo", ["ios"], "Studio Mac");
+  host.researchNotice = NOTICE;
+  return host;
+}
+
+test("a research host neither makes its platform ready nor takes a setup that did not name it", async () => {
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("byo", ["ios"], [researchHost()])], settings: { ios: { enabled: true } } });
+  try {
+    assert.equal(t.service.toolList("t1").platforms.find((entry) => entry.platform === "ios")?.ready, false);
+    assert.throws(() => t.service.startSetup("ios"), (error: DeviceError) => error.code === "PLATFORM_NOT_READY");
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a setup names its host: the research host runs its own fix, and an unknown host is refused", async () => {
+  const mac = new FakeDeviceHost("box:m1", "box", ["ios"], "Mac host");
+  const research = researchHost();
+  research.status = { status: "needs-setup", detail: null };
+  research.checks = [{ id: "template", label: "Template", state: "missing", detail: null, fixActionId: "vphone-template" }];
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("box", ["ios"], [mac]), new FakeHostFactory("byo", ["ios"], [research])], settings: { ios: { enabled: true } } });
+  try {
+    assert.throws(() => t.service.startSetup("ios", undefined, "vphone:nope"), (error: DeviceError) => error.code === "HOST_NOT_FOUND");
+    const job = t.service.startSetup("ios", ["vphone-template"], "vphone:b1");
+    assert.equal(job.hostId, "vphone:b1");
+    assert.deepEqual(research.ensured, [["vphone-template"]]);
+    assert.deepEqual(mac.ensured, []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("an agent names a research host to open it: only a ready one, and only a research host", async () => {
+  const mac = new FakeDeviceHost("box:m1", "box", ["ios"], "Mac host");
+  const research = researchHost();
+  research.status = { status: "needs-setup", detail: null };
+  research.checks = [{ id: "template", label: "Template", state: "missing", detail: null, fixActionId: "vphone-template" }];
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("box", ["ios"], [mac]), new FakeHostFactory("byo", ["ios"], [research])], settings: { ios: { enabled: true } } });
+  try {
+    assert.equal(await codeOf(t.service.toolOpen("t1", { platform: "ios", hostId: "box:m1" }, signal())), "INVALID_ARGUMENT");
+    assert.equal(await codeOf(t.service.toolOpen("t1", { platform: "ios", hostId: "vphone:b1" }, signal())), "PLATFORM_NOT_READY");
+    assert.deepEqual(research.ensured, [], "an agent's open never starts the template build");
+
+    research.status = { status: "ready", detail: null };
+    research.checks = [];
+    research.changed();
+    const opened = await t.service.toolOpen("t1", { platform: "ios", hostId: "vphone:b1" }, signal());
+    assert.equal(opened.lease.hostId, "vphone:b1");
+    assert.equal(opened.notice, NOTICE);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a research host's long setup leaves the platform's own setup alone", async () => {
+  const mac = new FakeDeviceHost("box:m1", "box", ["ios"], "Mac host");
+  mac.status = { status: "needs-setup", detail: null };
+  mac.checks = [{ id: "simctl", label: "Simulators", state: "missing", detail: null, fixActionId: "install-simulators" }];
+  const research = researchHost();
+  research.status = { status: "needs-setup", detail: null };
+  research.checks = [{ id: "template", label: "Template", state: "missing", detail: null, fixActionId: "vphone-template" }];
+  let finishTemplate: () => void = () => undefined;
+  research.ensureImpl = () => new Promise<void>((resolve) => (finishTemplate = resolve));
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("box", ["ios"], [mac]), new FakeHostFactory("byo", ["ios"], [research])], settings: { ios: { enabled: true } } });
+  try {
+    assert.equal(t.service.startSetup("ios", ["vphone-template"], "vphone:b1").state, "running");
+    assert.equal(t.service.startSetup("ios").hostId, "box:m1");
+    assert.equal(t.service.startSetup("ios", ["vphone-template"], "vphone:b1").hostId, "vphone:b1", "asked again, it joins its own job");
+    assert.deepEqual(research.ensured, [["vphone-template"]]);
+  } finally {
+    finishTemplate();
+    await t.cleanup();
+  }
+});
+
+test("a rental the pool's caps would refuse is not promised", async () => {
+  const factory = new FakeHostFactory("box", ["ios"], [], () => new FakeDeviceHost("box:m1", "box", ["ios"], "Mac host"));
+  factory.quote = { platform: "ios", provider: "blacksmith", providerLabel: "Blacksmith", size: "6vcpu", sizeLabel: "6 vCPU macOS", hourlyUsd: 4.8, lifetimeMinutes: 240, needsApproval: true };
+  const t = await startTestDeviceService({ factories: [factory], settings: { ios: { enabled: true } } });
+  try {
+    assert.deepEqual(t.service.snapshot().pool?.rentable, ["ios"]);
+    await t.service.updateSettings({ pool: { maxHourlyUsd: 1 } });
+    assert.deepEqual(t.service.snapshot().pool?.rentable, []);
+  } finally {
+    await t.cleanup();
+  }
+});

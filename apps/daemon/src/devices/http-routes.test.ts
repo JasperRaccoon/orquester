@@ -18,7 +18,7 @@ import { FakeDeviceHost, FakeHostFactory, solidPng, startTestDeviceService } fro
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
 
-function appWith(service: DeviceService | null, mode: "local" | "remote" = "remote", principal?: { kind: string }) {
+function appWith(service: DeviceService | null, principal?: { kind: string }) {
   const app = Fastify();
   if (principal) {
     app.decorateRequest("principal", null);
@@ -26,7 +26,7 @@ function appWith(service: DeviceService | null, mode: "local" | "remote" = "remo
       (request as unknown as { principal: unknown }).principal = principal;
     });
   }
-  registerDeviceHttpRoutes(app, { devices: () => service, hubProxy: () => createHubProxy({ leaseOnDevice: () => null, userInput: () => undefined, viewerActive: () => undefined, logger: quiet }), logger: quiet }, mode);
+  registerDeviceHttpRoutes(app, { devices: () => service, hubProxy: () => createHubProxy({ leaseOnDevice: () => null, userInput: () => undefined, viewerActive: () => undefined, logger: quiet }), logger: quiet });
   return app;
 }
 
@@ -115,13 +115,11 @@ test("settings and setup over HTTP", async () => {
   }
 });
 
-test("the hub proxy is remote-only, needs a known host with a lease, and strips the token from the query", async () => {
+test("the hub proxy needs a known host with a lease, and strips the token from the query", async () => {
   const host = new FakeDeviceHost();
   const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: { android: { enabled: true } } });
-  const remote = appWith(t.service, "remote");
-  const local = appWith(t.service, "local");
+  const remote = appWith(t.service);
   try {
-    assert.equal((await local.inject({ method: "GET", url: deviceRoutes.hub("local", "api/devices") })).statusCode, 404);
     assert.equal((await remote.inject({ method: "GET", url: deviceRoutes.hub("box:x", "api/devices") })).json().code, "HOST_NOT_FOUND");
     assert.equal((await remote.inject({ method: "GET", url: deviceRoutes.hub("local", "api/devices") })).json().code, "DEVICE_NOT_LEASED");
     await t.service.toolOpen("t1", { platform: "android" }, new AbortController().signal);
@@ -131,7 +129,6 @@ test("the hub proxy is remote-only, needs a known host with a lease, and strips 
     assert.equal((await remote.inject({ method: "GET", url: deviceRoutes.hub("local", "vendor/serve-sim/exec") })).statusCode, 404);
   } finally {
     await remote.close();
-    await local.close();
     await t.cleanup();
   }
 });
@@ -140,7 +137,7 @@ test("user actions: the user takes control first (never refused for the agent's)
   const host = new FakeDeviceHost();
   const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: { android: { enabled: true } } });
   const app = appWith(t.service);
-  const deniedApps = ["agent", "external"].map((kind) => appWith(t.service, "remote", { kind }));
+  const deniedApps = ["agent", "external"].map((kind) => appWith(t.service, { kind }));
   try {
     const signal = new AbortController().signal;
     const { lease } = await t.service.toolOpen("t1", { platform: "android" }, signal);
@@ -202,7 +199,7 @@ test("user actions: the user takes control first (never refused for the agent's)
 test("pool routes: drain / undrain a host, warm caches, the pool summary (validated bodies)", async () => {
   const local = new FakeDeviceHost();
   const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [local])], settings: { android: { enabled: true } } });
-  const app = appWith(t.service, "local");
+  const app = appWith(t.service);
   try {
     const drained = await app.inject({ method: "PUT", url: deviceRoutes.hostDrain("local"), payload: { draining: true } });
     assert.equal(drained.statusCode, 200);

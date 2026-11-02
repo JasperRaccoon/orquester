@@ -223,4 +223,47 @@ describe("picker", () => {
     const ios = groups.find((g) => g.platform === "ios")!;
     assert.deepEqual(ios.rows.map((row) => row.profile.id), ["iphone-17-pro"]);
   });
+  it("blocks an iPhone with no Mac host when the daemon says none can be rented", () => {
+    const groups = pickerGroups({ profiles, hosts: [host()], settings: settings(), chatLeases: 0, macHourlyUsd: 4.8, rentable: [] });
+    const ios = groups.find((g) => g.platform === "ios")!;
+    assert.ok(ios.rows.every((row) => !row.enabled));
+    assert.match(ios.rows[0]!.reason ?? "", /Settings/);
+    assert.doesNotMatch(ios.note ?? "", /rents/);
+    const rentable = pickerGroups({ profiles, hosts: [host()], settings: settings(), chatLeases: 0, macHourlyUsd: 4.8, rentable: ["ios"] });
+    assert.ok(rentable.find((g) => g.platform === "ios")!.rows.every((row) => row.enabled));
+  });
+  it("with no rental, an own Mac that needs setup or is full still opens, and nothing mentions renting", () => {
+    const own = (overrides: Partial<DeviceHostSummary>) => host({ id: "box:b1", kind: "byo", platforms: ["ios"], ...overrides });
+    for (const mac of [own({ status: "needs-setup" }), own({ capacity: { used: 3, total: 3 } })]) {
+      const ios = pickerGroups({ profiles, hosts: [mac], settings: settings(), chatLeases: 0, macHourlyUsd: 4.8, rentable: [] }).find((g) => g.platform === "ios")!;
+      assert.ok(ios.rows.every((row) => row.enabled));
+      assert.doesNotMatch(`${ios.note} ${ios.rows[0]!.badge}`, /rent/i);
+    }
+  });
+  describe("research hosts", () => {
+    const research = (overrides: Partial<DeviceHostSummary> = {}) =>
+      host({ id: "vphone:b1", kind: "byo", label: "Studio Mac", platforms: ["ios"], research: true, notice: "Research — real iOS in a VM", capacity: { used: 0, total: 2 }, ...overrides });
+    const picked = (hosts: DeviceHostSummary[], chatLeases = 0) => pickerGroups({ profiles, hosts, settings: settings(), chatLeases, macHourlyUsd: null, rentable: ["ios"] });
+    const groupOf = (groups: ReturnType<typeof pickerGroups>) => groups.find((group) => group.hostId === "vphone:b1")!;
+
+    it("gets its own group with its notice, opening on that host", () => {
+      const group = groupOf(picked([research()]));
+      assert.equal(group.note, "Research — real iOS in a VM");
+      assert.equal(group.rows.length, 1);
+      assert.equal(group.rows[0]!.hostId, "vphone:b1");
+      assert.equal(group.rows[0]!.enabled, true);
+    });
+    it("never reads as a Mac host", () => {
+      const ios = picked([research()]).find((group) => group.platform === "ios" && group.hostId === undefined)!;
+      assert.match(ios.note ?? "", /opening an iPhone rents one/);
+    });
+    it("explains a host that cannot open yet", () => {
+      const setup = groupOf(picked([research({ status: "needs-setup", statusDetail: "vphone-cli not found" })])).rows[0]!;
+      assert.equal(setup.enabled, false);
+      assert.match(setup.reason ?? "", /vphone-cli not found/);
+      assert.match(setup.reason ?? "", /Settings/);
+      assert.equal(groupOf(picked([research({ capacity: { used: 2, total: 2 } })])).rows[0]!.enabled, false);
+      assert.equal(groupOf(picked([research()], 3)).rows[0]!.enabled, false);
+    });
+  });
 });

@@ -7,8 +7,8 @@
  *   rows that can't open say why and link to Settings → Devices.
  * - A booting device's steps with elapsed time, a failed boot or a lost device with Retry.
  * - A ready device live (`DeviceLiveView`): stream, input, toolbar, controller pill, agent overlay
- *   and the action log; streams connect only while the panel is on screen, and need the HTTP
- *   transport ("Live devices need a server connection" on the desktop app's unix socket).
+ *   and the action log; streams connect only while the panel is on screen, over HTTP or the desktop
+ *   app's loopback relay ("Live devices need a server connection" with neither: an older desktop).
  * - Docked, the toolbar is a rail beside the device; on a phone it is a bar under it and Back
  *   closes the picker first.
  *
@@ -18,7 +18,7 @@
 import React from "react";
 import { AlertTriangle, Info, Link2Off, X } from "lucide-react";
 
-import { DEVICE_PROFILES, deviceRoutes, isActiveDeviceLease, type DeviceLeaseSummary, type DeviceProfile } from "@orquester/api";
+import { DEVICE_PROFILES, deviceRoutes, isActiveDeviceLease, VPHONE_HOST_PREFIX, type DeviceLeaseSummary, type DeviceProfile } from "@orquester/api";
 
 import { useBackClose } from "../../hooks/use-back-close";
 import { useIsDesktop } from "../../hooks/use-media-query";
@@ -32,7 +32,7 @@ import { loadDeviceActions, openDevice, releaseDevice } from "../../lib/devices/
 import { useAppStore } from "../../store/app";
 import type { RightRailPanelProps } from "../right-rail/types";
 import { actionLogRows } from "./action-log.logic";
-import { activeLeaseOf, bootElapsed, bootSteps, devicePanelView, leaseName, pickerGroups } from "./device-panel.logic";
+import { activeLeaseOf, bootElapsed, bootSteps, devicePanelView, leaseName, pickerGroups, pickerRowKey } from "./device-panel.logic";
 import { DeviceActionLog } from "./DeviceActionLog";
 import { DeviceLiveView } from "./DeviceLiveView";
 import { DeviceBooting, DeviceGone, DevicePicker, DeviceTabs, PanelMessage } from "./DeviceStates";
@@ -90,6 +90,7 @@ export const DevicePanel: React.FC<RightRailPanelProps> = ({ sessionId, variant 
   const settings = useDevicesSettings();
   const storeProfiles = useDevicesState((state) => state.profiles);
   const profiles = storeProfiles.length > 0 ? storeProfiles : DEVICE_PROFILES;
+  const rentable = useDevicesState((state) => state.pool?.rentable);
   const selectedId = useSelectedDeviceLease(sessionId);
   const [picking, setPicking] = React.useState(false);
   const [opening, setOpening] = React.useState<string | null>(null);
@@ -99,7 +100,7 @@ export const DevicePanel: React.FC<RightRailPanelProps> = ({ sessionId, variant 
   const [logOpen, setLogOpen] = React.useState(() => readDevicePanelPrefs().logOpen);
   const agentName = useAgentName(sessionId);
 
-  // Streams need the HTTP transport (the desktop app's unix socket has none).
+  // Streams need the HTTP transport or the desktop app's relay.
   const streamsAvailable = React.useMemo(() => (api ? api.deviceSocketUrl(deviceRoutes.socket("local", "probe")) !== null : false), [api]);
 
   const view = devicePanelView({ sessionId, loaded, leases, selectedLeaseId: selectedId, picking, streamsAvailable });
@@ -150,12 +151,15 @@ export const DevicePanel: React.FC<RightRailPanelProps> = ({ sessionId, variant 
   const macHourly = useMacHourlyUsd(settings?.ios.provider, settings?.ios.size, iosWanted && (settings?.ios.enabled ?? false));
   const now = useNow(view.kind === "booting");
 
-  const open = (profile: Pick<DeviceProfile, "id" | "platform">, replacing?: DeviceLeaseSummary) => {
+  /** The research host a lease ran on, even one that has gone: opened again it goes back there by name, and never rents a Mac instead. */
+  const researchHostOf = (lease: DeviceLeaseSummary): string | undefined => (lease.hostId.startsWith(VPHONE_HOST_PREFIX) ? lease.hostId : undefined);
+
+  const open = (profile: Pick<DeviceProfile, "id" | "platform">, hostId: string | undefined, replacing?: DeviceLeaseSummary) => {
     if (!api || !sessionId) return;
-    setOpening(profile.id);
+    setOpening(pickerRowKey({ profile, ...(hostId ? { hostId } : {}) }));
     setPickError(null);
     setBusy(true);
-    openDevice(api, { threadId: sessionId, platform: profile.platform, profile: profile.id, ...(replacing ? { fresh: true } : {}) })
+    openDevice(api, { threadId: sessionId, platform: profile.platform, profile: profile.id, ...(hostId ? { hostId } : {}), ...(replacing ? { fresh: true } : {}) })
       .then((lease) => {
         selectDeviceLease(sessionId, lease.id);
         setPicking(false);
@@ -197,18 +201,18 @@ export const DevicePanel: React.FC<RightRailPanelProps> = ({ sessionId, variant 
     case "picker":
       body = (
         <DevicePicker
-          groups={pickerGroups({ profiles, hosts, settings, chatLeases: liveCount, macHourlyUsd: macHourly })}
+          groups={pickerGroups({ profiles, hosts, settings, chatLeases: liveCount, macHourlyUsd: macHourly, rentable })}
           opening={opening}
           error={pickError}
           adding={leases.length > 0}
-          onOpen={(profile) => open(profile)}
+          onOpen={(profile, hostId) => open(profile, hostId)}
           onSettings={goSettings}
           {...(leases.length > 0 ? { onCancel: () => setPicking(false) } : {})}
         />
       );
       break;
     case "booting": {
-      const hasMac = hosts.some((host) => host.kind !== "local" && host.platforms.includes("ios") && host.status === "ready");
+      const hasMac = researchHostOf(view.lease) !== undefined || hosts.some((host) => host.kind !== "local" && host.platforms.includes("ios") && host.research !== true && host.status === "ready");
       body = (
         <DeviceBooting
           lease={view.lease}
@@ -218,7 +222,7 @@ export const DevicePanel: React.FC<RightRailPanelProps> = ({ sessionId, variant 
           elapsed={bootElapsed(view.lease, now)}
           failed={view.failed}
           busy={busy}
-          onRetry={() => open({ id: view.lease.profile, platform: view.lease.platform }, view.lease)}
+          onRetry={() => open({ id: view.lease.profile, platform: view.lease.platform }, researchHostOf(view.lease), view.lease)}
           onRelease={() => release(view.lease.id)}
         />
       );
@@ -233,7 +237,7 @@ export const DevicePanel: React.FC<RightRailPanelProps> = ({ sessionId, variant 
           formFactor={formFactorOf(view.lease)}
           kind={view.kind}
           busy={busy}
-          onRetry={() => open({ id: view.lease.profile, platform: view.lease.platform }, view.lease)}
+          onRetry={() => open({ id: view.lease.profile, platform: view.lease.platform }, researchHostOf(view.lease), view.lease)}
           onRelease={() => release(view.lease.id)}
         />
       );

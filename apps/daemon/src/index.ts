@@ -5021,8 +5021,8 @@ export function createServer(
   services.knowledge?.registerRoutes(app, options.mode);
   // boxes: the Ephemeral AI VMs routes (boxRoutes), on both transports like the plugin routes above.
   services.boxes?.registerRoutes(app);
-  // Devices (`deviceRoutes`): both transports; the hub proxy on the remote one only (streams need HTTP).
-  services.devices?.registerRoutes(app, options.mode);
+  // Devices (`deviceRoutes`): both transports, the hub proxy too (the desktop app's relay reaches it here).
+  services.devices?.registerRoutes(app);
 
   // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
   // transports; the bearer hook above gates HTTP. Secret values are write-only.

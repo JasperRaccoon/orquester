@@ -51,6 +51,7 @@ import { DeviceError, isDeviceError } from "./errors.ts";
 import type { DeviceHost, DeviceHostFactory, DeviceHostProgress, DeviceHostRegistry, DeviceRentalCaps, DeviceRentalQuote } from "./host.ts";
 import {
   decidePool,
+  EPSILON,
   hostCap,
   type PoolDecision,
   type PoolFailureCode,
@@ -600,6 +601,19 @@ export class DevicePool {
     return this.deps.factories.find((factory) => factory.provision !== undefined && factory.platforms.includes(platform)) ?? null;
   }
 
+  /** The platforms a new host can be rented for now: placement may rent, a factory quotes one, and the pool's caps (`decidePool`) allow it. */
+  rentablePlatforms(): DevicePlatform[] {
+    const { placement, maxHosts, maxHourlyUsd } = this.deps.settings().pool;
+    if (placement === "local-only") return [];
+    const rented = this.poolHosts().filter((host) => host.kind === "box");
+    if (rented.length + 1 > maxHosts) return [];
+    const hourly = rented.reduce((sum, host) => sum + (host.hourlyUsd ?? 0), 0);
+    return DEVICE_PLATFORMS.filter((platform) => {
+      const offer = this.offer(platform);
+      return offer !== null && hourly + (offer.hourlyUsd ?? 0) <= maxHourlyUsd + EPSILON;
+    });
+  }
+
   private poolHosts(): PoolHost[] {
     const state = this.deps.store.state();
     const out: PoolHost[] = [];
@@ -922,6 +936,7 @@ export class DevicePool {
       ),
       cacheJobs: this.cacheJobs(),
       cacheWarmedAt,
+      rentable: this.rentablePlatforms(),
       updatedAt: new Date(now).toISOString()
     };
   }

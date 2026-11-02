@@ -102,8 +102,8 @@ describe("DevicePanel", () => {
       deviceSocketUrl: () => null,
       deviceHttpRequest: () => null,
       deviceLeaseActions: async (leaseId: string) => ({ leaseId, actions: [] }),
-      openDeviceLease: async (req: { platform: string; profile?: string }) => {
-        calls.push(`open ${req.platform} ${req.profile}`);
+      openDeviceLease: async (req: { platform: string; profile?: string; hostId?: string }) => {
+        calls.push(`open ${req.platform} ${req.profile}${req.hostId ? ` on ${req.hostId}` : ""}`);
         return { lease: lease({ id: "l2", state: "starting", profile: req.profile ?? "pixel-9", stream: undefined }) };
       },
       releaseDeviceLease: async (leaseId: string, shutdown?: boolean) => {
@@ -117,9 +117,11 @@ describe("DevicePanel", () => {
     };
   }
 
-  async function render(leases: DeviceLeaseSummary[], hosts: DeviceHostSummary[] = [localHost]) {
+  async function render(leases: DeviceLeaseSummary[], hosts: DeviceHostSummary[] = [localHost], patch: (s: DevicesSettings) => void = () => {}) {
     useAppStore.setState({ api: api() as never, openSettings: ((id: string) => calls.push(`settings ${id}`)) as never });
-    devicesStore.setState({ enabled: true, hosts, leases, profiles: DEVICE_PROFILES, settings: settings(), setupJobs: {}, pool: null, actions: {} });
+    const current = settings();
+    patch(current);
+    devicesStore.setState({ enabled: true, hosts, leases, profiles: DEVICE_PROFILES, settings: current, setupJobs: {}, pool: null, actions: {} });
     await act(async () => {
       root.render(createElement(DevicePanel, { sessionId: "chat-1", projectPath: "/w/p", variant: "docked" }));
     });
@@ -164,6 +166,28 @@ describe("DevicePanel", () => {
     assert.equal(button("Open Pixel 9"), undefined);
     await act(async () => queue.click());
     assert.ok(calls.includes("open android pixel-9"));
+  });
+
+  const research: DeviceHostSummary = { ...localHost, id: "vphone:b1", kind: "byo", label: "Studio Mac", platforms: ["ios"], research: true, notice: "Research — real iOS in a VM", capacity: { used: 0, total: 2 } };
+
+  it("a research host's row shows its notice and opens on that host", async () => {
+    await render([], [localHost, research], (s) => (s.ios.enabled = true));
+    assert.match(host.querySelector('section[aria-label="Studio Mac"]')?.textContent ?? "", /Research — real iOS in a VM/);
+    await act(async () => button("Open Virtual iPhone")!.click());
+    assert.ok(calls.includes("open ios iphone-17-pro on vphone:b1"), calls.join(", "));
+  });
+
+  it("a failed research device retries on the same host, without talk of renting", async () => {
+    await render([lease({ id: "l3", hostId: "vphone:b1", platform: "ios", profile: "iphone-17-pro", state: "starting", stream: undefined, error: "The VM did not start" })], [localHost, research], (s) => (s.ios.enabled = true));
+    assert.doesNotMatch(text(), /Renting/);
+    await act(async () => button("Retry")!.click());
+    assert.ok(calls.includes("open ios iphone-17-pro on vphone:b1"), calls.join(", "));
+  });
+
+  it("a lost research device whose host has gone never falls back to renting a Mac", async () => {
+    await render([lease({ id: "l4", hostId: "vphone:gone", platform: "ios", profile: "iphone-17-pro", state: "lost", stream: undefined })], [localHost], (s) => (s.ios.enabled = true));
+    await act(async () => [...host.querySelectorAll("button")].find((item) => item.textContent?.startsWith("Open a new"))!.click());
+    assert.ok(calls.includes("open ios iphone-17-pro on vphone:gone"), calls.join(", "));
   });
 
   it("Cancel releases a starting device before control is available", async () => {
