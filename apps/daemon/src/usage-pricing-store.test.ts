@@ -29,7 +29,9 @@ test("loading installs the valid entries, keeps unknown fields, and a corrupt fi
   await prices.update({ aliases: { "my-proxy": null } });
   const saved = JSON.parse(await readFile(path, "utf8"));
   assert.deepEqual(saved.future, { keep: true });
-  assert.deepEqual(saved.aliases, {});
+  // Entries this version can't use are not the edit's to drop.
+  assert.deepEqual(saved.aliases, { self: "self" });
+  assert.deepEqual(saved.overrides, { "house-model": { input: 2, output: 8 }, broken: { input: -1, output: 1 } });
   assert.equal((await stat(path)).mode & 0o777, 0o600);
 
   setUsagePricingConfig({ overrides: { stale: { input: 1, output: 1 } }, aliases: {} });

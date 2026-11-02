@@ -10,11 +10,8 @@
 // and stored buckets with no live counterpart are kept. Projects, aliases and prices apply at query
 // time, so a settings or price edit applies to all history.
 //
-// File (`version: 1`): `{ version, recordedSince, sessions: string[], cwds: string[], buckets: Row[] }`,
-// where a Row is `[source, agent, model, speed, hour, cwdIndex | null, input, cacheRead, cacheWrite,
-// cacheWrite1h, output, reasoning, requests, reportedCostUsd, reportedRequests, sessionIndexes[]]`;
-// the indexes point into `cwds` and `sessions`. Unknown top-level fields and extra trailing row
-// columns are written back.
+// The file's format (and what of a newer writer's it keeps) is `parseUsageHistoryFile` in
+// `@orquester/config`.
 
 import { realpathSync } from "node:fs";
 import { readFile, rename } from "node:fs/promises";
@@ -32,12 +29,20 @@ import type {
   UsageSpeed,
   UsageTokenTotals
 } from "@orquester/api";
+import {
+  parseUsageHistoryFile,
+  serializeUsageHistoryFile,
+  USAGE_HISTORY_SOURCES,
+  USAGE_HISTORY_SPEEDS,
+  USAGE_HISTORY_SUM_FIELDS,
+  type UsageHistoryFile,
+  type UsageHistoryRow
+} from "@orquester/config";
 
 import { writeFileAtomic } from "./agent-hooks.ts";
 import { canonicalModel, overrideFor, priceSlice, resolvePricingKey } from "./usage-pricing.ts";
 import { HOUR_MS, type UsageRecord, type UsageRecordSource } from "./usage-records.ts";
 
-const VERSION = 1;
 const DAY_HOURS = 24;
 /** Buckets older than this are dropped. */
 const RETENTION_HOURS = 120 * DAY_HOURS;
@@ -50,8 +55,8 @@ const SCAN_INGEST_INTERVAL_MS = 5 * 60_000;
 const MAX_RANGE_DAYS = 90;
 
 type Source = UsageRecord["source"];
-const SOURCES: readonly Source[] = ["transcripts", "orquester-chats"];
-const SPEEDS: readonly UsageSpeed[] = ["standard", "fast", "ultrafast"];
+const SOURCES: readonly Source[] = USAGE_HISTORY_SOURCES;
+const SPEEDS: readonly UsageSpeed[] = USAGE_HISTORY_SPEEDS;
 /** Shown even before they have data: where each agent's usage comes from. */
 const KNOWN_SOURCES: readonly { agent: string; scope: Source }[] = [
   { agent: "claude", scope: "transcripts" },
@@ -59,8 +64,6 @@ const KNOWN_SOURCES: readonly { agent: string; scope: Source }[] = [
   { agent: "grok", scope: "orquester-chats" },
   { agent: "opencode", scope: "orquester-chats" }
 ];
-/** Row columns 0–15; anything after is a newer writer's and kept as is. */
-const ROW_COLUMNS = 16;
 
 interface Sums {
   input: number;
@@ -74,20 +77,12 @@ interface Sums {
   reportedRequests: number;
 }
 
-interface Bucket extends Sums {
-  source: Source;
-  agent: string;
-  model: string;
-  speed: UsageSpeed;
-  hour: number;
-  /** The working directory, "" when unknown. */
-  cwd: string;
+/** A file row, with its sessions as a set. */
+interface Bucket extends Omit<UsageHistoryRow, "sessions"> {
   sessions: Set<string>;
-  /** Trailing row columns a newer writer added. */
-  tail?: unknown[];
 }
 
-const SUM_FIELDS = ["input", "cacheRead", "cacheWrite", "cacheWrite1h", "output", "reasoning", "requests", "reportedCostUsd", "reportedRequests"] as const;
+const SUM_FIELDS = USAGE_HISTORY_SUM_FIELDS;
 
 const emptySums = (): Sums => ({ input: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, output: 0, reasoning: 0, requests: 0, reportedCostUsd: 0, reportedRequests: 0 });
 
@@ -201,8 +196,8 @@ export interface UsageHistoryQuery {
 export class UsageHistory {
   private readonly buckets = new Map<string, Bucket>();
   private recordedSince: string | null = null;
-  /** Unknown top-level fields of the file, written back untouched. */
-  private extra: Record<string, unknown> = {};
+  /** What of the file this version can't read (unknown fields, a newer writer's rows), written back. */
+  private kept: Omit<UsageHistoryFile, "recordedSince" | "rows"> = { unreadRows: [], sessions: [], cwds: [], extra: {} };
   /** False when the file could not be moved out of the way: never overwrite it. */
   private writable = true;
   private dirty = false;
@@ -237,26 +232,18 @@ export class UsageHistory {
     } catch {
       parsed = undefined;
     }
-    const doc = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-    if (!doc || typeof doc.version !== "number") {
-      await this.moveAside(`${this.opts.path}.corrupt-${this.now()}`, "did not parse");
+    const read = parseUsageHistoryFile(parsed, { minHour: this.cutoffHour() });
+    if (!read.ok) {
+      if (read.version === null) await this.moveAside(`${this.opts.path}.corrupt-${this.now()}`, "did not parse");
+      else await this.moveAside(`${this.opts.path}.v${read.version}.bak`, `has version ${read.version}`);
       return;
     }
-    if (doc.version !== VERSION) {
-      await this.moveAside(`${this.opts.path}.v${doc.version}.bak`, `has version ${doc.version}`);
-      return;
-    }
-    const { version: _version, recordedSince, sessions, cwds, buckets, ...extra } = doc;
-    this.extra = extra;
-    if (typeof recordedSince === "string" && Number.isFinite(Date.parse(recordedSince))) this.recordedSince = recordedSince;
-    const cutoff = this.cutoffHour();
-    for (const row of Array.isArray(buckets) ? buckets : []) {
-      const bucket = parseRow(row, Array.isArray(sessions) ? sessions : [], Array.isArray(cwds) ? cwds : []);
-      if (!bucket) continue;
-      if (bucket.hour < cutoff) {
-        this.dirty = true;
-        continue;
-      }
+    const { recordedSince, rows, ...kept } = read.file;
+    this.recordedSince = recordedSince;
+    this.kept = kept;
+    if (read.pruned) this.dirty = true;
+    for (const row of rows) {
+      const bucket: Bucket = { ...row, sessions: new Set(row.sessions) };
       const key = bucketKey(bucket);
       const stored = this.buckets.get(key);
       if (stored) mergeInto(stored, bucket);
@@ -601,16 +588,10 @@ export class UsageHistory {
   }
 
   private serialize(): Record<string, unknown> {
-    const sessions = table();
-    const cwds = table();
     const rows = [...this.buckets.values()]
       .sort((a, b) => a.hour - b.hour || bucketKey(a).localeCompare(bucketKey(b)))
-      .map((b) => {
-        const ids = [...b.sessions].map(sessions.index);
-        const row: unknown[] = [b.source, b.agent, b.model, b.speed, b.hour, b.cwd ? cwds.index(b.cwd) : null, ...SUM_FIELDS.map((f) => b[f]), ids];
-        return b.tail ? [...row, ...b.tail] : row;
-      });
-    return { ...this.extra, version: VERSION, recordedSince: this.recordedSince, sessions: sessions.values, cwds: cwds.values, buckets: rows };
+      .map((b): UsageHistoryRow => ({ ...b, sessions: [...b.sessions] }));
+    return serializeUsageHistoryFile({ ...this.kept, recordedSince: this.recordedSince, rows });
   }
 }
 
@@ -633,50 +614,6 @@ function mergeInto(stored: Bucket, live: Bucket): boolean {
     changed = true;
   }
   return changed;
-}
-
-/** A string table of the file: each distinct value once, rows refer to it by index. */
-function table(): { values: string[]; index: (value: string) => number } {
-  const values: string[] = [];
-  const indexes = new Map<string, number>();
-  return {
-    values,
-    index: (value) => {
-      let i = indexes.get(value);
-      if (i === undefined) {
-        indexes.set(value, (i = values.length));
-        values.push(value);
-      }
-      return i;
-    }
-  };
-}
-
-/** One stored row, or null when it does not parse. */
-function parseRow(row: unknown, sessions: unknown[], cwds: unknown[]): Bucket | null {
-  if (!Array.isArray(row) || row.length < ROW_COLUMNS) return null;
-  const [source, agent, model, speed, hour, cwdIndex] = row as unknown[];
-  if (!SOURCES.includes(source as Source) || !SPEEDS.includes(speed as UsageSpeed)) return null;
-  if (typeof agent !== "string" || !agent || typeof model !== "string") return null;
-  const cwd = cwdIndex === null ? "" : Number.isInteger(cwdIndex) ? cwds[cwdIndex as number] : undefined;
-  if (typeof cwd !== "string") return null;
-  if (!Number.isSafeInteger(hour)) return null;
-  const sums = emptySums();
-  for (let i = 0; i < SUM_FIELDS.length; i++) {
-    const value = row[6 + i];
-    if (!finite(value) || value < 0) return null;
-    sums[SUM_FIELDS[i]!] = value;
-  }
-  const ids = row[ROW_COLUMNS - 1];
-  if (!Array.isArray(ids)) return null;
-  const set = new Set<string>();
-  for (const i of ids) {
-    const id = Number.isInteger(i) ? sessions[i as number] : undefined;
-    if (typeof id === "string" && id) set.add(id);
-  }
-  const bucket: Bucket = { source: source as Source, agent, model, speed: speed as UsageSpeed, hour: hour as number, cwd, ...sums, sessions: set };
-  if (row.length > ROW_COLUMNS) bucket.tail = row.slice(ROW_COLUMNS);
-  return bucket;
 }
 
 /** Price one (agent, model after aliasing, speed) cell: override > reported > built-in > unpriced. */

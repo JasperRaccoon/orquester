@@ -85,6 +85,8 @@ test("buckets older than 120 days are dropped", async (t) => {
 test("the ledger survives a restart, keeping fields a newer writer added", async (t) => {
   const { path, make } = await world(t);
   const hour = hourOf("2026-11-02T09:00:00Z");
+  // A speed this version doesn't know: the row is a newer writer's, kept as is.
+  const newerRow = ["transcripts", "claude", "claude-opus-5", "turbo", hour, null, 1, 1, 1, 0, 1, 0, 1, 0, 0, [1]];
   await writeFile(path, JSON.stringify({
     version: 1,
     recordedSince: "2026-10-01T00:00:00.000Z",
@@ -92,6 +94,7 @@ test("the ledger survives a restart, keeping fields a newer writer added", async
     sessions: ["x", "y"],
     buckets: [
       ["transcripts", "codex", "gpt-5.5", "fast", hour, null, 1, 2, 3, 1, 5, 1, 2, 0, 0, [0, 1], "future-column"],
+      newerRow,
       ["transcripts", "codex", "broken"]
     ]
   }));
@@ -103,6 +106,8 @@ test("the ledger survives a restart, keeping fields a newer writer added", async
   const saved = JSON.parse(await readFile(path, "utf8"));
   assert.equal(saved.note, "kept");
   assert.equal(saved.buckets.find((row: unknown[]) => row[1] === "codex").at(-1), "future-column");
+  assert.deepEqual(saved.buckets.filter((row: unknown[]) => row[3] === "turbo"), [newerRow]);
+  assert.equal(saved.sessions[1], "y");
 
   const second = make();
   await second.load();

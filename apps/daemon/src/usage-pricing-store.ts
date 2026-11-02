@@ -2,13 +2,21 @@
 // overrides and "map to" aliases, installed into the pricing module at boot and on every edit.
 // Spec: docs/superpowers/specs/2026-11-02-usage-panel-design.md §4.1 (persistence), §4.4 (PUT).
 //
-// Reading is tolerant: an invalid entry is dropped on its own, unknown fields are written back
-// untouched, and a file that does not parse is moved aside (`<file>.corrupt-<ms>`) for the defaults.
+// Reading is tolerant: an invalid entry is left out of the prices on its own, and is written back
+// untouched with unknown fields until an edit replaces it; a file that does not parse is moved
+// aside (`<file>.corrupt-<ms>`) for the defaults.
 
 import { readFile, rename } from "node:fs/promises";
 
 import type { UsageModelRates, UsagePriceModelInfo, UsagePricesPatch, UsagePricesResponse } from "@orquester/api";
-import { normalizeUsageModelId, parseUsagePricingFile, serializeUsagePricingFile, USAGE_MODEL_ID_MAX, type UsagePricingFile } from "@orquester/config";
+import {
+  normalizeUsageModelId,
+  parseUsagePricingFile,
+  patchUsagePricingFile,
+  serializeUsagePricingFile,
+  USAGE_MODEL_ID_MAX,
+  type UsagePricingFile
+} from "@orquester/config";
 
 import { writeFileAtomic } from "./agent-hooks.ts";
 import { aliasesHaveCycle, pricingTable, setUsagePricingConfig, type UsagePricingConfig } from "./usage-pricing.ts";
@@ -52,7 +60,7 @@ function overrideRates(model: string, value: unknown, saved: UsageModelRates | u
 }
 
 export class UsagePricingStore {
-  private file: UsagePricingFile = { overrides: {}, aliases: {}, extra: {} };
+  private file: UsagePricingFile = parseUsagePricingFile({});
   private writes: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -106,14 +114,14 @@ export class UsagePricingStore {
 
   private async apply(patch: unknown): Promise<UsagePricingConfig> {
     if (!isRecord(patch)) throw new UsagePricingValidationError("The body must be an object of overrides and aliases.");
-    const overrides = { ...this.file.overrides };
-    const aliases = { ...this.file.aliases };
+    const overrides: Record<string, UsageModelRates | null> = {};
+    const aliases: Record<string, string | null> = {};
     if (patch.overrides !== undefined) {
       if (!isRecord(patch.overrides)) throw new UsagePricingValidationError("overrides must be an object.");
       for (const [raw, value] of Object.entries(patch.overrides)) {
         const model = modelId(raw);
-        if (value === null) delete overrides[model];
-        else overrides[model] = overrideRates(model, value, overrides[model]);
+        const saved = overrides[model] === undefined ? this.file.overrides[model] : (overrides[model] ?? undefined);
+        overrides[model] = value === null ? null : overrideRates(model, value, saved);
       }
     }
     if (patch.aliases !== undefined) {
@@ -121,7 +129,7 @@ export class UsagePricingStore {
       for (const [raw, value] of Object.entries(patch.aliases)) {
         const model = modelId(raw);
         if (value === null) {
-          delete aliases[model];
+          aliases[model] = null;
           continue;
         }
         if (typeof value !== "string") throw new UsagePricingValidationError(`The mapping of ${model} must be a model ID.`);
@@ -130,8 +138,8 @@ export class UsagePricingStore {
         aliases[model] = target;
       }
     }
-    if (aliasesHaveCycle(aliases)) throw new UsagePricingValidationError("Mappings can't form a cycle.");
-    const next: UsagePricingFile = { overrides, aliases, extra: this.file.extra };
+    const next = patchUsagePricingFile(this.file, { overrides, aliases });
+    if (aliasesHaveCycle(next.aliases)) throw new UsagePricingValidationError("Mappings can't form a cycle.");
     await writeFileAtomic(this.opts.path, `${JSON.stringify(serializeUsagePricingFile(next), null, 2)}\n`, 0o600, false);
     this.file = next;
     setUsagePricingConfig(this.config());
