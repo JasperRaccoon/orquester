@@ -2,13 +2,21 @@
 // overrides and "map to" aliases, installed into the pricing module at boot and on every edit.
 // Spec: docs/superpowers/specs/2026-11-02-usage-panel-design.md §4.1 (persistence), §4.4 (PUT).
 //
-// Reading is tolerant: an invalid entry is dropped on its own, unknown fields are written back
-// untouched, and a file that does not parse is moved aside (`<file>.corrupt-<ms>`) for the defaults.
+// Reading is tolerant: an invalid entry is left out of the prices on its own, and is written back
+// untouched with unknown fields until an edit replaces it; a file that does not parse is moved
+// aside (`<file>.corrupt-<ms>`) for the defaults.
 
 import { readFile, rename } from "node:fs/promises";
 
 import type { UsageModelRates, UsagePriceModelInfo, UsagePricesPatch, UsagePricesResponse } from "@orquester/api";
-import { normalizeUsageModelId, parseUsagePricingFile, serializeUsagePricingFile, USAGE_MODEL_ID_MAX, type UsagePricingFile } from "@orquester/config";
+import {
+  normalizeUsageModelId,
+  parseUsagePricingFile,
+  patchUsagePricingFile,
+  serializeUsagePricingFile,
+  USAGE_MODEL_ID_MAX,
+  type UsagePricingFile
+} from "@orquester/config";
 
 import { writeFileAtomic } from "./agent-hooks.ts";
 import { aliasesHaveCycle, pricingTable, setUsagePricingConfig, type UsagePricingConfig } from "./usage-pricing.ts";
@@ -16,6 +24,11 @@ import { aliasesHaveCycle, pricingTable, setUsagePricingConfig, type UsagePricin
 /** A price edit the daemon refuses; `message` is shown to the user as is. */
 export class UsagePricingValidationError extends Error {
   readonly code = "INVALID_REQUEST";
+}
+
+/** The prices file could not be read at boot: an edit would replace the user's prices, so none is saved. */
+export class UsagePricingUnavailableError extends Error {
+  readonly code = "UNAVAILABLE";
 }
 
 const RATE_FIELDS = ["input", "output", "cacheRead", "cacheWrite5m", "cacheWrite1h"] as const;
@@ -52,7 +65,9 @@ function overrideRates(model: string, value: unknown, saved: UsageModelRates | u
 }
 
 export class UsagePricingStore {
-  private file: UsagePricingFile = { overrides: {}, aliases: {}, extra: {} };
+  private file: UsagePricingFile = parseUsagePricingFile({});
+  /** The file could not be read (or a corrupt one moved aside): writing it would lose the user's prices. */
+  private readOnly = false;
   private writes: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -63,21 +78,33 @@ export class UsagePricingStore {
     }
   ) {}
 
-  /** Read the file and install its prices. Never throws: anything unreadable is the defaults. */
+  /**
+   * Read the file and install its prices. Never throws: a missing file is no prices yet; one that
+   * can't be read (EACCES, EIO) is the defaults, and edits are refused until a restart reads it.
+   */
   async load(): Promise<void> {
     let text: string | null = null;
     try {
       text = await readFile(this.opts.path, "utf8");
-    } catch {
-      // ENOENT (no prices yet) or unreadable → defaults
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        this.readOnly = true;
+        this.opts.logger?.warn(`usage prices: could not read ${this.opts.path} (${code ?? String(error)}); using the built-in prices, and edits are not saved`);
+      }
     }
     if (text !== null) {
       try {
         this.file = parseUsagePricingFile(JSON.parse(text));
       } catch {
         const aside = `${this.opts.path}.corrupt-${(this.opts.now ?? Date.now)()}`;
-        await rename(this.opts.path, aside).catch(() => undefined);
-        this.opts.logger?.warn(`usage prices: ${this.opts.path} did not parse; moved aside to ${aside}`);
+        try {
+          await rename(this.opts.path, aside);
+          this.opts.logger?.warn(`usage prices: ${this.opts.path} did not parse; moved aside to ${aside}`);
+        } catch {
+          this.readOnly = true;
+          this.opts.logger?.warn(`usage prices: ${this.opts.path} did not parse and could not be moved aside; using the built-in prices, and edits are not saved`);
+        }
       }
     }
     setUsagePricingConfig(this.config());
@@ -90,7 +117,8 @@ export class UsagePricingStore {
   /**
    * Apply a patch (`null` removes an entry): validate the whole result, persist it, then install it,
    * so every later estimate is repriced. Throws {@link UsagePricingValidationError} and changes
-   * nothing when the patch is invalid. Edits are applied one at a time.
+   * nothing when the patch is invalid, {@link UsagePricingUnavailableError} when the file could not
+   * be read at boot. Edits are applied one at a time.
    */
   update(patch: UsagePricesPatch): Promise<UsagePricingConfig> {
     const run = this.writes.then(() => this.apply(patch));
@@ -105,15 +133,18 @@ export class UsagePricingStore {
   }
 
   private async apply(patch: unknown): Promise<UsagePricingConfig> {
+    if (this.readOnly) {
+      throw new UsagePricingUnavailableError("Prices can't be saved: the daemon could not read its prices file at start (see its log). Fix the file and restart the daemon.");
+    }
     if (!isRecord(patch)) throw new UsagePricingValidationError("The body must be an object of overrides and aliases.");
-    const overrides = { ...this.file.overrides };
-    const aliases = { ...this.file.aliases };
+    const overrides: Record<string, UsageModelRates | null> = {};
+    const aliases: Record<string, string | null> = {};
     if (patch.overrides !== undefined) {
       if (!isRecord(patch.overrides)) throw new UsagePricingValidationError("overrides must be an object.");
       for (const [raw, value] of Object.entries(patch.overrides)) {
         const model = modelId(raw);
-        if (value === null) delete overrides[model];
-        else overrides[model] = overrideRates(model, value, overrides[model]);
+        const saved = overrides[model] === undefined ? this.file.overrides[model] : (overrides[model] ?? undefined);
+        overrides[model] = value === null ? null : overrideRates(model, value, saved);
       }
     }
     if (patch.aliases !== undefined) {
@@ -121,7 +152,7 @@ export class UsagePricingStore {
       for (const [raw, value] of Object.entries(patch.aliases)) {
         const model = modelId(raw);
         if (value === null) {
-          delete aliases[model];
+          aliases[model] = null;
           continue;
         }
         if (typeof value !== "string") throw new UsagePricingValidationError(`The mapping of ${model} must be a model ID.`);
@@ -130,8 +161,8 @@ export class UsagePricingStore {
         aliases[model] = target;
       }
     }
-    if (aliasesHaveCycle(aliases)) throw new UsagePricingValidationError("Mappings can't form a cycle.");
-    const next: UsagePricingFile = { overrides, aliases, extra: this.file.extra };
+    const next = patchUsagePricingFile(this.file, { overrides, aliases });
+    if (aliasesHaveCycle(next.aliases)) throw new UsagePricingValidationError("Mappings can't form a cycle.");
     await writeFileAtomic(this.opts.path, `${JSON.stringify(serializeUsagePricingFile(next), null, 2)}\n`, 0o600, false);
     this.file = next;
     setUsagePricingConfig(this.config());

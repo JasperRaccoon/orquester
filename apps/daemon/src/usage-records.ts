@@ -36,7 +36,7 @@ export interface UsageRecord {
 
 export interface UsageRecordSource {
   /** Hour-aggregated records after de-duplication; null until the first full scan finished. */
-  historyRecords(): UsageRecord[] | null;
+  historyRecords(): readonly UsageRecord[] | null;
 }
 
 export const HOUR_MS = 3_600_000;

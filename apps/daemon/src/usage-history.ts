@@ -2,24 +2,22 @@
 // 0600). The Claude CLI deletes transcripts after 30 days; the ledger keeps what the scanners once
 // saw, so the 90-day view keeps working. Spec: docs/superpowers/specs/2026-11-02-usage-panel-design.md §4.3.
 //
-// A bucket is one (source, agent, raw model, speed, UTC hour, project). After each scan the live
+// A bucket is one (source, agent, raw model, speed, UTC hour, cwd): only what a record says of
+// itself, never what is derived from settings (the project of a cwd follows the workspaces root,
+// which can change), so the same usage always lands in the same bucket. After a scan the live
 // records are merged in by a high-water rule: the live bucket replaces the stored one unless the
 // stored one has more requests (its transcript was deleted or truncated), session sets are unioned,
-// and stored buckets with no live counterpart are kept. Prices apply at query time, so a price
-// edit reprices all history.
+// and stored buckets with no live counterpart are kept. Projects, aliases and prices apply at query
+// time, so a settings or price edit applies to all history.
 //
-// File (`version: 1`): `{ version, recordedSince, sessions: string[], buckets: Row[] }`, where a Row is
-// `[source, agent, model, speed, hour, project, input, cacheRead, cacheWrite, cacheWrite1h, output,
-// reasoning, requests, reportedCostUsd, reportedRequests, sessionIndexes[]]` and sessionIndexes
-// point into `sessions`. Unknown top-level fields and extra trailing row columns are written back.
+// The file's format (and what of a newer writer's it keeps) is `parseUsageHistoryFile` in
+// `@orquester/config`.
 
 import { realpathSync } from "node:fs";
-import { readFile, rename } from "node:fs/promises";
+import { access, readFile, rename } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import type {
-  UsageCostParts,
-  UsageCostSource,
   UsageHistoryBucket,
   UsageHistoryProjectBucket,
   UsageHistoryResponse,
@@ -29,12 +27,20 @@ import type {
   UsageSpeed,
   UsageTokenTotals
 } from "@orquester/api";
+import {
+  parseUsageHistoryFile,
+  serializeUsageHistoryFile,
+  USAGE_HISTORY_SOURCES,
+  USAGE_HISTORY_SPEEDS,
+  USAGE_HISTORY_SUM_FIELDS,
+  type UsageHistoryFile,
+  type UsageHistoryRow
+} from "@orquester/config";
 
 import { writeFileAtomic } from "./agent-hooks.ts";
 import { canonicalModel, overrideFor, priceSlice, resolvePricingKey } from "./usage-pricing.ts";
 import { HOUR_MS, type UsageRecord, type UsageRecordSource } from "./usage-records.ts";
 
-const VERSION = 1;
 const DAY_HOURS = 24;
 /** Buckets older than this are dropped. */
 const RETENTION_HOURS = 120 * DAY_HOURS;
@@ -42,11 +48,13 @@ const RETENTION_HOURS = 120 * DAY_HOURS;
 const SEEN_MODELS_HOURS = 90 * DAY_HOURS;
 /** At most one write per this long. */
 const WRITE_INTERVAL_MS = 60_000;
+/** A finished scan is merged at most this often, unless a reader asks first. */
+const SCAN_INGEST_INTERVAL_MS = 5 * 60_000;
 const MAX_RANGE_DAYS = 90;
 
 type Source = UsageRecord["source"];
-const SOURCES: readonly Source[] = ["transcripts", "orquester-chats"];
-const SPEEDS: readonly UsageSpeed[] = ["standard", "fast", "ultrafast"];
+const SOURCES: readonly Source[] = USAGE_HISTORY_SOURCES;
+const SPEEDS: readonly UsageSpeed[] = USAGE_HISTORY_SPEEDS;
 /** Shown even before they have data: where each agent's usage comes from. */
 const KNOWN_SOURCES: readonly { agent: string; scope: Source }[] = [
   { agent: "claude", scope: "transcripts" },
@@ -54,8 +62,6 @@ const KNOWN_SOURCES: readonly { agent: string; scope: Source }[] = [
   { agent: "grok", scope: "orquester-chats" },
   { agent: "opencode", scope: "orquester-chats" }
 ];
-/** Row columns 0–15; anything after is a newer writer's and kept as is. */
-const ROW_COLUMNS = 16;
 
 interface Sums {
   input: number;
@@ -69,19 +75,12 @@ interface Sums {
   reportedRequests: number;
 }
 
-interface Bucket extends Sums {
-  source: Source;
-  agent: string;
-  model: string;
-  speed: UsageSpeed;
-  hour: number;
-  project: string;
+/** A file row, with its sessions as a set. */
+interface Bucket extends Omit<UsageHistoryRow, "sessions"> {
   sessions: Set<string>;
-  /** Trailing row columns a newer writer added. */
-  tail?: unknown[];
 }
 
-const SUM_FIELDS = ["input", "cacheRead", "cacheWrite", "cacheWrite1h", "output", "reasoning", "requests", "reportedCostUsd", "reportedRequests"] as const;
+const SUM_FIELDS = USAGE_HISTORY_SUM_FIELDS;
 
 const emptySums = (): Sums => ({ input: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, output: 0, reasoning: 0, requests: 0, reportedCostUsd: 0, reportedRequests: 0 });
 
@@ -95,8 +94,9 @@ const tokensOf = (s: Sums): UsageTokenTotals => ({
   input: s.input, cacheRead: s.cacheRead, cacheWrite: s.cacheWrite, cacheWrite1h: s.cacheWrite1h, output: s.output, reasoning: s.reasoning
 });
 
-const bucketKey = (b: Pick<Bucket, "source" | "agent" | "model" | "speed" | "hour" | "project">): string =>
-  `${b.source}|${b.agent}|${b.model}|${b.speed}|${b.hour}|${b.project}`;
+// NUL never occurs in a model id or a path.
+const bucketKey = (b: Pick<Bucket, "source" | "agent" | "model" | "speed" | "hour" | "cwd">): string =>
+  `${b.source}|${b.agent}|${b.model}|${b.speed}|${b.hour}\0${b.cwd}`;
 
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
@@ -177,7 +177,7 @@ function projectUnder(root: string, cwd: string): string | null {
 
 export interface UsageHistoryOptions {
   path: string;
-  /** The workspaces root, read on each ingest (it can change at runtime). */
+  /** The workspaces root, read on each query (it can change at runtime). */
   workspacesDir: () => string;
   now?: () => number;
   logger?: Pick<Console, "warn">;
@@ -194,9 +194,9 @@ export interface UsageHistoryQuery {
 export class UsageHistory {
   private readonly buckets = new Map<string, Bucket>();
   private recordedSince: string | null = null;
-  /** Unknown top-level fields of the file, written back untouched. */
-  private extra: Record<string, unknown> = {};
-  /** False when the file could not be moved out of the way: never overwrite it. */
+  /** What of the file this version can't read (unknown fields, a newer writer's rows), written back. */
+  private kept: Omit<UsageHistoryFile, "recordedSince" | "rows"> = { unreadRows: [], sessions: [], cwds: [], extra: {} };
+  /** False when the file could not be read or moved out of the way: never overwrite it. */
   private writable = true;
   private dirty = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -204,6 +204,10 @@ export class UsageHistory {
   private writing: Promise<void> = Promise.resolve();
   /** Sources whose records have been merged at least once. */
   private readonly ingested = new WeakSet<UsageRecordSource>();
+  /** Sources with a finished scan not merged yet ({@link scanned}). */
+  private readonly pending = new Set<UsageRecordSource>();
+  private ingestTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastIngestAt = Number.NEGATIVE_INFINITY;
   private rootCache: { raw: string; real: string } | null = null;
 
   constructor(private readonly opts: UsageHistoryOptions) {}
@@ -212,13 +216,21 @@ export class UsageHistory {
     return (this.opts.now ?? Date.now)();
   }
 
-  /** Read the ledger. Never throws: anything unreadable starts empty. */
+  /**
+   * Read the ledger. Never throws: a missing file is the first run; one that can't be read (EACCES,
+   * EIO) is never overwritten, the ledger only records in memory; one that does not parse is moved
+   * aside and the ledger starts empty.
+   */
   async load(): Promise<void> {
     let text: string;
     try {
       text = await readFile(this.opts.path, "utf8");
-    } catch {
-      return; // ENOENT (first run) or unreadable
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return;
+      this.writable = false;
+      this.opts.logger?.warn(`usage history: could not read ${this.opts.path} (${code ?? String(error)}); not recording to it until the daemon restarts`);
+      return;
     }
     let parsed: unknown;
     try {
@@ -226,27 +238,18 @@ export class UsageHistory {
     } catch {
       parsed = undefined;
     }
-    const doc = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-    if (!doc || typeof doc.version !== "number") {
-      await this.moveAside(`${this.opts.path}.corrupt-${this.now()}`, "did not parse");
+    const read = parseUsageHistoryFile(parsed, { minHour: this.cutoffHour() });
+    if (!read.ok) {
+      if (read.version === null) await this.moveAside(`${this.opts.path}.corrupt-${this.now()}`, "did not parse");
+      else await this.moveAside(`${this.opts.path}.v${read.version}.${this.now()}`, `has version ${read.version}`, ".bak");
       return;
     }
-    if (doc.version !== VERSION) {
-      await this.moveAside(`${this.opts.path}.v${doc.version}.bak`, `has version ${doc.version}`);
-      return;
-    }
-    const { version: _version, recordedSince, sessions, buckets, ...extra } = doc;
-    this.extra = extra;
-    if (typeof recordedSince === "string" && Number.isFinite(Date.parse(recordedSince))) this.recordedSince = recordedSince;
-    const table = Array.isArray(sessions) ? sessions : [];
-    const cutoff = this.cutoffHour();
-    for (const row of Array.isArray(buckets) ? buckets : []) {
-      const bucket = parseRow(row, table);
-      if (!bucket) continue;
-      if (bucket.hour < cutoff) {
-        this.dirty = true;
-        continue;
-      }
+    const { recordedSince, rows, ...kept } = read.file;
+    this.recordedSince = recordedSince;
+    this.kept = kept;
+    if (read.pruned) this.dirty = true;
+    for (const row of rows) {
+      const bucket: Bucket = { ...row, sessions: new Set(row.sessions) };
       const key = bucketKey(bucket);
       const stored = this.buckets.get(key);
       if (stored) mergeInto(stored, bucket);
@@ -254,7 +257,10 @@ export class UsageHistory {
     }
   }
 
-  private async moveAside(to: string, why: string): Promise<void> {
+  /** Rename the file to `<base><suffix>`, or to `<base>-<n><suffix>` when that is taken: never over another backup. */
+  private async moveAside(base: string, why: string, suffix = ""): Promise<void> {
+    let to = `${base}${suffix}`;
+    for (let n = 1; await access(to).then(() => true, () => false); n++) to = `${base}-${n}${suffix}`;
     try {
       await rename(this.opts.path, to);
       this.opts.logger?.warn(`usage history: ${this.opts.path} ${why}; moved aside to ${to}, starting empty`);
@@ -270,27 +276,49 @@ export class UsageHistory {
   }
 
   /**
+   * A source finished a scan. Its first records are merged at once (the view waits on them); later
+   * ones at most every {@link SCAN_INGEST_INTERVAL_MS}, or sooner when a reader asks
+   * ({@link ingestPending}): a merge walks every record, and scans come every 30 s while agents run.
+   */
+  scanned(source: UsageRecordSource): void {
+    if (!this.ingested.has(source)) {
+      this.ingest(source);
+      return;
+    }
+    this.pending.add(source);
+    if (this.ingestTimer) return;
+    const delay = Math.max(0, this.lastIngestAt + SCAN_INGEST_INTERVAL_MS - this.now());
+    this.ingestTimer = setTimeout(() => this.ingestPending(), delay);
+    this.ingestTimer.unref?.();
+  }
+
+  /** Merge the scans {@link scanned} deferred (before the ledger is read or written out). */
+  ingestPending(): void {
+    if (this.ingestTimer) {
+      clearTimeout(this.ingestTimer);
+      this.ingestTimer = undefined;
+    }
+    const sources = [...this.pending];
+    this.pending.clear();
+    for (const source of sources) this.ingest(source);
+  }
+
+  /**
    * Merge a source's live records (high-water rule). False when it has none yet (no full scan);
    * a change is written within a minute.
    */
   ingest(source: UsageRecordSource): boolean {
     const records = source.historyRecords();
     if (!records) return false;
+    this.pending.delete(source);
+    this.lastIngestAt = this.now();
     this.ingested.add(source);
     const cutoff = this.cutoffHour();
-    const projects = new Map<string, string>();
     const live = new Map<string, Bucket>();
     for (const record of records) {
       if (record.hour < cutoff || !SOURCES.includes(record.source)) continue;
-      const cwd = record.cwd;
-      let project = "";
-      if (cwd) {
-        const known = projects.get(cwd);
-        if (known === undefined) projects.set(cwd, (project = this.projectOf(cwd)));
-        else project = known;
-      }
       const speed = SPEEDS.includes(record.speed) ? record.speed : "standard";
-      const identity = { source: record.source, agent: record.agent, model: record.model, speed, hour: record.hour, project };
+      const identity = { source: record.source, agent: record.agent, model: record.model, speed, hour: record.hour, cwd: record.cwd ?? "" };
       const key = bucketKey(identity);
       let bucket = live.get(key);
       if (!bucket) live.set(key, (bucket = { ...identity, ...emptySums(), sessions: new Set() }));
@@ -309,8 +337,9 @@ export class UsageHistory {
     return true;
   }
 
-  /** Write now what is pending (the daemon's stop). */
+  /** Merge the deferred scans and write now what is pending (the daemon's stop). */
   async flush(): Promise<void> {
+    this.ingestPending();
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -319,7 +348,9 @@ export class UsageHistory {
     await this.writing;
   }
 
+  /** The range's buckets, after merging the scans {@link scanned} deferred. */
   query(q: UsageHistoryQuery): UsageHistoryResponse {
+    this.ingestPending();
     const now = this.now();
     const zone = zoneOf(q.timeZone);
     const nowHour = Math.floor(now / HOUR_MS);
@@ -384,18 +415,21 @@ export class UsageHistory {
       for (const id of ids) set.add(id);
     };
     const canonical = new Map<string, string>();
+    const projects = new Map<string, string>();
     for (const bucket of this.buckets.values()) {
       const period = periodOf(bucket.hour);
       if (period < 0) continue;
       let model = canonical.get(bucket.model);
       if (model === undefined) canonical.set(bucket.model, (model = canonicalModel(bucket.model)));
+      let project = projects.get(bucket.cwd);
+      if (project === undefined) projects.set(bucket.cwd, (project = bucket.cwd ? this.projectOf(bucket.cwd) : ""));
       const cellKey = `${period}|${bucket.agent}|${model}|${bucket.speed}`;
       let cell = cells.get(cellKey);
       if (!cell) cells.set(cellKey, (cell = { period, agent: bucket.agent, model, speed: bucket.speed, ...emptySums() }));
       addSums(cell, bucket);
-      const projectKey = `${bucket.project}|${bucket.agent}|${model}|${bucket.speed}`;
+      const projectKey = `${project}|${bucket.agent}|${model}|${bucket.speed}`;
       let projectCell = projectCells.get(projectKey);
-      if (!projectCell) projectCells.set(projectKey, (projectCell = { project: bucket.project, agent: bucket.agent, model, speed: bucket.speed, ...emptySums() }));
+      if (!projectCell) projectCells.set(projectKey, (projectCell = { project, agent: bucket.agent, model, speed: bucket.speed, ...emptySums() }));
       addSums(projectCell, bucket);
       if (bucket.sessions.size === 0) continue;
       // Ids are per agent: the same id under two agents is two sessions.
@@ -403,8 +437,8 @@ export class UsageHistory {
       for (const id of ids) sessions.total.add(id);
       addSessions(sessions.byAgent, bucket.agent, ids);
       addSessions(sessions.byModel, `${bucket.agent}:${model}`, ids);
-      addSessions(sessions.byProject, bucket.project, ids);
-      addSessions(sessions.byProjectAgent, `${bucket.agent}:${bucket.project}`, ids);
+      addSessions(sessions.byProject, project, ids);
+      addSessions(sessions.byProjectAgent, `${bucket.agent}:${project}`, ids);
     }
 
     const buckets: UsageHistoryBucket[] = [...cells.values()]
@@ -455,6 +489,7 @@ export class UsageHistory {
 
   /** Every model in the last 90 days, by processed tokens desc, with how it is priced now. */
   seenModels(): UsagePriceModelInfo[] {
+    this.ingestPending();
     const since = Math.floor(this.now() / HOUR_MS) - SEEN_MODELS_HOURS;
     const seen = new Map<string, { agent: string; model: string; tokens: number; reported: boolean }>();
     for (const bucket of this.buckets.values()) {
@@ -562,23 +597,10 @@ export class UsageHistory {
   }
 
   private serialize(): Record<string, unknown> {
-    const sessions: string[] = [];
-    const index = new Map<string, number>();
     const rows = [...this.buckets.values()]
       .sort((a, b) => a.hour - b.hour || bucketKey(a).localeCompare(bucketKey(b)))
-      .map((b) => {
-        const ids = [...b.sessions].map((id) => {
-          let i = index.get(id);
-          if (i === undefined) {
-            index.set(id, (i = sessions.length));
-            sessions.push(id);
-          }
-          return i;
-        });
-        const row: unknown[] = [b.source, b.agent, b.model, b.speed, b.hour, b.project, ...SUM_FIELDS.map((f) => b[f]), ids];
-        return b.tail ? [...row, ...b.tail] : row;
-      });
-    return { ...this.extra, version: VERSION, recordedSince: this.recordedSince, sessions, buckets: rows };
+      .map((b): UsageHistoryRow => ({ ...b, sessions: [...b.sessions] }));
+    return serializeUsageHistoryFile({ ...this.kept, recordedSince: this.recordedSince, rows });
   }
 }
 
@@ -603,37 +625,16 @@ function mergeInto(stored: Bucket, live: Bucket): boolean {
   return changed;
 }
 
-/** One stored row, or null when it does not parse. */
-function parseRow(row: unknown, sessions: unknown[]): Bucket | null {
-  if (!Array.isArray(row) || row.length < ROW_COLUMNS) return null;
-  const [source, agent, model, speed, hour, project] = row as unknown[];
-  if (!SOURCES.includes(source as Source) || !SPEEDS.includes(speed as UsageSpeed)) return null;
-  if (typeof agent !== "string" || !agent || typeof model !== "string" || typeof project !== "string") return null;
-  if (!Number.isSafeInteger(hour)) return null;
-  const sums = emptySums();
-  for (let i = 0; i < SUM_FIELDS.length; i++) {
-    const value = row[6 + i];
-    if (!finite(value) || value < 0) return null;
-    sums[SUM_FIELDS[i]!] = value;
-  }
-  const ids = row[ROW_COLUMNS - 1];
-  if (!Array.isArray(ids)) return null;
-  const set = new Set<string>();
-  for (const i of ids) {
-    const id = Number.isInteger(i) ? sessions[i as number] : undefined;
-    if (typeof id === "string" && id) set.add(id);
-  }
-  const bucket: Bucket = { source: source as Source, agent, model, speed: speed as UsageSpeed, hour: hour as number, project, ...sums, sessions: set };
-  if (row.length > ROW_COLUMNS) bucket.tail = row.slice(ROW_COLUMNS);
-  return bucket;
-}
-
-/** Price one (agent, model after aliasing, speed) cell: override > reported > built-in > unpriced. */
+/**
+ * Price one (agent, model after aliasing, speed) cell: override > reported > built-in > unpriced. A
+ * fast or ultrafast cell at built-in rates also says what it costs at standard rates (an override
+ * has no tiers, so there it would only repeat the cost).
+ */
 function priceCell(
   model: string,
   speed: UsageSpeed,
   sums: Sums
-): { costUsd: number | null; cost: UsageCostParts | null; costSource: UsageCostSource; cacheSavingsUsd: number; unpricedTokens: number } {
+): Pick<UsageHistoryBucket, "costUsd" | "cost" | "costSource" | "cacheSavingsUsd" | "unpricedTokens" | "standardCostUsd"> {
   const tokens = processed(sums);
   if (!overrideFor(model) && sums.reportedRequests > 0) {
     const unreported = sums.requests > 0 ? Math.max(0, sums.requests - sums.reportedRequests) / sums.requests : 0;
@@ -641,5 +642,7 @@ function priceCell(
   }
   const priced = priceSlice(model, speed, sums);
   if (!priced) return { costUsd: null, cost: null, costSource: "unpriced", cacheSavingsUsd: 0, unpricedTokens: tokens };
-  return { costUsd: priced.costUsd, cost: priced.parts, costSource: "estimated", cacheSavingsUsd: priced.cacheSavingsUsd, unpricedTokens: 0 };
+  const cell = { costUsd: priced.costUsd, cost: priced.parts, costSource: "estimated" as const, cacheSavingsUsd: priced.cacheSavingsUsd, unpricedTokens: 0 };
+  if (speed === "standard" || priced.rateSource === "override") return cell;
+  return { ...cell, standardCostUsd: priceSlice(model, "standard", sums)!.costUsd };
 }

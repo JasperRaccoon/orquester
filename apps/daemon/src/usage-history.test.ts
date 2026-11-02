@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, mock, test } from "node:test";
@@ -85,13 +85,16 @@ test("buckets older than 120 days are dropped", async (t) => {
 test("the ledger survives a restart, keeping fields a newer writer added", async (t) => {
   const { path, make } = await world(t);
   const hour = hourOf("2026-11-02T09:00:00Z");
+  // A speed this version doesn't know: the row is a newer writer's, kept as is.
+  const newerRow = ["transcripts", "claude", "claude-opus-5", "turbo", hour, null, 1, 1, 1, 0, 1, 0, 1, 0, 0, [1]];
   await writeFile(path, JSON.stringify({
     version: 1,
     recordedSince: "2026-10-01T00:00:00.000Z",
     note: "kept",
     sessions: ["x", "y"],
     buckets: [
-      ["transcripts", "codex", "gpt-5.5", "fast", hour, "", 1, 2, 3, 1, 5, 1, 2, 0, 0, [0, 1], "future-column"],
+      ["transcripts", "codex", "gpt-5.5", "fast", hour, null, 1, 2, 3, 1, 5, 1, 2, 0, 0, [0, 1], "future-column"],
+      newerRow,
       ["transcripts", "codex", "broken"]
     ]
   }));
@@ -103,6 +106,8 @@ test("the ledger survives a restart, keeping fields a newer writer added", async
   const saved = JSON.parse(await readFile(path, "utf8"));
   assert.equal(saved.note, "kept");
   assert.equal(saved.buckets.find((row: unknown[]) => row[1] === "codex").at(-1), "future-column");
+  assert.deepEqual(saved.buckets.filter((row: unknown[]) => row[3] === "turbo"), [newerRow]);
+  assert.equal(saved.sessions[1], "y");
 
   const second = make();
   await second.load();
@@ -129,8 +134,26 @@ test("a corrupt ledger is moved aside, and a newer version is kept as a backup t
   assert.equal(fromNewer.query({ range: range("7d"), scanning: false }).recordedSince, null);
   fromNewer.ingest(source([rec()]));
   await fromNewer.flush();
-  assert.equal(await readFile(`${path}.v2.bak`, "utf8"), newer);
   assert.equal(JSON.parse(await readFile(path, "utf8")).version, 1);
+
+  // The newer daemon runs again, then this one: its second file is backed up beside the first.
+  const newerAgain = JSON.stringify({ version: 2, buckets: "later" });
+  await writeFile(path, newerAgain);
+  await make().load();
+  const backups = (await readdir(dir)).filter((name) => name.startsWith("usage-history.json.v2.") && name.endsWith(".bak"));
+  assert.equal(backups.length, 2);
+  assert.deepEqual((await Promise.all(backups.map((name) => readFile(join(dir, name), "utf8")))).sort(), [newer, newerAgain].sort());
+});
+
+test("a ledger that can't be read is never overwritten", async (t) => {
+  const { path, make } = await world(t);
+  // A link to itself reads as ELOOP: unreadable as EACCES or EIO would be, whoever runs the test.
+  await symlink(path, path);
+  const history = make();
+  await history.load();
+  history.ingest(source([rec()]));
+  await history.flush();
+  assert.ok((await lstat(path)).isSymbolicLink());
 });
 
 test("changes are written at most once a minute, and only when something changed", async (t) => {
@@ -163,6 +186,43 @@ test("changes are written at most once a minute, and only when something changed
   mock.timers.tick(60_000);
   await history.flush();
   await assert.rejects(readFile(path), { code: "ENOENT" });
+});
+
+test("a source's first scan is merged at once, later scans at most every five minutes or when the ledger is read or flushed", async (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+  let now = NOW;
+  const { path, make } = await world(t, { now: () => now });
+  const history = make();
+  let reads = 0;
+  const scanner = source([rec({ input: 1 })]);
+  const counted: UsageRecordSource = { historyRecords: () => (reads++, scanner.historyRecords()) };
+  const input = () => history.query({ range: range("1d"), timeZone: "UTC", scanning: false }).buckets[0]?.tokens.input;
+
+  history.scanned(counted);
+  assert.equal(reads, 1);
+  assert.equal(history.hasIngested(counted), true);
+
+  scanner.records = [rec({ input: 2 })];
+  history.scanned(counted);
+  history.scanned(counted);
+  now += 60_000;
+  mock.timers.tick(60_000);
+  assert.equal(reads, 1, "two scans within the interval are not merged yet");
+  now += 4 * 60_000;
+  mock.timers.tick(4 * 60_000);
+  assert.equal(reads, 2, "and then once");
+
+  scanner.records = [rec({ input: 3 })];
+  history.scanned(counted);
+  assert.equal(input(), 3, "a reader merges the deferred scan first");
+  assert.equal(reads, 3);
+
+  scanner.records = [rec({ input: 4 })];
+  history.scanned(counted);
+  await history.flush();
+  assert.equal(reads, 4);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).buckets[0][6], 4);
 });
 
 test("days are the zone's calendar days across a DST change and at a quarter-hour offset; 24h is the last 24 UTC hours", async (t) => {
@@ -235,9 +295,48 @@ test("a session active on several days counts once; projects come from the cwd u
     total: 4,
     byAgent: { claude: 3, codex: 1 },
     byModel: { "claude:claude-opus-5-5": 3, "codex:gpt-5.5": 1 },
-    byProject: { "ws/app": 1, "": 2, "ws/api": 1 }
+    byProject: { "ws/app": 1, "": 2, "ws/api": 1 },
+    byProjectAgent: { "claude:ws/app": 1, "claude:": 2, "codex:ws/api": 1 }
   });
   assert.deepEqual(answer.projectBuckets.map((p) => [p.project, p.agent, p.requests]), [["", "claude", 2], ["ws/api", "codex", 1], ["ws/app", "claude", 2]]);
+});
+
+test("a new workspaces root moves the projects of all history, and the same usage merged again is not counted twice", async (t) => {
+  let root = "/srv/old-root";
+  const { path } = await world(t);
+  const history = new UsageHistory({ path, workspacesDir: () => root, now: () => NOW });
+  const scanner = source([
+    rec({ session: "a", cwd: "/srv/old-root/ws/app", requests: 2, input: 200 }),
+    rec({ session: "b", cwd: "/srv/new-root/team/site", requests: 1, input: 100 })
+  ]);
+  history.ingest(scanner);
+  const answer = () => history.query({ range: range("1d"), timeZone: "UTC", scanning: false });
+  assert.deepEqual(answer().projectBuckets.map((p) => [p.project, p.requests]), [["", 1], ["ws/app", 2]]);
+
+  root = "/srv/new-root";
+  history.ingest(scanner);
+  const moved = answer();
+  assert.deepEqual(moved.buckets.map((b) => [b.requests, b.tokens.input]), [[3, 300]]);
+  assert.deepEqual(moved.projectBuckets.map((p) => [p.project, p.requests]), [["", 2], ["team/site", 1]]);
+  assert.deepEqual(moved.sessions.byProject, { "": 1, "team/site": 1 });
+
+  await history.flush();
+  const reloaded = new UsageHistory({ path, workspacesDir: () => root, now: () => NOW });
+  await reloaded.load();
+  assert.deepEqual(reloaded.query({ range: range("1d"), timeZone: "UTC", scanning: false }), answer());
+});
+
+test("a fast cell at built-in rates also says what it costs at standard rates; at an override it does not", async (t) => {
+  const { make } = await world(t);
+  const history = make();
+  history.ingest(source([
+    rec({ model: "claude-opus-5-5", speed: "fast", input: M, output: M, session: "f" }),
+    rec({ model: "claude-opus-5-5", input: M, output: 0, session: "s" })
+  ]));
+  const cells = () => history.query({ range: range("1d"), timeZone: "UTC", scanning: false }).buckets;
+  assert.deepEqual(cells().map((b) => [b.speed, b.costUsd, b.standardCostUsd]), [["fast", 48, 24], ["standard", 4, undefined]]);
+  setUsagePricingConfig({ overrides: { "claude-opus-5-5": { input: 1, output: 1 } }, aliases: {} });
+  assert.deepEqual(cells().map((b) => [b.speed, b.costUsd, b.standardCostUsd]), [["fast", 2, undefined], ["standard", 1, undefined]]);
 });
 
 test("cells are priced override > reported > built-in > unpriced, after aliases fold models", async (t) => {

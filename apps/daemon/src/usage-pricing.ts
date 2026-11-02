@@ -98,12 +98,20 @@ function withoutContextTag(model: string): string {
   return model.replace(/\[[^\]]*\]$/, "");
 }
 
+/**
+ * What may follow a key and its `-` and still be the same model: dash-separated date and version
+ * stamps (`20260115`, `2025-09-29`, `0309`) and release labels. A name part (`mini`, `nano`, `pro`,
+ * `lite`, `codex-mini`) is another model with other prices, so it never matches.
+ */
+const VERSION_SUFFIX = /^(?:\d+|preview|latest|exp|experimental|beta|reasoning|non-reasoning)(?:-(?:\d+|preview|latest|exp|experimental|beta|reasoning|non-reasoning))*$/;
+
 function lookupKey(model: string): string | null {
   if (!model || AMBIGUOUS.has(model)) return null;
   if (BUILTIN[model]) return model;
   let best: string | null = null;
   for (const key of Object.keys(BUILTIN)) {
-    if (model.startsWith(key + "-") && (!best || key.length > best.length)) best = key;
+    if (best && key.length <= best.length) continue;
+    if (model.startsWith(key + "-") && VERSION_SUFFIX.test(model.slice(key.length + 1))) best = key;
   }
   return best;
 }
@@ -111,7 +119,8 @@ function lookupKey(model: string): string | null {
 /**
  * The built-in table key a raw model id resolves to, or null. Transcripts record versioned ids
  * (`claude-opus-4-8-20260115`) that never equal the bare keys: after the exact key, the longest key
- * the id starts with (followed by `-`) wins, which absorbs date and `-preview` suffixes. A trailing
+ * the id starts with (followed by `-` and only version stamps, see {@link VERSION_SUFFIX}) wins,
+ * which absorbs date and `-preview` suffixes but never prices `gpt-5-mini` as `gpt-5`. A trailing
  * context tag (`claude-opus-4-8[1m]`, the CLI's 1M-context variant) bills at the model's standard
  * rates (claude fixture 01). A provider-qualified id (`anthropic/claude-sonnet-4-5`) falls back to
  * its last segment.

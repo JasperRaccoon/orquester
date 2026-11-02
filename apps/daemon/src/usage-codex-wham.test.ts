@@ -22,6 +22,13 @@ test("maps plan_type and primary/secondary windows", () => {
   assert.equal(a.session?.percent, 12);
   assert.equal(a.weekly?.percent, 44);
   assert.equal(a.session?.resetsAt, new Date(resetSec * 1000).toISOString());
+  assert.deepEqual([a.session?.windowMinutes, a.weekly?.windowMinutes], [300, 10080]);
+});
+
+test("a window that does not state its length has no windowMinutes", () => {
+  const a = parseCodexWhamUsage({ rate_limit: { primary_window: { used_percent: 5, reset_at: resetSec } } }, NOW);
+  assert.equal(a.session?.percent, 5);
+  assert.equal(a.session?.windowMinutes, undefined);
 });
 
 test("week-only primary_window (7d limit, no secondary) → weekly slot", () => {

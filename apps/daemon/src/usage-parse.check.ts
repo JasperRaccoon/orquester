@@ -16,6 +16,7 @@ assert.equal(claudeLegacy.available, true);
 assert.equal(claudeLegacy.session?.percent, 45);
 assert.equal(claudeLegacy.weekly?.percent, 69);
 assert.equal(claudeLegacy.plan, "Max 20x");
+assert.deepEqual([claudeLegacy.session?.windowMinutes, claudeLegacy.weekly?.windowMinutes], [300, 10080]);
 assert.equal(claudeLegacy.stale, false);
 
 // Claude newer limits[] shape → same numbers.
@@ -29,6 +30,7 @@ const claudeLimits = parseClaudeUsage(
 );
 assert.equal(claudeLimits.session?.percent, 45);
 assert.equal(claudeLimits.weekly?.percent, 69);
+assert.deepEqual([claudeLimits.session?.windowMinutes, claudeLimits.weekly?.windowMinutes], [300, 10080]);
 
 // Leak bug #52326: a reset epoch bled into utilization → drop the window.
 const leak = parseClaudeUsage({ five_hour: { utilization: 1783000000 }, seven_day: { utilization: 69 } }, {}, NOW);
@@ -45,6 +47,7 @@ const codex = parseCodexUsage(
 assert.equal(codex.session?.percent, 3);
 assert.equal(codex.weekly?.percent, 37);
 assert.equal(codex.plan, "Pro");
+assert.deepEqual([codex.session?.windowMinutes, codex.weekly?.windowMinutes], [300, 10080]);
 
 // Week-only plan: sole pool lives under primary with a 7d limit → weekly slot,
 // not the 5h session bar (the bug in the usage panel for current Pro/Plus).
@@ -65,6 +68,7 @@ const weekByReset = parseCodexUsage(
 );
 assert.equal(weekByReset.session, null);
 assert.equal(weekByReset.weekly?.percent, 40);
+assert.equal(weekByReset.weekly?.windowMinutes, undefined);
 
 // Codex stale window (resets_at already past) → nulled.
 const codexStale = parseCodexUsage(
@@ -99,11 +103,13 @@ assert.equal(grok.session, null);
 assert.equal(grok.weekly?.percent, 22.4);
 assert.equal(grok.weekly?.resetsAt, future);
 assert.equal(grok.plan, "SuperGrok Heavy");
+assert.equal(grok.weekly?.windowMinutes, (Date.parse(future) - Date.parse("2026-07-01T00:00:00Z")) / 60_000);
 
 // Proto3: omitted creditUsagePercent on a live period means 0%, not unavailable.
 const grokZero = parseGrokBilling({ config: { currentPeriod: { end: future } } }, NOW);
 assert.equal(grokZero.available, true);
 assert.equal(grokZero.weekly?.percent, 0);
+assert.equal(grokZero.weekly?.windowMinutes, undefined, "no period start: length unknown");
 
 // A period that already ended is not current usage; garbage bodies are unavailable.
 assert.equal(parseGrokBilling({ config: { creditUsagePercent: 80, currentPeriod: { end: "2026-07-01T00:00:00Z" } } }, NOW).available, false);

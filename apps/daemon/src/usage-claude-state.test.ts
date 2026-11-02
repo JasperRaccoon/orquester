@@ -117,10 +117,11 @@ test("expired or cleared credentials keep historical quotas across restarts and 
   await reloaded.load();
   const later = NOW + 10 * 24 * 60 * MIN;
   const expired = await make(later, reloaded)();
+  // The windows' fixed lengths (5h, 7d) survive the restart with them.
   const expected = {
-    session: { percent: 37, resetsAt: "2026-09-28T17:00:00.000Z" },
-    weekly: { percent: 98, resetsAt: "2026-10-03T14:00:00.000Z" },
-    scopedWindows: [{ label: "Fable", percent: 42, resetsAt: "2026-09-29T14:00:00.000Z" }],
+    session: { percent: 37, resetsAt: "2026-09-28T17:00:00.000Z", windowMinutes: 300 },
+    weekly: { percent: 98, resetsAt: "2026-10-03T14:00:00.000Z", windowMinutes: 10080 },
+    scopedWindows: [{ label: "Fable", percent: 42, resetsAt: "2026-09-29T14:00:00.000Z", windowMinutes: 10080 }],
     asOf: "2026-09-28T14:00:00.000Z"
   };
   assert.deepEqual(expired?.lastKnown, expected);
@@ -277,8 +278,8 @@ test("a thread's live windows become the account's session and weekly readings",
     "2026-09-28T14:00:00.000Z"
   );
   assert.deepEqual(live, {
-    session: { percent: 4, resetsAt: "2026-09-28T18:00:00.000Z" },
-    weekly: { percent: 100 },
+    session: { percent: 4, resetsAt: "2026-09-28T18:00:00.000Z", windowMinutes: 300 },
+    weekly: { percent: 100, windowMinutes: 10080 },
     observedAt: NOW
   });
   // Only the session window: the weekly one is left as it was (absent, not null).

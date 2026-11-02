@@ -95,7 +95,7 @@ This feature adds a full **Usage** view that shows token consumption and an "API
 - **Lookup** (`resolvePricingKey`), in order:
   1. Trim the id and drop a trailing `[…]` tag.
   2. Exact match.
-  3. The longest key that the id starts with followed by `-` (existing rule: it absorbs date suffixes and `-preview`).
+  3. The longest key that the id starts with followed by `-`, when the rest is only dash-separated version stamps: all-digit tokens (dates such as `20260115` or `2025-09-29`, `0309`) and `preview`, `latest`, `exp`, `experimental`, `beta`, `reasoning`, `non-reasoning`. A name part (`-mini`, `-nano`, `-pro`, `-lite`) is another model, so `gpt-5-mini` is not priced as `gpt-5`.
   4. For a qualified id like `anthropic/claude-sonnet-4-5`, repeat steps 2–3 on the segment after the last `/`.
 
   Ambiguous slugs (`opus`, `sonnet`, `haiku`, `fable`, `default`, `<synthetic>`) are unpriced.
@@ -120,7 +120,9 @@ This feature adds a full **Usage** view that shows token consumption and an "API
   - `priceSlice(model, speed, tokens)` → `{ costUsd, parts, cacheSavingsUsd, rateSource: "override"|"builtin" } | null`.
   - `pricingTable()` → the built-in table for the price editor.
 - **Persistence:** `<appdir>/daemon/usage-pricing.json`, mode 0600, with path helper `usagePricingFile` in `packages/config` and zod schema `usagePricingFileSchema`.
-  - Reading is tolerant: an invalid entry is dropped, unknown fields are kept, and a corrupt file is moved aside and the defaults are used.
+  - Reading is tolerant: an invalid entry is not used, and a corrupt file is moved aside and the defaults are used.
+  - A file that can't be read (other than missing) gives the defaults, and `PUT` answers 503 until a restart reads it.
+  - Invalid entries and unknown fields (top-level or inside an entry) are written back as read. An edit replaces only the entries of the models it sets or removes.
   - Writes are atomic (temp file + rename).
   - The store loads at boot and calls `setUsagePricingConfig`.
 
@@ -158,12 +160,13 @@ export interface UsageRecordSource {
 
 ### 4.3 Ledger (`apps/daemon/src/usage-history.ts`)
 
-**Bucket key:** `source|agent|model|speed|hour|project`.
+**Bucket key:** `source|agent|model|speed|hour|cwd`.
 
-- `project` is `"<workspace>/<project>"` when the record's `cwd` (as given, or after realpath of the workspaces root) lies at least two segments under `workspacesDir`. Otherwise it is `""`.
-- A bucket stores the token sums, `requests`, `reportedCostUsd`, `reportedRequests`, and the set of session ids. Session ids are interned in a table inside the file.
+- The key holds only what a record says of itself. Nothing derived from settings goes in it: the same usage must always land in the same bucket, or the high-water merge keeps both copies.
+- A bucket stores the token sums, `requests`, `reportedCostUsd`, `reportedRequests`, and the set of session ids. Session ids and cwds are interned in tables inside the file.
+- `project` is derived at query time: `"<workspace>/<project>"` when the bucket's `cwd` (as given, or after realpath of the workspaces root) lies at least two segments under `workspacesDir`. Otherwise it is `""`.
 
-**Merge after each scan** (high-water rule):
+**Merge** (high-water rule):
 
 1. Group the live records into buckets.
 2. For each live bucket, the stored bucket is replaced by the live one unless the stored one has more `requests`. Session sets are unioned either way.
@@ -173,14 +176,16 @@ export interface UsageRecordSource {
 
 **Persistence:**
 
-- `<appdir>/daemon/usage-history.json`, mode 0600, `{ version: 1, recordedSince, sessions: string[], buckets: [...] }`, in compact arrays.
+- `<appdir>/daemon/usage-history.json`, mode 0600, `{ version: 1, recordedSince, sessions: string[], cwds: string[], buckets: [...] }`, in compact arrays.
 - Writes happen only when something changed, coalesced to at most one per 60 s, atomically. Pending changes are flushed on daemon stop.
-- Reading is tolerant: an unknown or newer `version` starts empty but keeps the old file as `.v<n>.bak`; a corrupt file is moved aside.
+- Reading is tolerant: an unknown or newer `version` starts empty but keeps the old file as `.v<n>.<ms>.bak` (never renamed over an earlier backup); a corrupt file is moved aside.
+- Only a missing file is a first run. A file that can't be read (EACCES, EIO) is never overwritten: the ledger records in memory only until a restart reads it.
+- A row this version can't read (a newer writer's source or speed), trailing columns and unknown top-level fields are written back unchanged. The parser and serializer are `parseUsageHistoryFile` / `serializeUsageHistoryFile` in `packages/config`.
 - `recordedSince` is the first time this daemon wrote the ledger.
 
 **Triggers:**
 
-- The scanner gets an `onScanned` callback after every `doRecompute`, and the history service ingests then.
+- The scanner gets an `onScanned` callback after every `doRecompute`. The ledger merges a source's first scan at once, and later scans at most every 5 minutes. A query, the prices answer and the flush at shutdown merge a deferred scan first.
 - A history request ingests the chat-log scanner's records and runs the merge before answering.
 - `refresh=1` awaits `usageTokens.recompute()` and a chat-log scan first.
 

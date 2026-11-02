@@ -14,6 +14,8 @@ interface RawRow {
   model: string;
   /** When the request ran (epoch ms): the event's timestamp, else the file's mtime. */
   ts: number;
+  /** {@link ts} is the file's mtime (the line has no timestamp): it moves with every later write. */
+  undated?: true;
   /** Provider session id (interned per file), or null. */
   session: string | null;
   /** The working directory the request ran in (interned per file), or null. */
@@ -49,32 +51,6 @@ interface DaySlice {
 
 const DAY_MS = 86_400_000;
 
-/** Sum rows per agent, model, UTC day and speed: tokens only, so a price change needs no row walk. */
-function sliceRows(raw: RawRow[]): DaySlice[] {
-  const dayNames = new Map<number, string>();
-  const byKey = new Map<string, DaySlice>();
-  for (const r of raw) {
-    const dayIndex = Math.floor(r.ts / DAY_MS);
-    let day = dayNames.get(dayIndex);
-    if (day === undefined) {
-      day = new Date(dayIndex * DAY_MS).toISOString().slice(0, 10);
-      dayNames.set(dayIndex, day);
-    }
-    const key = `${r.agent}|${r.model}|${dayIndex}|${r.speed}`;
-    let cur = byKey.get(key);
-    if (!cur) {
-      cur = { agent: r.agent, model: r.model, day, speed: r.speed, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
-      byKey.set(key, cur);
-    }
-    cur.input += r.input;
-    cur.output += r.output;
-    cur.cacheRead += r.cacheRead;
-    cur.cacheWrite += r.cacheWrite;
-    cur.cacheWrite1h += r.cacheWrite1h;
-  }
-  return [...byKey.values()];
-}
-
 /** The Cost tab's rows (per agent, model and UTC day) at the prices in force, each speed tier at its own rates. */
 function priceSlices(slices: readonly DaySlice[]): UsageTokenRow[] {
   const byKey = new Map<string, UsageTokenRow>();
@@ -106,20 +82,81 @@ function priceSlices(slices: readonly DaySlice[]): UsageTokenRow[] {
   return [...byKey.values()].sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : a.model.localeCompare(b.model)));
 }
 
-/** Rows summed per agent, model, UTC hour, cwd, session and speed: the usage ledger's input. */
-function historyOf(raw: RawRow[]): UsageRecord[] {
-  const byKey = new Map<string, UsageRecord>();
-  for (const r of raw) {
+/** What one walk over the de-duplicated rows yields (see {@link aggregate}). */
+interface Aggregates {
+  /** Token sums per agent, model, UTC day and speed: the Cost tab's rows are priced from these. */
+  slices: DaySlice[];
+  /** Rows summed per agent, model, UTC hour, cwd, session and speed: the usage ledger's input. */
+  history: UsageRecord[];
+  /** Claude subagent requests (rows with {@link RawRow.sub}), in row order. */
+  subagentRows: RawRow[];
+}
+
+/**
+ * Every parsed row, de-duplicated across files (first file by sorted path wins, so a partial rescan
+ * can't double-count a shared usage identity), summed once for all three consumers.
+ *
+ * A row without its own timestamp stays out of the history: its hour (the file's mtime) moves on
+ * every later write, and the ledger would keep each hour it was once seen in.
+ */
+function aggregate(files: ReadonlyMap<string, FileEntry>): Aggregates {
+  const seen = new Set<string>();
+  const dayNames = new Map<number, string>();
+  const slices: DaySlice[] = [];
+  const history: UsageRecord[] = [];
+  const subagentRows: RawRow[] = [];
+  // Rows come in runs of one agent, model, speed, cwd and session: the string-keyed lookups run once
+  // per run, and each row only looks up its day and hour (numbers) in the run's series.
+  const daySeries = new Map<string, Map<number, DaySlice>>();
+  const hourSeries = new Map<string, Map<number, UsageRecord>>();
+  let last: RawRow | undefined;
+  let days = new Map<number, DaySlice>();
+  let hours = new Map<number, UsageRecord>();
+  const add = (r: RawRow) => {
+    if (r.dedupId !== undefined) {
+      if (seen.has(r.dedupId)) return;
+      seen.add(r.dedupId);
+    }
+    if (r.sub !== undefined) subagentRows.push(r);
+
+    if (!last || r.agent !== last.agent || r.model !== last.model || r.speed !== last.speed || r.cwd !== last.cwd || r.session !== last.session) {
+      const dayKey = `${r.agent}|${r.model}|${r.speed}`;
+      let byDay = daySeries.get(dayKey);
+      if (!byDay) daySeries.set(dayKey, (byDay = new Map()));
+      // null and "" never meet (interned strings are never empty); NUL never occurs in a path or an id.
+      const hourKey = `${dayKey}\0${r.cwd ?? ""}\0${r.session ?? ""}`;
+      let byHour = hourSeries.get(hourKey);
+      if (!byHour) hourSeries.set(hourKey, (byHour = new Map()));
+      days = byDay;
+      hours = byHour;
+      last = r;
+    }
+
+    const dayIndex = Math.floor(r.ts / DAY_MS);
+    let slice = days.get(dayIndex);
+    if (!slice) {
+      let day = dayNames.get(dayIndex);
+      if (day === undefined) dayNames.set(dayIndex, (day = new Date(dayIndex * DAY_MS).toISOString().slice(0, 10)));
+      slice = { agent: r.agent, model: r.model, day, speed: r.speed, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
+      days.set(dayIndex, slice);
+      slices.push(slice);
+    }
+    slice.input += r.input;
+    slice.output += r.output;
+    slice.cacheRead += r.cacheRead;
+    slice.cacheWrite += r.cacheWrite;
+    slice.cacheWrite1h += r.cacheWrite1h;
+
+    if (r.undated) return;
     const hour = Math.floor(r.ts / HOUR_MS);
-    // null and "" never meet (interned strings are never empty); NUL never occurs in a path or an id.
-    const key = `${r.agent}|${r.model}|${hour}|${r.speed}\0${r.cwd ?? ""}\0${r.session ?? ""}`;
-    let rec = byKey.get(key);
+    let rec = hours.get(hour);
     if (!rec) {
       rec = {
         source: "transcripts", agent: r.agent, model: r.model, hour, cwd: r.cwd, session: r.session, speed: r.speed,
         input: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, output: 0, reasoning: 0, requests: 0, reportedCostUsd: 0, reportedRequests: 0
       };
-      byKey.set(key, rec);
+      hours.set(hour, rec);
+      history.push(rec);
     }
     rec.input += r.input;
     rec.cacheRead += r.cacheRead;
@@ -128,8 +165,13 @@ function historyOf(raw: RawRow[]): UsageRecord[] {
     rec.output += r.output;
     rec.reasoning += r.reasoning;
     rec.requests += 1;
+  };
+  for (const path of [...files.keys()].sort()) {
+    const entry = files.get(path)!;
+    for (const r of entry.rows) add(r);
+    for (const r of entry.tailRows) add(r);
   }
-  return [...byKey.values()];
+  return { slices, history, subagentRows };
 }
 
 async function walkJsonl(dir: string): Promise<string[]> {
@@ -151,10 +193,10 @@ async function walkJsonl(dir: string): Promise<string[]> {
   return out;
 }
 
-/** An event's time (epoch ms), else `fallbackMs` (the file's mtime). */
-function tsOf(timestamp: unknown, fallbackMs: number): number {
+/** An event's time (epoch ms), else `fallbackMs` (the file's mtime) and `undated`. */
+function tsOf(timestamp: unknown, fallbackMs: number): Pick<RawRow, "ts" | "undated"> {
   const t = timestamp ? new Date(timestamp as string).getTime() : Number.NaN;
-  return Number.isNaN(t) ? fallbackMs : t;
+  return Number.isNaN(t) ? { ts: fallbackMs, undated: true } : { ts: t };
 }
 
 /** A file's string pool: one instance per distinct session or cwd, however many rows carry it. */
@@ -197,14 +239,16 @@ function parseClaudeFile(text: string, mtimeMs: number, path: string, strings: S
     const requestId = obj?.requestId;
     const dedupId =
       typeof messageId === "string" && typeof requestId === "string" ? `${messageId}:${requestId}` : undefined;
-    const ts = tsOf(obj?.timestamp, mtimeMs);
+    const when = tsOf(obj?.timestamp, mtimeMs);
     const session = intern(strings, obj?.sessionId);
     const cwd = intern(strings, obj?.cwd);
     const speed: UsageSpeed = u.speed === "fast" ? "fast" : "standard";
     const agentId = typeof obj.agentId === "string" && obj.agentId ? obj.agentId : undefined;
     const subagent = obj.isSidechain === true || agentId !== undefined || inSubagentsDir;
     const sub = subagent && Number.isFinite(Date.parse(obj.timestamp)) ? (agentId ?? path) : undefined;
-    const push = (rowModel: string, usage: any, id: string | undefined) => {
+    // `sub` marks the subagent's own request only: an advisor call runs on another model with its
+    // own cache, so it says nothing of the subagent's cache lifetime.
+    const push = (rowModel: string, usage: any, id: string | undefined, advisor: boolean) => {
       const input = usage.input_tokens ?? 0;
       const output = usage.output_tokens ?? 0;
       const cacheRead = usage.cache_read_input_tokens ?? 0;
@@ -214,7 +258,7 @@ function parseClaudeFile(text: string, mtimeMs: number, path: string, strings: S
       const row: RawRow = {
         agent: "claude",
         model: rowModel,
-        ts,
+        ...when,
         session,
         cwd,
         speed,
@@ -226,15 +270,15 @@ function parseClaudeFile(text: string, mtimeMs: number, path: string, strings: S
         reasoning: 0,
         dedupId: id
       };
-      if (sub !== undefined) row.sub = sub;
+      if (sub !== undefined && !advisor) row.sub = sub;
       rows.push(row);
     };
-    push(model, u, dedupId);
+    push(model, u, dedupId, false);
     if (!Array.isArray(u.iterations)) continue;
     u.iterations.forEach((it: any, i: number) => {
       if (it === null || typeof it !== "object" || it.type !== "advisor_message") return;
       if (typeof it.model !== "string" || it.model === "" || it.model === SYNTHETIC_MODEL) return;
-      push(it.model, it, dedupId === undefined ? undefined : `${dedupId}:advisor:${i}`);
+      push(it.model, it, dedupId === undefined ? undefined : `${dedupId}:advisor:${i}`, true);
     });
   }
   return rows;
@@ -351,7 +395,7 @@ function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState, s
     rows.push({
       agent: "codex",
       model: state.model,
-      ts: tsOf(obj?.timestamp, mtimeMs),
+      ...tsOf(obj?.timestamp, mtimeMs),
       session: state.session,
       cwd: state.cwd,
       speed: state.speed,
@@ -392,8 +436,10 @@ export class UsageTokensScanner implements UsageRecordSource {
   private slices: DaySlice[] = [];
   /** The `usagePricingRevision()` {@link aggregateCache} was priced at (-1: not yet). */
   private pricedRevision = -1;
-  /** {@link historyRecords} of the last rebuild, built on first ask. */
-  private historyCache: UsageRecord[] | null = null;
+  /** The ledger's records of the last rebuild. */
+  private history: readonly UsageRecord[] = [];
+  /** The subagent requests of the last rebuild. */
+  private subagentRows: readonly RawRow[] = [];
   /** Stays dirty after a failed refresh until totals are successfully rebuilt. */
   private aggregateDirty = true;
   /** Per-file parse cache keyed by absolute path. Recompute only re-reads files
@@ -447,7 +493,7 @@ export class UsageTokensScanner implements UsageRecordSource {
   subagentRequests(sinceMs: number): SubagentRequest[] | null {
     if (!this.scanned) return null;
     const out: SubagentRequest[] = [];
-    for (const r of this.dedupedRows()) {
+    for (const r of this.subagentRows) {
       if (r.sub === undefined || r.ts < sinceMs) continue;
       out.push({ sub: r.sub, ts: r.ts, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite, cacheWrite1h: r.cacheWrite1h });
     }
@@ -455,10 +501,8 @@ export class UsageTokensScanner implements UsageRecordSource {
   }
 
   /** Hour-aggregated, de-duplicated records for the usage ledger; null until the first scan. */
-  historyRecords(): UsageRecord[] | null {
-    if (!this.scanned) return null;
-    this.historyCache ??= historyOf(this.dedupedRows());
-    return this.historyCache.map((record) => ({ ...record }));
+  historyRecords(): readonly UsageRecord[] | null {
+    return this.scanned ? this.history : null;
   }
 
   /** File-watcher entry point: rate-limited (leading run + one coalesced
@@ -543,8 +587,8 @@ export class UsageTokensScanner implements UsageRecordSource {
     // An unchanged transcript set has the same dedup winners and totals. Keep
     // the fresh scan timestamp without revisiting every historical turn.
     if (this.aggregateDirty) {
-      this.slices = sliceRows(this.dedupedRows());
-      this.historyCache = null;
+      // One walk for the day sums, the ledger's records and the subagent requests.
+      ({ slices: this.slices, history: this.history, subagentRows: this.subagentRows } = aggregate(this.fileCache));
       this.pricedRevision = -1;
       this.aggregateDirty = false;
     }
@@ -563,24 +607,6 @@ export class UsageTokensScanner implements UsageRecordSource {
   private async persist(): Promise<void> {
     await mkdir(dirname(this.opts.cacheFile), { recursive: true });
     await writeFile(this.opts.cacheFile, JSON.stringify(this.cache), { mode: 0o600 });
-  }
-
-  /** Every parsed row, with deterministic cross-file dedup (first file wins by
-   *  sorted path) so a partial rescan can't double-count a shared usage identity. */
-  private dedupedRows(): RawRow[] {
-    const raw: RawRow[] = [];
-    const seen = new Set<string>();
-    for (const path of [...this.fileCache.keys()].sort()) {
-      const entry = this.fileCache.get(path)!;
-      for (const r of [...entry.rows, ...entry.tailRows]) {
-        if (r.dedupId !== undefined) {
-          if (seen.has(r.dedupId)) continue;
-          seen.add(r.dedupId);
-        }
-        raw.push(r);
-      }
-    }
-    return raw;
   }
 
   /** Parse a changed file into its cache entry. Append-only growth (size grew)
