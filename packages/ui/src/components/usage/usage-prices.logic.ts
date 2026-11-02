@@ -33,7 +33,7 @@ export function isRateEdit(text: string): boolean {
 }
 
 /** A rate cell's value: blank, a finite non-negative number (`,` read as `.`), or invalid. */
-export function parseRate(text: string): number | "blank" | "invalid" {
+function parseRate(text: string): number | "blank" | "invalid" {
   const trimmed = text.trim().replace(",", ".");
   if (trimmed === "") return "blank";
   if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(trimmed)) return "invalid";
@@ -42,7 +42,7 @@ export function parseRate(text: string): number | "blank" | "invalid" {
 }
 
 /** A saved rate as cell text, never in exponent form (so it passes {@link isRateEdit}). */
-export function formatRate(value: number | undefined): string {
+function formatRate(value: number | undefined): string {
   if (value === undefined) return "";
   return value.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 });
 }
@@ -81,9 +81,18 @@ export function newPriceRow(model = ""): PriceRow {
 }
 
 /**
+ * What may follow `<key>-` for an id to still be that key: dash-separated version and date
+ * tokens only — all-digit tokens (so `20260115` and `2025-09-29`) and release tags. Anything
+ * else names another model (`gpt-5-mini`, `o3-pro`, `gemini-2.5-flash-lite`), which the
+ * daemon does not price as its prefix.
+ */
+const VERSION_SUFFIX = /^(?:\d+|preview|latest|exp|experimental|beta|reasoning|non-reasoning)(?:-(?:\d+|preview|latest|exp|experimental|beta|reasoning|non-reasoning))*$/;
+
+/**
  * The built-in rates the daemon would price `model` at, resolved as it does: drop a trailing
  * `[…]` tag and lowercase, then the exact key, else the longest key the id starts with followed
- * by `-`; a provider-qualified id (`anthropic/…`) retries on its last segment.
+ * by `-` and only version/date tokens ({@link VERSION_SUFFIX}); a provider-qualified id
+ * (`anthropic/…`) retries on its last segment.
  */
 export function builtinRatesFor(model: string, builtin: readonly UsageBuiltinPrice[]): UsageModelRates | null {
   const byKey = new Map(builtin.map((entry) => [entry.model.toLowerCase(), entry.rates]));
@@ -93,7 +102,8 @@ export function builtinRatesFor(model: string, builtin: readonly UsageBuiltinPri
     if (exact) return exact;
     let best: string | null = null;
     for (const key of byKey.keys()) {
-      if (id.startsWith(`${key}-`) && (best === null || key.length > best.length)) best = key;
+      if (!id.startsWith(`${key}-`) || !VERSION_SUFFIX.test(id.slice(key.length + 1))) continue;
+      if (best === null || key.length > best.length) best = key;
     }
     return best === null ? null : (byKey.get(best) ?? null);
   };
@@ -186,7 +196,8 @@ export function priceDraftResult(rows: readonly PriceRow[], saved: SavedPrices):
   const owners = new Map<string, string>();
   const targets: { row: PriceRow; target: RowTarget }[] = [];
 
-  for (const row of rows) {
+  // Saved rows own their model ids, so a new row naming one is the duplicate wherever it sits.
+  for (const row of [...rows.filter((r) => !r.isNew), ...rows.filter((r) => r.isNew)]) {
     const model = row.model.trim();
     if (model === "") {
       fail(row, "Enter a model ID.", true);
@@ -197,7 +208,7 @@ export function priceDraftResult(rows: readonly PriceRow[], saved: SavedPrices):
       continue;
     }
     if (owners.has(model)) {
-      // The row that was there first keeps the model; the later one is the duplicate.
+      // A saved row, else the earlier new row, keeps the model; this one is the duplicate.
       fail(row, "This model already has a row.");
       continue;
     }
