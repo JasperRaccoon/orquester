@@ -12,7 +12,7 @@ import type {
   UsageTokenTotals
 } from "@orquester/api";
 
-import { processedTokens, sortAgents } from "../../lib/usage-history-format";
+import { processedTokens, sortAgents, sumCostFigures, type CostFigure, type UnpricedPart } from "../../lib/usage-history-format";
 import type { UsageMetric } from "./types";
 
 /** Reported or unsplit cost below this is rounding noise, not an "Other" slice. */
@@ -41,6 +41,8 @@ export interface UsageSummary {
   cacheSavingsUsd: number;
   costByType: UsageCostByType;
   costBySpeed: UsageCostBySpeed;
+  /** What the estimated fast/ultrafast cells cost over the same tokens at standard rates. */
+  speedPremiumUsd: number;
 }
 
 export interface UsageTotals extends UsageSummary {
@@ -66,8 +68,10 @@ export interface UsageAgentRow {
 
 export interface UsageSeries {
   agent: string;
-  /** One value per period (zero-filled), in the metric. */
+  /** One value per period (zero-filled), in the metric; on cost, the known part. */
   values: number[];
+  /** On cost, per period: how much of it has no known price (unknown is not $0). */
+  unpriced?: UnpricedPart[];
 }
 
 export interface UsageModelRow {
@@ -100,7 +104,7 @@ export interface UsageProjectRow {
   project: string;
   workspace: string | null;
   name: string;
-  /** Distinct sessions over the range (all agents: the response has no per-agent split). */
+  /** Distinct sessions of the visible agents over the range. */
   sessions: number;
   processed: number;
   costUsd: number | null;
@@ -139,6 +143,8 @@ export interface UsageModelDetail extends UsageSummary {
   /** Its trend: the metric asked for, or tokens when its cost is unknown. */
   chartMetric: UsageMetric;
   values: number[];
+  /** On a cost trend, per period: how much of it has no known price. */
+  unpriced?: UnpricedPart[];
 }
 
 function emptyTokens(): UsageTokenTotals {
@@ -184,6 +190,7 @@ function summarize(buckets: readonly UsageHistoryBucket[]): UsageSummary {
   let split = 0;
   const costByType: UsageCostByType = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, other: 0 };
   const costBySpeed: UsageCostBySpeed = { standard: 0, fast: 0, ultrafast: 0 };
+  let speedPremiumUsd = 0;
   for (const b of buckets) {
     addTokens(tokens, b.tokens);
     cost.add(b.costUsd, processedTokens(b.tokens));
@@ -197,6 +204,9 @@ function summarize(buckets: readonly UsageHistoryBucket[]): UsageSummary {
       split += b.cost.input + b.cost.cacheRead + b.cost.cacheWrite + b.cost.output;
     }
     if (b.costUsd !== null) costBySpeed[b.speed] = (costBySpeed[b.speed] ?? 0) + b.costUsd;
+    if (b.speed !== "standard" && b.costUsd !== null && typeof b.standardCostUsd === "number") {
+      speedPremiumUsd += b.costUsd - b.standardCostUsd;
+    }
   }
   const costUsd = cost.value;
   const unsplit = (costUsd ?? 0) - split;
@@ -210,7 +220,8 @@ function summarize(buckets: readonly UsageHistoryBucket[]): UsageSummary {
     unpricedShare: processed > 0 ? unpricedTokens / processed : 0,
     cacheSavingsUsd,
     costByType,
-    costBySpeed
+    costBySpeed,
+    speedPremiumUsd
   };
 }
 
@@ -238,10 +249,24 @@ function visibleBuckets(data: UsageHistoryResponse, hiddenAgents: readonly strin
   return data.buckets.filter((b) => !hidden.has(b.agent) && b.period >= 0 && b.period < data.periods.length);
 }
 
-function seriesValues(buckets: readonly UsageHistoryBucket[], periods: number, metric: UsageMetric): number[] {
+/** A bucket's cost as a figure: unknown when unpriced, marked when part of its tokens are. */
+function costFigure(b: UsageHistoryBucket): CostFigure {
+  if (b.costUsd === null) return { usd: null, unpriced: processedTokens(b.tokens) > 0 ? "all" : "none" };
+  return { usd: b.costUsd, unpriced: b.unpricedTokens > 0 ? "some" : "none" };
+}
+
+/** Per period (zero-filled): the metric's values and, on cost, how much of each has no known price. */
+function seriesValues(
+  buckets: readonly UsageHistoryBucket[],
+  periods: number,
+  metric: UsageMetric
+): { values: number[]; unpriced?: UnpricedPart[] } {
   const values = new Array<number>(periods).fill(0);
   for (const b of buckets) values[b.period] = (values[b.period] ?? 0) + metricValue(metric, b);
-  return values;
+  if (metric !== "cost") return { values };
+  const byPeriod = groupBy(buckets, (b) => String(b.period));
+  const unpriced = values.map((_, i) => sumCostFigures((byPeriod.get(String(i)) ?? []).map(costFigure)).unpriced);
+  return { values, unpriced };
 }
 
 /** Everything the Cost / Tokens tabs show, for `metric`, without `hiddenAgents`. */
@@ -297,7 +322,7 @@ export function deriveUsageView(
 
   const series: UsageSeries[] = agents.map((agent) => ({
     agent,
-    values: seriesValues(byAgent.get(agent) ?? [], periodCount, metric)
+    ...seriesValues(byAgent.get(agent) ?? [], periodCount, metric)
   }));
 
   const models: UsageModelRow[] = [];
@@ -344,8 +369,22 @@ export function deriveUsageView(
   return { agents, totals, agentRows, series, models, periodRows, projects };
 }
 
+/** Distinct sessions per project of the visible agents (a session belongs to one agent, so they add up). */
+function projectSessions(data: UsageHistoryResponse, hidden: ReadonlySet<string>): Record<string, number> {
+  if (hidden.size === 0) return data.sessions.byProject;
+  const out: Record<string, number> = {};
+  for (const [key, count] of Object.entries(data.sessions.byProjectAgent ?? {})) {
+    const colon = key.indexOf(":");
+    if (colon < 0 || hidden.has(key.slice(0, colon))) continue;
+    const project = key.slice(colon + 1);
+    out[project] = (out[project] ?? 0) + count;
+  }
+  return out;
+}
+
 function deriveProjects(data: UsageHistoryResponse, metric: UsageMetric, hidden: ReadonlySet<string>): UsageProjectRow[] {
   const visible = data.projectBuckets.filter((b) => !hidden.has(b.agent));
+  const sessions = projectSessions(data, hidden);
   const rows: Omit<UsageProjectRow, "share">[] = [];
   const total = new CostSum();
   let totalProcessed = 0;
@@ -367,7 +406,7 @@ function deriveProjects(data: UsageHistoryResponse, metric: UsageMetric, hidden:
       project,
       workspace: slash > 0 ? project.slice(0, slash) : null,
       name: slash > 0 ? project.slice(slash + 1) : project,
-      sessions: data.sessions.byProject[project] ?? 0,
+      sessions: sessions[project] ?? 0,
       processed,
       costUsd: cost.value,
       unpricedTokens
@@ -415,6 +454,6 @@ export function deriveModelDetail(
     perMillionUsd: s.costUsd === null || priced <= 0 ? null : (s.costUsd / priced) * 1e6,
     cacheHitRate: input > 0 ? s.tokens.cacheRead / input : null,
     chartMetric,
-    values: seriesValues(list, data.periods.length, chartMetric)
+    ...seriesValues(list, data.periods.length, chartMetric)
   };
 }

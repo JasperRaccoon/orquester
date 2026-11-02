@@ -8,7 +8,6 @@ import {
   draftFromPrices,
   isRateEdit,
   newPriceRow,
-  parseRate,
   priceDraftResult,
   ratePlaceholder,
   type PriceRow
@@ -27,13 +26,13 @@ test("a rate cell takes digits with one decimal separator and parses finite non-
   for (const ok of ["", "4", "4.", "0.075", ".5", "3,5"]) assert.equal(isRateEdit(ok), true, ok);
   for (const bad of ["-1", "1.2.3", "1,2.3", "1e3", "abc", "1 2"]) assert.equal(isRateEdit(bad), false, bad);
 
-  assert.equal(parseRate(" 3,5 "), 3.5);
-  assert.equal(parseRate("0"), 0);
-  assert.equal(parseRate(".5"), 0.5);
-  assert.equal(parseRate("   "), "blank");
-  assert.equal(parseRate("-1"), "invalid");
-  assert.equal(parseRate("Infinity"), "invalid");
-  assert.equal(parseRate("1e400"), "invalid");
+  const priced = (rates: Partial<PriceRow["rates"]>) => {
+    const row = { ...newPriceRow("glm-5"), rates: { ...newPriceRow().rates, input: "1", output: "1", ...rates } };
+    const result = priceDraftResult([row], { overrides: {}, aliases: {} });
+    return result.errors[row.key]?.message ?? result.patch.overrides?.["glm-5"];
+  };
+  assert.deepEqual(priced({ input: " 3,5 ", output: "0", cacheRead: ".5", cacheWrite5m: "   " }), { input: 3.5, output: 0, cacheRead: 0.5 });
+  for (const bad of ["-1", "Infinity", "1e400"]) assert.equal(priced({ cacheRead: bad }), "Use non-negative numbers for prices.", bad);
 });
 
 test("an untouched draft sends nothing, and edits back to the saved value are dropped", () => {
@@ -65,9 +64,11 @@ test("a row asks for an id, a unique model, Input and Output unless mapped, and 
   const self = { ...newPriceRow("kimi-k3"), mapTo: "kimi-k3" };
   const mapped = { ...newPriceRow("kimi-k2"), mapTo: "gpt-6-astra" };
 
-  const { errors } = priceDraftResult([...draftFromPrices(saved), blank, duplicate, unpriced, self, mapped], saved);
+  // New rows go above the saved ones; the saved row still owns its model id.
+  const { errors } = priceDraftResult([duplicate, ...draftFromPrices(saved), blank, unpriced, self, mapped], saved);
   assert.deepEqual(errors[blank.key], { message: "Enter a model ID.", missing: true });
   assert.equal(errors[duplicate.key]?.message, "This model already has a row.");
+  assert.equal(errors["saved:gpt-6-astra"], undefined);
   assert.equal(errors[unpriced.key]?.missing, true);
   assert.equal(errors[self.key]?.message, "Map to a different model.");
   assert.equal(errors[mapped.key], undefined);
@@ -95,6 +96,21 @@ test("built-in rates resolve like the daemon's lookup, which the placeholders sh
   assert.equal(builtinRatesFor("openai/gpt-5-preview", builtin)?.input, 1.25);
   assert.equal(builtinRatesFor("gpt-50", builtin), null);
   assert.equal(builtinRatesFor("opus", builtin), null);
+
+  // Only version and date tokens may follow the key: anything else is another model.
+  const more: UsageBuiltinPrice[] = [
+    ...builtin,
+    { model: "o3", rates: { input: 2, output: 8 } },
+    { model: "gemini-2.5-flash", rates: { input: 0.3, output: 2.5 } },
+    { model: "grok-4-fast", rates: { input: 0.2, output: 0.5 } }
+  ];
+  for (const id of ["gpt-5-2025-08-07", "gpt-5-latest", "gemini-2.5-flash-preview-09-2025", "grok-4-fast-non-reasoning", "o3-exp-beta"]) {
+    assert.notEqual(builtinRatesFor(id, more), null, id);
+  }
+  for (const id of ["gpt-5-mini", "o3-pro", "gemini-2.5-flash-lite", "gpt-5-mini-2025-08-07"]) {
+    assert.equal(builtinRatesFor(id, more), null, id);
+    assert.equal(ratePlaceholder("input", builtinRatesFor(id, more)), "Automatic", id);
+  }
 
   const gpt5 = builtinRatesFor("gpt-5", builtin);
   assert.equal(ratePlaceholder("input", gpt5), "1.25");

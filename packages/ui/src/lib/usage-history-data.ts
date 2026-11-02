@@ -3,8 +3,7 @@
  * answers, kept on screen while a newer one loads, with which request is current
  * so a late answer (for a range left, or a daemon left) never replaces newer data.
  *
- * The pure part — {@link usageHistoryReducer} and its selectors — is what the
- * tests drive; {@link useUsageHistory} wires it to the API client, the price
+ * {@link useUsageHistory} wires a small reducer to the API client, the price
  * editor's "prices changed" signal and the 60 s poll.
  */
 
@@ -16,8 +15,8 @@ import { usePollWhileActive } from "../hooks/use-poll-while-active";
 import { ApiError, type ApiClient } from "./api-client";
 import { onUsagePricesChanged } from "./usage-prices-events";
 
-/** An answer older than this (or one taken mid-scan) is shown, then refetched with `refresh=1`. */
-export const USAGE_HISTORY_STALE_MS = 60_000;
+/** The unforced refetch while the view is visible. */
+const POLL_MS = 60_000;
 
 export interface UsageHistoryRequest {
   id: number;
@@ -37,16 +36,16 @@ export interface UsageHistoryState {
   error: "too-old" | "failed" | null;
 }
 
-export type UsageHistoryAction =
+type UsageHistoryAction =
   | { type: "request"; request: UsageHistoryRequest }
   | { type: "answer"; id: number; data: UsageHistoryResponse }
   | { type: "fail"; id: number; status: number | null }
   /** Another daemon: nothing of the previous one's may show. */
   | { type: "reset" };
 
-export const initialUsageHistoryState: UsageHistoryState = { data: null, dataForced: false, pending: null, error: null };
+const initialState: UsageHistoryState = { data: null, dataForced: false, pending: null, error: null };
 
-export function usageHistoryReducer(state: UsageHistoryState, action: UsageHistoryAction): UsageHistoryState {
+function reducer(state: UsageHistoryState, action: UsageHistoryAction): UsageHistoryState {
   switch (action.type) {
     case "request":
       return { ...state, pending: action.request };
@@ -57,20 +56,18 @@ export function usageHistoryReducer(state: UsageHistoryState, action: UsageHisto
       if (state.pending?.id !== action.id) return state;
       return { ...state, pending: null, error: action.status === 404 ? "too-old" : "failed" };
     case "reset":
-      return initialUsageHistoryState;
+      return initialState;
   }
 }
 
-/** The answer was taken mid-scan or is over a minute old. */
-export function isUsageHistoryStale(data: UsageHistoryResponse, now: number): boolean {
-  if (data.scanning) return true;
-  const asOf = Date.parse(data.asOf);
-  return Number.isFinite(asOf) && now - asOf > USAGE_HISTORY_STALE_MS;
-}
-
-/** Refetch with `refresh=1` now: the shown answer is stale and no forced request has answered it yet. */
-export function needsForcedRefetch(state: UsageHistoryState, now: number): boolean {
-  return state.data !== null && state.pending === null && !state.dataForced && state.error === null && isUsageHistoryStale(state.data, now);
+/**
+ * Refetch with `refresh=1` now: the shown answer was taken mid-scan and no forced request
+ * has answered it yet. Only the daemon's own `scanning` flag counts — its `asOf` is the
+ * daemon's clock, and comparing it with this device's would force a rescan on every poll
+ * whenever the two clocks disagree.
+ */
+function needsForcedRefetch(state: UsageHistoryState): boolean {
+  return state.data !== null && state.pending === null && !state.dataForced && state.error === null && state.data.scanning;
 }
 
 /** Whether the shown figures are out of date for `range` while a request runs (they dim). */
@@ -102,7 +99,7 @@ export function useUsageHistory(
   timeZone: string,
   poll: boolean
 ): UsageHistoryHandle {
-  const [state, dispatch] = useReducer(usageHistoryReducer, initialUsageHistoryState);
+  const [state, dispatch] = useReducer(reducer, initialState);
   const seq = useRef(0);
   const inFlight = useRef<AbortController | null>(null);
   const pendingRef = useRef(state.pending);
@@ -142,7 +139,7 @@ export function useUsageHistory(
   useEffect(() => onUsagePricesChanged(() => refetch(false)), [refetch]);
 
   useEffect(() => {
-    if (needsForcedRefetch(state, Date.now())) refetch(true);
+    if (needsForcedRefetch(state)) refetch(true);
   }, [state, refetch]);
 
   usePollWhileActive(
@@ -150,7 +147,7 @@ export function useUsageHistory(
     () => {
       if (pendingRef.current === null) refetch(false);
     },
-    USAGE_HISTORY_STALE_MS
+    POLL_MS
   );
 
   return { state, refetch };

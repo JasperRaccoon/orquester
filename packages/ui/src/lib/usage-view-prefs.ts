@@ -17,7 +17,7 @@ export interface UsageViewPrefs {
 
 const STORAGE_KEY = "orquester:usage-view";
 
-export const USAGE_VIEW_PREFS_DEFAULT: Readonly<UsageViewPrefs> = Object.freeze({
+const USAGE_VIEW_PREFS_DEFAULT: Readonly<UsageViewPrefs> = Object.freeze({
   tab: "cost",
   range: "30d",
   hiddenAgents: [] as string[],

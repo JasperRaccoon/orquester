@@ -2,7 +2,14 @@ import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from "
 
 import { getRegistryIcon } from "../../icons/registry-icons";
 import { cn } from "../../lib/cn";
-import { agentColor, formatPeriod, formatPeriodLong } from "../../lib/usage-history-format";
+import {
+  agentColor,
+  formatPeriod,
+  formatPeriodLong,
+  PARTLY_UNPRICED_NOTE,
+  sumCostFigures,
+  type CostFigure
+} from "../../lib/usage-history-format";
 import { labelForAgent } from "../topbar/usage-format";
 import {
   buildChart,
@@ -22,6 +29,8 @@ export interface UsageChartProps {
   /** One per agent, in the order the tooltip lists them. */
   series: readonly UsageSeries[];
   format: (value: number) => string;
+  /** A y-axis label given the tick step (its decimals follow the step); `format` when absent. */
+  formatTick?: (value: number, step: number) => string;
   ariaLabel: string;
   /** The plot's height class (the y gutter follows it). */
   heightClass?: string;
@@ -37,6 +46,7 @@ export const UsageChart: React.FC<UsageChartProps> = ({
   timeZone,
   series,
   format,
+  formatTick,
   ariaLabel,
   heightClass = "h-56"
 }) => {
@@ -63,7 +73,7 @@ export const UsageChart: React.FC<UsageChartProps> = ({
               className="absolute right-0 -translate-y-1/2 whitespace-nowrap text-[10px] tabular-nums text-neutral-500"
               style={{ top: `${(valueToY(tick, scale.max) / CHART_HEIGHT) * 100}%` }}
             >
-              {tick === 0 ? "0" : format(tick)}
+              {tick === 0 ? "0" : formatTick ? formatTick(tick, scale.step) : format(tick)}
             </span>
           ))}
         </div>
@@ -184,7 +194,22 @@ const ChartPlot: React.FC<{
 
   const hovered = hover === null ? undefined : periods[hover];
   const hoverX = hover === null ? 0 : periods.length < 2 ? CHART_WIDTH / 2 : hover * stepX;
-  const total = hover === null ? 0 : series.reduce((sum, s) => sum + (s.values[hover] ?? 0), 0);
+  // On cost, a period whose usage has no known price reads "Unpriced", and a partly priced one "+".
+  const figureAt = (s: UsageSeries, i: number): CostFigure => {
+    const unpriced = s.unpriced?.[i] ?? "none";
+    return { usd: unpriced === "all" ? null : (s.values[i] ?? 0), unpriced };
+  };
+  const readout = (figure: CostFigure) => {
+    if (figure.unpriced === "all") return <span className="tabular-nums text-neutral-500">Unpriced</span>;
+    const partly = figure.unpriced === "some";
+    return (
+      <span className="tabular-nums text-neutral-100" title={partly ? PARTLY_UNPRICED_NOTE : undefined}>
+        {format(figure.usd ?? 0)}
+        {partly ? "+" : ""}
+      </span>
+    );
+  };
+  const total = hover === null ? null : sumCostFigures(series.map((s) => figureAt(s, hover)));
 
   return (
     <div
@@ -228,13 +253,13 @@ const ChartPlot: React.FC<{
                 <span className="shrink-0">{getRegistryIcon("agent", s.agent, 12)}</span>
                 <span className="truncate">{labelForAgent(s.agent)}</span>
               </span>
-              <span className="tabular-nums text-neutral-100">{format(s.values[hover] ?? 0)}</span>
+              {readout(figureAt(s, hover))}
             </div>
           ))}
-          {series.length > 1 ? (
+          {series.length > 1 && total ? (
             <div className="mt-1 flex items-center justify-between gap-4 border-t border-neutral-800 pt-1">
               <span className="text-neutral-400">Total</span>
-              <span className="tabular-nums text-neutral-100">{format(total)}</span>
+              {readout(total)}
             </div>
           ) : null}
         </div>

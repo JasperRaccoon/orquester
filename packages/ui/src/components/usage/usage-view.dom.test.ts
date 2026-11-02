@@ -12,7 +12,7 @@ import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
-import type { SessionSummary, UsageHistoryResponse, UsageResponse } from "@orquester/api";
+import type { SessionSummary, UsageHistoryResponse, UsagePricesResponse, UsageResponse } from "@orquester/api";
 
 import type { ApiClient } from "../../lib/api-client";
 
@@ -70,6 +70,8 @@ after(() => {
 });
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+/** A closed Modal decides where focus goes a tick after it closes: let that tick run. */
+const modalTick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 function answer(range: string, over: Partial<UsageHistoryResponse> = {}): UsageHistoryResponse {
   return {
@@ -96,20 +98,30 @@ interface FakeApi {
   calls: string[];
   /** The next history answers (or errors), in order; the last one repeats. */
   answers: Array<UsageHistoryResponse | Error>;
+  /** `force` per quota (`/api/usage`) request. */
+  usageCalls: boolean[];
+  /** Answers the price editor's pending `/api/usage/prices` request. */
+  answerPrices: (prices: UsagePricesResponse) => void;
 }
 
 function fakeApi(answers: FakeApi["answers"] = []): FakeApi & ApiClient {
   const fake: FakeApi & Record<string, unknown> = {
     calls: [],
     answers,
+    usageCalls: [],
+    answerPrices: () => {},
     connection: { id: "c1" },
+    getUsagePrices() {
+      return new Promise<UsagePricesResponse>((resolve) => (fake.answerPrices = resolve));
+    },
     async getUsageHistory(range: string, _timeZone: string, force?: boolean) {
       fake.calls.push(`${range}:${force === true}`);
       const next = fake.answers.length > 1 ? fake.answers.shift()! : (fake.answers[0] ?? answer(range));
       if (next instanceof Error) throw next;
       return { ...next, range };
     },
-    async getUsage(): Promise<UsageResponse> {
+    async getUsage(force?: boolean): Promise<UsageResponse> {
+      fake.usageCalls.push(force === true);
       return { agents: [] };
     },
     async getUsageTokens() {
@@ -259,11 +271,13 @@ describe("the Usage view", () => {
     assert.deepEqual(api.calls, ["7d:false"]);
     assert.equal(document.querySelector('[role="radiogroup"][aria-label="Period"]')?.closest('[aria-hidden="true"]') != null, true, "no period on Limits");
 
-    await press({ key: "@", code: "Digit2", ctrlKey: true, shiftKey: true });
+    await press({ key: "2" });
     assert.deepEqual(api.calls, ["7d:false"], "ranges do nothing on Limits");
     await press({ key: "c" });
     assert.equal(checkedIn("Usage tab"), "Cost");
-    await press({ key: "$", code: "Digit4", ctrlKey: true, shiftKey: true });
+    await press({ key: "3", metaKey: true, shiftKey: true });
+    assert.equal(checkedIn("Period"), "7d", "⌘⇧3 is the system's screenshot");
+    await press({ key: "4" });
     assert.equal(checkedIn("Period"), "90d");
     assert.equal(api.calls.at(-1), "90d:false");
 
@@ -276,6 +290,58 @@ describe("the Usage view", () => {
     // Asked again while it shows (the popover's link): the view moves to that tab.
     await act(async () => store().openUsageView("limits"));
     assert.equal(checkedIn("Usage tab"), "Limits");
+  });
+
+  it("entering Limits forces a quota read only when the snapshot arrived over a minute ago", async () => {
+    const api = fakeApi();
+    useAppStore.setState({ api, activeConnectionId: "c1", usage: { agents: [] }, usageReceivedAt: Date.now() });
+    store().openUsageView("limits");
+    await render(createElement(UsageView));
+    assert.equal(checkedIn("Usage tab"), "Limits");
+    assert.deepEqual(api.usageCalls, [], "a snapshot this fresh shows as is");
+
+    await press({ key: "c" });
+    useAppStore.setState({ usageReceivedAt: Date.now() - 61_000 });
+    await press({ key: "l" });
+    assert.deepEqual(api.usageCalls, [true]);
+  });
+
+  it("Set price moves focus into the price editor while it loads, and its close lands on the model's row", async () => {
+    const unpriced = {
+      period: 1,
+      agent: "codex",
+      model: "gpt-6-mystery",
+      speed: "standard" as const,
+      tokens: { input: 5000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, output: 0, reasoning: 0 },
+      requests: 1,
+      costUsd: null,
+      cost: null,
+      costSource: "unpriced" as const,
+      cacheSavingsUsd: 0,
+      unpricedTokens: 5000
+    };
+    const api = fakeApi([answer("30d", { buckets: [unpriced] })]);
+    useAppStore.setState({ api, activeConnectionId: "c1" });
+    await render(createElement(UsageView));
+    const row = document.querySelector<HTMLButtonElement>('[data-usage-model="gpt-6-mystery"]')!;
+    await click(row);
+    await click(buttonNamed("Set price")!);
+    await act(modalTick);
+
+    const editor = () => [...document.querySelectorAll('[role="dialog"]')].find((d) => d.textContent?.includes("Model prices"));
+    assert.equal(document.querySelectorAll('[role="dialog"]').length, 1, "the model dialog closed");
+    assert.ok(editor()?.contains(document.activeElement), "focus is in the editor while its prices load");
+
+    await act(async () => {
+      api.answerPrices({ currency: "USD", unit: "per_million_tokens", builtin: [], overrides: {}, aliases: {}, seenModels: [] });
+      await settle();
+    });
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "Input price for gpt-6-mystery");
+
+    await click(editor()!.querySelector('button[aria-label="Close"]')!);
+    await act(modalTick);
+    assert.equal(editor(), undefined);
+    assert.equal(document.activeElement, row, "back on the model's row, not <body>");
   });
 
   it("says when the daemon is too old, and offers a retry that recovers after a failure", async () => {

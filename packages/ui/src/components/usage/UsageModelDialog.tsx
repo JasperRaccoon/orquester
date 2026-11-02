@@ -1,12 +1,12 @@
 import React from "react";
 
 import { getRegistryIcon } from "../../icons/registry-icons";
-import { formatCount, formatPercent, formatTokens, formatUsd } from "../../lib/usage-history-format";
+import { formatCount, formatPercent, formatTokens, formatUsd, formatUsdTick } from "../../lib/usage-history-format";
 import { Button } from "../ui/button";
 import { Modal, ModalCloseButton } from "../ui/modal";
 import { labelForAgent } from "../topbar/usage-format";
 import { UsageChart } from "./UsageChart";
-import { costTypeSegments, speedCostSegments, tokenTypeSegments, UsageShareBar } from "./UsageShareBar";
+import { costTypeSegments, speedCostSegments, speedPremiumAside, tokenTypeSegments, UsageShareBar } from "./UsageShareBar";
 import type { UsageModelDetail } from "./usage-view.logic";
 
 /** One model's drill-down: its figures, its own trend, and how its cost and tokens split. */
@@ -87,8 +87,9 @@ const ModelDialogBody: React.FC<{
             periods={periods}
             resolution={resolution}
             timeZone={timeZone}
-            series={[{ agent: detail.agent, values: detail.values }]}
+            series={[{ agent: detail.agent, values: detail.values, unpriced: detail.unpriced }]}
             format={detail.chartMetric === "cost" ? formatUsd : formatTokens}
+            formatTick={detail.chartMetric === "cost" ? formatUsdTick : undefined}
             ariaLabel={`${resolution === "hour" ? "Hourly" : "Daily"} ${chartNoun} for ${detail.model}`}
             heightClass="h-40 sm:h-44"
           />
@@ -96,7 +97,14 @@ const ModelDialogBody: React.FC<{
         <div className="grid gap-x-10 gap-y-7 sm:grid-cols-2">
           {detail.costUnknown ? null : <UsageShareBar label="Cost by type" segments={costTypeSegments(detail.costByType)} format={formatUsd} />}
           <UsageShareBar label="Tokens by type" segments={tokenTypeSegments(detail.tokens)} format={formatTokens} />
-          {hasSpeed ? <UsageShareBar label="Cost by speed" segments={speedCostSegments(detail.costBySpeed)} format={formatUsd} /> : null}
+          {hasSpeed ? (
+            <UsageShareBar
+              label="Cost by speed"
+              segments={speedCostSegments(detail.costBySpeed)}
+              format={formatUsd}
+              aside={speedPremiumAside(detail.speedPremiumUsd)}
+            />
+          ) : null}
         </div>
       </div>
       {detail.unpricedTokens > 0 ? (
@@ -107,8 +115,10 @@ const ModelDialogBody: React.FC<{
           <Button
             size="sm"
             onClick={() => {
-              onClose();
+              // The editor opens first, in the same commit as this dialog closes, and takes focus
+              // in; closing first would hand focus back to the row behind the editor's backdrop.
               onSetPrice(detail.model);
+              onClose();
             }}
           >
             Set price

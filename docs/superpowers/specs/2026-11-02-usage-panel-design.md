@@ -378,7 +378,7 @@ Content is `max-w-5xl`, centred, `px-5 sm:px-6 py-6`, sections `gap-6`. The page
 
 - **First load with no data:** a skeleton that mirrors the layout.
 - **Switching period:** the previous data stays on screen, dimmed with `opacity-40 transition-opacity delay-150`, until the new answer arrives.
-- **Scanning:** when the response says `scanning` (or the data is older than 60 s), show it and immediately refetch with `refresh=1`, which awaits the scan. During that refetch, show "Updating…" (small spinner, top-right of the content).
+- **Scanning:** when the response says `scanning`, show it and immediately refetch with `refresh=1`, which awaits the scan. During that refetch, show "Updating…" (small spinner, top-right of the content).
 - **Errors:** a 404 (older daemon) shows "This daemon is too old to report usage history. Update it to see this view." Other errors show "Couldn't load usage." with a Retry button, and keep the last data when there is some.
 - **Refresh while visible:** a non-forced refetch every 60 s while the view is visible and the tab is Cost/Tokens (`usePollWhileActive`).
 
@@ -387,7 +387,7 @@ Content is `max-w-5xl`, centred, `px-5 sm:px-6 py-6`, sections `gap-6`. The page
 While the view is open and focus is not in an input, textarea, select, contenteditable or an open dialog:
 
 - `c`, `t`, `l` switch tabs.
-- `mod+shift+1..4` switch the range (ignored on Limits).
+- `1`–`4` (no modifiers; ⌘⇧3 / ⌘⇧4 are macOS screenshots) switch the range (ignored on Limits).
 - `Esc` closes dialogs first (the existing Modal escape stack).
 - Each control's title shows its shortcut.
 

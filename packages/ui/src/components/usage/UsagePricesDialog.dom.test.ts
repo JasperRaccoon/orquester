@@ -90,6 +90,8 @@ describe("UsagePricesDialog", () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    // A closed Modal gives focus back a tick later: let that run while the DOM exists.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     document.body.innerHTML = "";
     useAppStore.setState(initial, true);
   });
@@ -141,6 +143,35 @@ describe("UsagePricesDialog", () => {
     } finally {
       stop();
     }
+  });
+
+  it("asks before Escape or the X drop unsaved edits, and a backdrop click does not close them", async () => {
+    const escape = async () =>
+      act(async () => {
+        document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+    await open();
+    await escape();
+    assert.equal(closed, 1, "nothing edited: Escape closes at once");
+
+    closed = 0;
+    await type(field("Input price for gpt-6-astra"), "3");
+    await escape();
+    assert.equal(closed, 0);
+    assert.match(document.body.textContent ?? "", /Discard unsaved price changes\?/);
+    await click("Cancel");
+    assert.doesNotMatch(document.body.textContent ?? "", /Discard unsaved price changes\?/);
+    assert.equal(field("Input price for gpt-6-astra").value, "3", "the edit is still there");
+
+    const backdrop = document.querySelector('[role="dialog"]')!.parentElement!;
+    await act(async () => {
+      backdrop.dispatchEvent(new dom.window.MouseEvent("mousedown", { bubbles: true }));
+    });
+    assert.equal(closed, 0);
+
+    await click("Close");
+    await click("Discard");
+    assert.equal(closed, 1);
   });
 
   it("does not send a row the daemon would reject, and says what it needs", async () => {

@@ -5,13 +5,13 @@ import type { UsageHistoryResponse } from "@orquester/api";
 
 import { getRegistryIcon } from "../../icons/registry-icons";
 import { cn } from "../../lib/cn";
-import { agentColor, formatCount, formatPercent, formatTokens, formatUsd } from "../../lib/usage-history-format";
+import { agentColor, formatCount, formatPercent, formatTokens, formatUsd, formatUsdTick } from "../../lib/usage-history-format";
 import { labelForAgent } from "../topbar/usage-format";
 import type { UsageMetric, UsageOverviewPanelProps } from "./types";
 import { UsageBreakdown } from "./UsageBreakdown";
 import { UsageChart } from "./UsageChart";
 import { UsageModelDialog } from "./UsageModelDialog";
-import { costTypeSegments, speedCostSegments, tokenTypeSegments, UsageShareBar } from "./UsageShareBar";
+import { costTypeSegments, speedCostSegments, speedPremiumAside, tokenTypeSegments, UsageShareBar } from "./UsageShareBar";
 import { deriveModelDetail, deriveUsageView, type UsageAgentRow, type UsageView } from "./usage-view.logic";
 
 /** Kept figures fade (after a beat, so a quick answer never flickers) while newer data loads. */
@@ -55,6 +55,7 @@ export const UsageOverviewPanel: React.FC<UsageOverviewPanelProps> = ({
               timeZone={data.timeZone}
               series={view.series}
               format={format}
+              formatTick={metric === "cost" ? formatUsdTick : undefined}
               ariaLabel={chartTitle}
             />
           </div>
@@ -70,7 +71,12 @@ export const UsageOverviewPanel: React.FC<UsageOverviewPanelProps> = ({
           ) : null}
           <UsageShareBar label="Tokens by type" segments={tokenTypeSegments(view.totals.tokens)} format={formatTokens} />
           {metric === "cost" && view.totals.costBySpeed.fast + view.totals.costBySpeed.ultrafast > 0 ? (
-            <UsageShareBar label="Cost by speed" segments={speedCostSegments(view.totals.costBySpeed)} format={formatUsd} />
+            <UsageShareBar
+              label="Cost by speed"
+              segments={speedCostSegments(view.totals.costBySpeed)}
+              format={formatUsd}
+              aside={speedPremiumAside(view.totals.speedPremiumUsd)}
+            />
           ) : null}
         </section>
       ) : null}

@@ -960,6 +960,8 @@ export interface AppState {
   // data
   registry: RegistryResponse;
   usage: UsageResponse | null;
+  /** This device's clock when {@link usage} arrived (never compared with the daemon's `asOf`). */
+  usageReceivedAt: number | null;
   usageTokens: UsageTokensResponse | null;
   agentAccounts: AgentAccountsResponse | null;
   /**
@@ -1246,7 +1248,8 @@ export interface AppState {
   loadSessions: () => Promise<void>;
   loadRegistry: () => Promise<void>;
   loadUsage: (force?: boolean) => Promise<void>;
-  loadUsageTokens: (force?: boolean) => Promise<void>;
+  /** True when an answer landed; false when the request failed or the app left that daemon. */
+  loadUsageTokens: (force?: boolean) => Promise<boolean>;
   loadAgentAccounts: () => Promise<void>;
   /** Fetch a device-code link's state into the store. */
   loadDeviceLink: (agent: DeviceLinkAgent) => Promise<void>;
@@ -1482,6 +1485,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentProject: null,
   registry: EMPTY_REGISTRY,
   usage: null,
+  usageReceivedAt: null,
   usageTokens: null,
   agentAccounts: null,
   deviceLinks: { grok: null, codex: null },
@@ -2185,6 +2189,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       providerRateLimits: {},
       // The popover's cost rows (an older daemon's fallback) are the previous daemon's.
       usageTokens: null,
+      // Its quota snapshot is no reason to skip reading the next daemon's.
+      usageReceivedAt: null,
       notice: null,
       // Per-daemon flag: never let one server's curtain setting apply to the
       // next one. connect() reloads it from the newly selected daemon.
@@ -2806,7 +2812,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     try {
-      set({ usage: await api.getUsage(force) });
+      const usage = await api.getUsage(force);
+      // A late answer from the daemon the app has since left is not this one's.
+      if (get().api !== api) return;
+      set({ usage, usageReceivedAt: Date.now() });
     } catch {
       /* keep current */
     }
@@ -2815,12 +2824,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadUsageTokens: async (force) => {
     const api = get().api;
     if (!api) {
-      return;
+      return false;
     }
     try {
-      set({ usageTokens: await api.getUsageTokens(force) });
+      const usageTokens = await api.getUsageTokens(force);
+      if (get().api !== api) return false;
+      set({ usageTokens });
+      return true;
     } catch {
       /* keep current */
+      return false;
     }
   },
 
@@ -3891,7 +3904,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     if (event.channel === "usage") {
-      set({ usage: event.payload as UsageResponse });
+      set({ usage: event.payload as UsageResponse, usageReceivedAt: Date.now() });
       return;
     }
     if (event.channel === "agent-accounts") {

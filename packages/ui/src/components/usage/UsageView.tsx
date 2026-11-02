@@ -6,7 +6,7 @@
  * the price editor's open state. The parts themselves draw the figures and their footnotes.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Loader2, MoreHorizontal, RefreshCw, SlidersHorizontal } from "lucide-react";
 
 import { getRegistryIcon } from "../../icons";
@@ -20,7 +20,6 @@ import {
 } from "../../lib/usage-history-data";
 import { readUsageViewPrefs, writeUsageViewPrefs, type UsageViewPrefs } from "../../lib/usage-view-prefs";
 import { useAppStore } from "../../store/app";
-import { isAppleLike } from "../agent-chat/primitives/shortcut";
 import { SegmentedControl } from "../settings/primitives";
 import { labelForAgent } from "../topbar/usage-format";
 import { AdaptiveMenu, Button, DropdownItem, DropdownSeparator, IconButton } from "../ui";
@@ -171,7 +170,7 @@ export const UsageView: React.FC = () => {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const shortcut = resolveUsageShortcut(event, { tab, layerOpen: isAnyLayerOpen(), apple: isAppleLike() });
+      const shortcut = resolveUsageShortcut(event, { tab, layerOpen: isAnyLayerOpen() });
       if (!shortcut) return;
       event.preventDefault();
       if (shortcut.kind === "tab") update({ tab: shortcut.tab });
@@ -182,6 +181,30 @@ export const UsageView: React.FC = () => {
   }, [tab, update]);
 
   const openPrices = useCallback((model: string | null) => setPrices({ open: true, model }), []);
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  /** The model the closed editor was opened for (null: from the menu); undefined while none closed. */
+  const returnFocus = useRef<string | null | undefined>(undefined);
+  const closePrices = useCallback(() => {
+    returnFocus.current = prices.model;
+    setPrices({ open: false, model: null });
+  }, [prices.model]);
+
+  // What opened the editor (the model dialog's Set price, a menu item) is gone by the time it
+  // closes, which would leave focus on <body>: land on the model's row, else on the view. Run
+  // after the Modal's own restore, so an opener that still exists keeps that role.
+  useEffect(() => {
+    if (prices.open || returnFocus.current === undefined) return undefined;
+    const model = returnFocus.current;
+    returnFocus.current = undefined;
+    const timer = setTimeout(() => {
+      const view = viewRef.current;
+      const active = document.activeElement;
+      if (!view?.isConnected || (active !== null && active !== document.body)) return;
+      const row = [...view.querySelectorAll<HTMLElement>("[data-usage-model]")].find((el) => el.dataset.usageModel === model);
+      (row ?? view).focus({ preventScroll: true });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [prices.open]);
 
   const content = !metricTab ? (
     <UsageLimitsPanel active />
@@ -218,7 +241,7 @@ export const UsageView: React.FC = () => {
   );
 
   return (
-    <div data-usage-view className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+    <div ref={viewRef} tabIndex={-1} data-usage-view className="flex min-h-0 flex-1 flex-col overflow-y-auto outline-none">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-5 py-6 sm:px-6">
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
           <div className="flex min-w-0 items-center gap-2">
@@ -292,7 +315,7 @@ export const UsageView: React.FC = () => {
           {content}
         </div>
       </div>
-      <UsagePricesDialog open={prices.open} initialModel={prices.model} onClose={() => setPrices({ open: false, model: null })} />
+      <UsagePricesDialog open={prices.open} initialModel={prices.model} onClose={closePrices} />
     </div>
   );
 };

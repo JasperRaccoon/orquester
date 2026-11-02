@@ -8,7 +8,7 @@ import { cn } from "../../lib/cn";
 import { formatTokens } from "../../lib/usage-history-format";
 import { emitUsagePricesChanged } from "../../lib/usage-prices-events";
 import { useAppStore } from "../../store/app";
-import { Button, IconButton, Modal, ModalCloseButton } from "../ui";
+import { Button, ConfirmDialog, IconButton, Modal, ModalCloseButton } from "../ui";
 import type { UsagePricesDialogProps } from "./types";
 import {
   RATE_FIELDS,
@@ -50,11 +50,15 @@ export const UsagePricesDialog: React.FC<UsagePricesDialogProps> = ({ open, onCl
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [rows, setRows] = useState<PriceRow[]>([]);
+  /** The rows as drafted from the daemon (or as last discarded to): edits are what differs. */
+  const [pristine, setPristine] = useState("[]");
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const inputs = useRef(new Map<string, HTMLInputElement>());
   const focusNext = useRef<FocusTarget | null>(null);
+  const headerRef = useRef<HTMLElement | null>(null);
   const listId = useId();
   const seenListId = `${listId}-seen`;
   const knownListId = `${listId}-known`;
@@ -65,6 +69,8 @@ export const UsagePricesDialog: React.FC<UsagePricesDialogProps> = ({ open, onCl
       setPrices(null);
       setLoadError(null);
       setRows([]);
+      setPristine("[]");
+      setConfirmDiscard(false);
       setAttempted(false);
       setSaveError(null);
       return undefined;
@@ -93,6 +99,7 @@ export const UsagePricesDialog: React.FC<UsagePricesDialogProps> = ({ open, onCl
         }
         setPrices(answer);
         setRows(draft);
+        setPristine(JSON.stringify(draft));
       })
       .catch((error: unknown) => {
         if (abort.signal.aborted) return;
@@ -105,6 +112,16 @@ export const UsagePricesDialog: React.FC<UsagePricesDialogProps> = ({ open, onCl
     return () => abort.abort();
   }, [open, api, initialModel, reload]);
 
+  // On opening, focus moves into the editor (its Close button) while the prices load, so it never
+  // stays behind the backdrop on whatever opened it; the loaded rows may then take it.
+  useEffect(() => {
+    if (!open) return;
+    const header = headerRef.current;
+    if (header && !header.closest('[role="dialog"]')?.contains(document.activeElement)) {
+      header.querySelector<HTMLButtonElement>('button[aria-label="Close"]')?.focus();
+    }
+  }, [open]);
+
   useEffect(() => {
     const target = focusNext.current;
     if (!target) return;
@@ -116,6 +133,8 @@ export const UsagePricesDialog: React.FC<UsagePricesDialogProps> = ({ open, onCl
 
   const result = useMemo(() => (prices ? priceDraftResult(rows, prices) : null), [rows, prices]);
   const dirty = Boolean(result?.changed) || rows.some((row) => row.isNew);
+  /** The user changed the draft since it loaded: closing must not drop that silently. */
+  const unsaved = prices !== null && JSON.stringify(rows) !== pristine;
 
   const builtin = prices?.builtin ?? [];
   const seenModels = prices?.seenModels ?? [];
@@ -139,14 +158,22 @@ export const UsagePricesDialog: React.FC<UsagePricesDialogProps> = ({ open, onCl
 
   const discard = () => {
     if (!prices) return;
-    setRows(draftFromPrices(prices));
+    const draft = draftFromPrices(prices);
+    setRows(draft);
+    setPristine(JSON.stringify(draft));
     setAttempted(false);
     setSaveError(null);
   };
 
+  // Escape, Back and the X ask before dropping edits; a stray backdrop click never does.
   const close = useCallback(() => {
-    if (!saving) onClose();
-  }, [saving, onClose]);
+    if (saving) return;
+    if (unsaved) setConfirmDiscard(true);
+    else onClose();
+  }, [saving, unsaved, onClose]);
+  const backdropClose = useCallback(() => {
+    if (!unsaved) close();
+  }, [unsaved, close]);
 
   const save = async () => {
     if (!api || !result || saving) return;
@@ -176,9 +203,20 @@ export const UsagePricesDialog: React.FC<UsagePricesDialogProps> = ({ open, onCl
   };
 
   return (
-    <Modal open={open} onClose={close} className="max-w-4xl flex-col">
+    <Modal open={open} onClose={close} onBackdropClick={backdropClose} className="max-w-4xl flex-col">
+      <ConfirmDialog
+        open={open && confirmDiscard}
+        title="Discard unsaved price changes?"
+        message="Your edits to model prices haven't been saved."
+        confirmLabel="Discard"
+        onConfirm={() => {
+          setConfirmDiscard(false);
+          onClose();
+        }}
+        onCancel={() => setConfirmDiscard(false)}
+      />
       <div className="flex min-h-0 w-full flex-col">
-        <header className="flex items-start justify-between gap-3 border-b border-neutral-800 px-4 py-3">
+        <header ref={headerRef} className="flex items-start justify-between gap-3 border-b border-neutral-800 px-4 py-3">
           <div className="min-w-0">
             <h2 className="text-sm font-medium text-neutral-100">Model prices</h2>
             <p className="mt-0.5 text-xs text-neutral-500">
