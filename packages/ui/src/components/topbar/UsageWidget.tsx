@@ -27,14 +27,17 @@ import { STALE_MIN, formatAgo, formatChipWindows, formatClock, gaugeClass, label
  * The Cost tab's data: the Usage view's 14-day history (local days, every agent), or the older
  * `/api/usage/tokens` rows from a daemon without it (404) or while it fails. Kept per API client,
  * so one daemon's figures never show under another; refetched when the model prices change.
+ * An answer taken mid-scan is shown, then asked for once more with `refresh=1` (as the view
+ * does); when the history and the fallback both fail, `failed` says so instead of loading on.
  */
-function usePopoverCost(): { summary: PopoverCostSummary | null; load: (force?: boolean) => void } {
+function usePopoverCost(): { summary: PopoverCostSummary | null; failed: boolean; load: (force?: boolean) => void } {
   const api = useAppStore((s) => s.api);
   const usageTokens = useAppStore((s) => s.usageTokens);
   const loadUsageTokens = useAppStore((s) => s.loadUsageTokens);
   const [history, setHistory] = useState<{ api: ApiClient; data: UsageHistoryResponse } | null>(null);
   const [legacyFor, setLegacyFor] = useState<ApiClient | null>(null);
   const [failedFor, setFailedFor] = useState<ApiClient | null>(null);
+  const [tokensFailedFor, setTokensFailedFor] = useState<ApiClient | null>(null);
   const seq = useRef(0);
   const loaded = useRef(false);
 
@@ -42,24 +45,32 @@ function usePopoverCost(): { summary: PopoverCostSummary | null; load: (force?: 
     (force = false) => {
       if (!api) return;
       loaded.current = true;
+      const id = ++seq.current;
+      const loadTokens = () =>
+        void loadUsageTokens(force).then((ok) => {
+          if (id === seq.current) setTokensFailedFor(ok ? null : api);
+        });
       if (legacyFor === api) {
-        void loadUsageTokens(force);
+        loadTokens();
         return;
       }
-      const id = ++seq.current;
-      api.getUsageHistory("14d", localTimeZone(), force).then(
-        (data) => {
-          if (id !== seq.current) return;
-          setHistory({ api, data });
-          setFailedFor(null);
-        },
-        (error: unknown) => {
-          if (id !== seq.current) return;
-          if (error instanceof ApiError && error.status === 404) setLegacyFor(api);
-          else setFailedFor(api);
-          void loadUsageTokens(force);
-        }
-      );
+      const fetchHistory = (forced: boolean) =>
+        api.getUsageHistory("14d", localTimeZone(), forced).then(
+          (data) => {
+            if (id !== seq.current) return;
+            setHistory({ api, data });
+            setFailedFor(null);
+            // Mid-scan totals may still grow: ask once more, awaiting the scan.
+            if (data.scanning && !forced) fetchHistory(true);
+          },
+          (error: unknown) => {
+            if (id !== seq.current) return;
+            if (error instanceof ApiError && error.status === 404) setLegacyFor(api);
+            else setFailedFor(api);
+            loadTokens();
+          }
+        );
+      fetchHistory(force);
     },
     [api, legacyFor, loadUsageTokens]
   );
@@ -74,7 +85,7 @@ function usePopoverCost(): { summary: PopoverCostSummary | null; load: (force?: 
     : fallback && usageTokens
       ? popoverCostFromTokenRows(usageTokens.rows, Date.now())
       : null;
-  return { summary, load };
+  return { summary, failed: summary === null && fallback && tokensFailedFor === api, load };
 }
 
 /** The hover note of a cost figure that is not fully priced. */
@@ -83,11 +94,31 @@ function unpricedTitle(figure: CostFigure): string | undefined {
   return figure.unpriced === "some" ? PARTLY_UNPRICED_NOTE : undefined;
 }
 
-const CostTab: React.FC<{ summary: PopoverCostSummary | null; load: () => void }> = ({ summary, load }) => {
+const CostTab: React.FC<{ summary: PopoverCostSummary | null; failed: boolean; load: () => void }> = ({ summary, failed, load }) => {
   // Mounted while the popover shows the tab: each opening asks for fresh figures.
   const loadRef = useRef(load);
   loadRef.current = load;
   useEffect(() => loadRef.current(), []);
+
+  if (failed) {
+    return (
+      <div className="px-3 pb-3 pt-2">
+        <div className="flex items-center justify-between gap-3 rounded border border-dashed border-neutral-800 px-3 py-3 text-xs text-neutral-400">
+          <span role="alert">Couldn't load costs.</span>
+          <button
+            type="button"
+            className="rounded px-2 py-1 text-neutral-200 hover:bg-neutral-800"
+            onClick={(e) => {
+              e.stopPropagation();
+              load();
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!summary || summary.days.length === 0) {
     return (
@@ -421,7 +452,7 @@ export const UsageWidget: React.FC = () => {
             ))}
           </>
         ) : null}
-        {tab === "cost" ? <CostTab summary={cost.summary} load={cost.load} /> : null}
+        {tab === "cost" ? <CostTab summary={cost.summary} failed={cost.failed} load={cost.load} /> : null}
       </div>
     </AdaptiveMenu>
   );

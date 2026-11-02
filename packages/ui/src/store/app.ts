@@ -1248,7 +1248,8 @@ export interface AppState {
   loadSessions: () => Promise<void>;
   loadRegistry: () => Promise<void>;
   loadUsage: (force?: boolean) => Promise<void>;
-  loadUsageTokens: (force?: boolean) => Promise<void>;
+  /** True when an answer landed; false when the request failed or the app left that daemon. */
+  loadUsageTokens: (force?: boolean) => Promise<boolean>;
   loadAgentAccounts: () => Promise<void>;
   /** Fetch a device-code link's state into the store. */
   loadDeviceLink: (agent: DeviceLinkAgent) => Promise<void>;
@@ -2823,14 +2824,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadUsageTokens: async (force) => {
     const api = get().api;
     if (!api) {
-      return;
+      return false;
     }
     try {
       const usageTokens = await api.getUsageTokens(force);
-      if (get().api !== api) return;
+      if (get().api !== api) return false;
       set({ usageTokens });
+      return true;
     } catch {
       /* keep current */
+      return false;
     }
   },
 
