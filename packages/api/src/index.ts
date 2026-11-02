@@ -2241,6 +2241,7 @@ export interface OrquesterApi {
   listWorkspaces(): Promise<WorkspaceSummary[]>;
   listProjects(workspace: string): Promise<ProjectSummary[]>;
   usage(force?: boolean): Promise<UsageResponse>;
+  usageHistory(range: string, timeZone: string, force?: boolean): Promise<UsageHistoryResponse>;
 }
 
 export interface HttpApiClientOptions {
@@ -2366,6 +2367,13 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   usage(force?: boolean): Promise<UsageResponse> {
     return this.get(`/api/usage${force ? "?refresh=1" : ""}`);
+  }
+
+  /** `range` is "24h" or "<N>d" (1–90); days are cut in `timeZone`. `force` waits for a fresh scan. */
+  usageHistory(range: string, timeZone: string, force?: boolean): Promise<UsageHistoryResponse> {
+    const query = new URLSearchParams({ range, tz: timeZone });
+    if (force) query.set("refresh", "1");
+    return this.get(`/api/usage/history?${query.toString()}`);
   }
 
   // Device-code account links (Settings → Accounts) for Grok and Codex. Start
