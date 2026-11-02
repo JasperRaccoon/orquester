@@ -581,9 +581,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     userhome: resolved.vars.userhome,
     cacheFile: usageTokensCacheFile(paths.baseDir),
     now: () => Date.now(),
-    onScanned: () => {
-      usageHistory.ingest(usageTokens);
-    },
+    // The first scan is merged at once; later ones every few minutes, or when the history is read.
+    onScanned: () => usageHistory.scanned(usageTokens),
     accountHomes: () => [
       // Token-transcript scanning knows the Claude/Codex session formats only;
       // grok homes are skipped (Grok Build has no scanner support yet).
@@ -4293,7 +4292,7 @@ export function createServer(
   });
 
   // The Usage view's history from the ledger. The chat logs are read and merged first; the
-  // transcripts are merged after each scan (`refresh=1` waits for one). Until the first transcript
+  // transcripts' last scan is merged as the ledger is read (`refresh=1` waits for a scan). Until the first transcript
   // scan is in, the answer says `scanning` (and asks for that scan).
   app.get<{ Querystring: { range?: string; tz?: string; refresh?: string } }>(
     "/api/usage/history",

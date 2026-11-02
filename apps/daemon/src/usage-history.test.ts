@@ -165,6 +165,43 @@ test("changes are written at most once a minute, and only when something changed
   await assert.rejects(readFile(path), { code: "ENOENT" });
 });
 
+test("a source's first scan is merged at once, later scans at most every five minutes or when the ledger is read or flushed", async (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+  let now = NOW;
+  const { path, make } = await world(t, { now: () => now });
+  const history = make();
+  let reads = 0;
+  const scanner = source([rec({ input: 1 })]);
+  const counted: UsageRecordSource = { historyRecords: () => (reads++, scanner.historyRecords()) };
+  const input = () => history.query({ range: range("1d"), timeZone: "UTC", scanning: false }).buckets[0]?.tokens.input;
+
+  history.scanned(counted);
+  assert.equal(reads, 1);
+  assert.equal(history.hasIngested(counted), true);
+
+  scanner.records = [rec({ input: 2 })];
+  history.scanned(counted);
+  history.scanned(counted);
+  now += 60_000;
+  mock.timers.tick(60_000);
+  assert.equal(reads, 1, "two scans within the interval are not merged yet");
+  now += 4 * 60_000;
+  mock.timers.tick(4 * 60_000);
+  assert.equal(reads, 2, "and then once");
+
+  scanner.records = [rec({ input: 3 })];
+  history.scanned(counted);
+  assert.equal(input(), 3, "a reader merges the deferred scan first");
+  assert.equal(reads, 3);
+
+  scanner.records = [rec({ input: 4 })];
+  history.scanned(counted);
+  await history.flush();
+  assert.equal(reads, 4);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).buckets[0][6], 4);
+});
+
 test("days are the zone's calendar days across a DST change and at a quarter-hour offset; 24h is the last 24 UTC hours", async (t) => {
   const { make } = await world(t);
   const history = make();

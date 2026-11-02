@@ -42,6 +42,8 @@ const RETENTION_HOURS = 120 * DAY_HOURS;
 const SEEN_MODELS_HOURS = 90 * DAY_HOURS;
 /** At most one write per this long. */
 const WRITE_INTERVAL_MS = 60_000;
+/** A finished scan is merged at most this often, unless a reader asks first. */
+const SCAN_INGEST_INTERVAL_MS = 5 * 60_000;
 const MAX_RANGE_DAYS = 90;
 
 type Source = UsageRecord["source"];
@@ -204,6 +206,10 @@ export class UsageHistory {
   private writing: Promise<void> = Promise.resolve();
   /** Sources whose records have been merged at least once. */
   private readonly ingested = new WeakSet<UsageRecordSource>();
+  /** Sources with a finished scan not merged yet ({@link scanned}). */
+  private readonly pending = new Set<UsageRecordSource>();
+  private ingestTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastIngestAt = Number.NEGATIVE_INFINITY;
   private rootCache: { raw: string; real: string } | null = null;
 
   constructor(private readonly opts: UsageHistoryOptions) {}
@@ -270,12 +276,42 @@ export class UsageHistory {
   }
 
   /**
+   * A source finished a scan. Its first records are merged at once (the view waits on them); later
+   * ones at most every {@link SCAN_INGEST_INTERVAL_MS}, or sooner when a reader asks
+   * ({@link ingestPending}): a merge walks every record, and scans come every 30 s while agents run.
+   */
+  scanned(source: UsageRecordSource): void {
+    if (!this.ingested.has(source)) {
+      this.ingest(source);
+      return;
+    }
+    this.pending.add(source);
+    if (this.ingestTimer) return;
+    const delay = Math.max(0, this.lastIngestAt + SCAN_INGEST_INTERVAL_MS - this.now());
+    this.ingestTimer = setTimeout(() => this.ingestPending(), delay);
+    this.ingestTimer.unref?.();
+  }
+
+  /** Merge the scans {@link scanned} deferred (before the ledger is read or written out). */
+  ingestPending(): void {
+    if (this.ingestTimer) {
+      clearTimeout(this.ingestTimer);
+      this.ingestTimer = undefined;
+    }
+    const sources = [...this.pending];
+    this.pending.clear();
+    for (const source of sources) this.ingest(source);
+  }
+
+  /**
    * Merge a source's live records (high-water rule). False when it has none yet (no full scan);
    * a change is written within a minute.
    */
   ingest(source: UsageRecordSource): boolean {
     const records = source.historyRecords();
     if (!records) return false;
+    this.pending.delete(source);
+    this.lastIngestAt = this.now();
     this.ingested.add(source);
     const cutoff = this.cutoffHour();
     const projects = new Map<string, string>();
@@ -309,8 +345,9 @@ export class UsageHistory {
     return true;
   }
 
-  /** Write now what is pending (the daemon's stop). */
+  /** Merge the deferred scans and write now what is pending (the daemon's stop). */
   async flush(): Promise<void> {
+    this.ingestPending();
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -319,7 +356,9 @@ export class UsageHistory {
     await this.writing;
   }
 
+  /** The range's buckets, after merging the scans {@link scanned} deferred. */
   query(q: UsageHistoryQuery): UsageHistoryResponse {
+    this.ingestPending();
     const now = this.now();
     const zone = zoneOf(q.timeZone);
     const nowHour = Math.floor(now / HOUR_MS);
@@ -455,6 +494,7 @@ export class UsageHistory {
 
   /** Every model in the last 90 days, by processed tokens desc, with how it is priced now. */
   seenModels(): UsagePriceModelInfo[] {
+    this.ingestPending();
     const since = Math.floor(this.now() / HOUR_MS) - SEEN_MODELS_HOURS;
     const seen = new Map<string, { agent: string; model: string; tokens: number; reported: boolean }>();
     for (const bucket of this.buckets.values()) {

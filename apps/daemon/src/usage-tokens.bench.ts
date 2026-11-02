@@ -7,10 +7,11 @@
  * Reports median wall/CPU time; setup is outside the measured region.
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { UsageHistory } from "./usage-history.ts";
 import type { UsageTokensScanner as Scanner } from "./usage-tokens.ts";
 
 const { UsageTokensScanner } = await import(process.argv[2] ? pathToFileURL(resolve(process.argv[2])).href : "./usage-tokens.ts") as { UsageTokensScanner: typeof Scanner };
@@ -50,6 +51,53 @@ try {
       }
     }
     console.log(JSON.stringify({ files, turns: files * turnsPerFile, refreshMedianMs: median(wall), cpuMedianMs: median(cpu), samples: wall.length }));
+  }
+
+  // A scan that found new bytes, as the file watcher triggers every 30 s while agents run: the
+  // history spans 30 days of hours, sessions and projects, and the ledger is wired as in index.ts.
+  {
+    const files = 1000;
+    const turnsPerFile = 1000;
+    const projects = join(process.env.CLAUDE_CONFIG_DIR, "projects");
+    await rm(projects, { recursive: true, force: true });
+    await mkdir(projects, { recursive: true });
+    const start = Date.parse("2026-09-25T00:00:00Z");
+    const turn = (file: number, turn: number) => JSON.stringify({
+      timestamp: new Date(start + (file * turnsPerFile + turn) * 2_600).toISOString(),
+      requestId: `request-${file}-${turn}`,
+      sessionId: `session-${file}`,
+      cwd: `/work/ws/project-${file % 40}`,
+      message: { id: `message-${file}-${turn}`, model: turn % 7 === 0 ? "claude-sonnet-5" : "claude-opus-5", usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 100 } }
+    });
+    for (let file = 0; file < files; file += 1) {
+      await writeFile(join(projects, `${file}.jsonl`), `${Array.from({ length: turnsPerFile }, (_, t) => turn(file, t)).join("\n")}\n`);
+    }
+    const history = new UsageHistory({ path: join(home, "usage-history.json"), workspacesDir: () => "/work" });
+    const scanner: Scanner = new UsageTokensScanner({
+      userhome: home, cacheFile: join(home, "cache.json"), now: () => Date.parse("2026-10-25T00:00:00Z"),
+      onScanned: () => history.scanned(scanner)
+    });
+    await scanner.snapshot(true);
+    const wall: number[] = [];
+    const cpu: number[] = [];
+    for (let run = 0; run < 13; run += 1) {
+      await appendFile(join(projects, "0.jsonl"), `${turn(0, turnsPerFile + run)}\n`);
+      const cpuStart = process.cpuUsage();
+      const begin = performance.now();
+      await scanner.snapshot(true);
+      const elapsed = performance.now() - begin;
+      const usage = process.cpuUsage(cpuStart);
+      if (run >= 3) {
+        wall.push(elapsed);
+        cpu.push((usage.user + usage.system) / 1000);
+      }
+    }
+    // The ledger merges the last scan when it is read (or every few minutes), not on every scan.
+    const mergeStart = performance.now();
+    history.ingestPending();
+    const ledgerMergeMs = performance.now() - mergeStart;
+    console.log(JSON.stringify({ changedScan: true, files, turns: files * turnsPerFile, refreshMedianMs: median(wall), cpuMedianMs: median(cpu), samples: wall.length, ledgerMergeMs }));
+    await history.flush();
   }
 } finally {
   if (previousClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR;
