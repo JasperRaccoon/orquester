@@ -9,6 +9,17 @@ import { estimateCostParts, UsageTokensScanner } from "./usage-tokens.ts";
 const fixtureRoot = await mkdtemp(join(tmpdir(), "orq-usage-tokens-fixtures-"));
 after(() => rm(fixtureRoot, { recursive: true, force: true }));
 
+// The scanner reads the host's transcripts through these: every test scans its own home instead.
+const callerEnv = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CODEX_HOME: process.env.CODEX_HOME };
+delete process.env.CLAUDE_CONFIG_DIR;
+delete process.env.CODEX_HOME;
+after(() => {
+  for (const [name, value] of Object.entries(callerEnv)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
+
 test("1h-TTL cache writes bill at 2x input, 5m at 1.25x", () => {
   // 1M total writes, 400k of them 1h: 600k*6.25 + 400k*10 = 3.75 + 4.00
   const cost = estimateCostParts("claude-opus-4-8", { input: 0, output: 0, cacheRead: 0, cacheWrite: 1_000_000, cacheWrite1h: 400_000 });
@@ -28,7 +39,6 @@ test("versioned model ids stay priced (F1)", () => {
 const T0 = () => Date.parse("2026-07-07T00:00:00Z");
 
 test("scanCodex reads the real event_msg/token_count/info shape and sums per-turn usage", async () => {
-  delete process.env.CODEX_HOME;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-codex-"));
   const sdir = join(home, ".codex", "sessions");
   await mkdir(sdir, { recursive: true });
@@ -54,7 +64,6 @@ test("scanCodex reads the real event_msg/token_count/info shape and sums per-tur
 });
 
 test("scanClaude reads the 1h cache-write split and skips zero-usage rows", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-1h-"));
   const pdir = join(home, ".claude", "projects", "p");
   await mkdir(pdir, { recursive: true });
@@ -91,7 +100,6 @@ test("scanClaude reads the 1h cache-write split and skips zero-usage rows", asyn
 });
 
 test("scanClaude dedupes repeated message.id+requestId across files (F2)", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-dedup-"));
   const pdir = join(home, ".claude", "projects", "p");
   await mkdir(pdir, { recursive: true });
@@ -113,7 +121,6 @@ test("scanClaude dedupes repeated message.id+requestId across files (F2)", async
 });
 
 test("recompute caches unchanged files and stays correct on partial rescan (F5)", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-cache-"));
   const pdir = join(home, ".claude", "projects", "p");
   await mkdir(pdir, { recursive: true });
@@ -137,7 +144,6 @@ test("recompute caches unchanged files and stays correct on partial rescan (F5)"
 });
 
 test("an unchanged refresh has a fresh persisted timestamp and repairs caller mutations", async (t) => {
-  delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-refresh-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   const pdir = join(home, ".claude", "projects", "p");
@@ -163,7 +169,6 @@ test("an unchanged refresh has a fresh persisted timestamp and repairs caller mu
 });
 
 test("refresh invalidates totals and dedup winners after deletion, same-size rewrite, truncation and recreation", async (t) => {
-  delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-invalidate-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   const pdir = join(home, ".claude", "projects", "p");
@@ -197,8 +202,6 @@ test("refresh invalidates totals and dedup winners after deletion, same-size rew
 });
 
 test("the first empty scan replaces a persisted snapshot from removed transcripts", async (t) => {
-  delete process.env.CLAUDE_CONFIG_DIR;
-  delete process.env.CODEX_HOME;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-empty-refresh-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   const cacheFile = join(home, "c.json");
@@ -210,7 +213,6 @@ test("the first empty scan replaces a persisted snapshot from removed transcript
 });
 
 test("codex parser state (model, cumulative gate) carries across appended chunks", async () => {
-  delete process.env.CODEX_HOME;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-codexincr-"));
   const sdir = join(home, ".codex", "sessions", "s");
   await mkdir(sdir, { recursive: true });
@@ -249,7 +251,6 @@ test("codex parser state (model, cumulative gate) carries across appended chunks
 });
 
 test("an unterminated tail line is counted once, then not double-counted when completed", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-tail-"));
   const pdir = join(home, ".claude", "projects", "p");
   await mkdir(pdir, { recursive: true });
@@ -268,7 +269,6 @@ test("an unterminated tail line is counted once, then not double-counted when co
 });
 
 test("managed-account home transcripts are counted with and without a system home", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-acct-"));
   const acctHome = join(home, "agent-accounts", "claude", "a1", "home");
   const acctPdir = join(acctHome, "projects", "p");
@@ -304,7 +304,6 @@ test("managed-account home transcripts are counted with and without a system hom
 });
 
 test("subagent requests are reported once each, with their time and cache usage, apart from the main thread", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-sub-"));
   const sdir = join(home, ".claude", "projects", "p", "sess", "subagents");
   await mkdir(sdir, { recursive: true });
@@ -348,7 +347,6 @@ test("subagent requests are reported once each, with their time and cache usage,
 });
 
 test("subagent requests are unknown until the transcripts have been scanned once", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-sub-cold-"));
   const scanner = new UsageTokensScanner({ userhome: home, cacheFile: join(home, "c.json"), now: T0 });
   await scanner.init();
@@ -379,7 +377,6 @@ test("a trailing context tag is dropped before the lookup: claude-opus-4-8[1m] b
 test("codex rollouts an Agent Profile home writes through its sessions link are counted once", async () => {
   // A prepared profile CODEX_HOME links `sessions` to the account's, which links to the system one;
   // the scanner walks the system and account dirs (deduped by realpath), never prepared homes.
-  delete process.env.CODEX_HOME;
   const home = await mkdtemp(join(fixtureRoot, "orq-utok-profile-"));
   const systemSessions = join(home, ".codex", "sessions");
   await mkdir(systemSessions, { recursive: true });
@@ -414,8 +411,6 @@ const jsonl = (...objs: unknown[]) => objs.map((o) => JSON.stringify(o)).join("\
 
 /** A scanner over a fresh home, with Claude transcripts and Codex rollouts written under it. */
 async function historyWorld(t: { after: (fn: () => Promise<void>) => void }, name: string) {
-  delete process.env.CLAUDE_CONFIG_DIR;
-  delete process.env.CODEX_HOME;
   const home = await mkdtemp(join(fixtureRoot, name));
   t.after(() => rm(home, { recursive: true, force: true }));
   const claudeDir = join(home, ".claude", "projects", "p");
