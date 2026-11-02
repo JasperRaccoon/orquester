@@ -62,6 +62,42 @@ export function formatUsd(value: number | null): string {
   return USD.format(value);
 }
 
+/** How much of a cost has no known price: none, some (the figure is the known part), or all. */
+export type UnpricedPart = "none" | "some" | "all";
+
+/** A cost that may be partly or wholly unpriced. Unknown is never zero: all-unpriced is `usd: null`. */
+export interface CostFigure {
+  usd: number | null;
+  unpriced: UnpricedPart;
+}
+
+/** The tooltip of a figure marked with "+". */
+export const PARTLY_UNPRICED_NOTE = "Partly unpriced: usage with no known price is left out";
+
+/**
+ * Add figures: the known parts add up, a sum of only unknown parts stays unknown, and a sum
+ * with any unknown part beside known ones is marked "some". Empty figures ($0, all priced) count
+ * as nothing either way.
+ */
+export function sumCostFigures(figures: Iterable<CostFigure>): CostFigure {
+  let usd = 0;
+  let known = false;
+  let unknown = false;
+  for (const f of figures) {
+    if (f.usd !== null) usd += f.usd;
+    if (f.usd !== null && (f.usd > 0 || f.unpriced === "some")) known = true;
+    if (f.unpriced !== "none") unknown = true;
+  }
+  if (!unknown) return { usd, unpriced: "none" };
+  return known ? { usd, unpriced: "some" } : { usd: null, unpriced: "all" };
+}
+
+/** "$3.20"; "$3.20+" when part of it has no known price; `unknown` ("—") when none of it has. */
+export function formatCostFigure(figure: CostFigure, unknown = "—"): string {
+  if (figure.usd === null || figure.unpriced === "all") return unknown;
+  return figure.unpriced === "some" ? `${formatUsd(figure.usd)}+` : formatUsd(figure.usd);
+}
+
 /**
  * A money axis label with as many decimals as the tick `step` needs, so a tiny scale
  * reads "$0.001 · $0.002" rather than "<$0.01" on every tick, and a large one "$1,500".

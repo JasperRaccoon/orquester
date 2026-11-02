@@ -9,7 +9,15 @@ import { UsageAccountCard, maxWindowCount } from "./UsageAccountCard";
 import { getRegistryIcon } from "../../icons";
 import { useUsageNow, useUsageResetFormat } from "../../hooks";
 import { ApiError, type ApiClient } from "../../lib/api-client";
-import { formatTokens, formatUsd, labelForModel, localTimeZone } from "../../lib/usage-history-format";
+import {
+  formatCostFigure,
+  formatTokens,
+  formatUsd,
+  labelForModel,
+  localTimeZone,
+  PARTLY_UNPRICED_NOTE,
+  type CostFigure
+} from "../../lib/usage-history-format";
 import { onUsagePricesChanged } from "../../lib/usage-prices-events";
 import { useAppStore } from "../../store/app";
 import { popoverCostFromHistory, popoverCostFromTokenRows, type PopoverCostSummary } from "./usage-cost.logic";
@@ -69,6 +77,12 @@ function usePopoverCost(): { summary: PopoverCostSummary | null; load: (force?: 
   return { summary, load };
 }
 
+/** The hover note of a cost figure that is not fully priced. */
+function unpricedTitle(figure: CostFigure): string | undefined {
+  if (figure.unpriced === "all") return "No known price";
+  return figure.unpriced === "some" ? PARTLY_UNPRICED_NOTE : undefined;
+}
+
 const CostTab: React.FC<{ summary: PopoverCostSummary | null; load: () => void }> = ({ summary, load }) => {
   // Mounted while the popover shows the tab: each opening asks for fresh figures.
   const loadRef = useRef(load);
@@ -92,11 +106,15 @@ const CostTab: React.FC<{ summary: PopoverCostSummary | null; load: () => void }
       <div className="flex items-end justify-between px-3 pt-2">
         <div>
           <p className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">Est. cost · today</p>
-          <p className="text-xl font-semibold leading-tight tabular-nums text-neutral-100">{formatUsd(summary.today)}</p>
+          <p className="text-xl font-semibold leading-tight tabular-nums text-neutral-100" title={unpricedTitle(summary.today)}>
+            {formatCostFigure(summary.today, "Unpriced")}
+          </p>
         </div>
         <div className="text-right">
           <p className="text-[10px] uppercase tracking-wider text-neutral-500">7 days</p>
-          <p className="text-xs font-medium tabular-nums text-neutral-300">{formatUsd(summary.week)}</p>
+          <p className="text-xs font-medium tabular-nums text-neutral-300" title={unpricedTitle(summary.week)}>
+            {formatCostFigure(summary.week, "Unpriced")}
+          </p>
         </div>
       </div>
       <div className="px-3 pt-2">
@@ -105,7 +123,11 @@ const CostTab: React.FC<{ summary: PopoverCostSummary | null; load: () => void }
             const pct = chartMax > 0 ? (c.cost / chartMax) * 100 : 0;
             const isToday = i === chart.length - 1;
             return (
-              <div key={c.day} className="group flex h-full flex-1 items-end" title={`${c.label} · ${formatUsd(c.cost)}`}>
+              <div
+                key={c.day}
+                className="group flex h-full flex-1 items-end"
+                title={`${c.label} · ${formatCostFigure({ usd: c.cost, unpriced: c.unpriced }, "Unpriced")}`}
+              >
                 <div
                   className={`w-full rounded-t-[2px] ${
                     isToday ? "bg-neutral-200" : "bg-neutral-500 group-hover:bg-neutral-300"
@@ -126,7 +148,9 @@ const CostTab: React.FC<{ summary: PopoverCostSummary | null; load: () => void }
           <div key={d.day} className="pt-2">
             <div className="flex items-baseline justify-between border-b border-neutral-800/80 pb-1">
               <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">{d.label}</span>
-              <span className="text-[11px] font-medium tabular-nums text-neutral-300">{formatUsd(d.total)}</span>
+              <span className="text-[11px] font-medium tabular-nums text-neutral-300" title={unpricedTitle(d.total)}>
+                {formatCostFigure(d.total)}
+              </span>
             </div>
             {d.rows.map((r) => {
               const bd = r.split;
@@ -143,11 +167,8 @@ const CostTab: React.FC<{ summary: PopoverCostSummary | null; load: () => void }
                       <span className="shrink-0">{getRegistryIcon("agent", r.agent, 14)}</span>
                       <p className="truncate text-xs text-neutral-200">{labelForModel(r.model)}</p>
                     </div>
-                    <span
-                      className="shrink-0 text-xs tabular-nums text-neutral-200"
-                      title={r.costUsd == null ? "No pricing data for this model" : undefined}
-                    >
-                      {formatUsd(r.costUsd)}
+                    <span className="shrink-0 text-xs tabular-nums text-neutral-200" title={unpricedTitle(r.cost)}>
+                      {formatCostFigure(r.cost)}
                     </span>
                   </div>
                   {bd != null && bdTotal > 0 && (
@@ -181,7 +202,7 @@ const CostTab: React.FC<{ summary: PopoverCostSummary | null; load: () => void }
       </div>
       <p className="mx-3 mt-2 border-t border-neutral-800/80 pt-2 text-[10px] leading-relaxed text-neutral-600">
         API-equivalent estimate, including prompt-cache reads and writes. Subscription usage isn't billed per token.
-        {summary.hasUnpriced && " Rows marked — have no pricing data and are excluded from totals."}
+        {summary.hasUnpriced && " — has no known price; a + marks a cost that leaves out usage with none."}
       </p>
     </div>
   );

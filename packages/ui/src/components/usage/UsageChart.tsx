@@ -2,7 +2,14 @@ import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from "
 
 import { getRegistryIcon } from "../../icons/registry-icons";
 import { cn } from "../../lib/cn";
-import { agentColor, formatPeriod, formatPeriodLong } from "../../lib/usage-history-format";
+import {
+  agentColor,
+  formatPeriod,
+  formatPeriodLong,
+  PARTLY_UNPRICED_NOTE,
+  sumCostFigures,
+  type CostFigure
+} from "../../lib/usage-history-format";
 import { labelForAgent } from "../topbar/usage-format";
 import {
   buildChart,
@@ -187,7 +194,22 @@ const ChartPlot: React.FC<{
 
   const hovered = hover === null ? undefined : periods[hover];
   const hoverX = hover === null ? 0 : periods.length < 2 ? CHART_WIDTH / 2 : hover * stepX;
-  const total = hover === null ? 0 : series.reduce((sum, s) => sum + (s.values[hover] ?? 0), 0);
+  // On cost, a period whose usage has no known price reads "Unpriced", and a partly priced one "+".
+  const figureAt = (s: UsageSeries, i: number): CostFigure => {
+    const unpriced = s.unpriced?.[i] ?? "none";
+    return { usd: unpriced === "all" ? null : (s.values[i] ?? 0), unpriced };
+  };
+  const readout = (figure: CostFigure) => {
+    if (figure.unpriced === "all") return <span className="tabular-nums text-neutral-500">Unpriced</span>;
+    const partly = figure.unpriced === "some";
+    return (
+      <span className="tabular-nums text-neutral-100" title={partly ? PARTLY_UNPRICED_NOTE : undefined}>
+        {format(figure.usd ?? 0)}
+        {partly ? "+" : ""}
+      </span>
+    );
+  };
+  const total = hover === null ? null : sumCostFigures(series.map((s) => figureAt(s, hover)));
 
   return (
     <div
@@ -231,13 +253,13 @@ const ChartPlot: React.FC<{
                 <span className="shrink-0">{getRegistryIcon("agent", s.agent, 12)}</span>
                 <span className="truncate">{labelForAgent(s.agent)}</span>
               </span>
-              <span className="tabular-nums text-neutral-100">{format(s.values[hover] ?? 0)}</span>
+              {readout(figureAt(s, hover))}
             </div>
           ))}
-          {series.length > 1 ? (
+          {series.length > 1 && total ? (
             <div className="mt-1 flex items-center justify-between gap-4 border-t border-neutral-800 pt-1">
               <span className="text-neutral-400">Total</span>
-              <span className="tabular-nums text-neutral-100">{format(total)}</span>
+              {readout(total)}
             </div>
           ) : null}
         </div>

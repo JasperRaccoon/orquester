@@ -2,17 +2,19 @@
  * The top-bar popover's Cost tab (spec §6.7): today, the last 7 days, 14 daily bars and the
  * per-day groups of per-model rows. Built from the Usage view's 14-day history (local days,
  * every agent), or — from a daemon too old for it — from `/api/usage/tokens` rows (UTC days).
+ *
+ * Unknown cost is never zero: a figure with no known price is unknown, and a sum with some
+ * unpriced usage keeps its known part, marked (see {@link CostFigure}).
  */
 
 import type { UsageHistoryResponse, UsageTokenRow } from "@orquester/api";
 
-import { formatDayShort, processedTokens } from "../../lib/usage-history-format";
+import { formatDayShort, processedTokens, sumCostFigures, type CostFigure, type UnpricedPart } from "../../lib/usage-history-format";
 
 export interface PopoverCostRow {
   agent: string;
   model: string;
-  /** Null when nothing in the row has a price. */
-  costUsd: number | null;
+  cost: CostFigure;
   /** The estimated part of the cost by type; null when none of it is estimated. */
   split: { input: number; output: number; cache: number } | null;
   /** Uncached input, output and cache (reads + writes) tokens. */
@@ -26,22 +28,22 @@ export interface PopoverCostDay {
   day: string;
   label: string;
   rows: PopoverCostRow[];
-  /** The priced rows' sum; null when no row is priced. */
-  total: number | null;
+  total: CostFigure;
 }
 
 export interface PopoverCostSummary {
   /** Days with activity, newest first. */
   days: PopoverCostDay[];
-  /** The 14 days of the chart, oldest first (today last). */
-  chart: { day: string; label: string; cost: number }[];
-  today: number;
-  week: number;
-  /** Some row has no price (its cost reads "—" and is left out of the totals). */
+  /** The 14 days of the chart, oldest first (today last); `cost` is the known part (bar height). */
+  chart: { day: string; label: string; cost: number; unpriced: UnpricedPart }[];
+  today: CostFigure;
+  week: CostFigure;
+  /** Some row has no price, or only part of one. */
   hasUnpriced: boolean;
 }
 
 const DAY_MS = 86_400_000;
+const NOTHING: CostFigure = { usd: 0, unpriced: "none" };
 
 function shiftDay(day: string, days: number): string {
   const ms = Date.parse(`${day}T00:00:00Z`);
@@ -59,21 +61,23 @@ function summarize(chartDays: readonly string[], today: string, rowsByDay: Map<s
   for (const [day, all] of rowsByDay) {
     const rows = all
       .filter((r) => r.input + r.output + r.cache > 0)
-      .sort((a, b) => (b.costUsd ?? -1) - (a.costUsd ?? -1) || a.model.localeCompare(b.model));
+      .sort((a, b) => (b.cost.usd ?? -1) - (a.cost.usd ?? -1) || a.model.localeCompare(b.model));
     if (rows.length === 0) continue;
-    const priced = rows.filter((r) => r.costUsd !== null);
-    const total = priced.length === 0 ? null : priced.reduce((sum, r) => sum + r.costUsd!, 0);
-    days.push({ day, label: dayLabel(day, today), rows, total });
+    days.push({ day, label: dayLabel(day, today), rows, total: sumCostFigures(rows.map((r) => r.cost)) });
   }
   days.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
-  const totalByDay = new Map(days.map((d) => [d.day, d.total ?? 0]));
-  const chart = chartDays.map((day) => ({ day, label: dayLabel(day, today), cost: totalByDay.get(day) ?? 0 }));
+  const totalByDay = new Map(days.map((d) => [d.day, d.total]));
+  const figureOf = (day: string) => totalByDay.get(day) ?? NOTHING;
+  const chart = chartDays.map((day) => {
+    const total = figureOf(day);
+    return { day, label: dayLabel(day, today), cost: total.usd ?? 0, unpriced: total.unpriced };
+  });
   return {
     days,
     chart,
-    today: totalByDay.get(today) ?? 0,
-    week: chart.slice(-7).reduce((sum, c) => sum + c.cost, 0),
-    hasUnpriced: days.some((d) => d.rows.some((r) => r.costUsd === null))
+    today: figureOf(today),
+    week: sumCostFigures(chartDays.slice(-7).map(figureOf)),
+    hasUnpriced: days.some((d) => d.rows.some((r) => r.cost.unpriced !== "none"))
   };
 }
 
@@ -87,7 +91,7 @@ export function popoverCostFromHistory(data: UsageHistoryResponse): PopoverCostS
     const key = `${day}\u0000${bucket.agent}\u0000${bucket.model}`;
     let row = byKey.get(key);
     if (!row) {
-      row = { agent: bucket.agent, model: bucket.model, costUsd: null, split: null, input: 0, output: 0, cache: 0 };
+      row = { agent: bucket.agent, model: bucket.model, cost: NOTHING, split: null, input: 0, output: 0, cache: 0 };
       byKey.set(key, row);
       const list = rowsByDay.get(day) ?? [];
       list.push(row);
@@ -96,7 +100,8 @@ export function popoverCostFromHistory(data: UsageHistoryResponse): PopoverCostS
     row.input += bucket.tokens.input;
     row.output += bucket.tokens.output;
     row.cache += bucket.tokens.cacheRead + bucket.tokens.cacheWrite;
-    if (bucket.costUsd !== null) row.costUsd = (row.costUsd ?? 0) + bucket.costUsd;
+    const unpriced: UnpricedPart = bucket.costUsd === null ? "all" : bucket.unpricedTokens > 0 ? "some" : "none";
+    row.cost = sumCostFigures([row.cost, { usd: bucket.costUsd, unpriced }]);
     if (bucket.cost) {
       const split = row.split ?? { input: 0, output: 0, cache: 0 };
       split.input += bucket.cost.input;
@@ -118,7 +123,7 @@ export function popoverCostFromTokenRows(rows: readonly UsageTokenRow[], now: nu
     list.push({
       agent: r.agent,
       model: r.model,
-      costUsd: r.costUsd,
+      cost: r.costUsd === null ? { usd: null, unpriced: "all" } : { usd: r.costUsd, unpriced: "none" },
       split: r.costBreakdown ?? null,
       input: r.inputTokens,
       output: r.outputTokens,

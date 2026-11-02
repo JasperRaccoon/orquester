@@ -94,6 +94,21 @@ const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
 const buttonNamed = (scope: ParentNode, text: string) =>
   [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === text) ?? null;
 
+describe("UsageOverviewPanel chart", () => {
+  it("reads an agent's unknown cost in the hover readout as Unpriced, not $0.00", () => {
+    const container = render(() => {});
+    const plot = container.querySelector('svg[role="img"]')!.parentElement!;
+    plot.getBoundingClientRect = () => ({ left: 0, top: 0, width: 600, height: 200, right: 600, bottom: 200, x: 0, y: 0, toJSON: () => ({}) });
+    // Period 4 of 7: only Codex's unpriced model ran.
+    act(() => {
+      plot.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 400, clientY: 50 }));
+    });
+    const tooltip = plot.querySelector(".pointer-events-none")?.textContent ?? "";
+    assert.match(tooltip, /CodexUnpriced/);
+    assert.match(tooltip, /TotalUnpriced/, "Claude did nothing then; the period's only cost is unknown");
+  });
+});
+
 describe("UsageOverviewPanel model dialog", () => {
   it("opens on a model row and hands the model to the price editor from Set price", async () => {
     const prices: string[] = [];

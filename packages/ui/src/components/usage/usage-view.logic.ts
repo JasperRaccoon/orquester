@@ -12,7 +12,7 @@ import type {
   UsageTokenTotals
 } from "@orquester/api";
 
-import { processedTokens, sortAgents } from "../../lib/usage-history-format";
+import { processedTokens, sortAgents, sumCostFigures, type CostFigure, type UnpricedPart } from "../../lib/usage-history-format";
 import type { UsageMetric } from "./types";
 
 /** Reported or unsplit cost below this is rounding noise, not an "Other" slice. */
@@ -66,8 +66,10 @@ export interface UsageAgentRow {
 
 export interface UsageSeries {
   agent: string;
-  /** One value per period (zero-filled), in the metric. */
+  /** One value per period (zero-filled), in the metric; on cost, the known part. */
   values: number[];
+  /** On cost, per period: how much of it has no known price (unknown is not $0). */
+  unpriced?: UnpricedPart[];
 }
 
 export interface UsageModelRow {
@@ -139,6 +141,8 @@ export interface UsageModelDetail extends UsageSummary {
   /** Its trend: the metric asked for, or tokens when its cost is unknown. */
   chartMetric: UsageMetric;
   values: number[];
+  /** On a cost trend, per period: how much of it has no known price. */
+  unpriced?: UnpricedPart[];
 }
 
 function emptyTokens(): UsageTokenTotals {
@@ -238,10 +242,24 @@ function visibleBuckets(data: UsageHistoryResponse, hiddenAgents: readonly strin
   return data.buckets.filter((b) => !hidden.has(b.agent) && b.period >= 0 && b.period < data.periods.length);
 }
 
-function seriesValues(buckets: readonly UsageHistoryBucket[], periods: number, metric: UsageMetric): number[] {
+/** A bucket's cost as a figure: unknown when unpriced, marked when part of its tokens are. */
+function costFigure(b: UsageHistoryBucket): CostFigure {
+  if (b.costUsd === null) return { usd: null, unpriced: processedTokens(b.tokens) > 0 ? "all" : "none" };
+  return { usd: b.costUsd, unpriced: b.unpricedTokens > 0 ? "some" : "none" };
+}
+
+/** Per period (zero-filled): the metric's values and, on cost, how much of each has no known price. */
+function seriesValues(
+  buckets: readonly UsageHistoryBucket[],
+  periods: number,
+  metric: UsageMetric
+): { values: number[]; unpriced?: UnpricedPart[] } {
   const values = new Array<number>(periods).fill(0);
   for (const b of buckets) values[b.period] = (values[b.period] ?? 0) + metricValue(metric, b);
-  return values;
+  if (metric !== "cost") return { values };
+  const byPeriod = groupBy(buckets, (b) => String(b.period));
+  const unpriced = values.map((_, i) => sumCostFigures((byPeriod.get(String(i)) ?? []).map(costFigure)).unpriced);
+  return { values, unpriced };
 }
 
 /** Everything the Cost / Tokens tabs show, for `metric`, without `hiddenAgents`. */
@@ -297,7 +315,7 @@ export function deriveUsageView(
 
   const series: UsageSeries[] = agents.map((agent) => ({
     agent,
-    values: seriesValues(byAgent.get(agent) ?? [], periodCount, metric)
+    ...seriesValues(byAgent.get(agent) ?? [], periodCount, metric)
   }));
 
   const models: UsageModelRow[] = [];
@@ -429,6 +447,6 @@ export function deriveModelDetail(
     perMillionUsd: s.costUsd === null || priced <= 0 ? null : (s.costUsd / priced) * 1e6,
     cacheHitRate: input > 0 ? s.tokens.cacheRead / input : null,
     chartMetric,
-    values: seriesValues(list, data.periods.length, chartMetric)
+    ...seriesValues(list, data.periods.length, chartMetric)
   };
 }

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import type { UsageHistoryBucket, UsageHistoryResponse, UsageTokenRow } from "@orquester/api";
 
+import { formatCostFigure } from "../../lib/usage-history-format.ts";
 import { popoverCostFromHistory, popoverCostFromTokenRows } from "./usage-cost.logic.ts";
 
 /** Oct 20 … Nov 2: fourteen local days, today last. */
@@ -49,8 +50,8 @@ describe("the popover's cost from the 14-day history", () => {
     const summary = popoverCostFromHistory(
       history([bucket(13, "claude", "claude-opus-5-5", 3), bucket(10, "codex", "gpt-6-sol", 2), bucket(2, "claude", "claude-opus-5-5", 50)])
     );
-    assert.equal(summary.today, 3);
-    assert.equal(summary.week, 5, "the period 11 days back is outside the week");
+    assert.equal(summary.today.usd, 3);
+    assert.equal(summary.week.usd, 5, "the period 11 days back is outside the week");
     assert.equal(summary.chart.length, 14);
     assert.equal(summary.chart.at(-1)?.day, "2026-11-02");
     assert.deepEqual(summary.days.map((d) => [d.day, d.label]), [["2026-11-02", "Today"], ["2026-10-30", "Oct 30"], ["2026-10-22", "Oct 22"]]);
@@ -67,10 +68,27 @@ describe("the popover's cost from the 14-day history", () => {
     );
     const day = summary.days[0]!;
     assert.equal(day.label, "Yesterday");
-    assert.deepEqual(day.rows.map((r) => [r.agent, r.costUsd]), [["codex", 6], ["grok", 1], ["opencode", null]]);
-    assert.equal(day.total, 7);
+    assert.deepEqual(day.rows.map((r) => [r.agent, r.cost.usd]), [["codex", 6], ["grok", 1], ["opencode", null]]);
+    assert.deepEqual(day.total, { usd: 7, unpriced: "some" }, "the unpriced row is left out, and marks the total");
     assert.equal(day.rows[0]!.cache, 120, "cache reads and writes of both speeds");
     assert.equal(summary.hasUnpriced, true);
+  });
+});
+
+describe("the popover's unknown cost", () => {
+  it("reads a day with no known price as unknown, not $0, and marks a sum that is only partly priced", () => {
+    const summary = popoverCostFromHistory(
+      history([
+        bucket(13, "opencode", "mystery-model", null),
+        bucket(12, "codex", "gpt-6-sol", 2),
+        bucket(12, "grok", "grok-build", 1, { costSource: "reported", cost: null, unpricedTokens: 50 })
+      ])
+    );
+    assert.equal(formatCostFigure(summary.today), "—");
+    assert.equal(formatCostFigure(summary.week), "$3.00+");
+    const grok = summary.days[1]!.rows.find((r) => r.agent === "grok")!;
+    assert.equal(formatCostFigure(grok.cost), "$1.00+", "a reported cost that leaves tokens unpriced");
+    assert.deepEqual(summary.chart.at(-1), { day: "2026-11-02", label: "Today", cost: 0, unpriced: "all" });
   });
 });
 
@@ -88,8 +106,8 @@ describe("the popover's cost from an older daemon's token rows", () => {
       costSource: "api_equivalent"
     });
     const summary = popoverCostFromTokenRows([row("2026-11-02", 1.5), row("2026-10-27", 2), row("2026-10-20", 9)], Date.parse("2026-11-02T10:00:00Z"));
-    assert.equal(summary.today, 1.5);
-    assert.equal(summary.week, 3.5);
+    assert.equal(summary.today.usd, 1.5);
+    assert.equal(summary.week.usd, 3.5);
     assert.equal(summary.chart[0]?.day, "2026-10-20");
     assert.equal(summary.hasUnpriced, false);
   });

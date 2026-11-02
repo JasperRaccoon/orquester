@@ -87,7 +87,7 @@ const ModelDialogBody: React.FC<{
             periods={periods}
             resolution={resolution}
             timeZone={timeZone}
-            series={[{ agent: detail.agent, values: detail.values }]}
+            series={[{ agent: detail.agent, values: detail.values, unpriced: detail.unpriced }]}
             format={detail.chartMetric === "cost" ? formatUsd : formatTokens}
             formatTick={detail.chartMetric === "cost" ? formatUsdTick : undefined}
             ariaLabel={`${resolution === "hour" ? "Hourly" : "Daily"} ${chartNoun} for ${detail.model}`}
