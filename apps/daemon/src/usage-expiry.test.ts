@@ -121,7 +121,7 @@ test("expired-token lastGood serves a refilled 5h window as 0% instead of droppi
   clock = NOW + 24 * 3_600_000;
   const served = await source();
   assert.equal(served?.stale, true);
-  assert.deepEqual(served?.session, { percent: 0 });
+  assert.deepEqual(served?.session, { percent: 0, windowMinutes: 300 });
   assert.equal(served?.weekly?.percent, 100);
 });
 
