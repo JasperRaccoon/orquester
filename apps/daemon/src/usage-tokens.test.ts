@@ -317,7 +317,9 @@ test("subagent requests are reported once each, with their time and cache usage,
       turn("2", "2026-07-06T23:50:00Z", sub, {
         cache_creation_input_tokens: 50,
         cache_read_input_tokens: 100,
-        cache_creation: { ephemeral_5m_input_tokens: 20, ephemeral_1h_input_tokens: 30 }
+        cache_creation: { ephemeral_5m_input_tokens: 20, ephemeral_1h_input_tokens: 30 },
+        // The advisor's call is no request of the subagent's.
+        iterations: [{ type: "advisor_message", model: "claude-fable-5", input_tokens: 1, cache_read_input_tokens: 400, cache_creation_input_tokens: 300 }]
       }),
       // A streamed message is logged once per content block, with the same usage.
       turn("2", "2026-07-06T23:50:01Z", sub, { cache_creation_input_tokens: 50, cache_read_input_tokens: 100 })

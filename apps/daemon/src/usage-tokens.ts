@@ -204,7 +204,9 @@ function parseClaudeFile(text: string, mtimeMs: number, path: string, strings: S
     const agentId = typeof obj.agentId === "string" && obj.agentId ? obj.agentId : undefined;
     const subagent = obj.isSidechain === true || agentId !== undefined || inSubagentsDir;
     const sub = subagent && Number.isFinite(Date.parse(obj.timestamp)) ? (agentId ?? path) : undefined;
-    const push = (rowModel: string, usage: any, id: string | undefined) => {
+    // `sub` marks the subagent's own request only: an advisor call runs on another model with its
+    // own cache, so it says nothing of the subagent's cache lifetime.
+    const push = (rowModel: string, usage: any, id: string | undefined, advisor: boolean) => {
       const input = usage.input_tokens ?? 0;
       const output = usage.output_tokens ?? 0;
       const cacheRead = usage.cache_read_input_tokens ?? 0;
@@ -226,15 +228,15 @@ function parseClaudeFile(text: string, mtimeMs: number, path: string, strings: S
         reasoning: 0,
         dedupId: id
       };
-      if (sub !== undefined) row.sub = sub;
+      if (sub !== undefined && !advisor) row.sub = sub;
       rows.push(row);
     };
-    push(model, u, dedupId);
+    push(model, u, dedupId, false);
     if (!Array.isArray(u.iterations)) continue;
     u.iterations.forEach((it: any, i: number) => {
       if (it === null || typeof it !== "object" || it.type !== "advisor_message") return;
       if (typeof it.model !== "string" || it.model === "" || it.model === SYNTHETIC_MODEL) return;
-      push(it.model, it, dedupId === undefined ? undefined : `${dedupId}:advisor:${i}`);
+      push(it.model, it, dedupId === undefined ? undefined : `${dedupId}:advisor:${i}`, true);
     });
   }
   return rows;
