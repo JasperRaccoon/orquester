@@ -1,7 +1,7 @@
 import React from "react";
 
 import { getRegistryIcon } from "../../icons/registry-icons";
-import { formatCount, formatPercent, formatTokens, formatUsd } from "../../lib/usage-history-format";
+import { formatCount, formatPercent, formatTokens, formatUsd, formatUsdTick } from "../../lib/usage-history-format";
 import { Button } from "../ui/button";
 import { Modal, ModalCloseButton } from "../ui/modal";
 import { labelForAgent } from "../topbar/usage-format";
@@ -89,6 +89,7 @@ const ModelDialogBody: React.FC<{
             timeZone={timeZone}
             series={[{ agent: detail.agent, values: detail.values }]}
             format={detail.chartMetric === "cost" ? formatUsd : formatTokens}
+            formatTick={detail.chartMetric === "cost" ? formatUsdTick : undefined}
             ariaLabel={`${resolution === "hour" ? "Hourly" : "Daily"} ${chartNoun} for ${detail.model}`}
             heightClass="h-40 sm:h-44"
           />

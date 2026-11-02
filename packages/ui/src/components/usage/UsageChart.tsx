@@ -22,6 +22,8 @@ export interface UsageChartProps {
   /** One per agent, in the order the tooltip lists them. */
   series: readonly UsageSeries[];
   format: (value: number) => string;
+  /** A y-axis label given the tick step (its decimals follow the step); `format` when absent. */
+  formatTick?: (value: number, step: number) => string;
   ariaLabel: string;
   /** The plot's height class (the y gutter follows it). */
   heightClass?: string;
@@ -37,6 +39,7 @@ export const UsageChart: React.FC<UsageChartProps> = ({
   timeZone,
   series,
   format,
+  formatTick,
   ariaLabel,
   heightClass = "h-56"
 }) => {
@@ -63,7 +66,7 @@ export const UsageChart: React.FC<UsageChartProps> = ({
               className="absolute right-0 -translate-y-1/2 whitespace-nowrap text-[10px] tabular-nums text-neutral-500"
               style={{ top: `${(valueToY(tick, scale.max) / CHART_HEIGHT) * 100}%` }}
             >
-              {tick === 0 ? "0" : format(tick)}
+              {tick === 0 ? "0" : formatTick ? formatTick(tick, scale.step) : format(tick)}
             </span>
           ))}
         </div>

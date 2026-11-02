@@ -5,7 +5,7 @@ import type { UsageHistoryResponse } from "@orquester/api";
 
 import { getRegistryIcon } from "../../icons/registry-icons";
 import { cn } from "../../lib/cn";
-import { agentColor, formatCount, formatPercent, formatTokens, formatUsd } from "../../lib/usage-history-format";
+import { agentColor, formatCount, formatPercent, formatTokens, formatUsd, formatUsdTick } from "../../lib/usage-history-format";
 import { labelForAgent } from "../topbar/usage-format";
 import type { UsageMetric, UsageOverviewPanelProps } from "./types";
 import { UsageBreakdown } from "./UsageBreakdown";
@@ -55,6 +55,7 @@ export const UsageOverviewPanel: React.FC<UsageOverviewPanelProps> = ({
               timeZone={data.timeZone}
               series={view.series}
               format={format}
+              formatTick={metric === "cost" ? formatUsdTick : undefined}
               ariaLabel={chartTitle}
             />
           </div>

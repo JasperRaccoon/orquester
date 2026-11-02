@@ -25,20 +25,31 @@ export function processedTokens(t: Pick<UsageTokenTotals, "input" | "cacheRead" 
   return t.input + t.cacheRead + t.cacheWrite + t.output;
 }
 
-function trim(value: number): string {
-  const abs = Math.abs(value);
-  const digits = abs >= 100 ? 0 : abs >= 10 ? 1 : 2;
-  return value.toFixed(digits).replace(/\.0+$/, "");
-}
+const TOKEN_UNITS: readonly { size: number; suffix: string }[] = [
+  { size: 1, suffix: "" },
+  { size: 1e3, suffix: "K" },
+  { size: 1e6, suffix: "M" },
+  { size: 1e9, suffix: "B" },
+  { size: 1e12, suffix: "T" }
+];
 
 /** 89_812_345_678 → "89.8B", 512_000 → "512K", 999 → "999" (three significant digits). */
 export function formatTokens(value: number): string {
   const abs = Math.abs(value);
-  if (abs >= 1e12) return `${trim(value / 1e12)}T`;
-  if (abs >= 1e9) return `${trim(value / 1e9)}B`;
-  if (abs >= 1e6) return `${trim(value / 1e6)}M`;
-  if (abs >= 1e3) return `${trim(value / 1e3)}K`;
-  return String(Math.round(value));
+  let unit = 0;
+  while (unit < TOKEN_UNITS.length - 1 && abs >= TOKEN_UNITS[unit + 1]!.size) unit += 1;
+  // Round first, then promote: 999_600 rounds to 1000K, which reads "1M".
+  for (;;) {
+    const scaled = abs / TOKEN_UNITS[unit]!.size;
+    const digits = unit === 0 || scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+    const rounded = scaled.toFixed(digits);
+    if (Number(rounded) >= 1000 && unit < TOKEN_UNITS.length - 1) {
+      unit += 1;
+      continue;
+    }
+    const sign = value < 0 && Number(rounded) !== 0 ? "-" : "";
+    return `${sign}${rounded.replace(/\.0+$/, "")}${TOKEN_UNITS[unit]!.suffix}`;
+  }
 }
 
 const USD = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -49,6 +60,15 @@ export function formatUsd(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "—";
   if (value > 0 && value < 0.005) return "<$0.01";
   return USD.format(value);
+}
+
+/**
+ * A money axis label with as many decimals as the tick `step` needs, so a tiny scale
+ * reads "$0.001 · $0.002" rather than "<$0.01" on every tick, and a large one "$1,500".
+ */
+export function formatUsdTick(value: number, step: number): string {
+  const decimals = !(step > 0) || step >= 1 ? 0 : Math.min(8, Math.max(2, Math.ceil(-Math.log10(step) - 1e-9)));
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: decimals, maximumFractionDigits: decimals }).format(value);
 }
 
 /** A 0–1 share as "15.0%"; "<0.1%" when tiny but not zero. */

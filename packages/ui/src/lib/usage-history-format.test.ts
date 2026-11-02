@@ -12,6 +12,13 @@ test("token counts keep three significant digits and drop all-zero decimals", ()
   assert.equal(formatTokens(999), "999");
 });
 
+test("a count that rounds up to 1000 of a unit reads as one of the next unit", () => {
+  assert.equal(formatTokens(999.6), "1K");
+  assert.equal(formatTokens(999_600), "1M");
+  assert.equal(formatTokens(999_700_000), "1B");
+  assert.equal(formatTokens(999_400), "999K");
+});
+
 test("money is never abbreviated, tiny amounts don't read as zero, and unknown is not $0", () => {
   assert.equal(formatUsd(11_944.02), "$11,944.02");
   assert.equal(formatUsd(0.001), "<$0.01");

@@ -14,7 +14,7 @@ export interface ChartPoint {
   y: number;
 }
 
-export interface CurveSegment {
+interface CurveSegment {
   from: ChartPoint;
   c1: ChartPoint;
   c2: ChartPoint;
@@ -24,11 +24,13 @@ export interface CurveSegment {
 export interface ChartScale {
   max: number;
   ticks: number[];
+  /** The distance between ticks (0 with nothing to show): axis labels take their decimals from it. */
+  step: number;
 }
 
 /** Ticks 0, step, 2·step … covering `peak`, with a 1/2/5 × 10ⁿ step for ~`count` intervals. */
-export function niceScale(peak: number, count = TICK_COUNT): ChartScale {
-  if (!(peak > 0) || !Number.isFinite(peak)) return { max: 0, ticks: [0] };
+function niceScale(peak: number, count = TICK_COUNT): ChartScale {
+  if (!(peak > 0) || !Number.isFinite(peak)) return { max: 0, ticks: [0], step: 0 };
   const rawStep = peak / count;
   const magnitude = 10 ** Math.floor(Math.log10(rawStep));
   const normalized = rawStep / magnitude;
@@ -36,7 +38,7 @@ export function niceScale(peak: number, count = TICK_COUNT): ChartScale {
   const max = Math.ceil(peak / step - 1e-9) * step;
   const ticks: number[] = [];
   for (let i = 0; i * step <= max + step * 1e-6; i += 1) ticks.push(i * step);
-  return { max, ticks };
+  return { max, ticks, step };
 }
 
 /** The y (in viewBox units) of `value` on a scale topping out at `max`. */
@@ -105,7 +107,7 @@ function monotoneCurve(points: readonly ChartPoint[]): CurveSegment[] {
 const f = (v: number) => (Math.round(v * 100) / 100).toString();
 
 /** The SVG path of a curve; a single point draws as a flat line across the plot. */
-export function linePath(points: readonly ChartPoint[]): string {
+function linePath(points: readonly ChartPoint[]): string {
   if (points.length === 0) return "";
   if (points.length === 1) return `M0,${f(points[0]!.y)} L${CHART_WIDTH},${f(points[0]!.y)}`;
   const segments = monotoneCurve(points);
@@ -115,7 +117,7 @@ export function linePath(points: readonly ChartPoint[]): string {
 }
 
 /** The line closed down to the baseline, for the translucent fill under it. */
-export function areaPath(line: string): string {
+function areaPath(line: string): string {
   return line === "" ? "" : `${line} L${CHART_WIDTH},${CHART_HEIGHT} L0,${CHART_HEIGHT} Z`;
 }
 
