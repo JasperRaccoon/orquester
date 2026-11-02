@@ -196,7 +196,7 @@ export class UsageHistory {
   private recordedSince: string | null = null;
   /** What of the file this version can't read (unknown fields, a newer writer's rows), written back. */
   private kept: Omit<UsageHistoryFile, "recordedSince" | "rows"> = { unreadRows: [], sessions: [], cwds: [], extra: {} };
-  /** False when the file could not be moved out of the way: never overwrite it. */
+  /** False when the file could not be read or moved out of the way: never overwrite it. */
   private writable = true;
   private dirty = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
