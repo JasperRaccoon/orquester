@@ -86,7 +86,7 @@ export function newPriceRow(model = ""): PriceRow {
  * else names another model (`gpt-5-mini`, `o3-pro`, `gemini-2.5-flash-lite`), which the
  * daemon does not price as its prefix.
  */
-const VERSION_SUFFIX = /^(?:\d+|preview|latest|exp|experimental|beta|reasoning|non-reasoning)(?:-(?:\d+|preview|latest|exp|experimental|beta|reasoning|non-reasoning))*$/;
+const VERSION_SUFFIX = /^(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{4}|\d{2}-\d{2}|\d{4,}|preview|latest|exp|experimental|beta|reasoning|non-reasoning)(?:-(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{4}|\d{2}-\d{2}|\d{4,}|preview|latest|exp|experimental|beta|reasoning|non-reasoning))*$/;
 
 /**
  * The built-in rates the daemon would price `model` at, resolved as it does: drop a trailing

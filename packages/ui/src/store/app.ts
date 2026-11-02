@@ -2815,7 +2815,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const usage = await api.getUsage(force);
       // A late answer from the daemon the app has since left is not this one's.
       if (get().api !== api) return;
-      set({ usage, usageReceivedAt: Date.now() });
+      // Only a forced read is fresh: a plain one may answer with the daemon's cached (even
+      // restored-from-disk) snapshot, whose age the client cannot know.
+      set(force ? { usage, usageReceivedAt: Date.now() } : { usage });
     } catch {
       /* keep current */
     }

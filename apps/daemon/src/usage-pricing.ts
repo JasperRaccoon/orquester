@@ -100,10 +100,11 @@ function withoutContextTag(model: string): string {
 
 /**
  * What may follow a key and its `-` and still be the same model: dash-separated date and version
- * stamps (`20260115`, `2025-09-29`, `0309`) and release labels. A name part (`mini`, `nano`, `pro`,
- * `lite`, `codex-mini`) is another model with other prices, so it never matches.
+ * stamps (`20260115`, `2025-09-29`, `0309`, a `05-20` month-day, a `09-2025` month-year) and release labels. A name part
+ * (`mini`, `nano`, `pro`, `lite`, `codex-mini`) or a short minor version (`claude-opus-5-6` is not
+ * `claude-opus-5`) is another model with other prices, so it never matches.
  */
-const VERSION_SUFFIX = /^(?:\d+|preview|latest|exp|experimental|beta|reasoning|non-reasoning)(?:-(?:\d+|preview|latest|exp|experimental|beta|reasoning|non-reasoning))*$/;
+const VERSION_SUFFIX = /^(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{4}|\d{2}-\d{2}|\d{4,}|preview|latest|exp|experimental|beta|reasoning|non-reasoning)(?:-(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{4}|\d{2}-\d{2}|\d{4,}|preview|latest|exp|experimental|beta|reasoning|non-reasoning))*$/;
 
 function lookupKey(model: string): string | null {
   if (!model || AMBIGUOUS.has(model)) return null;

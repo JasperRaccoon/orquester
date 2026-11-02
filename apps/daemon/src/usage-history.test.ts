@@ -7,6 +7,7 @@ import { afterEach, mock, test } from "node:test";
 import { parseUsageHistoryRange, UsageHistory, type UsageHistoryRange } from "./usage-history.ts";
 import { setUsagePricingConfig } from "./usage-pricing.ts";
 import { HOUR_MS, type UsageRecord, type UsageRecordSource } from "./usage-records.ts";
+import { USAGE_HISTORY_VERSION } from "@orquester/config";
 
 afterEach(() => setUsagePricingConfig({ overrides: {}, aliases: {} }));
 
@@ -88,7 +89,7 @@ test("the ledger survives a restart, keeping fields a newer writer added", async
   // A speed this version doesn't know: the row is a newer writer's, kept as is.
   const newerRow = ["transcripts", "claude", "claude-opus-5", "turbo", hour, null, 1, 1, 1, 0, 1, 0, 1, 0, 0, [1]];
   await writeFile(path, JSON.stringify({
-    version: 1,
+    version: 2,
     recordedSince: "2026-10-01T00:00:00.000Z",
     note: "kept",
     sessions: ["x", "y"],
@@ -127,20 +128,20 @@ test("a corrupt ledger is moved aside, and a newer version is kept as a backup t
   assert.equal(fromCorrupt.query({ range: range("7d"), scanning: false }).buckets.length, 0);
   assert.ok((await readdir(dir)).some((name) => name.startsWith("usage-history.json.corrupt-")));
 
-  const newer = JSON.stringify({ version: 2, buckets: "whatever" });
+  const newer = JSON.stringify({ version: 3, buckets: "whatever" });
   await writeFile(path, newer);
   const fromNewer = make();
   await fromNewer.load();
   assert.equal(fromNewer.query({ range: range("7d"), scanning: false }).recordedSince, null);
   fromNewer.ingest(source([rec()]));
   await fromNewer.flush();
-  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 1);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).version, USAGE_HISTORY_VERSION);
 
   // The newer daemon runs again, then this one: its second file is backed up beside the first.
-  const newerAgain = JSON.stringify({ version: 2, buckets: "later" });
+  const newerAgain = JSON.stringify({ version: 3, buckets: "later" });
   await writeFile(path, newerAgain);
   await make().load();
-  const backups = (await readdir(dir)).filter((name) => name.startsWith("usage-history.json.v2.") && name.endsWith(".bak"));
+  const backups = (await readdir(dir)).filter((name) => name.startsWith("usage-history.json.v3.") && name.endsWith(".bak"));
   assert.equal(backups.length, 2);
   assert.deepEqual((await Promise.all(backups.map((name) => readFile(join(dir, name), "utf8")))).sort(), [newer, newerAgain].sort());
 });

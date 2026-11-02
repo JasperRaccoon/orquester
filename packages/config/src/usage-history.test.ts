@@ -7,7 +7,7 @@ const sums = [1, 2, 3, 1, 5, 1, 2, 0.5, 1];
 test("a ledger row a newer writer added is kept as read, its table entries at the same indexes, and rewritten unchanged", () => {
   const newerRow = ["transcripts", "claude", "claude-opus-5", "turbo", 100, 1, ...sums, [1]];
   const read = parseUsageHistoryFile({
-    version: 1,
+    version: 2,
     recordedSince: "2026-10-01T00:00:00.000Z",
     future: { keep: true },
     sessions: ["s-current", "s-newer"],
@@ -41,9 +41,9 @@ test("a ledger row a newer writer added is kept as read, its table entries at th
 });
 
 test("rows past retention are left out; a document of another version or none is not read as a ledger", () => {
-  const read = parseUsageHistoryFile({ version: 1, sessions: [], cwds: [], buckets: [["transcripts", "claude", "m", "standard", 5, null, ...sums, []], ["transcripts", "claude", "m", "turbo", 5]] }, { minHour: 6 });
+  const read = parseUsageHistoryFile({ version: 2, sessions: [], cwds: [], buckets: [["transcripts", "claude", "m", "standard", 5, null, ...sums, []], ["transcripts", "claude", "m", "turbo", 5]] }, { minHour: 6 });
   assert.ok(read.ok);
   assert.deepEqual([read.file.rows, read.file.unreadRows, read.pruned], [[], [], true]);
-  assert.deepEqual(parseUsageHistoryFile({ version: 2, buckets: [] }), { ok: false, version: 2 });
+  assert.deepEqual(parseUsageHistoryFile({ version: 3, buckets: [] }), { ok: false, version: 3 });
   assert.deepEqual(parseUsageHistoryFile([1]), { ok: false, version: null });
 });

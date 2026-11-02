@@ -1063,7 +1063,8 @@ export function serializeUsagePricingFile(file: UsagePricingFile): Record<string
 // point into `cwds` and `sessions`. What this version can't read (unknown top-level fields, extra
 // trailing columns, whole rows of a newer writer's source or speed) is written back unchanged.
 
-export const USAGE_HISTORY_VERSION = 1;
+// 2: buckets keyed by a cwd index (version 1 rows carried a derived project string).
+export const USAGE_HISTORY_VERSION = 2;
 export const USAGE_HISTORY_SOURCES = ["transcripts", "orquester-chats"] as const;
 export const USAGE_HISTORY_SPEEDS = ["standard", "fast", "ultrafast"] as const;
 /** The summed columns of a row, in file order (columns 6–14). */

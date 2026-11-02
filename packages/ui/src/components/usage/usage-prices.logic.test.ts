@@ -92,7 +92,8 @@ test("built-in rates resolve like the daemon's lookup, which the placeholders sh
     { model: "gpt-5", rates: { input: 1.25, output: 10, cacheRead: 0.125 } }
   ];
   assert.equal(builtinRatesFor("Claude-Opus-4-8-20260115[1m]", builtin)?.input, 5);
-  assert.equal(builtinRatesFor("claude-opus-4-1", builtin)?.input, 15);
+  // A short minor version is another model (claude-opus-4-1 is not claude-opus-4).
+  assert.equal(builtinRatesFor("claude-opus-4-1", builtin), null);
   assert.equal(builtinRatesFor("openai/gpt-5-preview", builtin)?.input, 1.25);
   assert.equal(builtinRatesFor("gpt-50", builtin), null);
   assert.equal(builtinRatesFor("opus", builtin), null);
@@ -107,7 +108,7 @@ test("built-in rates resolve like the daemon's lookup, which the placeholders sh
   for (const id of ["gpt-5-2025-08-07", "gpt-5-latest", "gemini-2.5-flash-preview-09-2025", "grok-4-fast-non-reasoning", "o3-exp-beta"]) {
     assert.notEqual(builtinRatesFor(id, more), null, id);
   }
-  for (const id of ["gpt-5-mini", "o3-pro", "gemini-2.5-flash-lite", "gpt-5-mini-2025-08-07"]) {
+  for (const id of ["gpt-5-mini", "o3-pro", "gemini-2.5-flash-lite", "gpt-5-mini-2025-08-07", "claude-opus-5-6", "claude-fable-5-2"]) {
     assert.equal(builtinRatesFor(id, more), null, id);
     assert.equal(ratePlaceholder("input", builtinRatesFor(id, more)), "Automatic", id);
   }

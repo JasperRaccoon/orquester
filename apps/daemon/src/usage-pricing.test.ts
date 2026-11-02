@@ -62,11 +62,12 @@ test("a key absorbs date, version and release suffixes, never a name part that m
     ["gpt-5.4-codex-preview", "gpt-5.4-codex"],
     ["grok-4.20-0309-non-reasoning", "grok-4.20"],
     ["o4-mini-2025-04-16", "o4-mini"],
-    ["gemini-2.5-flash-preview-05-20", "gemini-2.5-flash"]
+    ["gemini-2.5-flash-preview-05-20", "gemini-2.5-flash"],
+    ["gemini-2.5-flash-preview-09-2025", "gemini-2.5-flash"]
   ]) assert.equal(resolvePricingKey(model), key, model);
   for (const model of [
     "gpt-5-mini", "gpt-5-nano", "gpt-5-pro", "gpt-5-codex-mini", "o3-mini", "o3-pro", "gpt-5.2-pro", "gpt-5.5-pro",
-    "gpt-5.4-nano", "gemini-2.5-flash-lite", "gpt-5-mini-2025-08-07"
+    "gpt-5.4-nano", "gemini-2.5-flash-lite", "gpt-5-mini-2025-08-07", "claude-opus-5-6", "claude-sonnet-5-6", "claude-fable-5-2"
   ]) assert.equal(resolvePricingKey(model), null, model);
 });
 
