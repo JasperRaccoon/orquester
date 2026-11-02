@@ -95,6 +95,9 @@ import type {
   UsageResponse,
   SubagentCacheTtlStatus,
   UsageTokensResponse,
+  UsageHistoryResponse,
+  UsagePricesPatch,
+  UsagePricesResponse,
   WorkspaceSummary
 } from "@orquester/api";
 import type { ProfileReferencesResponse } from "@orquester/api";
@@ -2014,6 +2017,21 @@ export class ApiClient {
 
   getUsageTokens(force?: boolean, signal?: AbortSignal): Promise<UsageTokensResponse> {
     return this.send("GET", `/api/usage/tokens${force ? "?refresh=1" : ""}`, { signal });
+  }
+
+  /** The Usage view's history: `range` is "24h" or "<N>d" (1–90); `force` awaits a fresh scan. */
+  getUsageHistory(range: string, timeZone: string, force?: boolean, signal?: AbortSignal): Promise<UsageHistoryResponse> {
+    const query = new URLSearchParams({ range, tz: timeZone });
+    if (force) query.set("refresh", "1");
+    return this.send("GET", `/api/usage/history?${query.toString()}`, { signal });
+  }
+
+  getUsagePrices(signal?: AbortSignal): Promise<UsagePricesResponse> {
+    return this.send("GET", "/api/usage/prices", { signal });
+  }
+
+  updateUsagePrices(patch: UsagePricesPatch): Promise<UsagePricesResponse> {
+    return this.send("PUT", "/api/usage/prices", { body: patch });
   }
 
   getSubagentCacheTtlStatus(signal?: AbortSignal): Promise<SubagentCacheTtlStatus> {

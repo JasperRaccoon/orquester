@@ -394,7 +394,7 @@ While the view is open and focus is not in an input, textarea, select, contented
 ### 6.6 Colours and formatting
 
 - **Agent colours:** per-mode CSS variables in `globals.css`, dark and light: `--agent-claude` (#D97757), `--agent-codex` (neutral contrast: near-white in dark, near-black in light), `--agent-grok` (a muted neutral), `--agent-opencode` (#5B9BBD), and an `--agent-other` fallback. Every hue appears in a single `agentColor(id)` helper.
-- **Formatters:** shared pure module `packages/ui/src/lib/usage-format.ts`, which the popover reuses:
+- **Formatters:** shared pure module `packages/ui/src/lib/usage-history-format.ts`, which the popover reuses:
   - Tokens: K/M/B/T, 3 significant digits, trailing all-zero decimals trimmed ("89.8B", "512K", "999").
   - Money: always `$1,234.56`; `<$0.01` for tiny positive values; "—" for null.
   - Percent: 1 decimal, `<0.1%` for tiny values.

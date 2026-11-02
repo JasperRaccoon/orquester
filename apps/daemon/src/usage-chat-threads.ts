@@ -17,6 +17,8 @@ import { join } from "node:path";
 
 import type { ChatThreadUsageResponse, ChatThreadUsageRow } from "@orquester/api";
 
+import type { UsageRecord, UsageRecordSource } from "./usage-records.ts";
+
 const CHUNK_BYTES = 4 * 1024 * 1024;
 /** A line longer than this is skipped (counted in `skippedLines`), never buffered whole. */
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
@@ -110,7 +112,7 @@ async function adapterOf(path: string): Promise<string | null> {
   }
 }
 
-export class ChatThreadUsageScanner {
+export class ChatThreadUsageScanner implements UsageRecordSource {
   private readonly threads = new Map<string, ThreadEntry>();
   private inflight: Promise<void> | null = null;
 
@@ -152,6 +154,17 @@ export class ChatThreadUsageScanner {
     for (const row of merged.values()) if (row.costUsd !== null) row.costUsd = Math.round(row.costUsd * 1e10) / 1e10;
     const rows = [...merged.values()].sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : a.model.localeCompare(b.model)));
     return { agent, scope: "orquester-chats", rows, asOf: new Date(this.opts.now()).toISOString(), ...(skippedLines > 0 ? { skippedLines } : {}) };
+  }
+
+  /** Read what the logs appended since the last scan (single-flight). */
+  refresh(): Promise<void> {
+    return this.scan();
+  }
+
+  /** Hourly per-thread records of every scanned agent for the usage ledger; null before the first scan. */
+  historyRecords(): UsageRecord[] | null {
+    // TODO(usage-history): hourly per-thread sums (spec §3.3).
+    return null;
   }
 
   /** Single-flight: a scan asked for while one runs waits for that one. */

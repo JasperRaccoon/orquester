@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import type { UsageTokenRow, UsageTokensResponse } from "@orquester/api";
 import type { SubagentRequest } from "./subagent-cache-ttl.ts";
 import { estimateCostParts } from "./usage-pricing.ts";
+import type { UsageRecord, UsageRecordSource } from "./usage-records.ts";
 
 // Prices live in `usage-pricing.ts` (built-in table plus the user's overrides and aliases);
 // re-exported here for the callers that predate it.
@@ -209,7 +210,7 @@ interface FileEntry {
   codexState: CodexParseState;
 }
 
-export class UsageTokensScanner {
+export class UsageTokensScanner implements UsageRecordSource {
   private cache: UsageTokensResponse = { rows: [], asOf: new Date(0).toISOString() };
   /** Kept private so callers mutating a snapshot cannot change the next refresh. */
   private aggregateCache: UsageTokenRow[] = [];
@@ -235,6 +236,8 @@ export class UsageTokensScanner {
       now: () => number;
       /** Extra credential homes to scan (managed accounts) beyond the host home. */
       accountHomes?: () => { agent: "claude" | "codex"; home: string }[];
+      /** Called after every finished scan (the usage ledger folds the records in). */
+      onScanned?: () => void;
     }
   ) {}
 
@@ -263,6 +266,12 @@ export class UsageTokensScanner {
       out.push({ sub: r.sub, ts: r.ts, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite, cacheWrite1h: r.cacheWrite1h });
     }
     return out;
+  }
+
+  /** Hour-aggregated, de-duplicated records for the usage ledger; null until the first scan. */
+  historyRecords(): UsageRecord[] | null {
+    // TODO(usage-history): aggregate dedupedRows() by agent, model, hour, cwd, session and speed.
+    return null;
   }
 
   /** File-watcher entry point: rate-limited (leading run + one coalesced
@@ -353,6 +362,7 @@ export class UsageTokensScanner {
     this.cache = { rows: structuredClone(this.aggregateCache), asOf: new Date(this.opts.now()).toISOString() };
     await mkdir(dirname(this.opts.cacheFile), { recursive: true });
     await writeFile(this.opts.cacheFile, JSON.stringify(this.cache), { mode: 0o600 });
+    this.opts.onScanned?.();
   }
 
   /** Every parsed row, with deterministic cross-file dedup (first file wins by
