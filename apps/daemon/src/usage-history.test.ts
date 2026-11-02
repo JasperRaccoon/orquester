@@ -91,7 +91,7 @@ test("the ledger survives a restart, keeping fields a newer writer added", async
     note: "kept",
     sessions: ["x", "y"],
     buckets: [
-      ["transcripts", "codex", "gpt-5.5", "fast", hour, "", 1, 2, 3, 1, 5, 1, 2, 0, 0, [0, 1], "future-column"],
+      ["transcripts", "codex", "gpt-5.5", "fast", hour, null, 1, 2, 3, 1, 5, 1, 2, 0, 0, [0, 1], "future-column"],
       ["transcripts", "codex", "broken"]
     ]
   }));
@@ -272,9 +272,35 @@ test("a session active on several days counts once; projects come from the cwd u
     total: 4,
     byAgent: { claude: 3, codex: 1 },
     byModel: { "claude:claude-opus-5-5": 3, "codex:gpt-5.5": 1 },
-    byProject: { "ws/app": 1, "": 2, "ws/api": 1 }
+    byProject: { "ws/app": 1, "": 2, "ws/api": 1 },
+    byProjectAgent: { "claude:ws/app": 1, "claude:": 2, "codex:ws/api": 1 }
   });
   assert.deepEqual(answer.projectBuckets.map((p) => [p.project, p.agent, p.requests]), [["", "claude", 2], ["ws/api", "codex", 1], ["ws/app", "claude", 2]]);
+});
+
+test("a new workspaces root moves the projects of all history, and the same usage merged again is not counted twice", async (t) => {
+  let root = "/srv/old-root";
+  const { path } = await world(t);
+  const history = new UsageHistory({ path, workspacesDir: () => root, now: () => NOW });
+  const scanner = source([
+    rec({ session: "a", cwd: "/srv/old-root/ws/app", requests: 2, input: 200 }),
+    rec({ session: "b", cwd: "/srv/new-root/team/site", requests: 1, input: 100 })
+  ]);
+  history.ingest(scanner);
+  const answer = () => history.query({ range: range("1d"), timeZone: "UTC", scanning: false });
+  assert.deepEqual(answer().projectBuckets.map((p) => [p.project, p.requests]), [["", 1], ["ws/app", 2]]);
+
+  root = "/srv/new-root";
+  history.ingest(scanner);
+  const moved = answer();
+  assert.deepEqual(moved.buckets.map((b) => [b.requests, b.tokens.input]), [[3, 300]]);
+  assert.deepEqual(moved.projectBuckets.map((p) => [p.project, p.requests]), [["", 2], ["team/site", 1]]);
+  assert.deepEqual(moved.sessions.byProject, { "": 1, "team/site": 1 });
+
+  await history.flush();
+  const reloaded = new UsageHistory({ path, workspacesDir: () => root, now: () => NOW });
+  await reloaded.load();
+  assert.deepEqual(reloaded.query({ range: range("1d"), timeZone: "UTC", scanning: false }), answer());
 });
 
 test("cells are priced override > reported > built-in > unpriced, after aliases fold models", async (t) => {

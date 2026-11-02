@@ -2,16 +2,19 @@
 // 0600). The Claude CLI deletes transcripts after 30 days; the ledger keeps what the scanners once
 // saw, so the 90-day view keeps working. Spec: docs/superpowers/specs/2026-11-02-usage-panel-design.md §4.3.
 //
-// A bucket is one (source, agent, raw model, speed, UTC hour, project). After each scan the live
+// A bucket is one (source, agent, raw model, speed, UTC hour, cwd): only what a record says of
+// itself, never what is derived from settings (the project of a cwd follows the workspaces root,
+// which can change), so the same usage always lands in the same bucket. After a scan the live
 // records are merged in by a high-water rule: the live bucket replaces the stored one unless the
 // stored one has more requests (its transcript was deleted or truncated), session sets are unioned,
-// and stored buckets with no live counterpart are kept. Prices apply at query time, so a price
-// edit reprices all history.
+// and stored buckets with no live counterpart are kept. Projects, aliases and prices apply at query
+// time, so a settings or price edit applies to all history.
 //
-// File (`version: 1`): `{ version, recordedSince, sessions: string[], buckets: Row[] }`, where a Row is
-// `[source, agent, model, speed, hour, project, input, cacheRead, cacheWrite, cacheWrite1h, output,
-// reasoning, requests, reportedCostUsd, reportedRequests, sessionIndexes[]]` and sessionIndexes
-// point into `sessions`. Unknown top-level fields and extra trailing row columns are written back.
+// File (`version: 1`): `{ version, recordedSince, sessions: string[], cwds: string[], buckets: Row[] }`,
+// where a Row is `[source, agent, model, speed, hour, cwdIndex | null, input, cacheRead, cacheWrite,
+// cacheWrite1h, output, reasoning, requests, reportedCostUsd, reportedRequests, sessionIndexes[]]`;
+// the indexes point into `cwds` and `sessions`. Unknown top-level fields and extra trailing row
+// columns are written back.
 
 import { realpathSync } from "node:fs";
 import { readFile, rename } from "node:fs/promises";
@@ -77,7 +80,8 @@ interface Bucket extends Sums {
   model: string;
   speed: UsageSpeed;
   hour: number;
-  project: string;
+  /** The working directory, "" when unknown. */
+  cwd: string;
   sessions: Set<string>;
   /** Trailing row columns a newer writer added. */
   tail?: unknown[];
@@ -97,8 +101,9 @@ const tokensOf = (s: Sums): UsageTokenTotals => ({
   input: s.input, cacheRead: s.cacheRead, cacheWrite: s.cacheWrite, cacheWrite1h: s.cacheWrite1h, output: s.output, reasoning: s.reasoning
 });
 
-const bucketKey = (b: Pick<Bucket, "source" | "agent" | "model" | "speed" | "hour" | "project">): string =>
-  `${b.source}|${b.agent}|${b.model}|${b.speed}|${b.hour}|${b.project}`;
+// NUL never occurs in a model id or a path.
+const bucketKey = (b: Pick<Bucket, "source" | "agent" | "model" | "speed" | "hour" | "cwd">): string =>
+  `${b.source}|${b.agent}|${b.model}|${b.speed}|${b.hour}\0${b.cwd}`;
 
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
@@ -179,7 +184,7 @@ function projectUnder(root: string, cwd: string): string | null {
 
 export interface UsageHistoryOptions {
   path: string;
-  /** The workspaces root, read on each ingest (it can change at runtime). */
+  /** The workspaces root, read on each query (it can change at runtime). */
   workspacesDir: () => string;
   now?: () => number;
   logger?: Pick<Console, "warn">;
@@ -241,13 +246,12 @@ export class UsageHistory {
       await this.moveAside(`${this.opts.path}.v${doc.version}.bak`, `has version ${doc.version}`);
       return;
     }
-    const { version: _version, recordedSince, sessions, buckets, ...extra } = doc;
+    const { version: _version, recordedSince, sessions, cwds, buckets, ...extra } = doc;
     this.extra = extra;
     if (typeof recordedSince === "string" && Number.isFinite(Date.parse(recordedSince))) this.recordedSince = recordedSince;
-    const table = Array.isArray(sessions) ? sessions : [];
     const cutoff = this.cutoffHour();
     for (const row of Array.isArray(buckets) ? buckets : []) {
-      const bucket = parseRow(row, table);
+      const bucket = parseRow(row, Array.isArray(sessions) ? sessions : [], Array.isArray(cwds) ? cwds : []);
       if (!bucket) continue;
       if (bucket.hour < cutoff) {
         this.dirty = true;
@@ -314,19 +318,11 @@ export class UsageHistory {
     this.lastIngestAt = this.now();
     this.ingested.add(source);
     const cutoff = this.cutoffHour();
-    const projects = new Map<string, string>();
     const live = new Map<string, Bucket>();
     for (const record of records) {
       if (record.hour < cutoff || !SOURCES.includes(record.source)) continue;
-      const cwd = record.cwd;
-      let project = "";
-      if (cwd) {
-        const known = projects.get(cwd);
-        if (known === undefined) projects.set(cwd, (project = this.projectOf(cwd)));
-        else project = known;
-      }
       const speed = SPEEDS.includes(record.speed) ? record.speed : "standard";
-      const identity = { source: record.source, agent: record.agent, model: record.model, speed, hour: record.hour, project };
+      const identity = { source: record.source, agent: record.agent, model: record.model, speed, hour: record.hour, cwd: record.cwd ?? "" };
       const key = bucketKey(identity);
       let bucket = live.get(key);
       if (!bucket) live.set(key, (bucket = { ...identity, ...emptySums(), sessions: new Set() }));
@@ -423,18 +419,21 @@ export class UsageHistory {
       for (const id of ids) set.add(id);
     };
     const canonical = new Map<string, string>();
+    const projects = new Map<string, string>();
     for (const bucket of this.buckets.values()) {
       const period = periodOf(bucket.hour);
       if (period < 0) continue;
       let model = canonical.get(bucket.model);
       if (model === undefined) canonical.set(bucket.model, (model = canonicalModel(bucket.model)));
+      let project = projects.get(bucket.cwd);
+      if (project === undefined) projects.set(bucket.cwd, (project = bucket.cwd ? this.projectOf(bucket.cwd) : ""));
       const cellKey = `${period}|${bucket.agent}|${model}|${bucket.speed}`;
       let cell = cells.get(cellKey);
       if (!cell) cells.set(cellKey, (cell = { period, agent: bucket.agent, model, speed: bucket.speed, ...emptySums() }));
       addSums(cell, bucket);
-      const projectKey = `${bucket.project}|${bucket.agent}|${model}|${bucket.speed}`;
+      const projectKey = `${project}|${bucket.agent}|${model}|${bucket.speed}`;
       let projectCell = projectCells.get(projectKey);
-      if (!projectCell) projectCells.set(projectKey, (projectCell = { project: bucket.project, agent: bucket.agent, model, speed: bucket.speed, ...emptySums() }));
+      if (!projectCell) projectCells.set(projectKey, (projectCell = { project, agent: bucket.agent, model, speed: bucket.speed, ...emptySums() }));
       addSums(projectCell, bucket);
       if (bucket.sessions.size === 0) continue;
       // Ids are per agent: the same id under two agents is two sessions.
@@ -442,8 +441,8 @@ export class UsageHistory {
       for (const id of ids) sessions.total.add(id);
       addSessions(sessions.byAgent, bucket.agent, ids);
       addSessions(sessions.byModel, `${bucket.agent}:${model}`, ids);
-      addSessions(sessions.byProject, bucket.project, ids);
-      addSessions(sessions.byProjectAgent, `${bucket.agent}:${bucket.project}`, ids);
+      addSessions(sessions.byProject, project, ids);
+      addSessions(sessions.byProjectAgent, `${bucket.agent}:${project}`, ids);
     }
 
     const buckets: UsageHistoryBucket[] = [...cells.values()]
@@ -602,23 +601,16 @@ export class UsageHistory {
   }
 
   private serialize(): Record<string, unknown> {
-    const sessions: string[] = [];
-    const index = new Map<string, number>();
+    const sessions = table();
+    const cwds = table();
     const rows = [...this.buckets.values()]
       .sort((a, b) => a.hour - b.hour || bucketKey(a).localeCompare(bucketKey(b)))
       .map((b) => {
-        const ids = [...b.sessions].map((id) => {
-          let i = index.get(id);
-          if (i === undefined) {
-            index.set(id, (i = sessions.length));
-            sessions.push(id);
-          }
-          return i;
-        });
-        const row: unknown[] = [b.source, b.agent, b.model, b.speed, b.hour, b.project, ...SUM_FIELDS.map((f) => b[f]), ids];
+        const ids = [...b.sessions].map(sessions.index);
+        const row: unknown[] = [b.source, b.agent, b.model, b.speed, b.hour, b.cwd ? cwds.index(b.cwd) : null, ...SUM_FIELDS.map((f) => b[f]), ids];
         return b.tail ? [...row, ...b.tail] : row;
       });
-    return { ...this.extra, version: VERSION, recordedSince: this.recordedSince, sessions, buckets: rows };
+    return { ...this.extra, version: VERSION, recordedSince: this.recordedSince, sessions: sessions.values, cwds: cwds.values, buckets: rows };
   }
 }
 
@@ -643,12 +635,31 @@ function mergeInto(stored: Bucket, live: Bucket): boolean {
   return changed;
 }
 
+/** A string table of the file: each distinct value once, rows refer to it by index. */
+function table(): { values: string[]; index: (value: string) => number } {
+  const values: string[] = [];
+  const indexes = new Map<string, number>();
+  return {
+    values,
+    index: (value) => {
+      let i = indexes.get(value);
+      if (i === undefined) {
+        indexes.set(value, (i = values.length));
+        values.push(value);
+      }
+      return i;
+    }
+  };
+}
+
 /** One stored row, or null when it does not parse. */
-function parseRow(row: unknown, sessions: unknown[]): Bucket | null {
+function parseRow(row: unknown, sessions: unknown[], cwds: unknown[]): Bucket | null {
   if (!Array.isArray(row) || row.length < ROW_COLUMNS) return null;
-  const [source, agent, model, speed, hour, project] = row as unknown[];
+  const [source, agent, model, speed, hour, cwdIndex] = row as unknown[];
   if (!SOURCES.includes(source as Source) || !SPEEDS.includes(speed as UsageSpeed)) return null;
-  if (typeof agent !== "string" || !agent || typeof model !== "string" || typeof project !== "string") return null;
+  if (typeof agent !== "string" || !agent || typeof model !== "string") return null;
+  const cwd = cwdIndex === null ? "" : Number.isInteger(cwdIndex) ? cwds[cwdIndex as number] : undefined;
+  if (typeof cwd !== "string") return null;
   if (!Number.isSafeInteger(hour)) return null;
   const sums = emptySums();
   for (let i = 0; i < SUM_FIELDS.length; i++) {
@@ -663,7 +674,7 @@ function parseRow(row: unknown, sessions: unknown[]): Bucket | null {
     const id = Number.isInteger(i) ? sessions[i as number] : undefined;
     if (typeof id === "string" && id) set.add(id);
   }
-  const bucket: Bucket = { source: source as Source, agent, model, speed: speed as UsageSpeed, hour: hour as number, project, ...sums, sessions: set };
+  const bucket: Bucket = { source: source as Source, agent, model, speed: speed as UsageSpeed, hour: hour as number, cwd, ...sums, sessions: set };
   if (row.length > ROW_COLUMNS) bucket.tail = row.slice(ROW_COLUMNS);
   return bucket;
 }

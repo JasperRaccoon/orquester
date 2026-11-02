@@ -158,12 +158,13 @@ export interface UsageRecordSource {
 
 ### 4.3 Ledger (`apps/daemon/src/usage-history.ts`)
 
-**Bucket key:** `source|agent|model|speed|hour|project`.
+**Bucket key:** `source|agent|model|speed|hour|cwd`.
 
-- `project` is `"<workspace>/<project>"` when the record's `cwd` (as given, or after realpath of the workspaces root) lies at least two segments under `workspacesDir`. Otherwise it is `""`.
-- A bucket stores the token sums, `requests`, `reportedCostUsd`, `reportedRequests`, and the set of session ids. Session ids are interned in a table inside the file.
+- The key holds only what a record says of itself. Nothing derived from settings goes in it: the same usage must always land in the same bucket, or the high-water merge keeps both copies.
+- A bucket stores the token sums, `requests`, `reportedCostUsd`, `reportedRequests`, and the set of session ids. Session ids and cwds are interned in tables inside the file.
+- `project` is derived at query time: `"<workspace>/<project>"` when the bucket's `cwd` (as given, or after realpath of the workspaces root) lies at least two segments under `workspacesDir`. Otherwise it is `""`.
 
-**Merge after each scan** (high-water rule):
+**Merge** (high-water rule):
 
 1. Group the live records into buckets.
 2. For each live bucket, the stored bucket is replaced by the live one unless the stored one has more `requests`. Session sets are unioned either way.
@@ -173,14 +174,14 @@ export interface UsageRecordSource {
 
 **Persistence:**
 
-- `<appdir>/daemon/usage-history.json`, mode 0600, `{ version: 1, recordedSince, sessions: string[], buckets: [...] }`, in compact arrays.
+- `<appdir>/daemon/usage-history.json`, mode 0600, `{ version: 1, recordedSince, sessions: string[], cwds: string[], buckets: [...] }`, in compact arrays.
 - Writes happen only when something changed, coalesced to at most one per 60 s, atomically. Pending changes are flushed on daemon stop.
 - Reading is tolerant: an unknown or newer `version` starts empty but keeps the old file as `.v<n>.bak`; a corrupt file is moved aside.
 - `recordedSince` is the first time this daemon wrote the ledger.
 
 **Triggers:**
 
-- The scanner gets an `onScanned` callback after every `doRecompute`, and the history service ingests then.
+- The scanner gets an `onScanned` callback after every `doRecompute`. The ledger merges a source's first scan at once, and later scans at most every 5 minutes. A query, the prices answer and the flush at shutdown merge a deferred scan first.
 - A history request ingests the chat-log scanner's records and runs the merge before answering.
 - `refresh=1` awaits `usageTokens.recompute()` and a chat-log scan first.
 
