@@ -115,6 +115,7 @@ import {
 } from "../lib/panel-sizes";
 import { normalizeAgentPrefs, normalizeUsagePrefs, type AppConfigAdapter } from "../lib/app-config";
 import { mergeProviderUsageWindows } from "../components/topbar/usage-format";
+import type { UsageTab } from "../components/usage/types";
 import { isAgentLikeSession } from "../lib/session-kind";
 import {
   rememberAgentAuthDismissal,
@@ -743,12 +744,12 @@ export interface KnowledgeViewState {
 }
 
 /**
- * Whether a server-level view (Knowledge, or the Devices fleet) covers the
- * main area: the project's tabs are hidden and inactive under it, and the
+ * Whether a server-level view (Knowledge, the Devices fleet, or Usage) covers
+ * the main area: the project's tabs are hidden and inactive under it, and the
  * right rail and the phone's bottom bars step aside. At most one shows.
  */
-export function serverViewOpen(state: Pick<AppState, "knowledgeView" | "devicesFleetOpen">): boolean {
-  return state.knowledgeView.open || state.devicesFleetOpen;
+export function serverViewOpen(state: Pick<AppState, "knowledgeView" | "devicesFleetOpen" | "usageViewOpen">): boolean {
+  return state.knowledgeView.open || state.devicesFleetOpen || state.usageViewOpen;
 }
 
 export type ProjectTab =
@@ -1095,6 +1096,10 @@ export interface AppState {
   knowledgeView: KnowledgeViewState;
   /** The server-level Devices fleet view (devices phase 2 §2.9) covers the main area; client-local, in memory. */
   devicesFleetOpen: boolean;
+  /** The server-level Usage view (history, cost and limits) covers the main area; client-local, in memory. */
+  usageViewOpen: boolean;
+  /** The tab the Usage view was asked to open on (overrides its saved tab for that opening), or null. */
+  usageViewTab: UsageTab | null;
   /** Server cache of to-do records (all loaded scopes/refs). */
   todos: TodoListRecord[];
   /**
@@ -1332,6 +1337,14 @@ export interface AppState {
   /** Leave the Devices fleet view: the main area shows the current project (or landing view) again. */
   closeDevicesFleet: () => void;
   /**
+   * Show the server-level Usage view over the main area (in another server
+   * view's place), on `tab` when given, else on its saved tab; closes the
+   * mobile drawer. Going to a project, a tab or a session leaves it.
+   */
+  openUsageView: (tab?: UsageTab) => void;
+  /** Leave the Usage view: the main area shows the current project (or landing view) again. */
+  closeUsageView: () => void;
+  /**
    * Open (or focus) the editor tab of workflow `workflowId` in project
    * `projectPath` — one per workflow, reused when open; `runId` selects a run
    * in its run view (`null` clears it; absent leaves it). `title` is used only
@@ -1505,6 +1518,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   whiteboardTabsByProject: {},
   knowledgeView: { open: false, focus: null },
   devicesFleetOpen: false,
+  usageViewOpen: false,
+  usageViewTab: null,
   todos: [],
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
@@ -2168,6 +2183,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       agentAuthError: null,
       dismissedAgentAuthErrors: [],
       providerRateLimits: {},
+      // The popover's cost rows (an older daemon's fallback) are the previous daemon's.
+      usageTokens: null,
       notice: null,
       // Per-daemon flag: never let one server's curtain setting apply to the
       // next one. connect() reloads it from the newly selected daemon.
@@ -2867,6 +2884,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // The new tab (or its loading screen) is what the user asked to see.
     if (get().knowledgeView.open) get().closeKnowledge();
     if (get().devicesFleetOpen) get().closeDevicesFleet();
+    if (get().usageViewOpen) get().closeUsageView();
     // A slow resume used to leave the clicked row looking inert, so a second
     // click launched the same conversation again and was refused. The first
     // one now owns the screen (`openingChat`) until it lands.
@@ -3251,14 +3269,26 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   openDevicesFleet: () =>
     set((state) => ({
+      // One server-level view at a time: the fleet takes the open one's place.
+      ...leaveServerViews(state),
       devicesFleetOpen: true,
-      // One server-level view at a time: the fleet takes Knowledge's place.
-      knowledgeView: state.knowledgeView.open ? { ...state.knowledgeView, open: false } : state.knowledgeView,
       // On a phone it opens from the drawer, which would otherwise stay over it.
       sidebarDrawerOpen: false
     })),
 
   closeDevicesFleet: () => set((state) => (state.devicesFleetOpen ? revealProject(state) : state)),
+
+  openUsageView: (tab) =>
+    set((state) => ({
+      // One server-level view at a time: Usage takes the open one's place.
+      ...leaveServerViews(state),
+      usageViewOpen: true,
+      usageViewTab: tab ?? null,
+      // On a phone it opens from the drawer, which would otherwise stay over it.
+      sidebarDrawerOpen: false
+    })),
+
+  closeUsageView: () => set((state) => (state.usageViewOpen ? revealProject(state) : state)),
 
   openWorkflowTab: (projectPath, workflowId, opts) =>
     set((state) => {
@@ -4406,7 +4436,10 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
  */
 function withoutDaemonTabs(
   state: Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject">
-): Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject" | "knowledgeView" | "devicesFleetOpen"> {
+): Pick<
+  AppState,
+  "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject" | "knowledgeView" | "devicesFleetOpen" | "usageViewOpen"
+> {
   const ids = new Set<string>();
   for (const tabs of Object.values(state.workflowTabsByProject)) for (const tab of tabs) ids.add(tab.id);
   for (const tabs of Object.values(state.whiteboardTabsByProject)) for (const tab of tabs) ids.add(tab.id);
@@ -4417,7 +4450,9 @@ function withoutDaemonTabs(
     whiteboardTabsByProject: {},
     activeTabByProject,
     knowledgeView: { open: false, focus: null },
-    devicesFleetOpen: false
+    devicesFleetOpen: false,
+    // Its figures were the previous daemon's.
+    usageViewOpen: false
   };
 }
 
@@ -4427,8 +4462,9 @@ let knowledgeFocusNonce = 0;
 function showKnowledge(state: AppState, focus: Omit<KnowledgeFocus, "nonce"> | null): Partial<AppState> {
   return {
     knowledgeView: { open: true, focus: focus ? { ...focus, nonce: ++knowledgeFocusNonce } : state.knowledgeView.focus },
-    // One server-level view at a time: Knowledge takes the fleet's place.
+    // One server-level view at a time: Knowledge takes the open one's place.
     devicesFleetOpen: false,
+    usageViewOpen: false,
     // On a phone it opens from the drawer, which would otherwise stay over it.
     sidebarDrawerOpen: false
   };
@@ -4440,11 +4476,12 @@ function showKnowledge(state: AppState, focus: Omit<KnowledgeFocus, "nonce"> | n
  * the user went to is what shows; the state is kept as is when none shows.
  */
 function leaveServerViews(
-  state: Pick<AppState, "knowledgeView" | "devicesFleetOpen">
-): Pick<AppState, "knowledgeView" | "devicesFleetOpen"> {
+  state: Pick<AppState, "knowledgeView" | "devicesFleetOpen" | "usageViewOpen">
+): Pick<AppState, "knowledgeView" | "devicesFleetOpen" | "usageViewOpen"> {
   return {
     knowledgeView: state.knowledgeView.open ? { ...state.knowledgeView, open: false } : state.knowledgeView,
-    devicesFleetOpen: false
+    devicesFleetOpen: false,
+    usageViewOpen: false
   };
 }
 
