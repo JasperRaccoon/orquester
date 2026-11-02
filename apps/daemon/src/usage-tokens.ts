@@ -2,8 +2,8 @@ import { open, readFile, readdir, stat, writeFile, mkdir, realpath } from "node:
 import { join, dirname } from "node:path";
 import type { UsageTokenRow, UsageTokensResponse } from "@orquester/api";
 import type { SubagentRequest } from "./subagent-cache-ttl.ts";
-import { estimateCostParts } from "./usage-pricing.ts";
-import type { UsageRecord, UsageRecordSource } from "./usage-records.ts";
+import { canonicalModel, estimateCostParts, priceSlice, usagePricingRevision } from "./usage-pricing.ts";
+import { HOUR_MS, type UsageRecord, type UsageRecordSource, type UsageSpeed } from "./usage-records.ts";
 
 // Prices live in `usage-pricing.ts` (built-in table plus the user's overrides and aliases);
 // re-exported here for the callers that predate it.
@@ -12,47 +12,124 @@ export { estimateCostParts };
 interface RawRow {
   agent: string;
   model: string;
-  day: string;
+  /** When the request ran (epoch ms): the event's timestamp, else the file's mtime. */
+  ts: number;
+  /** Provider session id (interned per file), or null. */
+  session: string | null;
+  /** The working directory the request ran in (interned per file), or null. */
+  cwd: string | null;
+  speed: UsageSpeed;
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
   /** 1h-TTL subset of {@link cacheWrite} (bills at 2x input instead of 1.25x). */
   cacheWrite1h: number;
+  /** Subset of {@link output} (Codex reports it; Anthropic folds thinking into output). */
+  reasoning: number;
   /** Stable identity for cross-file de-duplication (Claude resume/branch copies
    *  prior turns, each still carrying message.usage). Undefined = always count. */
   dedupId?: string;
-  /** Set on a Claude subagent's request: which subagent, and when (epoch ms). */
+  /** Set on a Claude subagent's request whose timestamp parses: which subagent ({@link ts} is then the event's). */
   sub?: string;
-  ts?: number;
 }
 
-function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
-  const byKey = new Map<string, UsageTokenRow>();
+/** Token sums of one agent, model, UTC day and speed tier: what the Cost tab's rows are priced from. */
+interface DaySlice {
+  agent: string;
+  model: string;
+  day: string;
+  speed: UsageSpeed;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cacheWrite1h: number;
+}
+
+const DAY_MS = 86_400_000;
+
+/** Sum rows per agent, model, UTC day and speed: tokens only, so a price change needs no row walk. */
+function sliceRows(raw: RawRow[]): DaySlice[] {
+  const dayNames = new Map<number, string>();
+  const byKey = new Map<string, DaySlice>();
   for (const r of raw) {
-    const key = `${r.agent}|${r.model}|${r.day}`;
-    const cur =
-      byKey.get(key) ??
-      { agent: r.agent, model: r.model, day: r.day, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, costUsd: null, costSource: "api_equivalent" as const };
-    cur.inputTokens += r.input;
-    cur.outputTokens += r.output;
-    cur.cacheReadTokens += r.cacheRead;
-    cur.cacheWriteTokens += r.cacheWrite;
-    cur.cacheWrite1hTokens = (cur.cacheWrite1hTokens ?? 0) + r.cacheWrite1h;
-    byKey.set(key, cur);
+    const dayIndex = Math.floor(r.ts / DAY_MS);
+    let day = dayNames.get(dayIndex);
+    if (day === undefined) {
+      day = new Date(dayIndex * DAY_MS).toISOString().slice(0, 10);
+      dayNames.set(dayIndex, day);
+    }
+    const key = `${r.agent}|${r.model}|${dayIndex}|${r.speed}`;
+    let cur = byKey.get(key);
+    if (!cur) {
+      cur = { agent: r.agent, model: r.model, day, speed: r.speed, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
+      byKey.set(key, cur);
+    }
+    cur.input += r.input;
+    cur.output += r.output;
+    cur.cacheRead += r.cacheRead;
+    cur.cacheWrite += r.cacheWrite;
+    cur.cacheWrite1h += r.cacheWrite1h;
+  }
+  return [...byKey.values()];
+}
+
+/** The Cost tab's rows (per agent, model and UTC day) at the prices in force, each speed tier at its own rates. */
+function priceSlices(slices: readonly DaySlice[]): UsageTokenRow[] {
+  const byKey = new Map<string, UsageTokenRow>();
+  for (const s of slices) {
+    const key = `${s.agent}|${s.model}|${s.day}`;
+    const priced = priceSlice(canonicalModel(s.model), s.speed, s);
+    let row = byKey.get(key);
+    if (!row) {
+      row = { agent: s.agent, model: s.model, day: s.day, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, costUsd: null, costSource: "api_equivalent" as const };
+      row.costBreakdown = priced ? { input: 0, output: 0, cache: 0 } : null;
+      byKey.set(key, row);
+    }
+    row.inputTokens += s.input;
+    row.outputTokens += s.output;
+    row.cacheReadTokens += s.cacheRead;
+    row.cacheWriteTokens += s.cacheWrite;
+    row.cacheWrite1hTokens = (row.cacheWrite1hTokens ?? 0) + s.cacheWrite1h;
+    // A model has a price at every tier or at none, so a row's parts are all of its slices'.
+    if (priced && row.costBreakdown) {
+      row.costBreakdown.input += priced.parts.input;
+      row.costBreakdown.output += priced.parts.output;
+      row.costBreakdown.cache += priced.parts.cacheRead + priced.parts.cacheWrite;
+    }
   }
   for (const row of byKey.values()) {
-    const parts = estimateCostParts(row.model, {
-      input: row.inputTokens,
-      output: row.outputTokens,
-      cacheRead: row.cacheReadTokens,
-      cacheWrite: row.cacheWriteTokens,
-      cacheWrite1h: row.cacheWrite1hTokens ?? 0
-    });
-    row.costBreakdown = parts;
+    const parts = row.costBreakdown;
     row.costUsd = parts ? parts.input + parts.output + parts.cache : null;
   }
   return [...byKey.values()].sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : a.model.localeCompare(b.model)));
+}
+
+/** Rows summed per agent, model, UTC hour, cwd, session and speed: the usage ledger's input. */
+function historyOf(raw: RawRow[]): UsageRecord[] {
+  const byKey = new Map<string, UsageRecord>();
+  for (const r of raw) {
+    const hour = Math.floor(r.ts / HOUR_MS);
+    // null and "" never meet (interned strings are never empty); NUL never occurs in a path or an id.
+    const key = `${r.agent}|${r.model}|${hour}|${r.speed}\0${r.cwd ?? ""}\0${r.session ?? ""}`;
+    let rec = byKey.get(key);
+    if (!rec) {
+      rec = {
+        source: "transcripts", agent: r.agent, model: r.model, hour, cwd: r.cwd, session: r.session, speed: r.speed,
+        input: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, output: 0, reasoning: 0, requests: 0, reportedCostUsd: 0, reportedRequests: 0
+      };
+      byKey.set(key, rec);
+    }
+    rec.input += r.input;
+    rec.cacheRead += r.cacheRead;
+    rec.cacheWrite += r.cacheWrite;
+    rec.cacheWrite1h += r.cacheWrite1h;
+    rec.output += r.output;
+    rec.reasoning += r.reasoning;
+    rec.requests += 1;
+  }
+  return [...byKey.values()];
 }
 
 async function walkJsonl(dir: string): Promise<string[]> {
@@ -74,15 +151,34 @@ async function walkJsonl(dir: string): Promise<string[]> {
   return out;
 }
 
-function dayOf(iso: string | undefined, fallbackMs: number): string {
-  const d = iso ? new Date(iso) : new Date(fallbackMs);
-  return Number.isNaN(d.getTime()) ? new Date(fallbackMs).toISOString().slice(0, 10) : d.toISOString().slice(0, 10);
+/** An event's time (epoch ms), else `fallbackMs` (the file's mtime). */
+function tsOf(timestamp: unknown, fallbackMs: number): number {
+  const t = timestamp ? new Date(timestamp as string).getTime() : Number.NaN;
+  return Number.isNaN(t) ? fallbackMs : t;
 }
+
+/** A file's string pool: one instance per distinct session or cwd, however many rows carry it. */
+type Strings = Map<string, string>;
+
+function intern(strings: Strings, value: unknown): string | null {
+  if (typeof value !== "string" || value === "") return null;
+  const known = strings.get(value);
+  if (known !== undefined) return known;
+  strings.set(value, value);
+  return value;
+}
+
+const tokens = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+
+/** Claude Code's local placeholder model: it never reached the API. */
+const SYNTHETIC_MODEL = "<synthetic>";
 
 /** Parse a Claude `projects/**.jsonl` transcript into per-turn rows. Each row
  *  carries a dedupId (message.id + requestId, the fields ccusage hashes) so
- *  turns copied into resumed/branched transcripts are counted only once. */
-function parseClaudeFile(text: string, mtimeMs: number, path: string): RawRow[] {
+ *  turns copied into resumed/branched transcripts are counted only once. An
+ *  advisor call (`usage.iterations[i]` of type `advisor_message`) runs on its
+ *  own model and is its own row; the top-level usage is the executor's only. */
+function parseClaudeFile(text: string, mtimeMs: number, path: string, strings: Strings): RawRow[] {
   const rows: RawRow[] = [];
   const inSubagentsDir = path.split(/[\\/]/).includes("subagents");
   for (const line of text.split("\n")) {
@@ -95,37 +191,51 @@ function parseClaudeFile(text: string, mtimeMs: number, path: string): RawRow[] 
     }
     const u = obj?.message?.usage;
     if (!u) continue;
-    const input = u.input_tokens ?? 0;
-    const output = u.output_tokens ?? 0;
-    const cacheRead = u.cache_read_input_tokens ?? 0;
-    const cacheWrite = u.cache_creation_input_tokens ?? 0;
-    // Zero-usage entries (e.g. the "<synthetic>" model on error turns) would
-    // only render as noise rows.
-    if (input + output + cacheRead + cacheWrite === 0) continue;
+    const model: string = obj?.message?.model ?? "unknown";
+    if (model === SYNTHETIC_MODEL) continue;
     const messageId = obj?.message?.id;
     const requestId = obj?.requestId;
     const dedupId =
       typeof messageId === "string" && typeof requestId === "string" ? `${messageId}:${requestId}` : undefined;
-    const row: RawRow = {
-      agent: "claude",
-      model: obj?.message?.model ?? "unknown",
-      day: dayOf(obj?.timestamp, mtimeMs),
-      input,
-      output,
-      cacheRead,
-      cacheWrite,
-      cacheWrite1h: u.cache_creation?.ephemeral_1h_input_tokens ?? 0,
-      dedupId
-    };
+    const ts = tsOf(obj?.timestamp, mtimeMs);
+    const session = intern(strings, obj?.sessionId);
+    const cwd = intern(strings, obj?.cwd);
+    const speed: UsageSpeed = u.speed === "fast" ? "fast" : "standard";
     const agentId = typeof obj.agentId === "string" && obj.agentId ? obj.agentId : undefined;
-    if (obj.isSidechain === true || agentId || inSubagentsDir) {
-      const ts = Date.parse(obj.timestamp);
-      if (Number.isFinite(ts)) {
-        row.sub = agentId ?? path;
-        row.ts = ts;
-      }
-    }
-    rows.push(row);
+    const subagent = obj.isSidechain === true || agentId !== undefined || inSubagentsDir;
+    const sub = subagent && Number.isFinite(Date.parse(obj.timestamp)) ? (agentId ?? path) : undefined;
+    const push = (rowModel: string, usage: any, id: string | undefined) => {
+      const input = usage.input_tokens ?? 0;
+      const output = usage.output_tokens ?? 0;
+      const cacheRead = usage.cache_read_input_tokens ?? 0;
+      const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+      // Zero-usage entries would only render as noise rows.
+      if (input + output + cacheRead + cacheWrite === 0) return;
+      const row: RawRow = {
+        agent: "claude",
+        model: rowModel,
+        ts,
+        session,
+        cwd,
+        speed,
+        input,
+        output,
+        cacheRead,
+        cacheWrite,
+        cacheWrite1h: usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+        reasoning: 0,
+        dedupId: id
+      };
+      if (sub !== undefined) row.sub = sub;
+      rows.push(row);
+    };
+    push(model, u, dedupId);
+    if (!Array.isArray(u.iterations)) continue;
+    u.iterations.forEach((it: any, i: number) => {
+      if (it === null || typeof it !== "object" || it.type !== "advisor_message") return;
+      if (typeof it.model !== "string" || it.model === "" || it.model === SYNTHETIC_MODEL) return;
+      push(it.model, it, dedupId === undefined ? undefined : `${dedupId}:advisor:${i}`);
+    });
   }
   return rows;
 }
@@ -147,21 +257,50 @@ function extractCodexModel(obj: any): string | undefined {
   return undefined;
 }
 
+/** A fork's or a spawned subagent's rollout replays its parent's history right after its meta. */
+function isForkMeta(payload: any): boolean {
+  return typeof payload?.forked_from_id === "string" || typeof payload?.source?.subagent?.thread_spawn?.parent_thread_id === "string";
+}
+
+function codexSpeed(tier: unknown): UsageSpeed {
+  if (tier === "priority" || tier === "fast") return "fast";
+  if (tier === "ultrafast") return "ultrafast";
+  return "standard";
+}
+
+/** A fork's copied history arrives as a burst: a token count closer than this to the previous one is a copy. */
+const FORK_COPY_MAX_GAP_MS = 1000;
+
 /** Codex line-parser state carried across incremental chunks of one file: the
  *  last seen model (turn_context/session_meta records precede the token_count
- *  events they describe) and the cumulative-total gate. */
+ *  events they describe), the cumulative-total gate, the session, cwd and speed
+ *  tier in force, and the fork-copy suppression. Primitives only, so a spread
+ *  copies all of it (the unterminated tail is parsed with such a copy). */
 interface CodexParseState {
   prevTotal: number;
   model: string;
+  session: string | null;
+  cwd: string | null;
+  speed: UsageSpeed;
+  /** The first `session_meta` was read: later ones are copied ancestors' and say nothing of this file. */
+  sawMeta: boolean;
+  /** Inside a fork's copy burst: token counts only set the cumulative baseline. */
+  suppressing: boolean;
+  /** The time of the burst's previous event (the meta's, at first). */
+  anchorMs: number;
 }
+
+const initialCodexState = (): CodexParseState => ({
+  prevTotal: 0, model: "unknown", session: null, cwd: null, speed: "standard", sawMeta: false, suppressing: false, anchorMs: 0
+});
 
 /** Parse a chunk of a Codex `sessions/**.jsonl` rollout into per-turn rows,
  *  advancing `state` (see {@link CodexParseState}). `last_token_usage` is the
  *  per-turn delta; gate on the cumulative total advancing so repeated events
- *  aren't double-counted. `input_tokens` already INCLUDES the cached tokens,
- *  so subtract them and record the non-cached remainder as `input` (cached
- *  goes to `cacheRead` and is billed at the cheaper cache-read rate). */
-function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState): RawRow[] {
+ *  aren't double-counted. `input_tokens` already INCLUDES the cached and the
+ *  cache-written tokens, so subtract them and record the remainder as `input`
+ *  (cached goes to `cacheRead`, written to `cacheWrite`). */
+function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState, strings: Strings): RawRow[] {
   const rows: RawRow[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -173,22 +312,55 @@ function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState): 
     }
     const m = extractCodexModel(obj);
     if (m) state.model = m;
-    if (obj?.type !== "event_msg" || obj?.payload?.type !== "token_count") continue;
-    const info = obj.payload.info;
+    const p = obj?.payload;
+    if (obj?.type === "session_meta") {
+      if (state.sawMeta) continue;
+      state.sawMeta = true;
+      state.session = intern(strings, p?.id ?? p?.session_id);
+      state.cwd = intern(strings, p?.cwd) ?? state.cwd;
+      const at = Date.parse(obj?.timestamp);
+      if (isForkMeta(p) && Number.isFinite(at)) {
+        state.suppressing = true;
+        state.anchorMs = at;
+      }
+      continue;
+    }
+    if (obj?.type === "turn_context") state.cwd = intern(strings, p?.cwd) ?? state.cwd;
+    const settings = p?.thread_settings;
+    if ((obj?.type === "turn_context" || p?.type === "thread_settings_applied") && settings && typeof settings === "object" && "service_tier" in settings) {
+      state.speed = codexSpeed(settings.service_tier);
+    }
+    if (obj?.type !== "event_msg" || p?.type !== "token_count") continue;
+    const info = p.info;
     const total = info?.total_token_usage?.total_tokens ?? 0;
+    if (state.suppressing) {
+      const at = Date.parse(obj?.timestamp);
+      if (!Number.isFinite(at) || at - state.anchorMs < FORK_COPY_MAX_GAP_MS) {
+        // The parent's history, billed in the parent's rollout: it only moves the baseline.
+        if (Number.isFinite(at)) state.anchorMs = at;
+        if (total > state.prevTotal) state.prevTotal = total;
+        continue;
+      }
+      state.suppressing = false;
+    }
     if (total <= state.prevTotal) continue;
     state.prevTotal = total;
     const last = info?.last_token_usage ?? {};
-    const cached = last.cached_input_tokens ?? last.cache_read_input_tokens ?? 0;
+    const cached = tokens(last.cached_input_tokens ?? last.cache_read_input_tokens);
+    const written = tokens(last.cache_write_input_tokens);
     rows.push({
       agent: "codex",
       model: state.model,
-      day: dayOf(obj?.timestamp, mtimeMs),
-      input: Math.max(0, (last.input_tokens ?? 0) - cached),
+      ts: tsOf(obj?.timestamp, mtimeMs),
+      session: state.session,
+      cwd: state.cwd,
+      speed: state.speed,
+      input: Math.max(0, (last.input_tokens ?? 0) - cached - written),
       output: last.output_tokens ?? 0,
       cacheRead: cached,
-      cacheWrite: 0,
-      cacheWrite1h: 0
+      cacheWrite: written,
+      cacheWrite1h: 0,
+      reasoning: tokens(last.reasoning_output_tokens)
     });
   }
   return rows;
@@ -208,12 +380,20 @@ interface FileEntry {
   tailRows: RawRow[];
   /** Codex line-parser state at {@link bytesParsed} (claude is stateless). */
   codexState: CodexParseState;
+  /** The file's interned sessions and cwds. */
+  strings: Strings;
 }
 
 export class UsageTokensScanner implements UsageRecordSource {
   private cache: UsageTokensResponse = { rows: [], asOf: new Date(0).toISOString() };
   /** Kept private so callers mutating a snapshot cannot change the next refresh. */
   private aggregateCache: UsageTokenRow[] = [];
+  /** Token sums per agent, model, day and speed of the last rebuild: repricing starts here, not at the rows. */
+  private slices: DaySlice[] = [];
+  /** The `usagePricingRevision()` {@link aggregateCache} was priced at (-1: not yet). */
+  private pricedRevision = -1;
+  /** {@link historyRecords} of the last rebuild, built on first ask. */
+  private historyCache: UsageRecord[] | null = null;
   /** Stays dirty after a failed refresh until totals are successfully rebuilt. */
   private aggregateDirty = true;
   /** Per-file parse cache keyed by absolute path. Recompute only re-reads files
@@ -249,8 +429,14 @@ export class UsageTokensScanner implements UsageRecordSource {
     }
   }
 
+  /** The Cost tab's rows; repriced from the scanned sums (no transcript reread) when the prices changed since. */
   async snapshot(force = false): Promise<UsageTokensResponse> {
     if (force) await this.recompute();
+    else if (this.scanned && this.pricedRevision !== usagePricingRevision()) {
+      this.reprice();
+      this.cache = { rows: structuredClone(this.aggregateCache), asOf: this.cache.asOf };
+      await this.persist();
+    }
     return this.cache;
   }
 
@@ -262,7 +448,7 @@ export class UsageTokensScanner implements UsageRecordSource {
     if (!this.scanned) return null;
     const out: SubagentRequest[] = [];
     for (const r of this.dedupedRows()) {
-      if (r.sub === undefined || r.ts === undefined || r.ts < sinceMs) continue;
+      if (r.sub === undefined || r.ts < sinceMs) continue;
       out.push({ sub: r.sub, ts: r.ts, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite, cacheWrite1h: r.cacheWrite1h });
     }
     return out;
@@ -270,8 +456,9 @@ export class UsageTokensScanner implements UsageRecordSource {
 
   /** Hour-aggregated, de-duplicated records for the usage ledger; null until the first scan. */
   historyRecords(): UsageRecord[] | null {
-    // TODO(usage-history): aggregate dedupedRows() by agent, model, hour, cwd, session and speed.
-    return null;
+    if (!this.scanned) return null;
+    this.historyCache ??= historyOf(this.dedupedRows());
+    return this.historyCache.map((record) => ({ ...record }));
   }
 
   /** File-watcher entry point: rate-limited (leading run + one coalesced
@@ -356,13 +543,26 @@ export class UsageTokensScanner implements UsageRecordSource {
     // An unchanged transcript set has the same dedup winners and totals. Keep
     // the fresh scan timestamp without revisiting every historical turn.
     if (this.aggregateDirty) {
-      this.aggregateCache = aggregateRows(this.dedupedRows());
+      this.slices = sliceRows(this.dedupedRows());
+      this.historyCache = null;
+      this.pricedRevision = -1;
       this.aggregateDirty = false;
     }
+    if (this.pricedRevision !== usagePricingRevision()) this.reprice();
     this.cache = { rows: structuredClone(this.aggregateCache), asOf: new Date(this.opts.now()).toISOString() };
+    await this.persist();
+    this.opts.onScanned?.();
+  }
+
+  /** Price the scanned sums at the prices in force now. */
+  private reprice(): void {
+    this.pricedRevision = usagePricingRevision();
+    this.aggregateCache = priceSlices(this.slices);
+  }
+
+  private async persist(): Promise<void> {
     await mkdir(dirname(this.opts.cacheFile), { recursive: true });
     await writeFile(this.opts.cacheFile, JSON.stringify(this.cache), { mode: 0o600 });
-    this.opts.onScanned?.();
   }
 
   /** Every parsed row, with deterministic cross-file dedup (first file wins by
@@ -397,7 +597,7 @@ export class UsageTokensScanner implements UsageRecordSource {
     const incremental = cached !== undefined && st.size > cached.size;
     const entry: FileEntry = incremental
       ? cached
-      : { mtimeMs: 0, size: 0, bytesParsed: 0, rows: [], tailRows: [], codexState: { prevTotal: 0, model: "unknown" } };
+      : { mtimeMs: 0, size: 0, bytesParsed: 0, rows: [], tailRows: [], codexState: initialCodexState(), strings: new Map() };
     const start = incremental ? entry.bytesParsed : 0;
     let buf: Buffer;
     try {
@@ -418,12 +618,12 @@ export class UsageTokensScanner implements UsageRecordSource {
     const completeBuf = lastNl >= 0 ? buf.subarray(0, lastNl + 1) : Buffer.alloc(0);
     const tailBuf = lastNl >= 0 ? buf.subarray(lastNl + 1) : buf;
     if (agent === "claude") {
-      entry.rows.push(...parseClaudeFile(completeBuf.toString("utf8"), st.mtimeMs, path));
-      entry.tailRows = tailBuf.length > 0 ? parseClaudeFile(tailBuf.toString("utf8"), st.mtimeMs, path) : [];
+      entry.rows.push(...parseClaudeFile(completeBuf.toString("utf8"), st.mtimeMs, path, entry.strings));
+      entry.tailRows = tailBuf.length > 0 ? parseClaudeFile(tailBuf.toString("utf8"), st.mtimeMs, path, entry.strings) : [];
     } else {
-      entry.rows.push(...parseCodexFile(completeBuf.toString("utf8"), st.mtimeMs, entry.codexState));
+      entry.rows.push(...parseCodexFile(completeBuf.toString("utf8"), st.mtimeMs, entry.codexState, entry.strings));
       entry.tailRows =
-        tailBuf.length > 0 ? parseCodexFile(tailBuf.toString("utf8"), st.mtimeMs, { ...entry.codexState }) : [];
+        tailBuf.length > 0 ? parseCodexFile(tailBuf.toString("utf8"), st.mtimeMs, { ...entry.codexState }, entry.strings) : [];
     }
     entry.bytesParsed = start + completeBuf.length;
     entry.mtimeMs = st.mtimeMs;

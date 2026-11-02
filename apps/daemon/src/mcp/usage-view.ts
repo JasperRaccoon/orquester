@@ -7,7 +7,7 @@ interface UsageWindowView { id: string; label: string; percentUsed: number; rese
 interface UsageAccountView { id: string; label: string; plan?: string; available: boolean; stale: boolean; asOf?: string; ageMinutes?: number; needsReauth?: boolean; email?: string; windows: UsageWindowView[] }
 interface UsageAgentView { id: string; name: string; available: boolean; stale: boolean; asOf?: string; ageMinutes?: number; plan?: string; windows?: UsageWindowView[]; accounts: UsageAccountView[]; system?: UsageAccountView; aggregate?: { strategy: string; accountCount: number; staleAccountCount?: number } }
 
-const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok Build" };
+const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok Build", opencode: "OpenCode" };
 
 /** The top-bar countdown (`formatCountdown` in the UI) without the "Resets in" prefix. */
 function formatResetsIn(resetsAt: string | undefined, now: number): string | undefined {
@@ -105,7 +105,7 @@ const ORQUESTER_CHATS_ONLY_NOTE = (agent: string): string =>
   `${AGENT_NAMES[agent] ?? agent}: Orquester chats only — the cost and tokens it reported per turn in Orquester's own agent chats (closed ones included). Its use outside Orquester (its own CLI) is not counted.`;
 
 /**
- * The chat-log rows of an agent with no transcript scanner (Grok) as cost rows: the reported cost,
+ * The chat-log rows of an agent with no transcript scanner (Grok, OpenCode) as cost rows: the reported cost,
  * input split into fresh and cached (the adapters' input counts the cached tokens).
  */
 function chatRowsAsCost(chats: ChatThreadUsageResponse): CostInputRow[] {

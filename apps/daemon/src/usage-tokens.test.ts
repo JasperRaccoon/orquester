@@ -1,8 +1,9 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setUsagePricingConfig } from "./usage-pricing.ts";
 import { estimateCostParts, UsageTokensScanner } from "./usage-tokens.ts";
 
 const fixtureRoot = await mkdtemp(join(tmpdir(), "orq-usage-tokens-fixtures-"));
@@ -404,4 +405,166 @@ test("codex rollouts an Agent Profile home writes through its sessions link are 
   const codex = (await scanner.snapshot(true)).rows.filter((r) => r.agent === "codex");
   assert.equal(codex.reduce((a, r) => a + r.inputTokens, 0), 10);
   assert.equal(codex.reduce((a, r) => a + r.outputTokens, 0), 2);
+});
+
+// --- history records (Usage view) -------------------------------------------------
+
+const hourOf = (iso: string) => Math.floor(Date.parse(iso) / 3_600_000);
+const jsonl = (...objs: unknown[]) => objs.map((o) => JSON.stringify(o)).join("\n") + "\n";
+
+/** A scanner over a fresh home, with Claude transcripts and Codex rollouts written under it. */
+async function historyWorld(t: { after: (fn: () => Promise<void>) => void }, name: string) {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CODEX_HOME;
+  const home = await mkdtemp(join(fixtureRoot, name));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const claudeDir = join(home, ".claude", "projects", "p");
+  const codexDir = join(home, ".codex", "sessions");
+  await mkdir(claudeDir, { recursive: true });
+  await mkdir(codexDir, { recursive: true });
+  const cacheFile = join(home, "c.json");
+  const scanner = new UsageTokensScanner({ userhome: home, cacheFile, now: T0 });
+  return { claudeDir, codexDir, cacheFile, scanner };
+}
+
+const claudeTurn = (o: { id: string; at: string; model?: string; usage: Record<string, unknown>; session?: string; cwd?: string }) => ({
+  type: "assistant",
+  timestamp: o.at,
+  requestId: `req_${o.id}`,
+  sessionId: o.session ?? "sess-1",
+  cwd: o.cwd ?? "/work/ws/proj",
+  message: { id: `msg_${o.id}`, model: o.model ?? "claude-opus-5", usage: o.usage }
+});
+
+test("history records carry each Claude request's hour, session, cwd and speed; advisor calls are rows of their own model; synthetic lines never count", async (t) => {
+  const w = await historyWorld(t, "orq-utok-hist-claude-");
+  assert.equal(w.scanner.historyRecords(), null, "unknown before the first scan");
+  const advised = claudeTurn({
+    id: "1", at: "2026-07-07T10:15:00Z",
+    usage: {
+      input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 40, cache_creation: { ephemeral_1h_input_tokens: 15 },
+      iterations: [
+        { type: "message", input_tokens: 999, output_tokens: 999 },
+        { type: "advisor_message", model: "claude-fable-5", input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 },
+        { type: "advisor_message", model: "<synthetic>", input_tokens: 500, output_tokens: 500 }
+      ]
+    }
+  });
+  await writeFile(join(w.claudeDir, "a.jsonl"), jsonl(
+    advised,
+    claudeTurn({ id: "2", at: "2026-07-07T10:45:00Z", usage: { input_tokens: 5, output_tokens: 5, speed: "fast" } }),
+    claudeTurn({ id: "3", at: "2026-07-07T11:05:00Z", session: "sess-2", cwd: "/work/ws/other", usage: { input_tokens: 7, output_tokens: 1 } }),
+    claudeTurn({ id: "4", at: "2026-07-07T11:06:00Z", model: "<synthetic>", usage: { input_tokens: 100, output_tokens: 100 } })
+  ));
+  // A resumed transcript repeats the advised turn, advisor iteration included: both count once.
+  await writeFile(join(w.claudeDir, "b.jsonl"), jsonl(advised));
+  const tokens = await w.scanner.snapshot(true);
+  assert.ok(!tokens.rows.some((row) => row.model === "<synthetic>"));
+  const records = w.scanner.historyRecords()!;
+  const pick = (model: string, speed: string, session: string) => records.filter((r) => r.model === model && r.speed === speed && r.session === session);
+  assert.deepEqual(pick("claude-opus-5", "standard", "sess-1"), [{
+    source: "transcripts", agent: "claude", model: "claude-opus-5", hour: hourOf("2026-07-07T10:15:00Z"), cwd: "/work/ws/proj", session: "sess-1", speed: "standard",
+    input: 10, cacheRead: 30, cacheWrite: 40, cacheWrite1h: 15, output: 20, reasoning: 0, requests: 1, reportedCostUsd: 0, reportedRequests: 0
+  }]);
+  assert.deepEqual(pick("claude-fable-5", "standard", "sess-1").map((r) => [r.hour, r.input, r.output, r.cacheRead, r.cacheWrite, r.requests]), [[hourOf("2026-07-07T10:00:00Z"), 1, 2, 3, 4, 1]]);
+  assert.deepEqual(pick("claude-opus-5", "fast", "sess-1").map((r) => [r.hour, r.input, r.requests]), [[hourOf("2026-07-07T10:00:00Z"), 5, 1]]);
+  assert.deepEqual(pick("claude-opus-5", "standard", "sess-2").map((r) => [r.hour, r.cwd]), [[hourOf("2026-07-07T11:00:00Z"), "/work/ws/other"]]);
+  assert.equal(records.length, 4, "nothing else: neither the synthetic line nor the copy");
+  // The Cost tab prices the fast request at the fast tier (opus 5: 2x every rate) and the advisor at its own model.
+  const sum = (p: { input: number; output: number; cache: number } | null) => p!.input + p!.output + p!.cache;
+  const standard = sum(estimateCostParts("claude-opus-5", { input: 17, output: 21, cacheRead: 30, cacheWrite: 40, cacheWrite1h: 15 }));
+  const fastAtStandard = sum(estimateCostParts("claude-opus-5", { input: 5, output: 5, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }));
+  const opus = tokens.rows.find((row) => row.model === "claude-opus-5")!;
+  assert.ok(Math.abs(opus.costUsd! - (standard + 2 * fastAtStandard)) < 1e-12, `${opus.costUsd}`);
+  assert.equal(tokens.rows.find((row) => row.model === "claude-fable-5")?.inputTokens, 1);
+});
+
+const codexCount = (at: string, total: number, last: Record<string, number>) => ({
+  timestamp: at, type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: total }, last_token_usage: last } }
+});
+
+test("codex records: session from the first meta, cwd from the meta then the latest turn context, cache writes and reasoning split out, speed from the thread settings", async (t) => {
+  const w = await historyWorld(t, "orq-utok-hist-codex-");
+  await writeFile(join(w.codexDir, "r.jsonl"), jsonl(
+    { timestamp: "2026-07-07T09:00:00Z", type: "session_meta", payload: { id: "codex-s1", cwd: "/work/ws/a", model: "gpt-6-sol" } },
+    // A copied ancestor's meta says nothing of this rollout.
+    { timestamp: "2026-07-07T09:00:00Z", type: "session_meta", payload: { id: "ancestor", cwd: "/elsewhere" } },
+    codexCount("2026-07-07T09:10:00Z", 100, { input_tokens: 100, cached_input_tokens: 60, cache_write_input_tokens: 15, output_tokens: 20, reasoning_output_tokens: 8 }),
+    { timestamp: "2026-07-07T09:20:00Z", type: "event_msg", payload: { type: "thread_settings_applied", thread_settings: { model: "gpt-6-sol", service_tier: "priority" } } },
+    { timestamp: "2026-07-07T09:20:00Z", type: "turn_context", payload: { cwd: "/work/ws/b", model: "gpt-6-sol" } },
+    codexCount("2026-07-07T10:30:00Z", 200, { input_tokens: 50, cached_input_tokens: 0, output_tokens: 10 })
+  ));
+  await w.scanner.snapshot(true);
+  assert.deepEqual(w.scanner.historyRecords()!.map((r) => [r.hour, r.session, r.cwd, r.speed, r.input, r.cacheRead, r.cacheWrite, r.output, r.reasoning, r.requests]), [
+    [hourOf("2026-07-07T09:00:00Z"), "codex-s1", "/work/ws/a", "standard", 25, 60, 15, 20, 8, 1],
+    [hourOf("2026-07-07T10:00:00Z"), "codex-s1", "/work/ws/b", "fast", 50, 0, 0, 10, 0, 1]
+  ]);
+});
+
+test("a codex fork's copied history is not billed, the first real request after the burst is; a rollout that is no fork bills the same events", async (t) => {
+  const w = await historyWorld(t, "orq-utok-hist-fork-");
+  const body = [
+    { timestamp: "2026-07-07T12:00:00.500Z", type: "turn_context", payload: { model: "gpt-6-sol" } },
+    // The parent's history, replayed within milliseconds of each other.
+    codexCount("2026-07-07T12:00:00.600Z", 1_000, { input_tokens: 900, output_tokens: 100 }),
+    codexCount("2026-07-07T12:00:01.300Z", 3_000, { input_tokens: 1_800, output_tokens: 200 }),
+    // The fork's own first request, seconds later.
+    codexCount("2026-07-07T12:00:09.000Z", 3_050, { input_tokens: 40, output_tokens: 10 })
+  ];
+  await writeFile(join(w.codexDir, "fork.jsonl"), jsonl({ timestamp: "2026-07-07T12:00:00Z", type: "session_meta", payload: { id: "child", forked_from_id: "parent" } }, ...body));
+  await writeFile(join(w.codexDir, "spawn.jsonl"), jsonl({ timestamp: "2026-07-07T12:00:00Z", type: "session_meta", payload: { id: "sub", source: { subagent: { thread_spawn: { parent_thread_id: "parent" } } } } }, ...body));
+  await writeFile(join(w.codexDir, "plain.jsonl"), jsonl({ timestamp: "2026-07-07T12:00:00Z", type: "session_meta", payload: { id: "plain" } }, ...body));
+  await w.scanner.snapshot(true);
+  const bySession = new Map(w.scanner.historyRecords()!.map((r) => [r.session, [r.input, r.output, r.requests]]));
+  assert.deepEqual(bySession.get("child"), [40, 10, 1]);
+  assert.deepEqual(bySession.get("sub"), [40, 10, 1], "a spawned subagent without forked_from_id is a fork too");
+  assert.deepEqual(bySession.get("plain"), [2_740, 310, 3]);
+});
+
+test("codex parser state (session, cwd, speed, fork suppression) carries across appended chunks and an unterminated tail", async (t) => {
+  const w = await historyWorld(t, "orq-utok-hist-chunks-");
+  const file = join(w.codexDir, "fork.jsonl");
+  await writeFile(file, jsonl(
+    { timestamp: "2026-07-07T12:00:00Z", type: "session_meta", payload: { id: "child", cwd: "/work/ws/a", forked_from_id: "parent" } },
+    { timestamp: "2026-07-07T12:00:00.100Z", type: "event_msg", payload: { type: "thread_settings_applied", thread_settings: { model: "gpt-6-sol", service_tier: "ultrafast" } } },
+    codexCount("2026-07-07T12:00:00.200Z", 1_000, { input_tokens: 900, output_tokens: 100 })
+  ) + JSON.stringify(codexCount("2026-07-07T12:00:00.700Z", 2_000, { input_tokens: 900, output_tokens: 100 })));
+  await w.scanner.snapshot(true);
+  assert.deepEqual(w.scanner.historyRecords(), [], "the unterminated copy is still inside the burst");
+  await appendFile(file, "\n" + jsonl(
+    codexCount("2026-07-07T12:00:01.100Z", 2_500, { input_tokens: 450, output_tokens: 50 }),
+    codexCount("2026-07-07T12:00:05.000Z", 2_530, { input_tokens: 20, output_tokens: 10 })
+  ));
+  await w.scanner.snapshot(true);
+  assert.deepEqual(w.scanner.historyRecords()!.map((r) => [r.session, r.cwd, r.speed, r.model, r.input, r.output, r.requests]), [["child", "/work/ws/a", "ultrafast", "gpt-6-sol", 20, 10, 1]]);
+});
+
+test("history records are de-duplicated across transcripts, and a deleted winner's copy takes its place", async (t) => {
+  const w = await historyWorld(t, "orq-utok-hist-dedup-");
+  const turn = claudeTurn({ id: "x", at: "2026-07-07T08:00:00Z", usage: { input_tokens: 3, output_tokens: 4 } });
+  await writeFile(join(w.claudeDir, "a.jsonl"), jsonl(turn));
+  await writeFile(join(w.claudeDir, "b.jsonl"), jsonl(turn, claudeTurn({ id: "y", at: "2026-07-07T08:30:00Z", usage: { input_tokens: 1, output_tokens: 1 } })));
+  await w.scanner.snapshot(true);
+  assert.deepEqual(w.scanner.historyRecords()!.map((r) => [r.input, r.output, r.requests]), [[4, 5, 2]]);
+  await rm(join(w.claudeDir, "a.jsonl"));
+  await w.scanner.snapshot(true);
+  assert.deepEqual(w.scanner.historyRecords()!.map((r) => [r.input, r.output, r.requests]), [[4, 5, 2]], "b's copy now counts, still once");
+});
+
+test("a price change reprices the Cost tab's rows from the scanned sums, without a rescan, and persists them", async (t) => {
+  const w = await historyWorld(t, "orq-utok-reprice-");
+  t.after(async () => setUsagePricingConfig({ overrides: {}, aliases: {} }));
+  await writeFile(join(w.claudeDir, "a.jsonl"), jsonl(claudeTurn({ id: "1", at: "2026-07-07T08:00:00Z", model: "mystery-model", usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 } })));
+  await w.scanner.init();
+  assert.equal((await w.scanner.snapshot(true)).rows[0]?.costUsd, null, "unpriced at first");
+  // Gone from disk: only the scanned sums can answer now.
+  await rm(join(w.claudeDir, "a.jsonl"));
+  setUsagePricingConfig({ overrides: { "mystery-model": { input: 2, output: 8 } }, aliases: {} });
+  const repriced = await w.scanner.snapshot();
+  assert.equal(repriced.rows[0]?.inputTokens, 1_000_000);
+  assert.equal(repriced.rows[0]?.costUsd, 10);
+  assert.deepEqual(repriced.rows[0]?.costBreakdown, { input: 2, output: 8, cache: 0 });
+  assert.deepEqual(JSON.parse(await readFile(w.cacheFile, "utf8")), repriced);
+  setUsagePricingConfig({ overrides: {}, aliases: { "mystery-model": "claude-opus-5" } });
+  assert.equal((await w.scanner.snapshot()).rows[0]?.costUsd, 30, "an alias prices it as its target (opus 5: 5 + 25)");
 });
