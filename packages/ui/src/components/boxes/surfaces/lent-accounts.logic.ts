@@ -71,25 +71,25 @@ export function lentAccountsModel(box: Pick<BoxSummary, "state" | "lentAccounts"
 
 /**
  * The chip per account lent anywhere, by account id: "Lent to 2 VMs until 21:40", the latest end
- * time across its boxes. A lend past its time no longer counts.
+ * time across its boxes. Two chats' lends on one VM are one VM. A lend past its time no longer counts.
  */
-export function accountLendChips(boxes: readonly Pick<BoxSummary, "state" | "lentAccounts">[], now: number): ReadonlyMap<string, string> {
-  const lent = new Map<string, { count: number; latest: BoxLentAccount | null }>();
+export function accountLendChips(boxes: readonly Pick<BoxSummary, "id" | "state" | "lentAccounts">[], now: number): ReadonlyMap<string, string> {
+  const lent = new Map<string, { boxIds: Set<string>; latest: BoxLentAccount | null }>();
   for (const box of boxes) {
     if (box.state === "destroyed") continue;
     for (const lend of box.lentAccounts ?? []) {
       if (isExpired(lend, now)) continue;
-      const entry = lent.get(lend.accountId) ?? { count: 0, latest: null };
-      entry.count += 1;
+      const entry = lent.get(lend.accountId) ?? { boxIds: new Set<string>(), latest: null };
+      entry.boxIds.add(box.id);
       const ends = Date.parse(lend.expiresAt);
       if (Number.isFinite(ends) && !(entry.latest && Date.parse(entry.latest.expiresAt) >= ends)) entry.latest = lend;
       lent.set(lend.accountId, entry);
     }
   }
   const chips = new Map<string, string>();
-  for (const [accountId, { count, latest }] of lent) {
+  for (const [accountId, { boxIds, latest }] of lent) {
     const clock = latest ? resetClock(latest.expiresAt, now) : "";
-    chips.set(accountId, `Lent to ${count} ${count === 1 ? "VM" : "VMs"}${clock ? ` until ${clock}` : ""}`);
+    chips.set(accountId, `Lent to ${boxIds.size} ${boxIds.size === 1 ? "VM" : "VMs"}${clock ? ` until ${clock}` : ""}`);
   }
   return chips;
 }

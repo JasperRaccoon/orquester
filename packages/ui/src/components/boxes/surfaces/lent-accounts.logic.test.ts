@@ -83,22 +83,27 @@ describe("a box's lent logins", () => {
 });
 
 describe("the chip on a lent account", () => {
-  const onBox = (...lends: BoxLentAccount[]) => box({ lentAccounts: lends });
+  const onBox = (id: string, ...lends: BoxLentAccount[]) => box({ id, lentAccounts: lends });
 
   it("takes the latest end time across boxes, in any order", () => {
-    const later = onBox(lend({ expiresAt: TODAY_2140 }));
-    const earlier = onBox(lend({ expiresAt: TODAY_1800 }));
+    const later = onBox("b1", lend({ expiresAt: TODAY_2140 }));
+    const earlier = onBox("b2", lend({ expiresAt: TODAY_1800 }));
     const chip = accountLendChips([earlier, later], NOW).get("a1")!;
     assert.equal(chip, accountLendChips([later, earlier], NOW).get("a1"));
     assert.ok(chip.endsWith(resetClock(TODAY_2140, NOW)));
     assert.notEqual(chip, accountLendChips([later], NOW).get("a1"), "the count differs");
   });
 
+  it("counts two chats' lends on one VM as one VM, with the later end time", () => {
+    const chip = accountLendChips([onBox("b1", lend({ id: "l1", expiresAt: TODAY_1800 }), lend({ id: "l2", expiresAt: TODAY_2140 }))], NOW).get("a1");
+    assert.equal(chip, accountLendChips([onBox("b1", lend({ expiresAt: TODAY_2140 }))], NOW).get("a1"));
+  });
+
   it("keeps accounts apart and leaves out ended lends and destroyed boxes", () => {
     const chips = accountLendChips(
       [
         box(),
-        onBox(lend({ accountId: "a1" }), lend({ id: "l2", accountId: "a2" }), lend({ id: "l3", accountId: "old", expiresAt: THIS_MORNING })),
+        onBox("b2", lend({ accountId: "a1" }), lend({ id: "l2", accountId: "a2" }), lend({ id: "l3", accountId: "old", expiresAt: THIS_MORNING })),
         box({ state: "destroyed", lentAccounts: [lend({ id: "l4", accountId: "gone" })] })
       ],
       NOW
