@@ -24,7 +24,11 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
   checked with `perl -c` first), so needrestart never restarts the daemon after an apt upgrade, and
   `/etc/tmpfiles.d/orquester.conf` (from `orquester-tmpfiles.conf`): the daily
   `systemd-tmpfiles-clean` run deletes tsx transpile-cache entries under `/var/lib/orquester/tmp/tsx-*`
-  that nothing has used for 2 days, since tsx lists that whole directory at every start. Run as
+  that nothing has used for 2 days, since tsx lists that whole directory at every start. It also
+  sets BBR congestion control and a 64 MB TCP send buffer limit, now and at boot
+  (`/etc/sysctl.d/99-orquester.conf`, from `orquester-sysctl.conf`), because CUBIC and the default
+  4 MB limit hold downloads to distant users to a few Mbit/s on lossy routes; if a host rejects them
+  the file isn't installed and the deploy continues. Run as
   root from the checkout; idempotent; it never restarts anything itself. Provisioning and every
   deploy run it before their own (re)start, so a changed unit — e.g. `OOMPolicy=continue`, which keeps
   one OOM-killed agent process from stopping the whole unit — applies at the deploy's restart.

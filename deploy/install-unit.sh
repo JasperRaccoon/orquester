@@ -15,6 +15,8 @@
 #   daemon behind the deploy's drain. Validated with `perl -c` before it is moved into place.
 # - /etc/tmpfiles.d/orquester.conf ← deploy/orquester-tmpfiles.conf: the daily
 #   systemd-tmpfiles-clean run ages out tsx transpile-cache entries under the service's TMPDIR.
+# - /etc/sysctl.d/99-orquester.conf ← deploy/orquester-sysctl.conf: BBR congestion control and a
+#   larger TCP send buffer limit, set now and at every boot. Nothing needs a restart.
 set -euo pipefail
 
 UNIT_SRC=deploy/orquester.service
@@ -23,6 +25,8 @@ NEEDRESTART_DIR=/etc/needrestart/conf.d
 NEEDRESTART_DST="$NEEDRESTART_DIR/orquester.conf"
 TMPFILES_SRC=deploy/orquester-tmpfiles.conf
 TMPFILES_DST=/etc/tmpfiles.d/orquester.conf
+SYSCTL_SRC=deploy/orquester-sysctl.conf
+SYSCTL_DST=/etc/sysctl.d/99-orquester.conf
 
 log() { printf '[install-unit] %s\n' "$*"; }
 fail() { printf '[install-unit] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -61,5 +65,18 @@ if [ -f "$TMPFILES_SRC" ]; then
     mkdir -p "$(dirname "$TMPFILES_DST")"
     install -m 0644 "$TMPFILES_SRC" "$TMPFILES_DST"
     log "tmpfiles rule installed: $TMPFILES_DST (applied by the daily systemd-tmpfiles-clean run)"
+  fi
+fi
+
+# A kernel or container that can't set it keeps its own default: slower long-distance transfers are
+# no reason to fail a deploy, so the file is installed only once the setting has been accepted.
+if [ -f "$SYSCTL_SRC" ]; then
+  if ! sysctl -q -p "$SYSCTL_SRC" >/dev/null 2>&1; then
+    log "this host did not accept $SYSCTL_SRC; not installing it"
+  elif [ -f "$SYSCTL_DST" ] && cmp -s "$SYSCTL_SRC" "$SYSCTL_DST"; then
+    log "sysctl settings already up to date"
+  else
+    install -m 0644 "$SYSCTL_SRC" "$SYSCTL_DST"
+    log "sysctl settings installed: $SYSCTL_DST"
   fi
 fi
