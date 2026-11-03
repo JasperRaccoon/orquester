@@ -349,6 +349,8 @@ export class AccountLends {
 
     const installing = created.map((lend) => ({ lend, runtime: this.open(boxId, lend, "installing") }));
     try {
+      // Closed before the records landed: its `closed` event found nothing to end.
+      if (!this.deps.chatOpen(threadId)) throw new AccountLendError(409, "LEND_ENDED", "This chat was closed.");
       await this.serial(boxId, () => this.ensureFolders(connection, created));
       for (const { lend, runtime } of installing) {
         try {

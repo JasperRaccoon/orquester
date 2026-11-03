@@ -16,7 +16,8 @@ Contracts: `packages/api/src/boxes.ts` (HTTP/UI), `packages/api/src/box-protocol
 | `boxes/tailscale/` | `TailscaleKeys` over the Tailscale API (API token or OAuth client); `LocalTailscale` (`local.ts`): this machine's `tailscale` CLI — status, whether `tailscale serve` proxies an HTTPS port to the daemon, and the Connection's "Set up for me". |
 | `boxes/github/` | GitHub Actions OIDC verification, the Blacksmith control repo (create, workflow commit — re-committed at box create when a template changed —, dispatch, cancel), the workflow templates (`orquester-box.yml` for macOS and Linux boxes, `orquester-device-cache.yml`), and `device-cache.ts`: device-host box paths, cache keys and the cache-building scripts the device service shares. |
 | `boxes/service/` | Box records (`boxes.json`, `box-secrets.json`), `BoxRegistry`, the lifecycle and provisioning pipeline, reconciler, costs, project integration (create/list/delete), the plugin's HTTP routes and events. `byo.ts`: bring-your-own machines — pairing codes (the hub's `pair` route serves their script), removal, lending a machine to a project or chat. |
-| `boxes/broker/` | `AgentTokenBroker` and the refresh-scheduling rules (spec §7). |
+| `boxes/broker/` | `AgentTokenBroker` and the refresh-scheduling rules (spec §7), `getLentToken` for lends, and the refresh-token-free login files a box gets (`credentials.ts`). |
+| `boxes/lends/` | Lending managed accounts to a box (spec `2026-11-03-lend-accounts-to-boxes-design.md`): `service.ts` (records on `StoredBox.accountLends`, resolving names, preview, all-or-nothing install, every way a lend ends, cleanup on the box), `keeper.ts` (one lend's login kept current from the host), `routes.ts` (`accountLendRoutes`, both transports). |
 | `boxes/sync/` | `BoxConfigSync`, `BoxTranscriptSync`, the box → host approval queue and its routes. |
 | `boxes/tooling/` | `BoxToolingProvisioner`: per-target plugin tooling (Better TS Typecheck in boxes). |
 | `boxes/remote/` | Routing host features to a box: files, search, uploads/downloads, git runner, terminals, workflows, port forwards, secret files. |
@@ -28,8 +29,10 @@ Contracts: `packages/api/src/boxes.ts` (HTTP/UI), `packages/api/src/box-protocol
 Rules every module follows:
 
 - Secrets (agent tokens, git credentials, provider keys, Tailscale keys, Windows passwords) never
-  appear in logs, API responses, process arguments, or files in a box. Agent refresh tokens never
-  leave the host in any form.
+  appear in logs, API responses or process arguments, nor in files in a box, with one exception: a
+  box's login file (a Claude chat's, or a lent login's, mode 0600) holds a short-lived ACCESS token,
+  and anything on that box can read it until it expires. Agent refresh tokens and id tokens never
+  leave the host in any form: a Codex login's id token is synthetic.
 - A box is reached only through `BoxConnection`. No SSH.
 - Persist a box record before any provider call that creates something billable.
 - Waits use events, receipts or deadlines — never sleeps.
