@@ -127,7 +127,8 @@ export async function writeFileAtomic(
   path: string,
   content: string,
   defaultMode: number,
-  preserveExistingMode = true
+  preserveExistingMode = true,
+  options: { durable?: boolean } = {}
 ): Promise<void> {
   // Write THROUGH symlinks: users symlink agent configs into dotfiles repos,
   // and rename() onto the link path would replace the link with a regular
@@ -153,12 +154,12 @@ export async function writeFileAtomic(
   // tmp, and the loser's rename throws ENOENT (aborting its per-agent config).
   const tmp = `${target}.${randomUUID()}.tmp`;
   try {
-    // On disk before the rename, so a power cut leaves the old file or the new one, never an
-    // empty one: for a login whose refresh token just rotated, that would be the only copy.
+    // `durable`: on disk before the rename, so a power cut leaves the old file or the new one, never
+    // an empty one. For a login whose refresh token just rotated, that would be the only copy.
     const file = await open(tmp, "w", mode);
     try {
       await file.writeFile(content, "utf8");
-      await file.sync();
+      if (options.durable) await file.sync();
     } finally {
       await file.close();
     }
@@ -168,6 +169,7 @@ export async function writeFileAtomic(
     await rm(tmp, { force: true }).catch(() => undefined);
     throw error;
   }
+  if (!options.durable) return;
   // The rename itself is only durable once the directory is; the file is already in place either way.
   const directory = await open(dirname(target), "r").catch(() => null);
   await directory?.sync().catch(() => undefined);

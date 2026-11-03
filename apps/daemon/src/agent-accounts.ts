@@ -869,7 +869,7 @@ export class AgentAccountsService {
         const out = await refreshClaudeToken(refreshToken);
         if (out.ok) {
           // Replaced by rename: the old refresh token is already spent, so a crash mid-save must not lose the file.
-          await writeFileAtomic(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), 0o600);
+          await writeFileAtomic(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), 0o600, true, { durable: true });
           if (record.needsReauth) await this.markNeedsReauth(id, false);
           return "refreshed";
         }
@@ -884,7 +884,7 @@ export class AgentAccountsService {
         if (out.ok) {
           // Replaced by rename, as the Grok CLI writes it: a CLI reading it through
           // `GROK_AUTH_PATH` (an Agent Profile chat) or its home never sees a torn file.
-          await writeFileAtomic(credsPath, JSON.stringify(mergeGrokRefreshedAuth(creds, out, this.opts.now())), 0o600);
+          await writeFileAtomic(credsPath, JSON.stringify(mergeGrokRefreshedAuth(creds, out, this.opts.now())), 0o600, true, { durable: true });
           if (record.needsReauth) await this.markNeedsReauth(id, false);
           return "refreshed";
         }
@@ -898,7 +898,7 @@ export class AgentAccountsService {
       const out = await refreshCodexToken(refreshToken);
       if (out.ok) {
         // Replaced by rename: a running Codex reloads it before refreshing and must never read a torn file.
-        await writeFileAtomic(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), 0o600);
+        await writeFileAtomic(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), 0o600, true, { durable: true });
         if (record.needsReauth) await this.markNeedsReauth(id, false);
         return "refreshed";
       }
