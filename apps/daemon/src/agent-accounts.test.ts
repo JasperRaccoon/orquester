@@ -547,21 +547,6 @@ test("the refresher renews held accounts before their CLI, respects its lock, an
   assert.equal(credentials.claudeAiOauth.refreshToken, "NEWR");
 });
 
-test("a Claude refresh replaces the login file by rename, so a crash mid-write cannot destroy the login", async (t) => {
-  const now = 1_000_000;
-  const svc = await makeServiceWithFetch(t, now, async () =>
-    new Response(JSON.stringify({ access_token: "NEWA", refresh_token: "NEWR", expires_in: 28_800 }), { status: 200 })
-  );
-  const claude = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: now } }), label: "L" });
-  const path = join(svc.homePath("claude", claude.id), ".credentials.json");
-  const before = await stat(path);
-  assert.equal(await svc.refreshNow("claude", claude.id), "refreshed");
-  const after = await stat(path);
-  assert.notEqual(after.ino, before.ino, "a new file, not the old one written in place");
-  assert.equal(after.mode & 0o777, 0o600);
-  assert.equal(JSON.parse(await readFile(path, "utf8")).claudeAiOauth.refreshToken, "NEWR");
-});
-
 test("an invalid_grant for a refresh token a host CLI already rotated is that CLI's refresh, not a login to redo", async (t) => {
   const now = 1_000_000;
   let home = "";

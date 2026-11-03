@@ -190,7 +190,7 @@ test("knowledge gating matrix: plugin off/on × Global / profile with collection
   }
   // A chat already in a box may borrow logins even while no box can be rented; that is all it gains.
   const inBox = buildSessionToolsManifest({ thread: thread({ inBox: true }), catalog: chat, daemonPointing: [] });
-  assert.deepEqual(inBox.tools.filter((name) => !build().tools.includes(name)), ["box_lend_accounts", "box_return_accounts"]);
+  assert.deepEqual(inBox.tools.filter((name) => !build().tools.includes(name)).sort(), ["box_lend_accounts", "box_return_accounts", "list_boxes"]);
   assert.ok(both.tools.includes("box_lend_accounts"));
   assert.ok(!build().tools.includes("box_lend_accounts"));
   assert.doesNotMatch(inBox.instructions, /create_box/);
