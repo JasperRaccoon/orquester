@@ -884,13 +884,39 @@ test("the old deadline firing does not end a lend whose end time moved", async (
   assert.deepEqual(storedLends(w), []);
 });
 
-test("two lends of one account at once: the second answers with the login there, not an unfinished install", async (t) => {
+test("two lends of one account at once: the second waits for the first's install and answers with the login there", async (t) => {
   const w = await world(t);
-  const [first, second] = await Promise.all([w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE), w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 300 })]);
-  assert.equal(second.lent[0]?.id, first.lent[0]?.id);
-  assert.equal(second.lent[0]?.status, "active");
-  assert.equal(second.lent[0]?.expiresAt, new Date(NOW + 300 * MIN).toISOString());
-  assert.notEqual(await w.readVm(w.vmPath("claude", CLAUDE)), null);
+  w.files.texts.set(w.hostPath("claude", CLAUDE), claudeLogin("short", NOW + 10 * MIN));
+  let finishRefresh: () => void = () => undefined;
+  const refreshing = new Promise<void>((asked) => {
+    w.refreshImpl = (agent, id) =>
+      new Promise((resolve) => {
+        finishRefresh = () => {
+          w.files.write(w.hostPath(agent as "claude", id), claudeLogin("fresh", Date.now() + 8 * HOUR));
+          resolve("refreshed");
+        };
+        asked();
+      });
+  });
+  let reads = 0;
+  w.enabled = {
+    get value() {
+      reads += 1;
+      return true;
+    }
+  };
+  const first = w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  await refreshing;
+  reads = 0;
+  const second = w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 300 });
+  await Promise.resolve();
+  assert.equal(reads, 0, "the second call starts nothing while the first installs");
+  finishRefresh();
+  const [installed, repeated] = await Promise.all([first, second]);
+  assert.equal(repeated.lent[0]?.id, installed.lent[0]?.id);
+  assert.equal(repeated.lent[0]?.status, "active");
+  assert.equal(repeated.lent[0]?.expiresAt, new Date(NOW + 300 * MIN).toISOString());
+  assert.equal(await vmToken(w), "fresh");
   assert.equal(storedLends(w).length, 1);
 });
 
