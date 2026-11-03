@@ -15,7 +15,8 @@ import { ToolError, expectOk } from "../errors.ts";
 import { listSessions, postIdempotent, readThread, readThreadHead, requireChatSession } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS, toSafeToolError } from "../result.ts";
 import { chatDetail } from "../views.ts";
-import { defineTool, MUTATING, type AnyOrquesterTool, type ScopeClaim } from "../catalog/contract.ts";
+import { defineTool, MUTATING, type AnyOrquesterTool, type ScopeClaim, type ScopeContext } from "../catalog/contract.ts";
+import { ACCOUNT_SPEND, BOX_ACCOUNT_PIN, boxAccountCard, exposedBox, requireBoxAccountCard, type BoxAccountExposure } from "./boxes.ts";
 import { chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./session-access.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT, optionsSchema } from "./sessions.ts";
 import { launchModel } from "./messages.ts";
@@ -129,6 +130,19 @@ async function forkTarget(
   };
 }
 
+/**
+ * What a chat's fork would newly give a box (`exposedBox`): the account it names, else (another
+ * agent) that agent's default, else the original's own.
+ */
+async function forkBoxAccount(args: { agent?: string; accountId?: string }, api: ScopeContext["api"], summary: SessionSummary): Promise<BoxAccountExposure | null> {
+  if (!api.boxesOfChat?.({ projectPath: summary.projectPath }).length) return null;
+  const refId = args.agent ?? summary.refId;
+  const agent = findAgent(await loadAgents(api, { includeLegacyModels: true }), refId);
+  const accountId = validateAccountId(agent, args.accountId) ?? (refId === summary.refId ? summary.accountId : agent.defaultAccountId);
+  const box = exposedBox(api, { projectPath: summary.projectPath }, accountId);
+  return box ? { box, accountId: accountId!, label: agent.accounts.find((account) => account.id === accountId)?.label ?? accountId!, agent: agent.id } : null;
+}
+
 export const forkSessionTool = defineTool({
   name: "fork_session",
   title: "Fork a chat session",
@@ -150,16 +164,20 @@ export const forkSessionTool = defineTool({
   audiences: ["external", "chat"],
   toolset: "core",
   tier: "act",
+  // Only a chat's fork that gives a box a new account spends (looked up by `scope`).
+  spendFamily: (_args, scope) => scope.resolved?.spendFamily,
   async scope(args, ctx) {
     if (args.throughTurn !== undefined && args.messageId !== undefined) throw new ToolError("INVALID_ARGUMENT", "Give throughTurn or messageId, not both.");
     const caller = threadCaller(ctx.caller);
     const target = args.sessionId ?? caller?.threadId;
     if (target === undefined) throw new ToolError("INVALID_ARGUMENT", "sessionId is required: the session to fork.");
     // The fork carries the original's conversation into a tab the caller can read: a content read.
-    return sessionClaim(ctx, target, { reads: "content", writes: false, causesTurnIn: [], self: "allow" });
+    const claim = await sessionClaim(ctx, target, { reads: "content", writes: false, causesTurnIn: [], self: "allow" });
+    if (caller === null || !ctx.api.boxesOfChat) return claim;
+    return (await forkBoxAccount(args, ctx.api, await requireChatSession(ctx.api, target))) ? { ...claim, resolved: ACCOUNT_SPEND } : claim;
   },
-  approval: async (args, ctx) =>
-    sessionCard(ctx, args.sessionId ?? threadCaller(ctx.caller)?.threadId ?? "", "fork", [
+  async approval(args, ctx) {
+    const base = await sessionCard(ctx, args.sessionId ?? threadCaller(ctx.caller)?.threadId ?? "", "fork", [
       ...(args.throughTurn !== undefined ? [{ label: "Through turn", value: String(args.throughTurn) }] : []),
       ...(args.messageId !== undefined ? [{ label: "At message", value: args.messageId }] : []),
       ...(args.title !== undefined ? [{ label: "Fork title", value: args.title }] : []),
@@ -168,7 +186,12 @@ export const forkSessionTool = defineTool({
       ...(args.model !== undefined ? [{ label: "Model", value: args.model }] : []),
       ...(args.options !== undefined ? [{ label: "Options", value: JSON.stringify(args.options) }] : []),
       ...(args.accountId !== undefined ? [{ label: "Account", value: args.accountId }] : [])
-    ]),
+    ]);
+    const caller = threadCaller(ctx.caller);
+    if (caller === null || !ctx.api.boxesOfChat) return base;
+    const exposure = await forkBoxAccount(args, ctx.api, await requireChatSession(ctx.api, args.sessionId ?? caller.threadId));
+    return exposure ? boxAccountCard(base, exposure, caller) : base;
+  },
   annotations: MUTATING,
   resultKind: "json",
   async run(args, ctx) {
@@ -187,6 +210,16 @@ export const forkSessionTool = defineTool({
     // Another agent, model or account: checked as create_session checks them, before anything is made.
     const { isLegacy, ...forkAt } = await forkTarget(api, summary, args);
     Object.assign(body, forkAt);
+    if (caller !== null) {
+      // What the card approved is what runs; an account new to the box runs only with a card.
+      const pinned = ctx.approval?.pins?.[BOX_ACCOUNT_PIN];
+      if (pinned !== undefined) body.accountId = pinned;
+      else if (api.boxesOfChat) {
+        const refId = args.agent ?? summary.refId;
+        const accountId = body.accountId ?? (refId === summary.refId ? summary.accountId : findAgent(await loadAgents(api, { includeLegacyModels: true }), refId).defaultAccountId);
+        requireBoxAccountCard(ctx, { projectPath: summary.projectPath }, accountId, "fork_session");
+      }
+    }
     // A chat's fork is its own child (§13 c): the route keeps the flag only from the forked chat's own agent.
     if (caller !== null) body.agentCreated = true;
     const result = await forkWithProfile(api, target, body, profile === undefined ? (summary.profileId ?? null) : profile);

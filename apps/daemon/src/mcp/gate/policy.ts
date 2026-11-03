@@ -140,6 +140,11 @@ const WORKFLOW_OWNED = "This chat runs inside an automated workflow, where nobod
 /** The gate. Pure: every fact it needs is in `input`. */
 export function gate(input: GateInput): GateDecision {
   const { caller, scope, tool } = input;
+  const away = [
+    ...input.targets.filter((target) => target.class !== "own"),
+    ...input.pendingTargets,
+    ...input.workspaceTargets.filter((target) => target.class !== "own")
+  ];
   if (input.deniedPaths.length > 0) {
     const path = clipText(input.deniedPaths[0]!, MAX_ECHO_CHARS);
     return deny("PERMISSION_DENIED", `"${path}" is not inside a project: paths must lie inside a project directory ("<workspace>/<project>/…", list_projects).`);
@@ -155,6 +160,10 @@ export function gate(input: GateInput): GateDecision {
   // mode, a workflow-owned chat included (its card waits for the owner, who gets a push, and
   // expires as a timeout); never a grant; never while planning.
   if (input.spendFamily !== undefined) {
+    // A spend that also reaches another project (an account card on `create_session`) stays refused for a workflow's chat (§5.4).
+    if (input.tier === "act" && caller.workflowOwned && (away.length > 0 || input.unknownTargets.length > 0)) {
+      return deny("PERMISSION_DENIED", `${WORKFLOW_OWNED} work in another project: ${tool} may act only in this chat's own project.`);
+    }
     const words = SPEND_WORDS[input.spendFamily];
     if (caller.planning) {
       return deny("PERMISSION_DENIED", `You are planning: ${tool} ${words.planning}. Propose it in your plan instead.`);
@@ -190,11 +199,6 @@ export function gate(input: GateInput): GateDecision {
   }
 
   // Workflow-owned callers never act across projects, in any mode (§5.4).
-  const away = [
-    ...input.targets.filter((target) => target.class !== "own"),
-    ...input.pendingTargets,
-    ...input.workspaceTargets.filter((target) => target.class !== "own")
-  ];
   if (input.tier === "act" && caller.workflowOwned && (away.length > 0 || input.unknownTargets.length > 0)) {
     return deny("PERMISSION_DENIED", `${WORKFLOW_OWNED} work in another project: ${tool} may act only in this chat's own project.`);
   }

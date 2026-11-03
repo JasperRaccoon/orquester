@@ -1789,6 +1789,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxes: temporaryBoxTools,
     // boxes: read_file / directory reads of box projects go to the box.
     boxRegistry: () => services.boxRegistry,
+    // boxes: which accounts a box's chats already use, as the token broker reads them.
+    boxSessions: () => sessions.list(),
     // Devices: the device MCP tools' operations (null while the plugin is off).
     devices: () => devices.service()
   });

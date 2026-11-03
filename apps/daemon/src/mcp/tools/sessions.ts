@@ -22,6 +22,7 @@ import {
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
 import { canonicalProject, resolveProject } from "../addressing.ts";
+import { ACCOUNT_SPEND, boxAccountCard, exposedBox, requireBoxAccountCard, type BoxAccountExposure } from "./boxes.ts";
 import { findAgent, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
 import {
   defineTool,
@@ -30,7 +31,8 @@ import {
   READ_ONLY,
   type AnyOrquesterTool,
   type CallContext,
-  type ScopeClaim
+  type ScopeClaim,
+  type ScopeContext
 } from "../catalog/contract.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
@@ -434,6 +436,21 @@ const getTurnDiff = defineTool({
 
 const OWN_CHILDREN_UPDATE = "update_session changes only this chat's own title, or the chats this chat created (create_session, fork_session).";
 
+/**
+ * What a chat's account switch would newly give a box (`exposedBox`): the target's project box, or
+ * a temporary box it owns.
+ */
+async function switchBoxAccount(args: { sessionId: string; accountId?: string }, ctx: ScopeContext): Promise<BoxAccountExposure | null> {
+  if (ctx.caller.kind !== "thread" || args.accountId === undefined || !ctx.api.boxesOfChat) return null;
+  const summary = await requireChatSession(ctx.api, args.sessionId);
+  const target = { projectPath: summary.projectPath, threadId: summary.id };
+  if (ctx.api.boxesOfChat(target).length === 0) return null;
+  const agent = findAgent(await loadAgents(ctx.api, { includeLegacyModels: true }), summary.refId);
+  const accountId = validateAccountId(agent, args.accountId);
+  const box = exposedBox(ctx.api, target, accountId);
+  return box ? { box, accountId: accountId!, label: agent.accounts.find((account) => account.id === accountId)?.label ?? accountId!, agent: agent.id } : null;
+}
+
 const updateSession = defineTool({
   name: "update_session",
   title: "Update session settings",
@@ -452,6 +469,8 @@ const updateSession = defineTool({
   audiences: ["external", "chat"],
   toolset: "chat-extras",
   tier: "act",
+  // Only a chat's switch that gives a box a new account spends (looked up by `scope`).
+  spendFamily: (_args, scope) => scope.resolved?.spendFamily,
   async scope(args, ctx) {
     const { caller } = ctx;
     if (caller.kind === "thread") {
@@ -466,20 +485,24 @@ const updateSession = defineTool({
         throw new ToolError("PERMISSION_DENIED", `runtimeMode ${args.runtimeMode} is broader than this chat's ${caller.runtimeMode}; allowed: ${allowed.join(", ") || "none"}.`);
       }
     }
-    return sessionClaim(ctx, args.sessionId, { reads: "none", writes: true, self: "title-only", ownChildrenOnly: OWN_CHILDREN_UPDATE });
+    const claim = await sessionClaim(ctx, args.sessionId, { reads: "none", writes: true, self: "title-only", ownChildrenOnly: OWN_CHILDREN_UPDATE });
+    return (await switchBoxAccount(args, ctx)) ? { ...claim, resolved: ACCOUNT_SPEND } : claim;
   },
-  approval: (args, ctx) =>
-    sessionCard(ctx, args.sessionId, "change the settings of", [
+  async approval(args, ctx) {
+    const base = await sessionCard(ctx, args.sessionId, "change the settings of", [
       ...(args.title !== undefined ? [{ label: "Title", value: args.title }] : []),
       ...(args.model !== undefined ? [{ label: "Model", value: args.model }] : []),
       ...(args.options !== undefined ? [{ label: "Options", value: JSON.stringify(args.options) }] : []),
       ...(args.runtimeMode !== undefined ? [{ label: "Permission mode", value: args.runtimeMode }] : []),
       ...(args.accountId !== undefined ? [{ label: "Account", value: args.accountId }] : []),
       ...(args.force ? [{ label: "Force", value: "yes — cuts a running turn" }] : [])
-    ]),
+    ]);
+    const exposure = await switchBoxAccount(args, ctx);
+    return exposure && ctx.caller.kind === "thread" ? boxAccountCard(base, exposure, ctx.caller) : base;
+  },
   annotations: MUTATING_IDEMPOTENT,
   resultKind: "json",
-  async run(args, { api, caller }) {
+  async run(args, { api, approval, caller }) {
     const summary = await requireChatSession(api, args.sessionId);
     const snap = await readThreadHead(api, args.sessionId);
     const current = snap.head.modelSelection;
@@ -521,6 +544,7 @@ const updateSession = defineTool({
     if (switchAccount) {
       const refusal = switchRefusal(summary, snap);
       if (refusal) throw new ToolError("SESSION_BUSY", refusal);
+      if (caller.kind === "thread") requireBoxAccountCard({ api, approval }, { projectPath: summary.projectPath, threadId: summary.id }, accountId, "update_session");
     }
     // Every check has run. Writes in order; `applied` records only what landed, and rides a mid-way failure's detail.
     const applied: string[] = [];

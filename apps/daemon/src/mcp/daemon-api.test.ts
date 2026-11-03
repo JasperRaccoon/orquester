@@ -198,3 +198,30 @@ test("listDirectory / readFileRange read through FsTools under the LIVE fsRoot, 
   assert.equal((await api.readFileRange("a.txt", {})).text, "second root", "a config change moves the root in place");
   await app.close();
 });
+
+test("boxesOfChat: a chat's project box and the temporary boxes it owns, gone ones left out; an account counts as in use only by a session there", () => {
+  const records = [
+    { id: "project-box", purpose: "project", state: "ready", name: "p" },
+    { id: "owned", purpose: "temporary", threadId: "me", state: "ready", name: "o" },
+    { id: "gone", purpose: "temporary", threadId: "me", state: "destroyed", name: "g" },
+    { id: "other", purpose: "temporary", threadId: "them", state: "ready", name: "x" }
+  ];
+  const registry = {
+    list: () => records,
+    summary: () => undefined,
+    locate: (path: string) => (path.startsWith("/w/boxed") ? { kind: "box", boxId: "project-box", record: records[0], connection: undefined } : { kind: "host" })
+  };
+  const sessions = [{ id: "peer", projectPath: "/w/boxed", accountId: "in-use" }, { id: "me", projectPath: "/w/host", accountId: "mine" }];
+  const api = new InjectDaemonApi({ app: Fastify(), authorization: undefined, agentChat: null, broadcaster: new Broadcaster(), fsRoot: "/r", workspacesDir: "/r", boxRegistry: () => registry as never, boxSessions: () => sessions });
+  assert.deepEqual(api.boxesOfChat({ projectPath: "/w/host" }), []);
+  const [box] = api.boxesOfChat({ projectPath: "/w/boxed" });
+  assert.equal(box!.usesAccount("in-use"), true);
+  assert.equal(box!.usesAccount("mine"), false);
+  const owned = api.boxesOfChat({ projectPath: "/w/host", threadId: "me" });
+  assert.deepEqual(owned.map((entry) => entry.boxId), ["owned"]);
+  assert.equal(owned[0]!.usesAccount("mine"), true);
+  assert.equal(owned[0]!.usesAccount("in-use"), false);
+  // No session source: nothing is in use, so a card opens.
+  const blind = new InjectDaemonApi({ app: Fastify(), authorization: undefined, agentChat: null, broadcaster: new Broadcaster(), fsRoot: "/r", workspacesDir: "/r", boxRegistry: () => registry as never });
+  assert.equal(blind.boxesOfChat({ projectPath: "/w/boxed" })[0]!.usesAccount("in-use"), false);
+});

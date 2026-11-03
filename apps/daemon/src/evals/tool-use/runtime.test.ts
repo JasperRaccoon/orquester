@@ -200,6 +200,6 @@ test("on a VM, a missing account index and an account with no login name box_len
   assert.match(await failure(withLogin), /has no login/);
   assert.doesNotMatch(await failure(withLogin), /box_lend_accounts/);
   process.env.ORQ_BOX_ID = "box-1";
-  assert.match(await failure(join(dir, "empty")), /box_lend_accounts/);
-  assert.match(await failure(withLogin), /box_lend_accounts/);
+  // A login already lent is found with the appdir: named before asking again, which would open a new card.
+  for (const message of [await failure(join(dir, "empty")), await failure(withLogin)]) assert.match(message, /--appdir[^]*ORQUESTER_APPDIR[^]*ask with box_lend_accounts/);
 });
