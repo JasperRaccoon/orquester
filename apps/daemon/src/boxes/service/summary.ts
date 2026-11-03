@@ -23,8 +23,9 @@ import {
   type BoxesTotals,
   BOX_STATES
 } from "@orquester/api";
-import type { StoredAccountLend, StoredBox } from "@orquester/config";
+import { parseStoredAccountLends, type StoredAccountLend, type StoredBox } from "@orquester/config";
 
+import { ACCOUNT_ID_PATTERN } from "../../agent-account-paths.ts";
 import type { BoxProviderRegistry } from "../contracts.ts";
 
 const HOUR_MS = 3_600_000;
@@ -177,12 +178,20 @@ export type BoxLendRuntime = Pick<BoxLentAccount, "status" | "statusMessage" | "
 export type BoxLendRuntimeLookup = (record: StoredBox, lend: StoredAccountLend) => BoxLendRuntime;
 
 /**
- * The record's active lends as the API shows them: ended ones wait only for their cleanup, and one
- * of an agent this build does not know stays in the record, unread.
+ * The lends of a record this build acts on. One that does not parse, of an agent it does not know, or
+ * whose ids are not the shape they are made in stays in the record, unread: its ids become paths on
+ * a box, so nothing else ever reaches a file or a keeper.
  */
+export function usableLends(record: StoredBox | undefined): StoredAccountLend[] {
+  return parseStoredAccountLends(record?.accountLends).filter(
+    (lend) => isBoxLendAgent(lend.agent) && ACCOUNT_ID_PATTERN.test(lend.id) && ACCOUNT_ID_PATTERN.test(lend.accountId)
+  );
+}
+
+/** The record's active lends as the API shows them: ended ones wait only for their cleanup. */
 export function lentAccountsOf(record: StoredBox, runtime: BoxLendRuntimeLookup): BoxLentAccount[] {
   const lent: BoxLentAccount[] = [];
-  for (const lend of record.accountLends ?? []) {
+  for (const lend of usableLends(record)) {
     if (lend.endedAt || !isBoxLendAgent(lend.agent)) continue;
     lent.push({
       id: lend.id,

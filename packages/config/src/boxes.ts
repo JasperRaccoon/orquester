@@ -75,6 +75,18 @@ export const storedAccountLendSchema = z
   .passthrough();
 export type StoredAccountLend = z.infer<typeof storedAccountLendSchema>;
 
+/**
+ * The lends of `StoredBox.accountLends` that parse. That field stays unknown in the box's own schema:
+ * one malformed lend must not lose its box, and a rewrite keeps an entry this build cannot read.
+ */
+export function parseStoredAccountLends(raw: unknown): StoredAccountLend[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    const parsed = storedAccountLendSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
 export const storedBoxSchema = z
   .object({
     id: z.string().min(1),
@@ -107,7 +119,8 @@ export const storedBoxSchema = z
     project: storedBoxProjectSchema.nullable().optional(),
     threadId: z.string().nullable().optional(),
     purposeNote: z.string().nullable().optional(),
-    accountLends: z.array(storedAccountLendSchema).optional(),
+    /** Read with {@link parseStoredAccountLends}. */
+    accountLends: z.unknown().optional(),
     /** SHA-256 (hex) of the per-box credential issued at first connect. */
     credentialHash: z.string().optional(),
     /** SHA-256 (hex) of the single-use bootstrap token, until used or expired. */

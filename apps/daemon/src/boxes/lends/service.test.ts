@@ -5,14 +5,15 @@
 
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { parseAgentAccounts } from "@orquester/config";
+import { parseAgentAccounts, parseStoredAccountLends } from "@orquester/config";
 
-import { settle } from "../broker/testing.ts";
-import { chat, claudeLogin, codexLogin, BOX, HOUR, ID_TOKEN_MARKER, lendWorld, MIN, NOW, REFRESH_MARKER, type LendWorld } from "./testing.ts";
+import { storedBox } from "../broker/testing.ts";
+import { hasActiveLend } from "./service.ts";
+import { chat, claudeLogin, codexLogin, BOX, HOUR, ID_TOKEN_MARKER, lendWorld, MIN, NOW, REFRESH_MARKER, sessionRow, type LendWorld } from "./testing.ts";
 
 const CLAUDE = "11111111-1111-4111-8111-111111111111";
 const CODEX = "22222222-2222-4222-8222-222222222222";
@@ -24,12 +25,13 @@ async function world(t: Parameters<typeof lendWorld>[0], box: Parameters<typeof 
   return w;
 }
 
+const STALE_LOGIN = JSON.stringify({ claudeAiOauth: { accessToken: "stale" } });
 const LEND_CLAUDE = { accounts: [{ agent: "claude", accountId: CLAUDE }], minutes: 240, purposeNote: "paid evals" };
 const LEND_BOTH = { ...LEND_CLAUDE, accounts: [...LEND_CLAUDE.accounts, { agent: "codex", accountId: CODEX }] };
 
 const vmToken = async (w: LendWorld): Promise<unknown> => JSON.parse((await w.readVm(w.vmPath("claude", CLAUDE)))!).claudeAiOauth.accessToken;
 const lentRow = (w: LendWorld, id = CLAUDE) => w.registry.summary(BOX)?.lentAccounts?.find((lent) => lent.accountId === id);
-const storedLends = (w: LendWorld) => w.registry.get(BOX)?.accountLends ?? [];
+const storedLends = (w: LendWorld) => parseStoredAccountLends(w.registry.get(BOX)?.accountLends);
 const indexOnVm = async (w: LendWorld) => parseAgentAccounts(JSON.parse((await w.readVm(w.vmIndexPath))!));
 
 async function allFiles(dir: string): Promise<string[]> {
@@ -118,7 +120,7 @@ test("a lent-only account gets no token over token.get, and none from the keeper
   await assert.rejects(w.broker.getLentToken(request, new AbortController().signal), { code: "TOKEN_FORBIDDEN" });
 });
 
-test("ending a lend keeps the login while a chat in the box uses the account, or another lend does", async (t) => {
+test("ending a lend keeps the login while another lend of the account is on the box", async (t) => {
   const w = await world(t);
   const first = await w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
   const second = await w.lends.lend(chat("chat-2"), BOX, LEND_CLAUDE);
@@ -128,15 +130,7 @@ test("ending a lend keeps the login while a chat in the box uses the account, or
   assert.notEqual(await w.readVm(w.vmPath("claude", CLAUDE)), null, "the other chat's lend still uses it");
   assert.deepEqual((await indexOnVm(w)).accounts.map((account) => account.id), [CLAUDE]);
 
-  w.sessions.push({ id: "a-chat", projectPath: "/ws/w/p/sub", accountId: CLAUDE });
   await w.lends.endOne(chat("chat-2"), BOX, second.lent[0]!.id);
-  assert.notEqual(await w.readVm(w.vmPath("claude", CLAUDE)), null, "a Claude chat reads that very file");
-  assert.equal(await w.readVm(w.vmIndexPath), null, "the index goes with the last lend");
-  assert.deepEqual(storedLends(w), []);
-
-  w.sessions.length = 0;
-  const third = await w.lends.lend(chat("chat-3"), BOX, LEND_CLAUDE);
-  await w.lends.endOne(chat("chat-3"), BOX, third.lent[0]!.id);
   assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), null);
 });
 
@@ -197,7 +191,7 @@ test("a transient failure keeps the VM's token, says so, and retries", async (t)
 test("an offline VM is not asked for anything; on reconnect its file is always rewritten, then the timer re-armed", async (t) => {
   const w = await world(t);
   await w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 1440 });
-  await writeFile(w.vmPath("claude", CLAUDE), "stale or damaged");
+  await writeFile(w.vmPath("claude", CLAUDE), STALE_LOGIN);
   const writes = () => w.connection.calls.length;
 
   w.setConnected(false);
@@ -216,8 +210,8 @@ test("an offline VM is not asked for anything; on reconnect its file is always r
   assert.equal(lentRow(w)?.status, "active");
   assert.equal(await vmToken(w), "while-away");
 
-  // The same token, a damaged file: still rewritten.
-  await writeFile(w.vmPath("claude", CLAUDE), "damaged again");
+  // The same token, a stale file: still rewritten.
+  await writeFile(w.vmPath("claude", CLAUDE), STALE_LOGIN);
   w.setConnected(false);
   w.setConnected(true);
   await w.lends.settled();
@@ -272,7 +266,7 @@ test("a restart resumes live lends and rewrites their files; it ends those past 
   await w.lends.stop();
 
   w.closedChats.add("closed-while-down");
-  await writeFile(w.vmPath("claude", CLAUDE), "stale");
+  await writeFile(w.vmPath("claude", CLAUDE), STALE_LOGIN);
   t.mock.timers.tick(30 * MIN);
 
   const restarted = w.newService();
@@ -364,16 +358,19 @@ test("a renewal racing an end writes nothing after the cleanup", async (t) => {
   w.files.texts.set(w.hostPath("claude", CLAUDE), claudeLogin("short", NOW + 2 * HOUR));
   const { lent } = await w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
 
-  let finishRefresh: (() => void) | undefined;
-  w.refreshImpl = (agent, id) =>
-    new Promise((resolve) => {
-      finishRefresh = () => {
-        w.files.write(w.hostPath(agent as "claude", id), claudeLogin("too-late", Date.now() + 8 * HOUR));
-        resolve("refreshed");
-      };
-    });
+  let finishRefresh: () => void = () => undefined;
+  const refreshing = new Promise<void>((asked) => {
+    w.refreshImpl = (agent, id) =>
+      new Promise((resolve) => {
+        finishRefresh = () => {
+          w.files.write(w.hostPath(agent as "claude", id), claudeLogin("too-late", Date.now() + 8 * HOUR));
+          resolve("refreshed");
+        };
+        asked();
+      });
+  });
   t.mock.timers.tick(90 * MIN + 1);
-  await settle(() => finishRefresh !== undefined);
+  await refreshing;
 
   const write = w.connection.writeFile.bind(w.connection);
   const written: string[] = [];
@@ -383,7 +380,7 @@ test("a renewal racing an end writes nothing after the cleanup", async (t) => {
   };
   const ending = w.lends.endOne(chat("chat-1"), BOX, lent[0]!.id);
   await once(w.store.events, "changed");
-  finishRefresh!();
+  finishRefresh();
   await ending;
   await w.lends.settled();
   assert.ok(!written.includes(w.vmPath("claude", CLAUDE)), "the new token was never written");
@@ -397,9 +394,16 @@ test("an end aborts a wait in the broker", async (t) => {
   const path = w.hostPath("claude", CLAUDE);
   w.hostLocal.add(CLAUDE);
   w.files.lockAges.set(join(path, "..", ".oauth_refresh.lock"), 0);
-  const watchers = w.files.watcherCount(path);
+  // The broker's own watch on the file says the request has started waiting on it.
+  const brokerWatching = new Promise<void>((resolve) => {
+    const watch = w.files.watch.bind(w.files);
+    w.files.watch = (watched, onChange) => {
+      resolve();
+      return watch(watched, onChange);
+    };
+  });
   w.files.write(path, claudeLogin("nearly-gone", NOW + MIN));
-  await settle(() => w.files.watcherCount(path) === watchers + 1, 2000);
+  await brokerWatching;
 
   await w.lends.endOne(chat("chat-1"), BOX, lent[0]!.id);
   assert.equal(w.files.watcherCount(path), 0);
@@ -409,7 +413,7 @@ test("an end aborts a wait in the broker", async (t) => {
 test("approving an account the chat already has replaces its end time and leaves the token alone", async (t) => {
   const w = await world(t);
   const first = await w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 60 });
-  await writeFile(w.vmPath("claude", CLAUDE), "untouched");
+  await writeFile(w.vmPath("claude", CLAUDE), STALE_LOGIN);
 
   const preview = await w.lends.preview(chat("chat-1"), BOX, { claude: [CLAUDE] });
   assert.equal(preview.accounts[0]?.alreadyLent, true);
@@ -417,7 +421,7 @@ test("approving an account the chat already has replaces its end time and leaves
   const second = await w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 120 });
   assert.equal(second.lent[0]?.id, first.lent[0]?.id);
   assert.equal(second.lent[0]?.expiresAt, new Date(NOW + 120 * MIN).toISOString());
-  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), "untouched");
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), STALE_LOGIN);
 
   t.mock.timers.tick(60 * MIN);
   await w.lends.settled();
@@ -455,7 +459,7 @@ test("a preview resolves names and defaults the time, and changes nothing", asyn
   assert.equal(preview.boxLabel, "p");
   assert.deepEqual(storedLends(w), []);
   assert.equal(await w.readVm(w.vmIndexPath), null);
-  assert.equal(w.connection.calls.length, 0);
+  assert.deepEqual([...new Set(w.connection.calls.map((call) => call.method))], ["fs.stat"], "it only looks");
 });
 
 test("what cannot be lent is refused before any card, naming the fix", async (t) => {
@@ -542,8 +546,8 @@ test("unknown fields survive every rewrite, and a lend of an unknown agent is ig
 
   const { lent } = await restarted.lend(chat("chat-1"), BOX, LEND_CLAUDE);
   await w.store.update(BOX, (record) => {
-    const mine = record.accountLends!.find((lend) => lend.id === lent[0]!.id)!;
-    (mine as Record<string, unknown>).futureField = "mine";
+    const mine = (record.accountLends as Record<string, unknown>[]).find((lend) => lend.id === lent[0]!.id)!;
+    mine.futureField = "mine";
   });
   await restarted.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 300 });
   assert.equal((storedLends(w).find((lend) => lend.id === lent[0]!.id) as Record<string, unknown>).futureField, "mine");
@@ -553,4 +557,431 @@ test("unknown fields survive every rewrite, and a lend of an unknown agent is ig
   assert.deepEqual(storedLends(w), [future], "kept for the build that knows it");
   const raw = JSON.parse(await readFile((await allFiles(w.base)).find((file) => file.endsWith("boxes.json"))!, "utf8"));
   assert.equal(raw.boxes[BOX].boxFuture, "kept");
+});
+
+test("a live Claude chat in the project box keeps the login and the ended record; the file goes when the chat does", async (t) => {
+  const w = await world(t);
+  w.sessions.push(sessionRow(CLAUDE));
+  const { lent } = await w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  await w.lends.endOne(chat("chat-1"), BOX, lent[0]!.id);
+  assert.notEqual(await w.readVm(w.vmPath("claude", CLAUDE)), null, "that chat's CLI reads this very file");
+  assert.equal(await w.readVm(w.vmIndexPath), null, "the index goes with the last lend");
+  assert.equal(storedLends(w).length, 1, "the record is what still owes the cleanup");
+
+  // An unrelated session change leaves it alone.
+  w.sessionsChanged();
+  await w.lends.settled();
+  assert.notEqual(await w.readVm(w.vmPath("claude", CLAUDE)), null);
+
+  w.sessions.length = 0;
+  w.sessionsChanged();
+  await w.lends.settled();
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), null);
+  assert.deepEqual(storedLends(w), []);
+});
+
+test("a kept login whose chat went while the VM was away goes on reconnect", async (t) => {
+  const w = await world(t);
+  w.sessions.push(sessionRow(CLAUDE));
+  const { lent } = await w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  await w.lends.endOne(chat("chat-1"), BOX, lent[0]!.id);
+  w.setConnected(false);
+  w.sessions.length = 0;
+  w.sessionsChanged();
+  await w.lends.settled();
+  assert.equal(storedLends(w).length, 1);
+  w.setConnected(true);
+  await w.lends.settled();
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), null);
+  assert.deepEqual(storedLends(w), []);
+});
+
+test("a temporary box's owning chat runs on the host, so it keeps nothing on the VM", async (t) => {
+  const w = await world(t, { purpose: "temporary", project: null, threadId: "owner" });
+  w.sessions.push(sessionRow(CLAUDE, { id: "owner", projectPath: "/ws/host/project" }));
+  const { lent } = await w.lends.lend(chat("owner", ""), BOX, LEND_CLAUDE);
+  await w.lends.endOne(chat("owner", ""), BOX, lent[0]!.id);
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), null);
+  assert.deepEqual(storedLends(w), []);
+});
+
+test("a Codex chat never reads auth.json, and an exited terminal or a tab with no CLI reads nothing: none keeps the file", async (t) => {
+  const w = await world(t);
+  w.sessions.push(
+    sessionRow(CODEX, { refId: "codex" }),
+    sessionRow(CLAUDE, { id: "exited-pty", kind: "agent", status: "exited", chatSessionStatus: undefined }),
+    sessionRow(CLAUDE, { id: "running-pty", kind: "agent", chatSessionStatus: undefined }),
+    sessionRow(CLAUDE, { id: "idle-tab", chatSessionStatus: "idle" }),
+    sessionRow(CLAUDE, { id: "stopped-tab", chatSessionStatus: "stopped" })
+  );
+  const { lent } = await w.lends.lend(chat("chat-1"), BOX, LEND_BOTH);
+  await w.lends.endAll(chat("chat-1"), BOX);
+  assert.equal(lent.length, 2);
+  assert.equal(await w.readVm(w.vmPath("codex", CODEX)), null);
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), null);
+  assert.deepEqual(storedLends(w), []);
+});
+
+test("a boot whose session index failed to load ends no lend and removes no login", async (t) => {
+  const w = await world(t);
+  w.sessions.push(sessionRow(CLAUDE));
+  const { lent } = await w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  await w.lends.stop();
+
+  w.closedChats.add("chat-1"); // what `chat.has` says of every chat then
+  w.sessions.length = 0;
+  w.sessionsLoaded.value = false;
+  const restarted = w.newService();
+  t.after(() => restarted.stop());
+  await restarted.start();
+  await restarted.settled();
+  assert.equal(storedLends(w)[0]?.endedAt, undefined);
+  assert.equal(lentRow(w)?.status, "active");
+
+  // A person ends it: with no session list, a chat may still read the file.
+  await restarted.endOne({ kind: "user" }, BOX, lent[0]!.id);
+  assert.notEqual(await w.readVm(w.vmPath("claude", CLAUDE)), null);
+  assert.equal(storedLends(w).length, 1);
+});
+
+/** A real install at the lend's paths: what a bring-your-own machine, or this very host, may hold. */
+const REAL_INDEX = `${JSON.stringify({ accounts: [{ id: CLAUDE, agent: "claude", label: "real", createdAt: "x", importedAt: "x" }] })}\n`;
+const realClaude = JSON.stringify({ claudeAiOauth: { accessToken: "real", refreshToken: REFRESH_MARKER } });
+const realCodex = JSON.stringify({ tokens: { access_token: "real", refresh_token: REFRESH_MARKER } });
+
+async function plant(path: string, content: string): Promise<void> {
+  await mkdir(join(path, ".."), { recursive: true });
+  await writeFile(path, content);
+}
+
+test("a real index or login refuses the preview and the lend, and is left byte for byte", async (t) => {
+  const refused = (error: Error & { code: string }, path: string): boolean => error.code === "LEND_APPDIR_IN_USE" && error.message.includes(path);
+  for (const [describe, file, content] of [
+    ["index", (w: LendWorld) => w.vmIndexPath, REAL_INDEX],
+    ["claude", (w: LendWorld) => w.vmPath("claude", CLAUDE), realClaude],
+    ["codex", (w: LendWorld) => w.vmPath("codex", CODEX), realCodex],
+    ["api key", (w: LendWorld) => w.vmPath("codex", CODEX), JSON.stringify({ OPENAI_API_KEY: "sk-real" })],
+    ["mcp login", (w: LendWorld) => w.vmPath("claude", CLAUDE), JSON.stringify({ mcpOAuth: { s: { refreshToken: REFRESH_MARKER } } })],
+    ["unreadable", (w: LendWorld) => w.vmIndexPath, "not json"]
+  ] as const) {
+    await t.test(describe, async (t) => {
+      const w = await world(t);
+      const path = file(w);
+      await plant(path, content);
+      await assert.rejects(w.lends.preview(chat("chat-1"), BOX, { claude: ["ana"], codex: ["bo"] }), (error: Error & { code: string }) => refused(error, path));
+      await assert.rejects(w.lends.lend(chat("chat-1"), BOX, LEND_BOTH), (error: Error & { code: string }) => refused(error, path));
+      await w.lends.settled();
+      assert.equal(await w.readVm(path), content);
+      assert.deepEqual(storedLends(w), [], "no record");
+      assert.ok(!w.connection.calls.some((call) => call.method === "agent.ensurePaths" || call.method === "fs.rm"));
+    });
+  }
+});
+
+test("a symlink at a login's path is not ours: refused, its target untouched", async (t) => {
+  const w = await world(t);
+  const target = join(w.base, "real-login.json");
+  await writeFile(target, realClaude);
+  await mkdir(join(w.vmPath("claude", CLAUDE), ".."), { recursive: true });
+  await symlink(target, w.vmPath("claude", CLAUDE));
+  await assert.rejects(w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE), { code: "LEND_APPDIR_IN_USE" });
+  assert.equal(await readFile(target, "utf8"), realClaude);
+});
+
+test("a real login that appears during a lend is never overwritten or removed: the lend says why and stops asking", async (t) => {
+  const w = await world(t);
+  const { lent } = await w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 1440 });
+  await writeFile(w.vmPath("claude", CLAUDE), realClaude);
+
+  // A host renewal, a reconnect, and the time passing would each rewrite it.
+  w.files.write(w.hostPath("claude", CLAUDE), claudeLogin("renewed", NOW + 9 * HOUR));
+  await w.lends.settled();
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), realClaude);
+  assert.equal(lentRow(w)?.status, "renewal-failing");
+  assert.match(lentRow(w)?.statusMessage ?? "", /real login/);
+
+  t.mock.timers.tick(10 * HOUR);
+  await w.lends.settled();
+  assert.equal(w.refreshCalls.length, 0, "nothing is spent on a login that could not be written");
+  w.setConnected(false);
+  w.setConnected(true);
+  await w.lends.settled();
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), realClaude);
+
+  await w.lends.endOne(chat("chat-1"), BOX, lent[0]!.id);
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), realClaude, "and a return leaves it");
+  assert.deepEqual(storedLends(w), [], "nothing of ours is left to clean up");
+});
+
+test("a real index that appears during a lend survives the rewrite and the return", async (t) => {
+  const w = await world(t);
+  const { lent } = await w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  await writeFile(w.vmIndexPath, REAL_INDEX);
+  w.setConnected(false);
+  w.setConnected(true);
+  await w.lends.settled();
+  assert.equal(await w.readVm(w.vmIndexPath), REAL_INDEX);
+  await w.lends.endOne(chat("chat-1"), BOX, lent[0]!.id);
+  assert.equal(await w.readVm(w.vmIndexPath), REAL_INDEX);
+});
+
+test("our own index carries the marker, and a second lend and the last return handle it", async (t) => {
+  const w = await world(t);
+  await w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  assert.equal(JSON.parse((await w.readVm(w.vmIndexPath))!).lentBy, "orquester");
+  await w.lends.lend(chat("chat-2"), BOX, { ...LEND_CLAUDE, accounts: [{ agent: "codex", accountId: CODEX }] });
+  assert.equal((await indexOnVm(w)).accounts.length, 2);
+  await w.lends.endAll({ kind: "user" }, BOX);
+  assert.equal(await w.readVm(w.vmIndexPath), null);
+});
+
+const ENTRY = { label: "x", createdAt: new Date(NOW).toISOString(), expiresAt: new Date(NOW + HOUR).toISOString(), threadId: "chat-1" };
+
+test("one malformed lend does not lose its box, goes back verbatim on rewrite, and a traversal id reaches no file", async (t) => {
+  const w = await world(t);
+  const malformed = { id: 7, nonsense: true };
+  const traversal = { ...ENTRY, id: "66666666-6666-4666-8666-666666666666", accountId: "../../../../home/me", agent: "claude" };
+  const badLendId = { ...ENTRY, id: "../../evil", accountId: CLAUDE, agent: "claude" };
+  await w.store.update(BOX, (record) => {
+    record.accountLends = [malformed, "not even an object", traversal, badLendId];
+  });
+  // A fresh read of the file: the store's own parse must keep the box.
+  await w.store.load();
+  assert.ok(w.registry.get(BOX), "the box is still there");
+
+  await w.lends.stop();
+  const restarted = w.newService();
+  t.after(() => restarted.stop());
+  await restarted.start();
+  await restarted.settled();
+  assert.equal(w.registry.summary(BOX)?.lentAccounts, undefined);
+  assert.equal(hasActiveLend(w.registry.get(BOX), CLAUDE, NOW), false);
+  assert.ok(!w.connection.calls.some((call) => call.method === "fs.rm" || call.method === "agent.ensurePaths"));
+  assert.equal(w.files.watcherCount(w.hostPath("claude", CLAUDE)), 0);
+
+  w.setConnected(false);
+  w.setConnected(true);
+  await restarted.settled();
+  const { lent } = await restarted.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  await restarted.endOne(chat("chat-1"), BOX, lent[0]!.id);
+  assert.deepEqual(w.registry.get(BOX)?.accountLends, [malformed, "not even an object", traversal, badLendId]);
+  assert.ok(!w.connection.calls.some((call) => JSON.stringify(call.params).includes("home/me") || JSON.stringify(call.params).includes("evil")));
+  await assert.rejects(restarted.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, accounts: [{ agent: "claude", accountId: "../../../x" }] }), { code: "ACCOUNT_NOT_FOUND" });
+});
+
+test("a duplicate record of one lend gets one keeper, so nothing stray stays behind", async (t) => {
+  const w = await world(t);
+  const id = "77777777-7777-4777-8777-777777777777";
+  const entry = { ...ENTRY, id, accountId: CLAUDE, agent: "claude" };
+  await w.lends.stop();
+  await w.store.update(BOX, (record) => {
+    record.accountLends = [entry, { ...entry }];
+  });
+  const restarted = w.newService();
+  t.after(() => restarted.stop());
+  await restarted.start();
+  await restarted.settled();
+  assert.equal(w.files.watcherCount(w.hostPath("claude", CLAUDE)), 1);
+  await restarted.endOne(chat("chat-1"), BOX, id);
+  assert.equal(w.files.watcherCount(w.hostPath("claude", CLAUDE)), 0);
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), null);
+  assert.deepEqual(storedLends(w), []);
+});
+
+test("an account the host already flags stops a restarted keeper before any provider post, until its login changes", async (t) => {
+  const w = await world(t);
+  w.files.texts.set(w.hostPath("claude", CLAUDE), claudeLogin("short", NOW + 2 * HOUR));
+  await w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  await w.lends.stop();
+  w.accounts.find((account) => account.id === CLAUDE)!.needsReauth = true;
+  w.refreshImpl = async () => "invalid-grant";
+  t.mock.timers.tick(90 * MIN + 1);
+
+  for (let restart = 0; restart < 2; restart += 1) {
+    const restarted = w.newService();
+    await restarted.start();
+    await restarted.settled();
+    assert.equal(lentRow(w)?.status, "needs-login");
+    await restarted.stop();
+  }
+  assert.equal(w.refreshCalls.length, 0);
+
+  const restarted = w.newService();
+  t.after(() => restarted.stop());
+  await restarted.start();
+  await restarted.settled();
+  assert.equal((await indexOnVm(w)).accounts[0]?.needsReauth, true);
+  w.files.write(w.hostPath("claude", CLAUDE), claudeLogin("signed-in", Date.now() + 8 * HOUR));
+  await restarted.settled();
+  assert.equal(lentRow(w)?.status, "active");
+  assert.equal(await vmToken(w), "signed-in");
+  assert.equal(w.refreshCalls.length, 0);
+});
+
+test("failed renewals back off from a minute to 15, a host change looks at once, and a success resets it", async (t) => {
+  const w = await world(t);
+  w.files.texts.set(w.hostPath("claude", CLAUDE), claudeLogin("gone", NOW + 2 * HOUR));
+  await w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 1440 });
+  w.refreshImpl = async () => "failed";
+  // Past the last usable minutes, so the broker has nothing to fall back on.
+  t.mock.timers.setTime(NOW + 2 * HOUR - 4 * MIN);
+  t.mock.timers.tick(0);
+  const tick = async (ms: number): Promise<number> => {
+    t.mock.timers.tick(ms);
+    await w.lends.settled();
+    return w.refreshCalls.length;
+  };
+  // The timer armed at install still has to fire.
+  let calls = await tick(HOUR);
+  assert.ok(calls >= 1);
+  for (const wait of [1, 2, 4, 8, 15, 15]) {
+    // Just short of the wait, nothing; at the wait, one more attempt.
+    assert.equal(await tick(wait * MIN - 1), calls, `${wait} min`);
+    calls = await tick(1);
+    assert.ok(calls > 0);
+  }
+  const before = calls;
+  assert.equal(await tick(10 * MIN), before, "still 15 minutes apart");
+
+  w.refreshImpl = async (agent, id) => {
+    w.files.write(w.hostPath(agent as "claude", id), claudeLogin("short-again", Date.now() + 2 * HOUR));
+    return "refreshed";
+  };
+  w.files.write(w.hostPath("claude", CLAUDE), claudeLogin("gone", Date.now() + MIN));
+  await w.lends.settled();
+  assert.equal(w.refreshCalls.length, before + 1, "a host change does not wait");
+  assert.equal(lentRow(w)?.status, "active");
+});
+
+test("a token of unknown expiry: the file is rewritten before the hour it claims runs out, with no refresh", async (t) => {
+  const w = await world(t);
+  w.hostLocal.add(CLAUDE); // a host CLI owns it, so the broker answers as is
+  w.files.texts.set(w.hostPath("claude", CLAUDE), JSON.stringify({ claudeAiOauth: { accessToken: "no-expiry", refreshToken: REFRESH_MARKER } }));
+  await w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 1440 });
+  const claimed = async () => JSON.parse((await w.readVm(w.vmPath("claude", CLAUDE)))!).claudeAiOauth.expiresAt as number;
+  assert.equal(await claimed(), NOW + HOUR);
+  for (let look = 1; look <= 3; look += 1) {
+    t.mock.timers.tick(30 * MIN);
+    await w.lends.settled();
+    assert.equal(await claimed(), NOW + look * 30 * MIN + HOUR);
+  }
+  assert.equal(w.refreshCalls.length, 0);
+});
+
+test("the old deadline firing does not end a lend whose end time moved", async (t) => {
+  const w = await world(t);
+  const { lent } = await w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 60 });
+  // The extension has landed in the record; its re-arm has not run yet.
+  await w.store.update(BOX, (record) => {
+    (record.accountLends as Record<string, unknown>[])[0]!.expiresAt = new Date(NOW + 120 * MIN).toISOString();
+  });
+  t.mock.timers.tick(60 * MIN);
+  await w.lends.settled();
+  assert.equal(lentRow(w)?.id, lent[0]!.id);
+  assert.equal(lentRow(w)?.status, "active");
+  t.mock.timers.tick(60 * MIN);
+  await w.lends.settled();
+  assert.deepEqual(storedLends(w), []);
+});
+
+test("two lends of one account at once: the second waits for the first's install and answers with the login there", async (t) => {
+  const w = await world(t);
+  w.files.texts.set(w.hostPath("claude", CLAUDE), claudeLogin("short", NOW + 10 * MIN));
+  let finishRefresh: () => void = () => undefined;
+  const refreshing = new Promise<void>((asked) => {
+    w.refreshImpl = (agent, id) =>
+      new Promise((resolve) => {
+        finishRefresh = () => {
+          w.files.write(w.hostPath(agent as "claude", id), claudeLogin("fresh", Date.now() + 8 * HOUR));
+          resolve("refreshed");
+        };
+        asked();
+      });
+  });
+  let reads = 0;
+  w.enabled = {
+    get value() {
+      reads += 1;
+      return true;
+    }
+  };
+  const first = w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  await refreshing;
+  reads = 0;
+  const second = w.lends.lend(chat("chat-1"), BOX, { ...LEND_CLAUDE, minutes: 300 });
+  await Promise.resolve();
+  assert.equal(reads, 0, "the second call starts nothing while the first installs");
+  finishRefresh();
+  const [installed, repeated] = await Promise.all([first, second]);
+  assert.equal(repeated.lent[0]?.id, installed.lent[0]?.id);
+  assert.equal(repeated.lent[0]?.status, "active");
+  assert.equal(repeated.lent[0]?.expiresAt, new Date(NOW + 300 * MIN).toISOString());
+  assert.equal(await vmToken(w), "fresh");
+  assert.equal(storedLends(w).length, 1);
+});
+
+test("a lend in flight across stop writes nothing after it and leaves no watcher; the next start cleans up", async (t) => {
+  const w = await world(t);
+  w.files.texts.set(w.hostPath("claude", CLAUDE), claudeLogin("short", NOW + 10 * MIN));
+  let finishRefresh: () => void = () => undefined;
+  const refreshing = new Promise<void>((asked) => {
+    w.refreshImpl = (agent, id) =>
+      new Promise((resolve) => {
+        finishRefresh = () => {
+          w.files.write(w.hostPath(agent as "claude", id), claudeLogin("late", Date.now() + 8 * HOUR));
+          resolve("refreshed");
+        };
+        asked();
+      });
+  });
+  const lending = w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  const failed = assert.rejects(lending);
+  await refreshing;
+  const stopping = w.lends.stop();
+  finishRefresh();
+  await stopping;
+  await failed;
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), null);
+  assert.equal(await w.readVm(w.vmIndexPath), null);
+  assert.equal(w.files.watcherCount(w.hostPath("claude", CLAUDE)), 0);
+  assert.ok(storedLends(w)[0]?.endedAt, "all or nothing, across a restart too");
+
+  const restarted = w.newService();
+  t.after(() => restarted.stop());
+  await restarted.start();
+  await restarted.settled();
+  assert.deepEqual(storedLends(w), []);
+});
+
+test("a symlinked workspaces root: a chat naming its project canonically still lends and returns", async (t) => {
+  const w = await world(t);
+  const real = join(w.base, "real-workspaces", "w", "p");
+  await mkdir(real, { recursive: true });
+  await symlink(join(w.base, "real-workspaces"), join(w.base, "workspaces"));
+  await w.store.update(BOX, (record) => {
+    record.project = { workspace: "w", name: "p", path: join(w.base, "workspaces", "w", "p") };
+  });
+  const { lent } = await w.lends.lend(chat("chat-1", real), BOX, LEND_CLAUDE);
+  assert.equal(lent.length, 1);
+  assert.equal(w.registry.locate(real).kind, "box", "so a chat's `projectBoxId` finds it too");
+  assert.deepEqual((await w.lends.endOne(chat("chat-1", real), BOX, lent[0]!.id)).lends, []);
+  await assert.rejects(w.lends.preview(chat("other", join(w.base, "elsewhere")), BOX, { claude: ["ana"] }), { code: "BOX_NOT_FOUND" });
+});
+
+test("an offline Windows box's home is its own path, from the OS on its record", async (t) => {
+  const w = await world(t);
+  await w.store.insert(
+    storedBox({
+      id: "box-win",
+      kind: "windows",
+      os: "win32",
+      project: null,
+      purpose: "temporary",
+      threadId: "chat-1",
+      accountLends: [{ ...ENTRY, id: "88888888-8888-4888-8888-888888888888", accountId: CLAUDE, agent: "claude" }]
+    })
+  );
+  const home = w.registry.summary("box-win")?.lentAccounts?.[0]?.home ?? "";
+  assert.match(home, /^[A-Za-z]:\\/);
+  assert.ok(!home.includes("/"));
 });

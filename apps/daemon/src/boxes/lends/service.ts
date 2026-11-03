@@ -8,13 +8,21 @@
  *   times only. No log line, response or error names a token.
  * - **Records first.** A lend is persisted before the box is touched; ended, it stays with `endedAt`
  *   until its files were removed, so a restart or an offline box loses no cleanup.
+ * - **A real login is never touched.** A bring-your-own machine may be a real install at the same
+ *   appdir, even this host. Our index carries {@link LEND_INDEX_MARKER}, our logins hold no refresh
+ *   token; anything else at those paths is refused with `LEND_APPDIR_IN_USE` in the preview, the
+ *   install and every rewrite, and is never removed.
+ * - **What a cleanup keeps.** A login file stays only while another active lend of that account is on
+ *   the box, or a live Claude chat in the project box reads it. In the second case the ended record
+ *   stays too, so the file goes when that session does.
  * - **A lend always ends, on the host:** returned, its time limit, its chat closing, its box destroyed
  *   or released. An end does not revoke anything: a forced refresh is what this feature must not do.
  * - **One writer per box.** Everything written to or removed from one box runs in one queue, and what
  *   a cleanup keeps is decided inside it, so a cleanup and a new lend of the same account cannot
  *   cross. A keeper's write is skipped once its lend ended.
- * - **Tolerant.** Records are rewritten through the box store (unknown fields survive). A lend of an
- *   agent this build does not know is left alone, unread.
+ * - **Tolerant.** Records are rewritten through the box store (unknown fields survive). A lend that
+ *   does not parse, of an agent this build does not know, or with an id of the wrong shape is left
+ *   alone, unread (`usableLends`).
  * - **The plugin switch** stops new lends (`BOXES_DISABLED`). Existing ones can still be ended and
  *   still reach their time limit; with the plugin off their boxes are away, so nothing is asked.
  */
@@ -28,6 +36,7 @@ import {
   BOX_LEND_MAX_ACCOUNTS,
   BOX_LEND_MAX_MINUTES,
   BOX_LEND_MIN_MINUTES,
+  boxPathMapFor,
   hostToBoxPath,
   isBoxLendAgent,
   SYSTEM_ACCOUNT_ID,
@@ -36,24 +45,34 @@ import {
   type BoxLendAgent,
   type LendAccountPlan,
   type LendAccountsPreviewResponse,
-  type LendAccountsResponse
+  type LendAccountsResponse,
+  type SessionSummary
 } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import { agentAccountsFile, createDefaultAgentAccounts, type AgentAccountsIndex, type StoredAccountLend, type StoredBox } from "@orquester/config";
 
 import { BoxTokenTracker } from "../../agent-host/boxes/token-policy.ts";
-import { AgentTokenError, boxUsesAccount, GONE_STATES, type TokenBrokerSession } from "../broker/broker.ts";
-import { boxLoginFile, credentialPath, grantFromCredentials, type CredentialFiles } from "../broker/credentials.ts";
+import { ACCOUNT_ID_PATTERN } from "../../agent-account-paths.ts";
+import { AgentTokenError, GONE_STATES } from "../broker/broker.ts";
+import { boxLoginFile, credentialPath, grantFromCredentials, holdsRealLogin, type CredentialFiles } from "../broker/credentials.ts";
 import type { AgentTokenBroker, BoxConnection, BoxHub, BoxRegistry } from "../contracts.ts";
 import { errorLine } from "../service/errors.ts";
 import type { BoxRecordStore } from "../service/store.ts";
-import { lentAccountsOf, type BoxLendRuntime } from "../service/summary.ts";
+import { lentAccountsOf, usableLends, type BoxLendRuntime } from "../service/summary.ts";
 import { LendKeeper, LendStoppedError, type LendKeeperState } from "./keeper.ts";
 
 /** How long a time limit that could not be recorded waits before it tries again. */
 const END_RETRY_MS = 60_000;
 /** `setTimeout`'s range; a later time limit (a record from elsewhere) looks again then. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
+/** Marks an `agent-accounts.json` on a box as ours: one without it belongs to a real install. */
+export const LEND_INDEX_MARKER = { lentBy: "orquester" } as const;
+/** The largest file on a box taken for one of ours (a login and an index are small). */
+const MAX_OWN_FILE_BYTES = 1024 * 1024;
+/** What a box's file reads as when it cannot be one of ours: not a file, too large, unreadable. */
+const NOT_OURS = Symbol("not ours");
+/** A chat's session statuses with no CLI running: the next start installs its own login. */
+const CHAT_NOT_RUNNING: ReadonlySet<string> = new Set(["idle", "stopped", "error"]);
 
 export type LendEndReason = "returned" | "time-limit" | "chat-closed" | "box-released" | "install-failed";
 
@@ -71,15 +90,21 @@ export class AccountLendError extends Error {
 
 /** Whether an active lend gives `record`'s box the account right now; what the broker's authorization reads. */
 export function hasActiveLend(record: StoredBox | undefined, accountId: string, now: number): boolean {
-  return (record?.accountLends ?? []).some((lend) => lend.accountId === accountId && isActive(lend) && Date.parse(lend.expiresAt) > now);
-}
-
-function isActive(lend: StoredAccountLend): boolean {
-  return !lend.endedAt && isBoxLendAgent(lend.agent);
+  return activeLends(record).some((lend) => lend.accountId === accountId && Date.parse(lend.expiresAt) > now);
 }
 
 function activeLends(record: StoredBox | undefined): StoredAccountLend[] {
-  return (record?.accountLends ?? []).filter(isActive);
+  return usableLends(record).filter((lend) => !lend.endedAt);
+}
+
+/** A record's raw entries, for rewriting: what cannot be read goes back as it came. */
+function rawLends(record: StoredBox): unknown[] {
+  return Array.isArray(record.accountLends) ? record.accountLends : [];
+}
+
+/** The fields of each raw entry with one of these ids that has not ended. */
+function rawActive(record: StoredBox, ids: ReadonlySet<string>): Record<string, unknown>[] {
+  return rawLends(record).filter((entry): entry is Record<string, unknown> => isRecord(entry) && ids.has(entry.id as string) && !entry.endedAt);
 }
 
 /** An account as lending reads it. */
@@ -96,6 +121,9 @@ export interface LendAccounts {
   homePath(agent: string, id: string): string;
 }
 
+/** What lending reads of a session. */
+export type LendSession = Pick<SessionSummary, "id" | "kind" | "refId" | "accountId" | "projectPath" | "status" | "chatSessionStatus">;
+
 export interface AccountLendsDeps {
   /** The appdir base (the index's path, and the appdir an eval is told). */
   baseDir: string;
@@ -105,8 +133,12 @@ export interface AccountLendsDeps {
   hub: Pick<BoxHub, "get" | "onConnectionChange">;
   broker: Pick<AgentTokenBroker, "getLentToken">;
   files: Pick<CredentialFiles, "read" | "watch">;
-  /** Every session (PTY and chat): a live session in a box keeps its account's login file there. */
-  sessions(): Iterable<TokenBrokerSession>;
+  /** Every session (PTY and chat): a live Claude chat in a project box keeps its account's login file there. */
+  sessions(): Iterable<LendSession>;
+  /** Fires when a session is created, updated, exits or closes. */
+  onSessionsChanged(listener: () => void): () => void;
+  /** False when the session index failed to load: an empty list then says nothing about any chat. */
+  sessionsLoaded(): boolean;
   chatOpen(threadId: string): boolean;
   /** The plugin switch: new lends only while it is on. */
   enabled(): boolean;
@@ -145,6 +177,18 @@ function notConnected(): AccountLendError {
   return new AccountLendError(409, "BOX_NOT_READY", "The VM is not connected.");
 }
 
+function stopping(): AccountLendError {
+  return new AccountLendError(503, "BOXES_DISABLED", "Lending is not available: the daemon is stopping.");
+}
+
+function appdirInUse(path: string): AccountLendError {
+  return new AccountLendError(
+    409,
+    "LEND_APPDIR_IN_USE",
+    `${path} on this machine is a real login or account index, not a lent one, so lending here would overwrite it. It may be a real Orquester install at the same appdir; lend to a VM without one.`
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -179,6 +223,10 @@ export class AccountLends {
   private readonly tracker: BoxTokenTracker;
   private readonly runtimes = new Map<string, LendRuntime>();
   private readonly queues = new Map<string, Promise<unknown>>();
+  /** One `lend` at a time per box: a second one finds the first's lends installed, or gone. */
+  private readonly lending = new Map<string, Promise<unknown>>();
+  /** Boxes with an ended lend whose login a live chat still reads. */
+  private readonly keptForChats = new Set<string>();
   private readonly hostWatches = new Map<string, { listeners: Set<() => void>; stop: () => void }>();
   private readonly background = new Set<Promise<unknown>>();
   private readonly unsubscribers: (() => void)[] = [];
@@ -197,10 +245,11 @@ export class AccountLends {
   async start(): Promise<void> {
     this.unsubscribers.push(
       this.deps.hub.onConnectionChange((boxId, connected) => this.connectionChanged(boxId, connected)),
-      this.deps.registry.onChange((boxId) => this.recordChanged(boxId))
+      this.deps.registry.onChange((boxId) => this.recordChanged(boxId)),
+      this.deps.onSessionsChanged(() => this.sessionsChanged())
     );
     for (const record of this.deps.registry.list()) {
-      if (!record.accountLends?.length) continue;
+      if (rawLends(record).length === 0) continue;
       if (GONE_STATES.has(record.state)) {
         this.track(this.dropRecords(record.id).catch((error: unknown) => this.warnBox(record.id, "could not drop a destroyed box's lends", error)));
         continue;
@@ -208,9 +257,9 @@ export class AccountLends {
       const ending: { id: string; reason: LendEndReason }[] = [];
       for (const lend of activeLends(record)) {
         if (Date.parse(lend.expiresAt) <= this.now()) ending.push({ id: lend.id, reason: "time-limit" });
-        else if (typeof lend.threadId !== "string" || !this.deps.chatOpen(lend.threadId)) ending.push({ id: lend.id, reason: "chat-closed" });
+        else if (this.chatGone(lend.threadId)) ending.push({ id: lend.id, reason: "chat-closed" });
         else if (record.purpose === "machine") ending.push({ id: lend.id, reason: "box-released" });
-        else this.open(record.id, lend, "waiting-for-vm").keeper.start();
+        else if (!this.runtimes.has(lend.id)) this.open(record.id, lend, "waiting-for-vm").keeper.start();
       }
       for (const reason of new Set(ending.map((entry) => entry.reason))) {
         this.endQuietly(record.id, ending.filter((entry) => entry.reason === reason).map((entry) => entry.id), reason);
@@ -262,7 +311,7 @@ export class AccountLends {
   async preview(principal: CallerPrincipal, boxId: string, body: unknown): Promise<LendAccountsPreviewResponse> {
     this.requireEnabled();
     const record = this.ownedBox(principal, boxId);
-    this.requireConnection(record);
+    const connection = this.requireConnection(record);
     if (!isRecord(body)) throw invalid("The request must name accounts.");
     const accounts = this.deps.accounts.list().accounts;
     const seen = new Set<string>();
@@ -283,6 +332,7 @@ export class AccountLends {
     }
     if (resolved.length === 0) throw invalid("Name at least one account.");
     const { minutes, expiresAt } = this.lendWindow(record, body.minutes ?? BOX_LEND_DEFAULT_MINUTES);
+    await this.serial(boxId, () => this.assertAppdirFree(connection, resolved));
     const plans: LendAccountPlan[] = [];
     for (const account of resolved) {
       const tokenExpiresAt = await this.checkLendable(account.agent, account.accountId);
@@ -300,9 +350,16 @@ export class AccountLends {
   /**
    * An APPROVED lend, all or nothing: the records are persisted, the logins and the index written,
    * then the keepers start; any failure ends every lend this call created. An account this chat
-   * already has on the box only gets the new end time, once everything else succeeded.
+   * already has on the box only gets the new end time, once everything else succeeded. One at a time
+   * per box, so a second call for an account never answers with the first's unfinished install.
    */
-  async lend(principal: CallerPrincipal, boxId: string, body: unknown): Promise<LendAccountsResponse> {
+  lend(principal: CallerPrincipal, boxId: string, body: unknown): Promise<LendAccountsResponse> {
+    const run = this.chain(this.lending, boxId, () => this.lendNow(principal, boxId, body));
+    this.track(run);
+    return run;
+  }
+
+  private async lendNow(principal: CallerPrincipal, boxId: string, body: unknown): Promise<LendAccountsResponse> {
     this.requireEnabled();
     if (principal.kind !== "agent") {
       throw new AccountLendError(403, "PERMISSION_DENIED", "Only an agent chat asks for a lend, on the owner's approval.");
@@ -314,6 +371,8 @@ export class AccountLends {
     const { expiresAt } = this.lendWindow(record, request.minutes);
     const expiresIso = new Date(expiresAt).toISOString();
     for (const account of request.accounts) await this.checkLendable(account.agent, account.accountId);
+    await this.serial(boxId, () => this.assertAppdirFree(connection, request.accounts));
+    if (this.stopped) throw stopping();
     const accounts = this.deps.accounts.list().accounts;
 
     const createdAt = new Date(this.now()).toISOString();
@@ -322,9 +381,10 @@ export class AccountLends {
     const updated = await this.deps.records.update(boxId, (next) => {
       created.length = 0;
       extended.clear();
-      const lends = next.accountLends ?? [];
+      const lends = rawLends(next);
+      const active = activeLends(next);
       for (const account of request.accounts) {
-        const existing = lends.find((lend) => isActive(lend) && lend.accountId === account.accountId && lend.threadId === threadId);
+        const existing = active.find((lend) => lend.accountId === account.accountId && lend.threadId === threadId);
         if (existing) {
           extended.add(existing.id);
           continue;
@@ -347,10 +407,12 @@ export class AccountLends {
     });
     if (!updated) throw new AccountLendError(404, "BOX_NOT_FOUND", "No such box.");
 
-    const installing = created.map((lend) => ({ lend, runtime: this.open(boxId, lend, "installing") }));
+    const installing: { lend: StoredAccountLend; runtime: LendRuntime }[] = [];
     try {
+      if (this.stopped) throw stopping();
       // Closed before the records landed: its `closed` event found nothing to end.
-      if (!this.deps.chatOpen(threadId)) throw new AccountLendError(409, "LEND_ENDED", "This chat was closed.");
+      if (this.chatGone(threadId)) throw new AccountLendError(409, "LEND_ENDED", "This chat was closed.");
+      for (const lend of created) installing.push({ lend, runtime: this.open(boxId, lend, "installing") });
       await this.serial(boxId, () => this.ensureFolders(connection, created));
       for (const { lend, runtime } of installing) {
         try {
@@ -360,6 +422,7 @@ export class AccountLends {
         }
       }
       await this.serial(boxId, () => this.writeIndex(boxId));
+      if (this.stopped) throw stopping();
     } catch (error) {
       // Whatever ended them already (a person, the chat closing), this finishes the same.
       await this.end(boxId, created.map((lend) => lend.id), "install-failed").catch((endError: unknown) => {
@@ -385,7 +448,7 @@ export class AccountLends {
   /** End one lend: an agent only its own chat's (another's reads as not found), a person any. */
   async endOne(principal: CallerPrincipal, boxId: string, lendId: string): Promise<AccountLendsResponse> {
     const record = this.ownedBox(principal, boxId);
-    const lend = (record.accountLends ?? []).find((candidate) => candidate.id === lendId && isBoxLendAgent(candidate.agent));
+    const lend = usableLends(record).find((candidate) => candidate.id === lendId);
     if (!lend || (principal.kind === "agent" && lend.threadId !== principal.threadId)) {
       throw new AccountLendError(404, "LEND_NOT_FOUND", "This box has no such lend.");
     }
@@ -413,7 +476,9 @@ export class AccountLends {
   /** What `BoxSummary.lentAccounts` shows of a lend beyond its record. */
   readonly runtimeOf = (record: StoredBox, lend: StoredAccountLend): BoxLendRuntime => {
     const state: LendKeeperState = this.runtimes.get(lend.id)?.keeper.current() ?? { status: "waiting-for-vm", statusMessage: null, tokenExpiresAt: null };
-    const paths = this.deps.hub.get(record.id)?.paths ?? { kind: "identity" as const };
+    // A box not connected now answers from its record: the OS it reported, else its kind.
+    const os = record.os ?? (record.kind.startsWith("windows") ? "win32" : null);
+    const paths = this.deps.hub.get(record.id)?.paths ?? (os === "win32" ? boxPathMapFor("win32") : { kind: "identity" as const });
     return {
       status: state.status,
       statusMessage: state.statusMessage,
@@ -427,7 +492,8 @@ export class AccountLends {
   // -------------------------------------------------------------------------
 
   private requireEnabled(): void {
-    if (this.stopped || !this.deps.enabled()) {
+    if (this.stopped) throw stopping();
+    if (!this.deps.enabled()) {
       throw new AccountLendError(503, "BOXES_DISABLED", "Lending is not available: the Ephemeral AI VMs plugin is off or still starting.");
     }
   }
@@ -463,9 +529,11 @@ export class AccountLends {
     if (body.purposeNote.length > TEMPORARY_BOX_PURPOSE_MAX_CHARS) throw invalid(`purposeNote is limited to ${TEMPORARY_BOX_PURPOSE_MAX_CHARS} characters.`);
     const accounts = new Map<string, LendTarget>();
     for (const entry of body.accounts as unknown[]) {
-      if (!isRecord(entry) || !isBoxLendAgent(entry.agent) || typeof entry.accountId !== "string" || entry.accountId.length === 0) {
+      if (!isRecord(entry) || !isBoxLendAgent(entry.agent) || typeof entry.accountId !== "string") {
         throw invalid("Each account needs its agent (claude or codex) and id.");
       }
+      if (entry.accountId === SYSTEM_ACCOUNT_ID) throw notLendable();
+      if (!ACCOUNT_ID_PATTERN.test(entry.accountId)) throw new AccountLendError(404, "ACCOUNT_NOT_FOUND", `No managed ${capitalized(entry.agent)} account has that id.`);
       accounts.set(entry.accountId, { accountId: entry.accountId, agent: entry.agent });
     }
     if (accounts.size === 0) throw invalid("Name at least one account.");
@@ -506,6 +574,7 @@ export class AccountLends {
   }
 
   private installError(lend: StoredAccountLend, error: unknown, connection: BoxConnection): AccountLendError {
+    if (error instanceof AccountLendError) return error;
     if (error instanceof LendStoppedError) return new AccountLendError(409, "LEND_ENDED", `The lend of ${lend.label} was ended while it was being installed.`);
     if (error instanceof AgentTokenError && error.code === "TOKEN_NEEDS_REAUTH") return needsLogin(lend.label);
     if (error instanceof AgentTokenError) return new AccountLendError(503, error.code, `Could not get a login for ${lend.label}: ${error.message}`);
@@ -536,11 +605,20 @@ export class AccountLends {
           watchHostLogin: (onChange) => this.watchHost(hostPath, onChange),
           tracker: this.tracker,
           connected: () => this.deps.hub.get(boxId)?.connected === true,
+          accountNeedsLogin: () => this.deps.accounts.list().accounts.some((account) => account.id === lend.accountId && account.needsReauth),
+          checkBoxLogin: () =>
+            this.serial(boxId, async () => {
+              const connection = this.deps.hub.get(boxId);
+              if (!connection?.connected) throw notConnected();
+              await this.assertLoginFree(connection, agent, lend.accountId);
+            }),
           writeLogin: (grant, wanted) =>
             this.serial(boxId, async () => {
               if (!wanted()) return;
               const connection = this.deps.hub.get(boxId);
               if (!connection?.connected) throw notConnected();
+              await this.assertLoginFree(connection, agent, lend.accountId);
+              if (!wanted()) return;
               const { filename, content } = boxLoginFile(agent, grant, this.now());
               await connection.writeFile(hostToBoxPath(connection.paths, join(this.deps.accounts.homePath(agent, lend.accountId), filename)), content, { mode: 0o600, mkdirs: true });
             }),
@@ -568,8 +646,10 @@ export class AccountLends {
     const delay = Number.isFinite(expiresAt) ? Math.max(0, expiresAt - this.now()) : 0;
     runtime.deadline = setTimeout(() => {
       runtime.deadline = null;
-      if (delay > MAX_TIMER_MS) {
-        this.armDeadline(runtime, expiresAt);
+      // Read again: an extension may have landed since this was armed, or be landing now.
+      const limit = Date.parse(activeLends(this.deps.registry.get(runtime.boxId)).find((lend) => lend.id === runtime.lendId)?.expiresAt ?? "");
+      if (limit > this.now()) {
+        this.armDeadline(runtime, limit);
         return;
       }
       this.track(
@@ -608,9 +688,7 @@ export class AccountLends {
 
   private async extend(boxId: string, ids: ReadonlySet<string>, expiresAt: string): Promise<void> {
     await this.deps.records.update(boxId, (next) => {
-      for (const lend of next.accountLends ?? []) {
-        if (ids.has(lend.id) && isActive(lend)) lend.expiresAt = expiresAt;
-      }
+      for (const lend of rawActive(next, ids)) lend.expiresAt = expiresAt;
     });
     for (const id of ids) {
       const runtime = this.runtimes.get(id);
@@ -628,11 +706,9 @@ export class AccountLends {
     if (wanted.size === 0) return;
     const endedAt = new Date(this.now()).toISOString();
     await this.deps.records.update(boxId, (next) => {
-      for (const lend of next.accountLends ?? []) {
-        if (wanted.has(lend.id) && isActive(lend)) {
-          lend.endedAt = endedAt;
-          lend.endReason = reason;
-        }
+      for (const lend of rawActive(next, wanted)) {
+        lend.endedAt = endedAt;
+        lend.endReason = reason;
       }
     });
     await Promise.all(ids.flatMap((id) => {
@@ -657,29 +733,72 @@ export class AccountLends {
 
   /**
    * Remove what ended lends left on the box, while it is connected: a login file unless another
-   * active lend or a live session on the box uses that account (a Claude chat reads that very file),
-   * and the index rewritten, or removed with the last lend. A record goes once that worked; one that
-   * could not waits for the next reconnect. Never throws.
+   * active lend of that account is there or a live chat reads it, and never one that is a real login;
+   * the index rewritten, or removed with the last lend. A record goes once that worked. One whose
+   * login a chat reads stays, and is looked at again when sessions change and on reconnect; one that
+   * failed waits for the next reconnect. Never throws.
    */
   private cleanUp(boxId: string): Promise<void> {
+    if (this.stopped) return Promise.resolve();
     return this.serial(boxId, async () => {
       const record = this.deps.registry.get(boxId);
-      const ended = (record?.accountLends ?? []).filter((lend) => lend.endedAt && isBoxLendAgent(lend.agent));
+      const ended = usableLends(record).filter((lend) => lend.endedAt);
       const connection = this.deps.hub.get(boxId);
       if (!record || ended.length === 0 || GONE_STATES.has(record.state) || !connection?.connected) return;
       const active = activeLends(record);
-      const sessions = [...this.deps.sessions()];
+      const cleaned = new Set<string>();
       for (const accountId of new Set(ended.map((lend) => lend.accountId))) {
-        if (active.some((lend) => lend.accountId === accountId) || boxUsesAccount(record, accountId, sessions, this.deps.registry)) continue;
-        const { agent } = ended.find((lend) => lend.accountId === accountId)!;
-        await connection.request("fs.rm", { path: hostToBoxPath(connection.paths, this.loginPath(agent as BoxLendAgent, accountId)), recursive: false, force: true });
+        const lends = ended.filter((lend) => lend.accountId === accountId);
+        const agent = lends[0]!.agent as BoxLendAgent;
+        if (!active.some((lend) => lend.accountId === accountId)) {
+          if (this.chatReadsLogin(record, agent, accountId)) continue;
+          await this.removeLogin(connection, agent, accountId);
+        }
+        for (const lend of lends) cleaned.add(lend.id);
       }
-      await this.writeIndex(boxId);
-      const cleaned = new Set(ended.map((lend) => lend.id));
-      await this.deps.records.update(boxId, (next) => {
-        next.accountLends = (next.accountLends ?? []).filter((lend) => !cleaned.has(lend.id));
+      await this.writeIndex(boxId).catch((error: unknown) => {
+        // A real index appeared: nothing of ours is there to clean up.
+        if ((error as { code?: unknown }).code !== "LEND_APPDIR_IN_USE") throw error;
+        this.warnBox(boxId, "left a real account index alone", error);
       });
+      if (cleaned.size > 0) {
+        await this.deps.records.update(boxId, (next) => {
+          next.accountLends = rawLends(next).filter((entry) => !(isRecord(entry) && cleaned.has(entry.id as string)));
+        });
+      }
+      if (cleaned.size < ended.length) this.keptForChats.add(boxId);
+      else this.keptForChats.delete(boxId);
     }).catch((error: unknown) => this.warnBox(boxId, "could not clean up after a lend; it is tried again when the VM reconnects", error));
+  }
+
+  /**
+   * Whether a live Claude chat running in this project box reads the account's login file. Codex
+   * chats log in with their own token and never read `auth.json`; a temporary box's chat runs on the
+   * host; a chat with no CLI running installs its own login when it next starts. A status not known
+   * yet (just after a restart) counts as running, and with no session list every chat might be.
+   */
+  private chatReadsLogin(record: StoredBox, agent: BoxLendAgent, accountId: string): boolean {
+    if (agent !== "claude" || record.purpose !== "project") return false;
+    if (!this.deps.sessionsLoaded()) return true;
+    for (const session of this.deps.sessions()) {
+      if (session.kind !== "agent-chat" || session.refId !== "claude" || session.accountId !== accountId || session.status !== "running") continue;
+      if (session.chatSessionStatus !== undefined && CHAT_NOT_RUNNING.has(session.chatSessionStatus)) continue;
+      const location = this.deps.registry.locate(session.projectPath);
+      if (location.kind === "box" && location.boxId === record.id) return true;
+    }
+    return false;
+  }
+
+  /** A kept login's chat may have gone: clean up once one has. Session updates are many, so this reads no box otherwise. */
+  private sessionsChanged(): void {
+    for (const boxId of this.keptForChats) {
+      const record = this.deps.registry.get(boxId);
+      const released = record
+        ? usableLends(record).some((lend) => lend.endedAt && !this.chatReadsLogin(record, lend.agent as BoxLendAgent, lend.accountId))
+        : false;
+      if (released) this.track(this.cleanUp(boxId));
+      else if (!record) this.keptForChats.delete(boxId);
+    }
   }
 
   /** The box is gone: its lends' records go with it, nothing to clean up. */
@@ -695,7 +814,8 @@ export class AccountLends {
       for (const runtime of [...this.runtimes.values()]) {
         if (runtime.boxId === boxId) this.track(this.close(runtime));
       }
-      if (record?.accountLends?.length) {
+      this.keptForChats.delete(boxId);
+      if (record && rawLends(record).length > 0) {
         this.track(this.dropRecords(boxId).catch((error: unknown) => this.warnBox(boxId, "could not drop a destroyed box's lends", error)));
       }
       return;
@@ -713,8 +833,7 @@ export class AccountLends {
       for (const keeper of keepers) keeper.disconnected();
       return;
     }
-    const record = this.deps.registry.get(boxId);
-    if (!record?.accountLends?.length) return;
+    if (usableLends(this.deps.registry.get(boxId)).length === 0) return;
     this.track(
       this.reconnected(boxId)
         .catch((error: unknown) => this.warnBox(boxId, "could not bring the lent logins' folders back", error))
@@ -747,16 +866,90 @@ export class AccountLends {
     return connection.request("agent.ensurePaths", { paths: [...new Set(folders)].map((folder) => hostToBoxPath(connection.paths, folder)) });
   }
 
-  /** The eval's `agent-accounts.json`: only the accounts lent to this box. Removed with the last one. Call inside {@link serial}. */
+  /**
+   * A box file's text; null when there is nothing there; {@link NOT_OURS} for anything that cannot be
+   * ours (a symlink, a folder, too large, unreadable). Throws only when the link is gone.
+   */
+  private async readBoxFile(connection: BoxConnection, path: string): Promise<string | null | typeof NOT_OURS> {
+    try {
+      const stats = await connection.request("fs.stat", { path, followSymlinks: false });
+      if (stats === null) return null;
+      if (stats.kind !== "file" || stats.size > MAX_OWN_FILE_BYTES) return NOT_OURS;
+      const chunks: Buffer[] = [];
+      for await (const chunk of await connection.readFile(path)) chunks.push(Buffer.from(chunk as Uint8Array));
+      return Buffer.concat(chunks).toString("utf8");
+    } catch (error) {
+      if (!connection.connected) throw notConnected();
+      this.warnBox(connection.boxId, `could not read ${path}, so it is left alone`, error);
+      return NOT_OURS;
+    }
+  }
+
+  private loginBoxPath(connection: BoxConnection, agent: BoxLendAgent, accountId: string): string {
+    return hostToBoxPath(connection.paths, this.loginPath(agent, accountId));
+  }
+
+  /** Throws `LEND_APPDIR_IN_USE` unless the login's path holds nothing, or a login of ours. */
+  private async assertLoginFree(connection: BoxConnection, agent: BoxLendAgent, accountId: string): Promise<void> {
+    const path = this.loginBoxPath(connection, agent, accountId);
+    const found = await this.readBoxFile(connection, path);
+    if (found !== null && (found === NOT_OURS || holdsRealLogin(found))) throw appdirInUse(path);
+  }
+
+  /** Throws `LEND_APPDIR_IN_USE` unless the index's path holds nothing, or an index of ours. */
+  private async assertIndexFree(connection: BoxConnection): Promise<void> {
+    const path = hostToBoxPath(connection.paths, agentAccountsFile(this.deps.baseDir));
+    const found = await this.readBoxFile(connection, path);
+    if (found !== null && !this.isOwnIndex(found)) throw appdirInUse(path);
+  }
+
+  private isOwnIndex(found: string | typeof NOT_OURS): boolean {
+    if (found === NOT_OURS) return false;
+    try {
+      const parsed: unknown = JSON.parse(found);
+      return isRecord(parsed) && parsed.lentBy === LEND_INDEX_MARKER.lentBy;
+    } catch {
+      return false;
+    }
+  }
+
+  private async assertAppdirFree(connection: BoxConnection, accounts: readonly LendTarget[]): Promise<void> {
+    await this.assertIndexFree(connection);
+    for (const account of accounts) await this.assertLoginFree(connection, account.agent, account.accountId);
+  }
+
+  /** Remove a lent login; a real one stays. Call inside {@link serial}. */
+  private async removeLogin(connection: BoxConnection, agent: BoxLendAgent, accountId: string): Promise<void> {
+    const path = this.loginBoxPath(connection, agent, accountId);
+    const found = await this.readBoxFile(connection, path);
+    if (found === null) return;
+    if (found === NOT_OURS || holdsRealLogin(found)) {
+      this.deps.logger.warn(`[boxes] Box ${connection.boxId}: account ${accountId} has a real login at its lent login's path; it is left alone`);
+      return;
+    }
+    await connection.request("fs.rm", { path, recursive: false, force: true });
+  }
+
+  /**
+   * The eval's `agent-accounts.json`: only the accounts lent to this box, marked as ours. Removed with
+   * the last one, unless what is there is not ours. Call inside {@link serial}.
+   */
   private async writeIndex(boxId: string): Promise<void> {
     const connection = this.deps.hub.get(boxId);
     if (!connection?.connected) return;
     const path = hostToBoxPath(connection.paths, agentAccountsFile(this.deps.baseDir));
     const active = activeLends(this.deps.registry.get(boxId));
     if (active.length === 0) {
+      const found = await this.readBoxFile(connection, path);
+      if (found === null) return;
+      if (!this.isOwnIndex(found)) {
+        this.warnBox(boxId, "left a real account index alone", path);
+        return;
+      }
       await connection.request("fs.rm", { path, recursive: false, force: true });
       return;
     }
+    await this.assertIndexFree(connection);
     const index: AgentAccountsIndex = createDefaultAgentAccounts();
     const needingLogin = new Set(
       active.filter((lend) => this.runtimes.get(lend.id)?.keeper.current().status === "needs-login").map((lend) => lend.accountId)
@@ -776,7 +969,7 @@ export class AccountLends {
         importedAt: lend.createdAt
       });
     }
-    await connection.writeFile(path, `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600, mkdirs: true });
+    await connection.writeFile(path, `${JSON.stringify({ ...index, ...LEND_INDEX_MARKER }, null, 2)}\n`, { mode: 0o600, mkdirs: true });
   }
 
   private homeOf(lend: Pick<StoredAccountLend, "agent" | "accountId">): string {
@@ -789,16 +982,27 @@ export class AccountLends {
 
   /** Run `job` after the box's earlier file work; a failure is the caller's, not the queue's. */
   private serial<T>(boxId: string, job: () => Promise<T>): Promise<T> {
-    const run = (this.queues.get(boxId) ?? Promise.resolve()).then(job);
+    // Nothing reaches a box once the service stopped.
+    return this.chain(this.queues, boxId, () => (this.stopped ? Promise.reject(stopping()) : job()));
+  }
+
+  private chain<T>(queues: Map<string, Promise<unknown>>, key: string, job: () => Promise<T>): Promise<T> {
+    const run = (queues.get(key) ?? Promise.resolve()).then(job);
     const tail = run.then(
       () => undefined,
       () => undefined
     );
-    this.queues.set(boxId, tail);
+    queues.set(key, tail);
     void tail.then(() => {
-      if (this.queues.get(boxId) === tail) this.queues.delete(boxId);
+      if (queues.get(key) === tail) queues.delete(key);
     });
     return run;
+  }
+
+  /** The chat is known to be gone: with no session list, nothing is known. */
+  private chatGone(threadId: string | null | undefined): boolean {
+    if (typeof threadId !== "string") return true;
+    return this.deps.sessionsLoaded() && !this.deps.chatOpen(threadId);
   }
 
   private track<T>(work: Promise<T>): void {
