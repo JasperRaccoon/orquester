@@ -95,6 +95,7 @@ const HTML_RENDER_MESSAGE = "Shown to the reader above your reply. Don't mention
 const SECRET_PROVIDED_NOTE =
   "The user provided the value. Use it only where it is needed (an env var for one command, the config file the user asked for); never print, echo, log or commit it, and never repeat it in chat.";
 const BOX_READY_NOTE = "Ready and empty: Orquester copied nothing into it. It bills until destroy_box, its deadline, or this chat closing.";
+const LEND_NEXT = "Pass this appdir to the eval (--appdir or ORQUESTER_APPDIR). Logins renew by themselves until lent_until. Call box_return_accounts when the run ends.";
 
 function replyFields(reply: unknown): Record<string, unknown> {
   if (reply === "notify") return { delivery: "posted", subscriptionId: "sub-3001", willNotify: true, hint: NOTIFY_HINT };
@@ -176,7 +177,22 @@ export function defaultResult(name: string, args: Record<string, unknown>, state
         note: BOX_READY_NOTE
       };
     case "list_boxes":
-      return { boxes: [] };
+      return { boxes: [], lent_accounts: [] };
+    case "box_lend_accounts": {
+      const lentUntil = new Date(Date.now() + 4 * 3_600_000).toISOString();
+      const lent = (agent: string, names: unknown) =>
+        (Array.isArray(names) ? names : []).map((name, index) => ({
+          agent,
+          label: String(name),
+          id: `${agent}-acct-${index + 1}`,
+          home: `/var/lib/orquester/daemon/agent-accounts/${agent}/${agent}-acct-${index + 1}/home`,
+          lent_until: lentUntil,
+          token_expires_at: lentUntil
+        }));
+      return { box_id: args.box_id ?? "box-5001", appdir: "/var/lib/orquester", accounts: [...lent("claude", args.claude), ...lent("codex", args.codex)], next: LEND_NEXT };
+    }
+    case "box_return_accounts":
+      return { box_id: args.box_id ?? "box-5001", returned: [] };
     case "box_exec":
       return { exitCode: 0, stdout: "", stderr: "" };
     case "knowledge_search":

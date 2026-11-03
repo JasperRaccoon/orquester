@@ -54,6 +54,8 @@ export type ToolCaller =
        * through `callerHostPath` (`../addressing.ts`).
        */
       boxPaths?: BoxPathMap;
+      /** The project box its CLI runs in (POSIX and Windows alike); absent for a chat on the host. */
+      projectBoxId?: string;
       agentId: AgentAdapterId;
       /** Unique per call (the provider's tool-call id where it names one). */
       callId: string;

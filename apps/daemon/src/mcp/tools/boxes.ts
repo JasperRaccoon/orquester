@@ -1,8 +1,10 @@
 /**
  * Catalog family `boxes` (Ephemeral AI VMs spec §13): temporary cloud machines an agent chat rents
  * for a task — `create_box`, `list_boxes`, `box_exec`, `box_exec_output`, `box_upload`,
- * `box_download`, `box_forward_port`, `destroy_box`. Chat-only (like `request_secret`): external
- * MCP clients do not get them; the daemon advertises them only while the plugin can rent a box.
+ * `box_download`, `box_forward_port`, `destroy_box` — and lending it logins (`box_lend_accounts`,
+ * `box_return_accounts`). Chat-only (like `request_secret`): external MCP clients do not get them;
+ * the daemon advertises them only while the plugin can rent a box, and the two lending tools also
+ * to a chat already running in a box (`session-tools/manifest.ts`).
  *
  * - **Approval.** `create_box` spends the owner's money, so every call opens a `spend` card
  *   (`spendFamily`: in every permission mode, workflow-owned and agent-to-agent chats included,
@@ -20,25 +22,36 @@
  * - **Nothing is copied into a box**: the agent moves what it needs with `box_upload` /
  *   `box_download` (streamed by the daemon, never through JSON; paths inside the chat's project,
  *   spelled as host paths, whose files are in the project's own box for a box project).
+ * - **Lending** (spec docs/superpowers/specs/2026-11-03-lend-accounts-to-boxes-design.md §8, §9):
+ *   `box_lend_accounts` uses subscription quota and exposes tokens to the box, so it opens a `spend`
+ *   card like `create_box`. The accounts, box and minutes are resolved BEFORE the card and pinned;
+ *   no token ever passes through this module.
  *
  * Everything goes through `DaemonApi` (D-1): this module imports types and pure contracts only.
  */
 
 import { z } from "zod";
 import {
+  accountLendRoutes,
   BOX_KIND_LABELS,
   BOX_KINDS,
+  BOX_LEND_MAX_ACCOUNTS,
+  BOX_LEND_MAX_MINUTES,
+  BOX_LEND_MIN_MINUTES,
   BYO_PROVIDER_ID,
   boxRoutes,
+  isBoxLendAgent,
   isBoxProviderId,
   TEMPORARY_BOX_DEFAULT_LIFETIME_MINUTES,
   TEMPORARY_BOX_MAX_LIFETIME_MINUTES,
   TEMPORARY_BOX_MIN_LIFETIME_MINUTES,
   TEMPORARY_BOX_PURPOSE_MAX_CHARS,
   temporaryBoxRoutes,
+  type AccountLendsResponse,
   type ApprovalPreviewSection,
   type BoxKind,
   type BoxKindsResponse,
+  type BoxLendAgent,
   type BoxOffersResponse,
   type BoxProviderId,
   type BoxProviderInfo,
@@ -47,6 +60,10 @@ import {
   type BoxSizeOffer,
   type BoxSummary,
   type CreateTemporaryBoxRequest,
+  type LendAccountsPreviewRequest,
+  type LendAccountsPreviewResponse,
+  type LendAccountsRequest,
+  type LendAccountsResponse,
   type TemporaryBoxesResponse
 } from "@orquester/api";
 
@@ -140,6 +157,16 @@ function durationLabel(minutes: number): string {
   const mins = minutes % 60;
   const parts = [days ? `${days} d` : "", hours ? `${hours} h` : "", mins && days === 0 ? `${mins} min` : ""].filter((part) => part !== "");
   return parts.length > 0 ? parts.join(" ") : "0 min";
+}
+
+/** A moment as the card says it, in UTC (the daemon's clock is not the reader's): "19:40 UTC" today, else "Nov 13, 19:40 UTC". */
+function timeLabel(iso: string, now: number): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "unknown";
+  const stamp = at.toISOString();
+  const time = `${stamp.slice(11, 16)} UTC`;
+  if (stamp.slice(0, 10) === new Date(now).toISOString().slice(0, 10)) return time;
+  return `${at.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}, ${time}`;
 }
 
 function sizeLabel(size: BoxSizeOffer): string {
@@ -447,7 +474,7 @@ const createBox = defineTool({
 const listBoxes = defineTool({
   name: "list_boxes",
   title: "List this chat's boxes",
-  description: "This chat's temporary boxes: id, kind, provider, state, OS/arch, $/h, estimated cost so far, deadline.",
+  description: "This chat's temporary boxes: id, kind, provider, state, OS/arch, $/h, estimated cost so far, deadline; lent_accounts: logins it borrowed on any VM.",
   input: {},
   audiences: ["chat"],
   toolset: "boxes",
@@ -457,9 +484,10 @@ const listBoxes = defineTool({
   resultKind: "json",
   async run(_args, { api, caller }) {
     threadCaller(caller, "list_boxes");
-    const res = await api.request("GET", temporaryBoxRoutes.list);
-    if (res.status >= 400) throw daemonError(res);
-    return { boxes: (res.body as TemporaryBoxesResponse).boxes.map(boxView) };
+    const [boxes, lends] = await Promise.all([api.request("GET", temporaryBoxRoutes.list), api.request("GET", accountLendRoutes.all)]);
+    if (boxes.status >= 400) throw daemonError(boxes);
+    if (lends.status >= 400) throw daemonError(lends);
+    return { boxes: (boxes.body as TemporaryBoxesResponse).boxes.map(boxView), lent_accounts: (lends.body as AccountLendsResponse).lends.map(lentView) };
   }
 });
 
@@ -644,5 +672,206 @@ const destroyBox = defineTool({
   }
 });
 
+// ---------------------------------------------------------------------------
+// Lending accounts: the card, its pins, and the two tools
+// ---------------------------------------------------------------------------
+
+const AGENT_WORDS: Readonly<Record<BoxLendAgent, string>> = { claude: "Claude", codex: "Codex" };
+
+const LEND_NEXT = "Pass this appdir to the eval (--appdir or ORQUESTER_APPDIR). Logins renew by themselves until lent_until. Call box_return_accounts when the run ends.";
+
+/** A fresh schema per field: a shared one serializes as a `$ref`, which clients do not take. */
+const lendNames = () => z.array(z.string().trim().min(1).max(200)).max(BOX_LEND_MAX_ACCOUNTS).optional();
+
+/** One lent login as the agent reads it. Never a token: the routes carry none. */
+function lentView(lend: AccountLendsResponse["lends"][number]): Record<string, unknown> {
+  return {
+    box_id: lend.boxId,
+    agent: lend.agent,
+    label: lend.label,
+    id: lend.accountId,
+    status: lend.status,
+    ...(lend.statusMessage ? { status_message: lend.statusMessage } : {}),
+    lent_until: lend.expiresAt,
+    token_expires_at: lend.tokenExpiresAt,
+    home: lend.home
+  };
+}
+
+/** The box a lend goes to when the agent names none: the VM this chat runs in, else its only temporary box. */
+async function defaultLendBox(api: DaemonApi, caller: ThreadCaller): Promise<string> {
+  if (caller.projectBoxId !== undefined) return caller.projectBoxId;
+  const res = await api.request("GET", temporaryBoxRoutes.list);
+  if (res.status >= 400) throw daemonError(res);
+  // The route keeps a chat's destroyed boxes on the list.
+  const live = (res.body as TemporaryBoxesResponse).boxes.filter((box) => box.state !== "destroying" && box.state !== "destroy-failed" && box.state !== "destroyed");
+  if (live.length === 1) return live[0]!.id;
+  if (live.length === 0) throw new ToolError("LEND_NO_BOX", "This chat has no VM: rent one with create_box first.");
+  throw new ToolError("LEND_NO_BOX", `This chat has several VMs: pass box_id (${live.map((box) => box.id).join(", ")}).`);
+}
+
+/** The card (spec §9): what is lent, to what, until when, and what approving exposes. */
+function lendCard(boxId: string, plan: LendAccountsPreviewResponse, purpose: string, unattended: boolean, now: number): ApprovalPreview {
+  const count = plan.accounts.length;
+  const sections: ApprovalPreviewSection[] = [
+    { kind: "text", title: "Purpose", text: purpose },
+    {
+      kind: "fields",
+      title: "The VM",
+      rows: [
+        { label: "VM", value: plan.boxLabel },
+        { label: "Time limit", value: durationLabel(plan.minutes) },
+        { label: "Ends at", value: timeLabel(plan.expiresAt, now) }
+      ]
+    },
+    {
+      kind: "fields",
+      title: "Accounts",
+      rows: plan.accounts.map((account) => ({
+        label: account.label,
+        value: [
+          AGENT_WORDS[account.agent],
+          account.tokenExpiresAt !== null ? `current token valid until ${timeLabel(account.tokenExpiresAt, now)}` : "current token's expiry unknown",
+          ...(account.alreadyLent ? ["already lent: approving replaces its end time"] : [])
+        ].join(" · ")
+      }))
+    }
+  ];
+  if (unattended) sections.push({ kind: "warning", level: "caution", text: UNATTENDED_WARNING });
+  sections.push({
+    kind: "warning",
+    level: "caution",
+    text: "Anything running on this VM can read these logins and use their quota until each token expires, even after the lend ends. Their refresh tokens stay on this server, so nothing on the VM can renew them or change your login."
+  });
+  const codex = plan.accounts.filter((account) => account.agent === "codex");
+  if (codex.length > 0) {
+    const known = codex.flatMap((account) => (account.tokenExpiresAt !== null ? [`${account.label} until ${timeLabel(account.tokenExpiresAt, now)}`] : []));
+    sections.push({ kind: "warning", level: "caution", text: `Codex tokens last about 10 days.${known.length > 0 ? ` Current tokens: ${known.join(", ")}.` : ""}` });
+  }
+  return { title: `Lend ${count} account${count === 1 ? "" : "s"} to a VM`, scopeLabel: "Uses your subscription quota", sections, pins: lendPins(boxId, plan), ungrantable: true };
+}
+
+/** The approved lend, frozen with the card (`ApprovalPreview.pins`): what `run` posts. */
+function lendPins(boxId: string, plan: LendAccountsPreviewResponse): Record<string, string> {
+  return { boxId, accounts: JSON.stringify(plan.accounts.map((account) => ({ agent: account.agent, accountId: account.accountId }))), minutes: String(plan.minutes) };
+}
+
+/** The pins read back; null unless they are whole (fail closed). */
+function readLendPins(pins: Record<string, string> | undefined): { boxId: string; accounts: LendAccountsRequest["accounts"]; minutes: number } | null {
+  if (!pins?.boxId || !pins.accounts || !pins.minutes) return null;
+  const minutes = Number(pins.minutes);
+  if (!Number.isInteger(minutes) || minutes <= 0) return null;
+  let accounts: unknown;
+  try {
+    accounts = JSON.parse(pins.accounts);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(accounts) || accounts.length === 0) return null;
+  const whole = accounts.every((account: { agent?: unknown; accountId?: unknown }) => isBoxLendAgent(account?.agent) && typeof account.accountId === "string" && account.accountId !== "");
+  return whole ? { boxId: pins.boxId, accounts: accounts as LendAccountsRequest["accounts"], minutes } : null;
+}
+
+const boxLendAccounts = defineTool({
+  name: "box_lend_accounts",
+  title: "Lend accounts to a VM",
+  description:
+    "Put short-lived logins of named managed accounts on this chat's VM, so a paid eval or CLI there can use them. Needs the owner's approval on a card (up to 30 min); if denied, don't retry: ask. Never copy logins yourself. Names from `list_agents`, quota from `get_usage`.",
+  input: {
+    claude: lendNames().describe("Account labels, label parts before @, or id prefixes."),
+    codex: lendNames().describe("Same, for Codex."),
+    purpose: z.string().trim().min(1).max(TEMPORARY_BOX_PURPOSE_MAX_CHARS).describe("What you need them for, shown to the owner."),
+    minutes: z.number().int().min(BOX_LEND_MIN_MINUTES).max(BOX_LEND_MAX_MINUTES).optional().describe("Default 240. Clamped to a temporary box's time limit."),
+    box_id: boxIdField.optional().describe("Default: this chat's VM, or its only temporary box.")
+  },
+  audiences: ["chat"],
+  toolset: "boxes",
+  tier: "act",
+  spendFamily: "accounts",
+  scope: async (_args, ctx) => ownBoxScope(ctx, "none", true),
+  async approval(args, ctx) {
+    const caller = threadCaller(ctx.caller, "box_lend_accounts");
+    const named = (args.claude?.length ?? 0) + (args.codex?.length ?? 0);
+    if (named === 0) throw new ToolError("INVALID_ARGUMENT", "Name at least one account in claude or codex (labels from list_agents).");
+    if (named > BOX_LEND_MAX_ACCOUNTS) throw new ToolError("INVALID_ARGUMENT", `At most ${BOX_LEND_MAX_ACCOUNTS} accounts in one call.`);
+    const boxId = args.box_id ?? (await defaultLendBox(ctx.api, caller));
+    const body: LendAccountsPreviewRequest = {
+      ...(args.claude?.length ? { claude: args.claude } : {}),
+      ...(args.codex?.length ? { codex: args.codex } : {}),
+      ...(args.minutes !== undefined ? { minutes: args.minutes } : {})
+    };
+    const res = await ctx.api.request("POST", accountLendRoutes.preview(boxId), { body });
+    if (res.status >= 400) throw daemonError(res);
+    return lendCard(boxId, res.body as LendAccountsPreviewResponse, args.purpose, caller.workflowOwned || caller.exchange !== null, ctx.now());
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  resultKind: "json",
+  async run(args, { api, approval, caller }) {
+    threadCaller(caller, "box_lend_accounts");
+    // Fail closed: logins are lent only as a card showed them.
+    const pinned = readLendPins(approval?.pins);
+    if (!pinned) throw new ToolError("PERMISSION_DENIED", "box_lend_accounts needs the owner's approval on its card.");
+    const body: LendAccountsRequest = { accounts: pinned.accounts, minutes: pinned.minutes, purposeNote: args.purpose };
+    const res = await api.request("POST", accountLendRoutes.box(pinned.boxId), { body });
+    if (res.status >= 400) throw daemonError(res);
+    const lent = res.body as LendAccountsResponse;
+    return {
+      box_id: lent.boxId,
+      appdir: lent.appdir,
+      accounts: lent.lent.map((lend) => ({ agent: lend.agent, label: lend.label, id: lend.accountId, home: lend.home, lent_until: lend.expiresAt, token_expires_at: lend.tokenExpiresAt })),
+      next: LEND_NEXT
+    };
+  }
+});
+
+/** Whether `name` names this lend's account, as `box_lend_accounts` takes names: a label, its part before `@`, or an id prefix. */
+function namesLend(lend: AccountLendsResponse["lends"][number], name: string): boolean {
+  const query = name.toLowerCase();
+  const label = lend.label.toLowerCase();
+  return lend.accountId.toLowerCase().startsWith(query) || label === query || label.split("@")[0] === query;
+}
+
+const boxReturnAccounts = defineTool({
+  name: "box_return_accounts",
+  title: "Return lent accounts",
+  description: "End logins box_lend_accounts put on a VM, once the run is done. Without claude or codex: everything this chat borrowed on that VM. No card; always safe.",
+  input: {
+    box_id: boxIdField.optional().describe("Default: the VM this chat borrowed on."),
+    claude: lendNames(),
+    codex: lendNames()
+  },
+  audiences: ["chat"],
+  toolset: "boxes",
+  tier: "act",
+  // Ending a lend stops quota use: never refused while planning.
+  planSafe: true,
+  scope: async (_args, ctx) => ownBoxScope(ctx, "none", true),
+  annotations: { ...MUTATING, idempotentHint: true, openWorldHint: false },
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    const thread = threadCaller(caller, "box_return_accounts");
+    const res = await api.request("GET", accountLendRoutes.all);
+    if (res.status >= 400) throw daemonError(res);
+    // This chat's own lends: another chat's on the same VM stay.
+    const mine = (res.body as AccountLendsResponse).lends;
+    const boxIds = [...new Set(mine.map((lend) => lend.boxId))];
+    const boxId = args.box_id ?? (thread.projectBoxId !== undefined && boxIds.includes(thread.projectBoxId) ? thread.projectBoxId : boxIds.length === 1 ? boxIds[0] : undefined);
+    if (boxId === undefined && boxIds.length > 1) throw new ToolError("LEND_NO_BOX", `This chat borrowed on several VMs: pass box_id (${boxIds.join(", ")}).`);
+    const onBox = mine.filter((lend) => lend.boxId === boxId);
+    const named = [...(args.claude ?? []).map((name) => ({ agent: "claude", name })), ...(args.codex ?? []).map((name) => ({ agent: "codex", name }))];
+    const targets = named.length === 0 ? onBox : onBox.filter((lend) => named.some(({ agent, name }) => lend.agent === agent && namesLend(lend, name)));
+    for (const lend of targets) {
+      const ended = await api.request("DELETE", accountLendRoutes.lend(lend.boxId, lend.id));
+      if (ended.status >= 400) throw daemonError(ended);
+    }
+    const notLent = named.filter(({ agent, name }) => !onBox.some((lend) => lend.agent === agent && namesLend(lend, name))).map(({ name }) => name);
+    return {
+      ...(boxId !== undefined ? { box_id: boxId } : {}),
+      returned: targets.map((lend) => ({ agent: lend.agent, label: lend.label, id: lend.accountId })),
+      ...(notLent.length > 0 ? { not_lent: notLent } : {})
+    };
+  }
+});
+
 /** This family in the catalog (`../catalog/index.ts`). */
-export const boxesFamily: readonly AnyOrquesterTool[] = [createBox, listBoxes, boxExec, boxExecOutput, boxUpload, boxDownload, boxForwardPort, destroyBox];
+export const boxesFamily: readonly AnyOrquesterTool[] = [createBox, listBoxes, boxExec, boxExecOutput, boxUpload, boxDownload, boxForwardPort, destroyBox, boxLendAccounts, boxReturnAccounts];
