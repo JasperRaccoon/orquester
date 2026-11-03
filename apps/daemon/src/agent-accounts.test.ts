@@ -464,6 +464,25 @@ test("a Grok refresh replaces auth.json by rename (as the CLI does), 0600, nothi
   assert.deepEqual((await readdir(home)).filter((name) => name.endsWith(".tmp")), []);
 });
 
+test("a Claude refresh replaces .credentials.json by rename, 0600, holding the rotated refresh token", async (t) => {
+  const svc = await makeServiceWithFetch(t, 1_000_000, async () =>
+    new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", expires_in: 3600 }), { status: 200 })
+  );
+  const acct = await svc.importAccount({
+    content: JSON.stringify({ claudeAiOauth: { accessToken: "OLD", refreshToken: "OLDR", expiresAt: 0 } }),
+    label: "Work"
+  });
+  const home = svc.homePath("claude", acct.id);
+  const before = await stat(join(home, ".credentials.json"));
+  assert.equal(await svc.refreshNow("claude", acct.id), "refreshed");
+  const after = await stat(join(home, ".credentials.json"));
+  assert.notEqual(after.ino, before.ino, "a new file renamed over the old one");
+  assert.equal(after.mode & 0o777, 0o600);
+  const creds = JSON.parse(await readFile(join(home, ".credentials.json"), "utf8"));
+  assert.equal(creds.claudeAiOauth.refreshToken, "NEWR");
+  assert.deepEqual((await readdir(home)).filter((name) => name.endsWith(".tmp")), []);
+});
+
 test("the refresher re-reads the live sessions before spending a refresh token (a chat that just started)", async (t) => {
   const now = Date.parse("2026-10-18T00:00:00Z");
   let called = 0;
