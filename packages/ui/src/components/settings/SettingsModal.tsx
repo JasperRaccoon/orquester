@@ -322,12 +322,17 @@ export const SettingsModal: React.FC = () => {
       if (!isDesktop) setSection(null);
       return;
     }
-    const requested = findSection(requestedSection);
-    if (requested) {
-      setSection(requested.id);
-    }
     void loadAgentAccounts();
-  }, [open, requestedSection, loadAgentAccounts, isDesktop]);
+  }, [open, loadAgentAccounts, isDesktop]);
+
+  // Taken once: a later request for the same section, after the user moved on
+  // inside the open modal, must still change the page.
+  useEffect(() => {
+    if (!open || requestedSection === null) return;
+    const requested = findSection(requestedSection);
+    if (requested) setSection(requested.id);
+    useAppStore.setState({ settingsSection: null });
+  }, [open, requestedSection]);
 
   // A new page starts at its top, not wherever the previous one was scrolled.
   useEffect(() => {

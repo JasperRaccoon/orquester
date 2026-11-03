@@ -21,6 +21,7 @@ import { useNow } from "../../../lib/boxes/hooks";
 import { destroyBox, useBoxes, useBoxesLoaded } from "../../../lib/boxes/store";
 import { Button, ConfirmDialog, Modal, ModalCloseButton } from "../../ui";
 import { Badge, EmptyState, SettingsSection } from "../../settings/primitives";
+import { LentAccountsSection } from "../surfaces/LentAccountsSection";
 import {
   boxCostLine,
   boxCountdown,
@@ -163,6 +164,7 @@ const BoxRow: React.FC<{
       {box.state === "destroy-failed" && box.purpose === "project" && (
         <p className="text-xs text-danger">It may still be billing. Delete its project again to retry.</p>
       )}
+      <LentAccountsSection box={box} now={now} className="rounded-lg border border-neutral-800/80 px-2.5 py-1.5" />
 
       {showProgress && (
         <div className="space-y-1.5">
