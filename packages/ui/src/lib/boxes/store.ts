@@ -51,6 +51,7 @@ import {
   type BoxKind,
   type BoxKindAvailability,
   type BoxKindsResponse,
+  type BoxLentAccount,
   type BoxOffersResponse,
   type BoxProviderId,
   type BoxProviderInfo,
@@ -85,6 +86,8 @@ export interface BoxesApi {
   readonly connection?: { readonly id: string };
   listBoxes(signal?: AbortSignal): Promise<BoxesResponse>;
   destroyBox(id: string): Promise<BoxResponse | undefined>;
+  endAccountLend(boxId: string, lendId: string): Promise<unknown>;
+  endAccountLends(boxId: string): Promise<unknown>;
   listBoxKinds(signal?: AbortSignal): Promise<BoxKindsResponse>;
   listBoxProviders(signal?: AbortSignal): Promise<BoxProvidersResponse>;
   setBoxProviderCredentials(id: BoxProviderId, req: SetBoxProviderCredentialsRequest): Promise<BoxProviderInfo>;
@@ -514,6 +517,25 @@ export async function destroyBox(api: BoxesApi, id: string): Promise<void> {
   const box = sanitizeBoxResponse(answer);
   if (box && box.id === id && current) upsertBox(box);
   else reloadQuietly(() => loadBoxesList(api));
+}
+
+/** After an ended lend: takes it off the box right away (the daemon's event says the same), or re-reads. */
+function dropLends(api: BoxesApi, boxId: string, current: boolean, keep: (lend: BoxLentAccount) => boolean): void {
+  const box = current ? boxesStore.getState().boxes?.find((entry) => entry.id === boxId) : undefined;
+  if (!current) reloadQuietly(() => loadBoxesList(api));
+  else if (box?.lentAccounts) upsertBox({ ...box, lentAccounts: box.lentAccounts.filter(keep) });
+}
+
+/** End one lend. Rejects with the daemon's error, and the row stays. */
+export async function endAccountLend(api: BoxesApi, boxId: string, lendId: string): Promise<void> {
+  const { reset, current } = await mutate(api, "boxes", () => api.endAccountLend(boxId, lendId));
+  if (!reset) dropLends(api, boxId, current, (lend) => lend.id !== lendId);
+}
+
+/** End every lend on a box. Rejects with the daemon's error, and the rows stay. */
+export async function endAccountLends(api: BoxesApi, boxId: string): Promise<void> {
+  const { reset, current } = await mutate(api, "boxes", () => api.endAccountLends(boxId));
+  if (!reset) dropLends(api, boxId, current, () => false);
 }
 
 // ---------------------------------------------------------------------------

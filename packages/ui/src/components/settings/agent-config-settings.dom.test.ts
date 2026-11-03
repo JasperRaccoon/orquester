@@ -137,6 +137,14 @@ describe("Settings → Agent config", () => {
     });
   }
 
+  it("goes to a requested section again after the user moved on inside the open modal", async () => {
+    await open("agent-config");
+    await act(async () => navButton("General")!.click());
+    assert.notEqual(document.querySelector("h2")?.textContent, "Agent config");
+    await act(async () => useAppStore.getState().openSettings("agent-config"));
+    assert.equal(document.querySelector("h2")?.textContent, "Agent config");
+  });
+
   it("is listed under Agents and found by a search for skills or MCP", async () => {
     await open("general");
     assert.ok(navButton("Agent config"), "in the nav");

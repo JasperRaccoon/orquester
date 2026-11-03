@@ -13,6 +13,7 @@ import {
   BOX_SETUP_STEP_IDS,
   BOX_STATES,
   isBoxKind,
+  isBoxLendAgent,
   isBoxProviderId,
   isBoxPurpose,
   type BlacksmithSetupResponse,
@@ -35,6 +36,8 @@ import {
   type BoxKindAvailability,
   type BoxLocalTailscale,
   type BoxKindsResponse,
+  type BoxLentAccount,
+  type BoxLentAccountStatus,
   type BoxMcpRunInBoxEntry,
   type BoxMcpRunInBoxResponse,
   type BoxOffersResponse,
@@ -139,6 +142,30 @@ function sanitizeProjectRef(value: unknown): BoxProjectRef | null {
   return { workspace: stringOr(value.workspace, ""), name: value.name, path: value.path };
 }
 
+const LENT_ACCOUNT_STATUSES: readonly BoxLentAccountStatus[] = ["installing", "active", "waiting-for-vm", "renewal-failing", "needs-login"];
+
+/**
+ * One lend from the wire, by its known fields only, so nothing else a payload carries reaches the
+ * store. A status from a newer daemon reads as `installing`: the row stays, and can be ended.
+ */
+function sanitizeLentAccount(value: unknown): BoxLentAccount | null {
+  if (!isRecord(value) || !nonEmpty(value.id) || !nonEmpty(value.accountId) || !isBoxLendAgent(value.agent)) return null;
+  return {
+    id: value.id,
+    accountId: value.accountId,
+    agent: value.agent,
+    label: nonEmpty(value.label) ? value.label : value.accountId,
+    threadId: stringOrNull(value.threadId),
+    purposeNote: stringOr(value.purposeNote, ""),
+    createdAt: stringOr(value.createdAt, ""),
+    expiresAt: stringOr(value.expiresAt, ""),
+    tokenExpiresAt: stringOrNull(value.tokenExpiresAt),
+    status: oneOf(LENT_ACCOUNT_STATUSES, value.status) ? value.status : "installing",
+    statusMessage: stringOrNull(value.statusMessage),
+    home: stringOr(value.home, "")
+  };
+}
+
 /**
  * One box from the wire, repaired field-wise — or `null` without an id, or
  * with a purpose, kind, provider or state this client does not know.
@@ -181,7 +208,9 @@ export function sanitizeBoxSummary(value: unknown): BoxSummary | null {
     setup: listOf(value.setup, sanitizeSetupStep, (step) => step.id),
     ...(typeof value.kvm === "boolean" ? { kvm: value.kvm } : {}),
     ...(typeof value.deviceHost === "boolean" ? { deviceHost: value.deviceHost } : {}),
-    ...(provider === "byo" ? { byo: sanitizeByoInfo(value.byo, stringOr(value.sizeLabel, value.id)) } : {})
+    ...(provider === "byo" ? { byo: sanitizeByoInfo(value.byo, stringOr(value.sizeLabel, value.id)) } : {}),
+    // Absent stays absent: an older daemon has no lends to tell of.
+    ...(Array.isArray(value.lentAccounts) ? { lentAccounts: listOf(value.lentAccounts, sanitizeLentAccount, (lend) => lend.id) } : {})
   };
 }
 

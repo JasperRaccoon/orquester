@@ -13,6 +13,8 @@ import {
   boxesStore,
   decideBoxConfigChange,
   destroyBox,
+  endAccountLend,
+  endAccountLends,
   loadBoxes,
   loadBoxesList,
   loadBoxOffers,
@@ -84,6 +86,16 @@ const flush = async () => {
 describe("box payload validation", () => {
   it("keeps a well-formed box as it is", () => {
     assert.deepEqual(sanitizeBoxSummary(box()), box());
+  });
+
+  it("reads a box's lends by their known fields, leaving out one it cannot reason about", () => {
+    const lend = { id: "l1", accountId: "a1", agent: "codex", label: "work", status: "active", expiresAt: "2026-11-03T21:40:00.000Z" };
+    const read = sanitizeBoxSummary({
+      ...box(),
+      lentAccounts: [{ ...lend, accessToken: "x" }, { ...lend, id: "l2", agent: "grok" }, { ...lend, id: "l3", status: "new-status" }]
+    });
+    assert.deepEqual(read?.lentAccounts?.map((entry) => [entry.id, entry.status]), [["l1", "active"], ["l3", "installing"]]);
+    assert.equal(JSON.stringify(read).includes("accessToken"), false);
   });
 
   it("drops a box it cannot reason about", () => {
@@ -310,6 +322,29 @@ describe("the boxes store", () => {
     await loadBoxesList(api);
     await assert.rejects(destroyBox(api, "b1"), /409/);
     assert.equal(boxesStore.getState().boxes?.[0].state, "ready");
+  });
+
+  it("takes an ended lend off its box, and keeps it when the daemon refuses", async () => {
+    const lend = (id: string) => ({
+      id, accountId: id, agent: "claude" as const, label: id, threadId: null, purposeNote: "", createdAt: "", expiresAt: "", tokenExpiresAt: null,
+      status: "active" as const, statusMessage: null, home: ""
+    });
+    const lentIds = () => boxesStore.getState().boxes?.[0].lentAccounts?.map((entry) => entry.id);
+    const held = box({ lentAccounts: [lend("l1"), lend("l2"), lend("l3")] });
+    const { api } = fakeApi({
+      listBoxes: async () => listOf(held),
+      endAccountLend: async (_box: string, id: string) => {
+        if (id === "l2") throw new Error("refused");
+      },
+      endAccountLends: async () => undefined
+    });
+    await loadBoxesList(api);
+    await endAccountLend(api, "b1", "l1");
+    assert.deepEqual(lentIds(), ["l2", "l3"]);
+    await assert.rejects(endAccountLend(api, "b1", "l2"), /refused/);
+    assert.deepEqual(lentIds(), ["l2", "l3"]);
+    await endAccountLends(api, "b1");
+    assert.deepEqual(lentIds(), []);
   });
 
   it("saving credentials upserts the provider and re-reads the kinds that were loaded", async () => {

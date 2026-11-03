@@ -1,5 +1,5 @@
 import React, { useCallback, useId, useRef, useState } from "react";
-import { AlertTriangle, Check, FileUp, Loader2, Star, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, FileUp, KeyRound, Loader2, Star, Trash2 } from "lucide-react";
 import type { AgentAccount, AgentAccountAgent } from "@orquester/api";
 import { Button, ConfirmDialog, Input } from "../ui";
 import { getRegistryIcon } from "../../icons";
@@ -12,6 +12,8 @@ import { ClaudeOAuthLink } from "./ClaudeOAuthLink";
 import { Badge, EmptyState, FormField, Notice, SettingRow, SettingsPage, SettingsSection } from "./primitives";
 import { LoginExpiryWarning } from "../auth/LoginExpiryWarning";
 import { useUsageNow } from "../../hooks/use-usage-display";
+import { useBoxes } from "../../lib/boxes/store";
+import { accountLendChips } from "../boxes/surfaces/lent-accounts.logic";
 
 const AGENTS: { id: AgentAccountAgent; name: string }[] = [
   { id: "claude", name: "Claude" },
@@ -38,6 +40,9 @@ export function AgentAccountsSettings() {
   const [removing, setRemoving] = useState<AgentAccount | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const labelId = useId();
+  const boxes = useBoxes();
+  const now = useUsageNow();
+  const lendChips = accountLendChips(boxes, now);
 
   /** Run a mutation, then reload the list; resolves false when it failed. */
   const run = useCallback(
@@ -133,6 +138,7 @@ export function AgentAccountsSettings() {
                   key={a.id}
                   account={a}
                   isDefault={isDefault(a)}
+                  lendChip={lendChips.get(a.id) ?? null}
                   busy={busy}
                   onMakeDefault={() => void run(() => api.setAgentAccountDefaults({ [agent]: a.id }))}
                   onRemove={() => setRemoving(a)}
@@ -255,10 +261,11 @@ export function AgentAccountsSettings() {
 const AccountRow: React.FC<{
   account: AgentAccount;
   isDefault: boolean;
+  lendChip: string | null;
   busy: boolean;
   onMakeDefault: () => void;
   onRemove: () => void;
-}> = ({ account: a, isDefault, busy, onMakeDefault, onRemove }) => {
+}> = ({ account: a, isDefault, lendChip, busy, onMakeDefault, onRemove }) => {
   const now = useUsageNow();
   const added = formatDate(a.importedAt);
   const details = [a.email, a.plan, added && `Added ${added}`].filter(Boolean).join(" · ");
@@ -276,6 +283,11 @@ const AccountRow: React.FC<{
           {a.needsReauth && (
             <Badge tone="warn" icon={<AlertTriangle size={10} />} title="The stored login stopped refreshing">
               Needs re-auth
+            </Badge>
+          )}
+          {lendChip && (
+            <Badge tone="info" icon={<KeyRound size={10} />}>
+              {lendChip}
             </Badge>
           )}
         </span>
