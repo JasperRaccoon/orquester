@@ -397,6 +397,12 @@ export interface AgentTokenBroker {
     request: { boxId: string; agent: BoxAgentId; accountId: string; minValidSeconds?: number; rejectedAccessToken?: string },
     signal: AbortSignal
   ): Promise<AgentTokenGrant>;
+  /**
+   * For the host-side lend keeper only (lending spec §7): never reachable from a box. An account
+   * lent to this box needs no session in it, and no token can be named as refused, so nothing on
+   * the box can force a renewal.
+   */
+  getLentToken(request: { boxId: string; agent: BoxAgentId; accountId: string; minValidSeconds?: number }, signal: AbortSignal): Promise<AgentTokenGrant>;
 }
 
 /** What one agent CLI launch in a box needs synced first. All paths are host paths. */

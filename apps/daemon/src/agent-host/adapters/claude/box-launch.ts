@@ -41,7 +41,7 @@ import { requireBoxes, type BoxLaunch } from "../../boxes/index.ts";
 import { claudeMcpSpec, type McpBridgePlan, type McpServerSpec } from "../../boxes/mcp-plan.ts";
 import { BoxLaunchError } from "../../boxes/errors.ts";
 import { joinBoxPath } from "../../boxes/launch-info.ts";
-import type { AgentTokenGrant } from "../../../boxes/contracts.ts";
+import { claudeBoxCredentials } from "../../../boxes/broker/credentials.ts";
 import { claudeConfigDir, claudeJsonPath } from "./config-dir.ts";
 import { claudeVersionGateMessage, meetsMinimumClaudeVersion, parseClaudeVersion } from "./models.ts";
 import type { ClaudeProfileLaunch, ClaudeProfileLaunchFiles } from "./profile-launch.ts";
@@ -100,9 +100,6 @@ async function accountMcpServers(claudeJson: string, cwd: string): Promise<{ spe
   return { specs: [...byName.values()], defs };
 }
 
-/** Without an expiry from the broker, the file says one hour; the CLI does not refresh either way. */
-const UNKNOWN_EXPIRY_MS = 60 * 60_000;
-
 /**
  * A CLI frame saying the API refused the box's login (`BoxLaunch.renewRejectedLogin`): an
  * `api_retry` after a 401 — one per attempt; CLI 2.1.307 re-reads its login file after a 401 and
@@ -115,26 +112,6 @@ export function isBoxLoginRefusal(message: unknown): boolean {
     return frame.error_status === 401 || frame.error === "authentication_failed";
   }
   return frame.type === "assistant" && frame.error === "authentication_failed";
-}
-
-/**
- * The box's `.credentials.json` for a grant (spikes doc (a)): the access token, its expiry and
- * the non-secret `scopes` (space-separated in `extra`), `subscriptionType` and `rateLimitTier`
- * that give the CLI its subscription defaults. NEVER a `refreshToken`: without one the CLI cannot
- * refresh, so it can never race the host's refresher.
- */
-export function claudeBoxCredentials(grant: AgentTokenGrant, now: number): { claudeAiOauth: Record<string, unknown> } {
-  const extra = grant.extra ?? {};
-  const scopes = (extra.scopes ?? "").split(/\s+/).filter((scope) => scope.length > 0);
-  return {
-    claudeAiOauth: {
-      accessToken: grant.accessToken,
-      expiresAt: grant.expiresAt ?? now + UNKNOWN_EXPIRY_MS,
-      scopes,
-      ...(extra.subscriptionType !== undefined ? { subscriptionType: extra.subscriptionType } : {}),
-      ...(extra.rateLimitTier !== undefined ? { rateLimitTier: extra.rateLimitTier } : {})
-    }
-  };
 }
 
 /**

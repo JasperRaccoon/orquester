@@ -124,6 +124,8 @@ export interface BrokerWorld {
   hostLocal: Set<string>;
   boxes: Map<string, StoredBox>;
   accounts: Map<string, { id: string; agent: BoxAgentId }>;
+  /** `boxId accountId` of each account lent to a box. */
+  lent: Set<string>;
   refreshCalls: Array<{ agent: BoxAgentId; id: string; allowHeld: boolean }>;
   /** What `refreshNow` does; defaults to "rewrite the file with a fresh token and answer refreshed". */
   refreshImpl: (agent: BoxAgentId, id: string) => Promise<AccountRefreshOutcome>;
@@ -143,6 +145,7 @@ export function brokerWorld(): BrokerWorld {
     hostLocal: new Set(),
     boxes,
     accounts,
+    lent: new Set(),
     refreshCalls: [],
     clock,
     sessionsChanged: () => {
@@ -191,6 +194,7 @@ export function brokerWorld(): BrokerWorld {
       return () => sessionListeners.delete(listener);
     },
     files,
+    isAccountLent: (boxId, accountId) => world.lent.has(`${boxId} ${accountId}`),
     now: () => clock.now
   };
   return world;

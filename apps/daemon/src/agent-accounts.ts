@@ -868,7 +868,8 @@ export class AgentAccountsService {
         if (typeof refreshToken !== "string" || !refreshToken) return "unavailable";
         const out = await refreshClaudeToken(refreshToken);
         if (out.ok) {
-          await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), { mode: 0o600 });
+          // Replaced by rename: a crash mid-write must not destroy the login, and a CLI re-reading it never sees a torn file.
+          await writeFileAtomic(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), 0o600);
           if (record.needsReauth) await this.markNeedsReauth(id, false);
           return "refreshed";
         }

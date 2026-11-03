@@ -32,11 +32,17 @@
  *    rewrite, the holder set for the session ending (then the daemon refreshes) — until the
  *    request's signal ends the wait.
  *
+ * {@link AgentTokenBroker.getLentToken} is the same loop with its own step 1 (lending spec §7): the
+ * account is lent to the box (`isAccountLent`) rather than used by a launch in it. Only the
+ * host-side lend keeper calls it, and it takes no rejected token, so nothing on a box can get a lent
+ * account's token or force its renewal: `token.get` stays on `getToken`'s authorization.
+ *
  * Evidence for step 4 and the per-CLI facts: docs/superpowers/specs/2026-10-19-ephemeral-ai-vms-spikes.md.
  * Nothing here logs a token; errors name codes and accounts only.
  */
 
-import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import { isBoxLendAgent, SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import type { StoredBox } from "@orquester/config";
 
 import {
   CLAUDE_REFRESH_LOCK_STALE_MS,
@@ -72,7 +78,7 @@ export const MAX_REJECTED_TOKEN_LENGTH = 32 * 1024;
 export { HELD_REFRESH_FLOOR_MS, HOST_CLI_ADOPTS_DAEMON_REFRESH } from "../../agent-account-refresh.ts";
 
 const BOX_AGENTS: readonly BoxAgentId[] = ["claude", "codex", "grok"];
-const GONE_STATES = new Set(["destroying", "destroy-failed", "destroyed"]);
+export const GONE_STATES: ReadonlySet<string> = new Set(["destroying", "destroy-failed", "destroyed"]);
 
 export type AgentTokenErrorCode =
   | "TOKEN_INVALID_REQUEST"
@@ -162,7 +168,28 @@ export interface AgentTokenBrokerDeps {
   /** Fires when a session is created, updated, exits or closes (the holder set may have changed). */
   onSessionsChanged(listener: () => void): () => void;
   files: CredentialFiles;
+  /** Whether an active lend gives this box the account (`boxes/lends`). */
+  isAccountLent(boxId: string, accountId: string): boolean;
   now?: () => number;
+}
+
+/** Whether one of the box's own launches uses the account: a session in its project, or its owning chat. */
+export function boxUsesAccount(
+  box: Pick<StoredBox, "id" | "purpose" | "threadId">,
+  accountId: string,
+  sessions: Iterable<TokenBrokerSession>,
+  registry: Pick<BoxRegistry, "locate">
+): boolean {
+  for (const session of sessions) {
+    if (session.accountId !== accountId) continue;
+    if (box.purpose === "project") {
+      const location = registry.locate(session.projectPath);
+      if (location.kind === "box" && location.boxId === box.id) return true;
+    } else if (box.purpose === "temporary" && typeof box.threadId === "string" && session.id === box.threadId) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -237,21 +264,8 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
     return grant.expiresAt === null || grant.expiresAt - now() > COOLDOWN_MIN_LIFE_MS;
   }
 
-  /** Whether one of the box's own launches uses the account (step 1). */
-  function boxUsesAccount(box: NonNullable<ReturnType<BoxRegistry["get"]>>, accountId: string): boolean {
-    for (const session of deps.sessions()) {
-      if (session.accountId !== accountId) continue;
-      if (box.purpose === "project") {
-        const location = deps.registry.locate(session.projectPath);
-        if (location.kind === "box" && location.boxId === box.id) return true;
-      } else if (box.purpose === "temporary" && typeof box.threadId === "string" && session.id === box.threadId) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function authorize(request: ParsedTokenRequest): void {
+  /** What every request must pass: a managed account of that agent, for an active box. Answers the box. */
+  function authorizeAccount(request: ParsedTokenRequest): StoredBox {
     if (request.accountId === SYSTEM_ACCOUNT_ID) {
       throw new AgentTokenError(403, "TOKEN_FORBIDDEN", "Box chats use managed accounts only; the System account's logins stay on this host.");
     }
@@ -264,9 +278,7 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
     if (account.agent !== request.agent) {
       throw new AgentTokenError(403, "TOKEN_FORBIDDEN", `That account is not a ${request.agent} account.`);
     }
-    if (!boxUsesAccount(box, request.accountId)) {
-      throw new AgentTokenError(403, "TOKEN_FORBIDDEN", "No session in this box was launched with that account.");
-    }
+    return box;
   }
 
   async function readGrant(agent: BoxAgentId, path: string): Promise<AgentTokenGrant | null> {
@@ -290,83 +302,101 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
     return true;
   }
 
+  /** Steps 2 to 4, for a request already authorized. */
+  async function issue(request: ParsedTokenRequest, signal: AbortSignal): Promise<AgentTokenGrant> {
+    const { agent, accountId } = request;
+    const minValidMs = request.minValidSeconds * 1000;
+    const home = deps.accounts.homePath(agent, accountId);
+    try {
+      await deps.files.assertOwnedHome(agent, accountId, home);
+    } catch (error) {
+      if (error instanceof AgentAccountError) {
+        throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "That account's login files are missing or not where Orquester keeps them.");
+      }
+      throw error;
+    }
+    const path = credentialPath(home, agent);
+    /** The fallback when no renewal can happen: a token the provider has not refused, with some life left. */
+    const stillUsable = (grant: AgentTokenGrant | null): grant is AgentTokenGrant =>
+      grant !== null &&
+      grant.accessToken !== request.rejectedAccessToken &&
+      (grant.expiresAt === null || grant.expiresAt - now() > COOLDOWN_MIN_LIFE_MS);
+
+    // Subscribed before the first read, so a rewrite or a session ending between a read and the
+    // wait still wakes it.
+    const change = new ChangeLatch();
+    const stopWatch = deps.files.watch(path, change.fire);
+    const stopSessions = deps.onSessionsChanged(change.fire);
+    try {
+      for (;;) {
+        if (signal.aborted) throw waitTimeout();
+        change.arm();
+        const grant = await readGrant(agent, path);
+        const held = deps.hostLocalAccountIds().has(accountId);
+        // The token the CLI was refused with is never handed out again: it is renewed below,
+        // or awaited from a holder's CLI, like one that ran out.
+        if (grant !== null && grant.accessToken !== request.rejectedAccessToken) {
+          // An unknown expiry cannot be judged: a holder's CLI owns it; otherwise refresh once.
+          if (grant.expiresAt === null ? held : grant.expiresAt - now() >= minValidMs) return grant;
+        }
+        // Refreshed moments ago: that token is the answer, not another refresh.
+        if (grant !== null && inCooldown(accountId, grant)) return grant;
+        if (!held || (await mayRefreshHeld(agent, home, grant, stillUsable(grant)))) {
+          const outcome = await refreshOnce(agent, accountId, held);
+          if (outcome === "refreshed") {
+            const fresh = await readGrant(agent, path);
+            if (fresh !== null && (fresh.expiresAt === null || fresh.expiresAt > now())) {
+              lastRefresh.set(accountId, { at: now(), accessToken: fresh.accessToken });
+              return fresh;
+            }
+            throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "The account was refreshed but its new login could not be read.");
+          }
+          if (outcome === "invalid-grant") {
+            throw new AgentTokenError(409, "TOKEN_NEEDS_REAUTH", "This account's login has expired. Sign in to it again in Settings → Agent accounts.");
+          }
+          // No renewal now (no refresh token, or the sign-in service is unreachable): a token
+          // that still works beats a refusal — the box runs until it really runs out, as a host
+          // CLI with the same file would. A rejected one never comes back this way.
+          if ((outcome === "unavailable" || outcome === "failed") && stillUsable(grant)) return grant;
+          if (outcome === "unavailable") {
+            throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "This account has no login Orquester can renew. Sign in to it again in Settings → Agent accounts.");
+          }
+          if (outcome === "failed") {
+            throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "Could not reach the sign-in service to renew this account's login. Try again in a moment.");
+          }
+          // "held": a host-local session took the account meanwhile; its CLI refreshes — wait for it.
+        }
+        // Below the floor the holder's CLI may be renewing: a token that still works beats a
+        // wait the box gives up on. The box asks again when it is refused.
+        if (stillUsable(grant)) return grant;
+        await change.wait(signal).catch(() => {
+          throw waitTimeout();
+        });
+      }
+    } finally {
+      stopWatch();
+      stopSessions();
+    }
+  }
+
   return {
     async getToken(raw, signal) {
       const request = parseTokenRequest(raw);
-      authorize(request);
-      const { agent, accountId } = request;
-      const minValidMs = request.minValidSeconds * 1000;
-      const home = deps.accounts.homePath(agent, accountId);
-      try {
-        await deps.files.assertOwnedHome(agent, accountId, home);
-      } catch (error) {
-        if (error instanceof AgentAccountError) {
-          throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "That account's login files are missing or not where Orquester keeps them.");
-        }
-        throw error;
+      const box = authorizeAccount(request);
+      if (!boxUsesAccount(box, request.accountId, deps.sessions(), deps.registry)) {
+        throw new AgentTokenError(403, "TOKEN_FORBIDDEN", "No session in this box was launched with that account.");
       }
-      const path = credentialPath(home, agent);
-      /** The fallback when no renewal can happen: a token the provider has not refused, with some life left. */
-      const stillUsable = (grant: AgentTokenGrant | null): grant is AgentTokenGrant =>
-        grant !== null &&
-        grant.accessToken !== request.rejectedAccessToken &&
-        (grant.expiresAt === null || grant.expiresAt - now() > COOLDOWN_MIN_LIFE_MS);
+      return issue(request, signal);
+    },
 
-      // Subscribed before the first read, so a rewrite or a session ending between a read and the
-      // wait still wakes it.
-      const change = new ChangeLatch();
-      const stopWatch = deps.files.watch(path, change.fire);
-      const stopSessions = deps.onSessionsChanged(change.fire);
-      try {
-        for (;;) {
-          if (signal.aborted) throw waitTimeout();
-          change.arm();
-          const grant = await readGrant(agent, path);
-          const held = deps.hostLocalAccountIds().has(accountId);
-          // The token the CLI was refused with is never handed out again: it is renewed below,
-          // or awaited from a holder's CLI, like one that ran out.
-          if (grant !== null && grant.accessToken !== request.rejectedAccessToken) {
-            // An unknown expiry cannot be judged: a holder's CLI owns it; otherwise refresh once.
-            if (grant.expiresAt === null ? held : grant.expiresAt - now() >= minValidMs) return grant;
-          }
-          // Refreshed moments ago: that token is the answer, not another refresh.
-          if (grant !== null && inCooldown(accountId, grant)) return grant;
-          if (!held || (await mayRefreshHeld(agent, home, grant, stillUsable(grant)))) {
-            const outcome = await refreshOnce(agent, accountId, held);
-            if (outcome === "refreshed") {
-              const fresh = await readGrant(agent, path);
-              if (fresh !== null && (fresh.expiresAt === null || fresh.expiresAt > now())) {
-                lastRefresh.set(accountId, { at: now(), accessToken: fresh.accessToken });
-                return fresh;
-              }
-              throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "The account was refreshed but its new login could not be read.");
-            }
-            if (outcome === "invalid-grant") {
-              throw new AgentTokenError(409, "TOKEN_NEEDS_REAUTH", "This account's login has expired. Sign in to it again in Settings → Agent accounts.");
-            }
-            // No renewal now (no refresh token, or the sign-in service is unreachable): a token
-            // that still works beats a refusal — the box runs until it really runs out, as a host
-            // CLI with the same file would. A rejected one never comes back this way.
-            if ((outcome === "unavailable" || outcome === "failed") && stillUsable(grant)) return grant;
-            if (outcome === "unavailable") {
-              throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "This account has no login Orquester can renew. Sign in to it again in Settings → Agent accounts.");
-            }
-            if (outcome === "failed") {
-              throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "Could not reach the sign-in service to renew this account's login. Try again in a moment.");
-            }
-            // "held": a host-local session took the account meanwhile; its CLI refreshes — wait for it.
-          }
-          // Below the floor the holder's CLI may be renewing: a token that still works beats a
-          // wait the box gives up on. The box asks again when it is refused.
-          if (stillUsable(grant)) return grant;
-          await change.wait(signal).catch(() => {
-            throw waitTimeout();
-          });
-        }
-      } finally {
-        stopWatch();
-        stopSessions();
+    async getLentToken({ boxId, agent, accountId, minValidSeconds }, signal) {
+      // Field by field: a refused token named by a caller never reaches the loop.
+      const request = parseTokenRequest({ boxId, agent, accountId, minValidSeconds });
+      authorizeAccount(request);
+      if (!isBoxLendAgent(request.agent) || !deps.isAccountLent(boxId, accountId)) {
+        throw new AgentTokenError(403, "TOKEN_FORBIDDEN", "That account is not lent to this box.");
       }
+      return issue(request, signal);
     }
   };
 }
