@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 interface Logger {
