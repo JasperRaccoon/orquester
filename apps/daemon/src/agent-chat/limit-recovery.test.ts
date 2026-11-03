@@ -457,12 +457,15 @@ test("a chat with a VM moves only to an account that VM already has, and otherwi
   assert.ok(!h.api.posts.some((post) => JSON.stringify(post.body).includes("acc2")));
   const state = h.chat.usageLimitOf("s1");
   assert.equal(state?.message, "Usage limit reached");
-  assert.equal(state?.autoResume, "armed", "it resumes at its own reset");
-  await assert.rejects(h.recovery.switchAndContinue("s1", { commandId: "c1", accountId: "acc2" }), /VM/);
+  assert.equal(state?.autoResume, "armed");
+  assert.equal(state?.resumeAt, iso(T0 + HOUR + USAGE_LIMIT_RESUME_MARGIN_MS), "it resumes at its own reset, not on the switch's retry");
+  await assert.rejects(h.recovery.switchAndContinue("s1", { commandId: "c1" }), /VM/);
 
-  // A session on that VM already uses the other account: nothing new reaches the VM.
-  uses.add("acc2");
-  assert.equal((await h.recovery.switchAndContinue("s1", { commandId: "c2" })).limitFailover?.toAccountId, "acc2");
+  // A session on that VM uses a third account: only that one will do, named or picked.
+  h.accounts.push(account("acc3"));
+  uses.add("acc3");
+  await assert.rejects(h.recovery.switchAndContinue("s1", { commandId: "c2", accountId: "acc2" }), /VM/);
+  assert.equal((await h.recovery.switchAndContinue("s1", { commandId: "c3" })).limitFailover?.toAccountId, "acc3");
 });
 
 test("manual switch and resume now: idempotent by the client's command id, refused when nothing is limited", async () => {
