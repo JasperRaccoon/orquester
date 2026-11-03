@@ -225,7 +225,7 @@ export function resolveDockCard(input: {
 // Orquester approval cards (unified MCP §7.1, §9.3)
 // ---------------------------------------------------------------------------
 
-type CardFacts = Pick<ParsedToolApprovalSummary, "kind" | "family" | "scope">;
+type CardFacts = Pick<ParsedToolApprovalSummary, "kind" | "family" | "scope"> & { tool?: string };
 
 /**
  * The "what will change" sentence every card carries under its title: what approving does, said
@@ -261,9 +261,12 @@ export function toolApprovalChangeSentence(card: CardFacts): string {
     // devices: a device host for the device an agent opens (devices spec §6.3).
     case "devices":
       return "Approving rents this device host from the provider shown, billed to your account at about the price shown. Every chat's devices share it; it is destroyed once idle, at its time limit, or from Settings → Devices.";
-    // accounts: lending logins to a VM spends quota, not money (lending spec §9).
+    // accounts: a login on a VM spends quota, not money (lending spec §9).
     case "accounts":
-      return "Approving puts short-lived logins of these accounts on the VM shown. Anything running there can use their subscription quota until each token expires, even after the lend ends. Their refresh tokens stay on this server. You can end a lend at any time, from this chat or Settings.";
+      if (!isLendToolCard(card)) {
+        return "Approving puts a login without a refresh token for this account on the VM shown, so the chat can use it. Anything running there can use its subscription quota until the token expires, even after the chat ends. Its refresh token stays on this server.";
+      }
+      return "Approving puts logins without refresh tokens for these accounts on the VM shown. Anything running there can use their subscription quota until each token expires, even after the lend ends. Their refresh tokens stay on this server. You can end a lend at any time, from this chat or Settings.";
     default:
       return "This approval comes from a newer Orquester than this client knows: check it on an updated client before approving.";
   }
@@ -278,9 +281,17 @@ export function isBoxApprovalCard(card: Pick<ParsedToolApprovalSummary, "kind"> 
   return (card.kind as string) === "box" || card.tool === "create_box";
 }
 
-/** accounts: a card lending account logins to a VM (`box_lend_accounts`, lending spec §9). */
-export function isLendApprovalCard(card: { family?: ParsedToolApprovalSummary["family"] }): boolean {
+/**
+ * accounts: a card putting an account's login on a VM: a lend (`box_lend_accounts`, lending spec
+ * §9), or a chat a tool opens or moves on a VM with an account not yet used there.
+ */
+export function isAccountApprovalCard(card: { family?: ParsedToolApprovalSummary["family"] }): boolean {
   return card.family === "accounts";
+}
+
+/** A lend proper, which has an end time and can be ended; a chat's login goes with the chat. */
+function isLendToolCard(card: { tool?: string }): boolean {
+  return card.tool === "box_lend_accounts";
 }
 
 /** The card's badge: what kind of decision it is. */
@@ -288,7 +299,7 @@ export function toolApprovalKindBadge(
   card: Pick<ParsedToolApprovalSummary, "kind"> & { tool?: string; family?: ParsedToolApprovalSummary["family"] }
 ): string {
   if (isBoxApprovalCard(card)) return "Rent a VM";
-  if (isLendApprovalCard(card)) return "Lend accounts";
+  if (isAccountApprovalCard(card)) return isLendToolCard(card) ? "Lend accounts" : "Use an account on a VM";
   switch (card.kind) {
     case "admin":
       return "Admin";
