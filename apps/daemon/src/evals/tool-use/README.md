@@ -25,7 +25,7 @@ A run uses one managed Claude account that you name with `--account`: a label, t
 
 ## On a VM
 
-A VM has no `agent-accounts.json` and its account folders hold no login, so a run there stops and says to ask with `box_lend_accounts`. A VM is told by `ORQ_BOX_ID`, which the box agent sets on every process.
+A VM has no `agent-accounts.json` and its account folders hold no login, so a run there stops and says to pass a lent appdir, or to ask with `box_lend_accounts`. A VM is told by `ORQ_BOX_ID`, which the box agent sets on every process.
 
 - Call `box_lend_accounts` with the account you want. The owner approves it on a card, and samples bill that subscription as usual.
 - Pass the `appdir` it returns as `--appdir`. The login renews by itself until `lent_until`.
