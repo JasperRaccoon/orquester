@@ -7,7 +7,6 @@ import React from "react";
 import { Loader2, X } from "lucide-react";
 import type { BoxSummary } from "@orquester/api";
 
-import { useApi } from "../../../context/orquester-context";
 import { getRegistryIcon } from "../../../icons";
 import { ApiError } from "../../../lib/api-client";
 import { endAccountLend, endAccountLends } from "../../../lib/boxes/store";
@@ -101,7 +100,7 @@ export const LentAccountsSection: React.FC<{
   now: number;
   className?: string;
 }> = ({ box, now, className }) => {
-  const api = useApi();
+  const api = useAppStore((s) => s.api);
   const model = lentAccountsModel(box, now);
   const [ending, setEnding] = React.useState<string | typeof ALL | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -109,6 +108,7 @@ export const LentAccountsSection: React.FC<{
   if (model.rows.length === 0) return null;
 
   const end = async (target: string | typeof ALL): Promise<void> => {
+    if (!api) return;
     setEnding(target);
     setError(null);
     try {
