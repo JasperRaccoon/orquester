@@ -48,7 +48,9 @@ export const AGENT_TOOL_GRANT_SCOPES: Readonly<Record<string, readonly AgentTool
   // boxes: renting a temporary box spends money — the owner approves every one (Ephemeral AI VMs spec §13.2).
   boxes: [],
   // devices: renting a device host spends money — a card per rental the owner did not pre-approve (devices spec §6.3).
-  devices: []
+  devices: [],
+  // accounts: lending logins to a box uses subscription quota and exposes tokens — the owner approves every one.
+  accounts: []
 };
 
 /** The grant scopes `family` allows at all (before the per-call rules of {@link findGrant}). */

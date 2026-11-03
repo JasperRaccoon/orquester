@@ -380,7 +380,8 @@ test("a session-tool call builds its caller from the thread's HEAD, never its sn
     });
   api.fsRoot = ROOT;
   api.workspacesDir = WS;
-  const caller = await buildThreadCaller(api, "thread-a", THREADS["thread-a"]!, "call-1");
+  const caller = await buildThreadCaller(api, "thread-a", { ...THREADS["thread-a"]!, projectBoxId: "box-1" }, "call-1");
+  assert.equal(caller.projectBoxId, "box-1");
   assert.equal(caller.runtimeMode, "auto-accept-edits");
   assert.equal(caller.planning, true);
   assert.deepEqual(caller.exchange, { id: "ex-1", hop: 2 });

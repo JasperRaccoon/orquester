@@ -889,3 +889,136 @@ test("a failed wait is worded by why: a message follows only for WAIT_CYCLE / HO
     if (!notify) assert.doesNotMatch(out.hint, /will be delivered/, failure);
   }
 });
+
+// ---------------------------------------------------------------------------
+// A chat that would give a box an account it does not use yet (lend spec §3 G3, §8)
+// ---------------------------------------------------------------------------
+
+/** OWN is a project box; a chat on it has token.get for what a session there uses, as `boxUsesAccount` says. */
+function boxRig() {
+  const r = rig();
+  const account = (id: string, agent: string, label: string) => ({ id, agent, label, email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) });
+  r.api.on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [account("acc-1", "claude", "work"), account("acc-2", "claude", "side"), account("cx-1", "codex", "codex one")], defaults: { claude: "acc-1", codex: "cx-1", grok: null } } });
+  const uses = (boxProject: string) => (accountId: string) => r.sessions.some((s) => s.projectPath === boxProject && s.accountId === accountId);
+  Object.assign(r.api, {
+    boxesOfChat: ({ projectPath, threadId }: { projectPath: string; threadId?: string }) => [
+      ...(projectPath === OWN ? [{ boxId: "box-1", label: "orquester", usesAccount: uses(OWN) }] : []),
+      ...(threadId === "near" ? [{ boxId: "tmp-1", label: "Hetzner · CX22", usesAccount: (accountId: string) => r.sessions.some((s) => s.id === "near" && s.accountId === accountId) }] : [])
+    ]
+  });
+  return { ...r, creates: createRoutes(r.api, r.sessions) };
+}
+
+const cardRows = (r: ReturnType<typeof boxRig>) => r.port.cards[0]!.sections.flatMap((section) => (section.kind === "fields" ? section.rows : []));
+
+test("create_session with an account new to the box: a spend card in Full access naming account and VM, no grant, and the approved id runs", async () => {
+  const r = boxRig();
+  const result = await r.call("create_session", { prompt: "go", accountId: "acc-2" });
+  assert.equal(result.isError, undefined, JSON.stringify(body(result)));
+  const card = r.port.cards[0]!;
+  assert.deepEqual([card.kind, card.family, card.grantOptions], ["spend", "accounts", []]);
+  assert.ok(cardRows(r).some((row) => row.value === "side") && cardRows(r).some((row) => row.value === "orquester"));
+  assert.ok(card.sections.some((section) => section.kind === "warning" && section.text.includes("can read this login")));
+  assert.equal(r.port.grantQueries.length, 0);
+  assert.equal(r.creates[0]!.chat.accountId, "acc-2");
+  assert.equal(r.creates[0]!.accountId, "acc-2");
+});
+
+test("create_session on a box: an account already in use opens no card, inherited or named; a host project is unaffected", async () => {
+  const r = boxRig();
+  assert.equal((await r.call("create_session", { prompt: "go" })).isError, undefined);
+  assert.equal((await r.call("create_session", { prompt: "go", accountId: "acc-1" })).isError, undefined);
+  assert.equal((await r.call("create_session", { prompt: "go", project: SAME, accountId: "acc-2" })).isError, undefined);
+  assert.equal(r.creates.length, 3);
+  assert.equal(r.port.cards.filter((card) => card.kind === "spend").length, 0);
+});
+
+test("create_session resolves the account before the card: the default a call names none for, and one a host chat targets a box with", async () => {
+  const fromBox = boxRig();
+  assert.equal((await fromBox.call("create_session", { prompt: "go", agent: "codex", model: "gpt-5" })).isError, undefined);
+  assert.equal(fromBox.port.cards[0]!.family, "accounts");
+  assert.ok(cardRows(fromBox).some((row) => row.value === "codex one"));
+  assert.ok(fromBox.port.cards[0]!.sections.some((section) => section.kind === "warning" && section.text.includes("Codex tokens last about 10 days")));
+  assert.equal(fromBox.creates[0]!.chat.accountId, "cx-1", "the pinned default, not whatever is default later");
+
+  const fromHost = boxRig();
+  const caller = { threadId: "near", projectPath: SAME, cwd: SAME };
+  assert.equal((await fromHost.call("create_session", { prompt: "go", project: OWN, accountId: "acc-2" }, caller)).isError, undefined);
+  assert.deepEqual([fromHost.port.cards[0]!.kind, fromHost.port.cards[0]!.family], ["spend", "accounts"]);
+});
+
+test("create_session with a new account: nothing launches when denied, while planning, for a workflow's chat in another project, or if run is reached without a card", async () => {
+  const denied = boxRig();
+  denied.port.answerWith({ outcome: "denied", approvalId: "" });
+  assert.equal(code(await denied.call("create_session", { prompt: "go", accountId: "acc-2" })), "APPROVAL_DENIED");
+  assert.equal(denied.creates.length, 0);
+
+  const planning = boxRig();
+  const refused = await planning.call("create_session", { prompt: "go", accountId: "acc-2" }, { planning: true });
+  assert.equal(code(refused), "PERMISSION_DENIED");
+  assert.match(body(refused).message, /quota/);
+  assert.equal(planning.port.cards.length, 0);
+
+  const owned = boxRig();
+  const caller = { threadId: "near", projectPath: SAME, cwd: SAME, workflowOwned: true };
+  assert.equal(code(await owned.call("create_session", { prompt: "go", project: OWN, accountId: "acc-2" }, caller)), "PERMISSION_DENIED");
+  assert.equal(owned.port.cards.length, 0);
+
+  const direct = boxRig();
+  const ctx = (approval?: { outcome: "approved"; approvalId: string; pins: Record<string, string> }) => ({
+    api: direct.api, signal: new AbortController().signal, now: Date.now,
+    caller: { kind: "thread", threadId: "me", title: "Implement auth", projectPath: OWN, workspace: "jaspersito", cwd: OWN, agentId: "claude", callId: "c", runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null },
+    turn: { interactionMode: "default", provenance: (_origin: string, text: string) => text },
+    ...(approval ? { approval } : {})
+  });
+  await assert.rejects(Promise.resolve(toolByName("create_session", "chat")!.run({ prompt: "go", accountId: "acc-2" } as never, ctx() as never)), (error: { code?: string }) => error.code === "PERMISSION_DENIED");
+  assert.equal(direct.creates.length, 0);
+});
+
+test("a legacy alias of create_session opens the same card", async () => {
+  const r = boxRig();
+  const result = await executeToolCall(
+    { approvals: r.port, lookup: (name: string) => chatToolByName(name), newId: () => "ex-new" },
+    { name: "thread_create", arguments: { prompt: "go", accountId: "acc-2" } },
+    { caller: { kind: "thread", threadId: "me", title: "t", projectPath: OWN, workspace: "jaspersito", cwd: OWN, agentId: "claude", callId: "c", runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null }, api: r.api, signal: new AbortController().signal }
+  );
+  assert.equal(result.isError, undefined, JSON.stringify(body(result)));
+  assert.equal(r.port.cards[0]!.family, "accounts");
+  assert.equal(r.creates[0]!.chat.accountId, "acc-2");
+});
+
+test("fork_session: another account or another agent's default new to the box needs the card and runs as pinned; the original's own opens none", async () => {
+  const r = boxRig();
+  const forks: Record<string, any>[] = [];
+  r.api.on("POST", agentChatRoutes.fork("me"), ({ body: b }) => {
+    forks.push(b as Record<string, any>);
+    return { status: 200, body: { session: tab("f1", OWN), strategy: "native", lineage: { parentThreadId: "me", relation: "fork", createdAt: stamp(1) } } };
+  });
+  assert.equal((await r.call("fork_session", {})).isError, undefined);
+  assert.equal(r.port.cards.filter((card) => card.kind === "spend").length, 0);
+  assert.equal((await r.call("fork_session", { accountId: "acc-2" })).isError, undefined);
+  assert.deepEqual([r.port.cards.at(-1)!.kind, r.port.cards.at(-1)!.family], ["spend", "accounts"]);
+  assert.equal(forks.at(-1)!.accountId, "acc-2");
+  assert.equal((await r.call("fork_session", { agent: "codex", model: "gpt-5" })).isError, undefined);
+  assert.equal(r.port.cards.filter((card) => card.family === "accounts").length, 2);
+  assert.equal(forks.at(-1)!.accountId, "cx-1");
+});
+
+test("update_session: switching a child to an account new to its box needs the card; one in use does not; a temporary box's owner counts", async () => {
+  const r = boxRig();
+  const switches: Record<string, any>[] = [];
+  for (const id of ["task", "near"]) r.api.on("POST", agentChatRoutes.account(id), ({ body: b }) => {
+    switches.push({ id, ...(b as Record<string, any>) });
+    return { status: 200, body: { seq: 3 } };
+  });
+  r.sessions.find((s) => s.id === "near")!.lineage = { parentThreadId: "me", relation: "opened", createdAt: stamp(1), agentCreated: true };
+  assert.equal((await r.call("update_session", { sessionId: "task", accountId: "acc-1" })).isError, undefined);
+  assert.equal(r.port.cards.filter((card) => card.family === "accounts").length, 0);
+  assert.equal((await r.call("update_session", { sessionId: "task", accountId: "acc-2" })).isError, undefined);
+  assert.equal(r.port.cards.filter((card) => card.family === "accounts").length, 1);
+  assert.equal((await r.call("update_session", { sessionId: "near", accountId: "acc-2" })).isError, undefined, "a host chat that owns a temporary box");
+  assert.equal(r.port.cards.filter((card) => card.family === "accounts").length, 2);
+  assert.deepEqual(switches.map((entry) => [entry.id, entry.accountId]), [["task", "acc-1"], ["task", "acc-2"], ["near", "acc-2"]]);
+  r.port.answerWith({ outcome: "denied", approvalId: "" });
+  assert.equal(code(await r.call("update_session", { sessionId: "task", accountId: "cx-1" })), "INVALID_ARGUMENT", "another family's account is refused before any card");
+});

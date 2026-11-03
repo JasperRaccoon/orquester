@@ -25,7 +25,7 @@ import {
   type AgentAccountRecord,
   type AgentAccountsIndex
 } from "@orquester/config";
-import { assertOwnedAccountHome, AgentAccountError, ACCOUNT_MARKER } from "./agent-account-paths.ts";
+import { assertOwnedAccountHome, AgentAccountError, ACCOUNT_ID_PATTERN, ACCOUNT_MARKER } from "./agent-account-paths.ts";
 import { writeFileAtomic } from "./agent-hooks.ts";
 import {
   detectAgentFromBlob,
@@ -59,9 +59,6 @@ const CODEX_AUTH_ENV_UNSET = ["OPENAI_API_KEY"];
 // Same rule for grok: XAI_API_KEY switches the CLI to API billing, beating the
 // OAuth login in GROK_HOME/auth.json.
 const GROK_AUTH_ENV_UNSET = ["XAI_API_KEY"];
-
-/** An account home's directory name: the UUID `importAccount` mints. */
-const ACCOUNT_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * The first file under `src` (relative path) whose namesake under `dst` has
@@ -293,7 +290,7 @@ export class AgentAccountsService {
       const names = await readdir(familyDir, { withFileTypes: true }).catch(() => []);
       for (const entry of names) {
         const id = entry.name;
-        if (!entry.isDirectory() || registered.has(id) || inUse.has(id) || !ACCOUNT_DIR_NAME.test(id)) {
+        if (!entry.isDirectory() || registered.has(id) || inUse.has(id) || !ACCOUNT_ID_PATTERN.test(id)) {
           continue;
         }
         const dir = join(familyDir, id);
@@ -868,7 +865,8 @@ export class AgentAccountsService {
         if (typeof refreshToken !== "string" || !refreshToken) return "unavailable";
         const out = await refreshClaudeToken(refreshToken);
         if (out.ok) {
-          await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), { mode: 0o600 });
+          // Replaced by rename: the old refresh token is already spent, so a crash mid-save must not lose the file.
+          await writeFileAtomic(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), 0o600, true, { durable: true });
           if (record.needsReauth) await this.markNeedsReauth(id, false);
           return "refreshed";
         }
@@ -883,7 +881,7 @@ export class AgentAccountsService {
         if (out.ok) {
           // Replaced by rename, as the Grok CLI writes it: a CLI reading it through
           // `GROK_AUTH_PATH` (an Agent Profile chat) or its home never sees a torn file.
-          await writeFileAtomic(credsPath, JSON.stringify(mergeGrokRefreshedAuth(creds, out, this.opts.now())), 0o600);
+          await writeFileAtomic(credsPath, JSON.stringify(mergeGrokRefreshedAuth(creds, out, this.opts.now())), 0o600, true, { durable: true });
           if (record.needsReauth) await this.markNeedsReauth(id, false);
           return "refreshed";
         }
@@ -897,7 +895,7 @@ export class AgentAccountsService {
       const out = await refreshCodexToken(refreshToken);
       if (out.ok) {
         // Replaced by rename: a running Codex reloads it before refreshing and must never read a torn file.
-        await writeFileAtomic(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), 0o600);
+        await writeFileAtomic(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), 0o600, true, { durable: true });
         if (record.needsReauth) await this.markNeedsReauth(id, false);
         return "refreshed";
       }

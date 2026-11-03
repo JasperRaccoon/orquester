@@ -12,7 +12,7 @@ import { storedBox } from "./testing.ts";
 
 function recordingBroker(answer: (request: unknown) => Promise<unknown>) {
   const seen: Array<{ request: unknown; signal: AbortSignal }> = [];
-  const broker: AgentTokenBroker = {
+  const broker: Pick<AgentTokenBroker, "getToken"> = {
     getToken: async (request, signal) => {
       seen.push({ request, signal });
       return (await answer(request)) as never;

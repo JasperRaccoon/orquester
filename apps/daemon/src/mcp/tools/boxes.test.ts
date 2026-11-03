@@ -15,6 +15,7 @@ import test from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  accountLendRoutes,
   boxPathMapFor,
   boxRoutes,
   hostToBoxPath,
@@ -22,7 +23,9 @@ import {
   type BoxKindsResponse,
   type BoxOffersResponse,
   type BoxProviderInfo,
-  type BoxSummary
+  type BoxLentAccount,
+  type BoxSummary,
+  type LendAccountsPreviewResponse
 } from "@orquester/api";
 import type { AgentChatToolApprovalEventPayload, CallerPrincipal } from "@orquester/api/agent-chat";
 
@@ -115,6 +118,7 @@ function fakeApi(): { api: FakeDaemonApi; ops: BoxCall[]; created: unknown[]; de
       return { status: 200, body: { box: boxSummary({ id: "tmp-1", state: "provisioning", os: null, arch: null }) } };
     })
     .on("GET", temporaryBoxRoutes.list, { status: 200, body: { boxes: [boxSummary({ id: "tmp-1", estimatedCostUsd: 0.01234 })] } })
+    .on("GET", accountLendRoutes.all, { status: 200, body: { lends: [] } })
     .on("DELETE", `${temporaryBoxRoutes.list}/*`, ({ path, query }) => {
       deleted.push({ path, ...(query ? { query } : {}) });
       return { status: 200, body: { box: boxSummary({ id: "tmp-1", state: "destroyed", destroyedReason: "agent" }) } };
@@ -614,4 +618,197 @@ test("create_box with provider byo when none of the owner's machines is free: a 
   const refused = await call(api, "create_box", { ...createArgs, provider: "byo" }, { port });
   assert.equal(port.cards.length, 0);
   assert.ok(!refused.ok && refused.code === "BOX_NOT_READY");
+});
+
+// ---------------------------------------------------------------------------
+// Lending accounts (spec 2026-11-03-lend-accounts-to-boxes-design.md §8, §9)
+// ---------------------------------------------------------------------------
+
+const lendArgs = { claude: ["ada"], codex: ["bob"], purpose: "run the paid eval" };
+
+const PREVIEW: LendAccountsPreviewResponse = {
+  accounts: [
+    { accountId: "acct-claude", agent: "claude", label: "ada@acme.dev", tokenExpiresAt: "2026-11-03T19:40:00.000Z", alreadyLent: false },
+    { accountId: "acct-codex", agent: "codex", label: "bob@acme.dev", tokenExpiresAt: "2026-11-13T08:00:00.000Z", alreadyLent: false }
+  ],
+  minutes: 90,
+  expiresAt: "2026-11-03T21:40:00.000Z",
+  boxLabel: "Hetzner · 8 vCPU"
+};
+
+function lend(over: Partial<BoxLentAccount & { boxId: string }> = {}): BoxLentAccount & { boxId: string } {
+  return {
+    boxId: "tmp-1", id: "lend-1", accountId: "acct-claude", agent: "claude", label: "ada@acme.dev", threadId: "me", purposeNote: "run the paid eval",
+    createdAt: "2026-11-03T17:40:00.000Z", expiresAt: "2026-11-03T21:40:00.000Z", tokenExpiresAt: "2026-11-03T19:40:00.000Z", status: "active", statusMessage: null,
+    home: "/var/lib/orquester/daemon/agent-accounts/claude/acct-claude/home", ...over
+  };
+}
+
+/** {@link fakeApi} plus the lend routes on `boxId`, recording what is previewed and posted. */
+function lendApi(boxId = "tmp-1", preview: LendAccountsPreviewResponse = PREVIEW) {
+  const base = fakeApi();
+  const previews: unknown[] = [];
+  const posted: unknown[] = [];
+  base.api
+    .on("POST", accountLendRoutes.preview(boxId), ({ body }) => {
+      previews.push(body);
+      return { status: 200, body: preview };
+    })
+    .on("POST", accountLendRoutes.box(boxId), ({ body }) => {
+      posted.push(body);
+      return { status: 200, body: { boxId, appdir: "/var/lib/orquester", lent: [lend()] } };
+    });
+  return { ...base, previews, posted };
+}
+
+const lendTool = () => boxesFamily.find((tool) => tool.name === "box_lend_accounts")!;
+
+test("box_lend_accounts run refuses without whole approved pins, and posts exactly the pins whatever the arguments say", async () => {
+  const { api, posted } = lendApi("pinned-box");
+  const ctx = (pins?: Record<string, string>) => ({
+    api, caller: chat(), signal: new AbortController().signal, now: Date.now,
+    ...(pins ? { approval: { outcome: "approved" as const, approvalId: "a_1", pins } } : {})
+  });
+  const parsed = { ...lendArgs, claude: ["someone-else"], minutes: 1440, box_id: "another-box" };
+  const accounts = JSON.stringify([{ agent: "claude", accountId: "acct-claude" }]);
+  const refused: (Record<string, string> | undefined)[] = [undefined, {}, { boxId: "pinned-box", accounts, minutes: "soon" }, { boxId: "pinned-box", accounts: "[]", minutes: "90" }, { boxId: "pinned-box", accounts: '[{"agent":"grok","accountId":"x"}]', minutes: "90" }];
+  for (const pins of refused) {
+    await assert.rejects(Promise.resolve(lendTool().run(parsed as never, ctx(pins) as never)), (error: { code?: string }) => error.code === "PERMISSION_DENIED", JSON.stringify(pins));
+  }
+  assert.deepEqual(posted, []);
+  await lendTool().run(parsed as never, ctx({ boxId: "pinned-box", accounts, minutes: "90" }) as never);
+  assert.deepEqual(posted, [{ accounts: [{ agent: "claude", accountId: "acct-claude" }], minutes: 90, purposeNote: "run the paid eval" }]);
+});
+
+test("box_lend_accounts in full access opens a spend card naming every account and warning that tokens are readable; approving lends what the preview resolved", async () => {
+  const { api, previews, posted } = lendApi();
+  const port = new FakeApprovalPort();
+  const outcome = await call(api, "box_lend_accounts", { ...lendArgs, minutes: 1440 }, { port });
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  const card = port.cards[0]!;
+  assert.deepEqual([card.kind, card.family, card.grantOptions], ["spend", "accounts", []]);
+  assert.equal(port.grantQueries.length, 0, "no grant is ever looked for");
+  const rows = card.sections.flatMap((section) => (section.kind === "fields" ? section.rows : []));
+  for (const account of PREVIEW.accounts) assert.ok(rows.some((row) => row.label === account.label), account.label);
+  assert.ok(card.sections.some((section) => section.kind === "text" && section.text === lendArgs.purpose));
+  const warnings = card.sections.flatMap((section) => (section.kind === "warning" ? [section.text] : []));
+  assert.ok(warnings.some((text) => text.includes("can read these logins")));
+  assert.ok(warnings.some((text) => text.includes("Codex tokens last about 10 days")));
+  // The real end is counted from approval, so the card promises no clock time.
+  assert.ok(!rows.some((row) => row.label === "Ends at"));
+  assert.match(rows.find((row) => row.label === "Time limit")!.value, /^1 h 30 min from approval, at most until/);
+  assert.deepEqual(previews, [{ claude: ["ada"], codex: ["bob"], minutes: 1440 }]);
+  // The clamped minutes and the resolved ids, not the arguments.
+  assert.deepEqual(posted, [{ accounts: [{ agent: "claude", accountId: "acct-claude" }, { agent: "codex", accountId: "acct-codex" }], minutes: 90, purposeNote: lendArgs.purpose }]);
+  assert.equal(outcome.value.appdir, "/var/lib/orquester");
+  assert.deepEqual((outcome.value.accounts as { id: string }[]).map((account) => account.id), ["acct-claude"]);
+
+  const claudeOnly = new FakeApprovalPort();
+  await call(lendApi("tmp-1", { ...PREVIEW, accounts: [PREVIEW.accounts[0]!] }).api, "box_lend_accounts", { claude: ["ada"], purpose: "p" }, { port: claudeOnly, caller: chat({ workflowOwned: true }) });
+  const claudeWarnings = claudeOnly.cards[0]!.sections.flatMap((section) => (section.kind === "warning" ? [section.text] : []));
+  assert.ok(!claudeWarnings.some((text) => text.includes("Codex")));
+  assert.ok(claudeWarnings.some((text) => text.includes("unattended")));
+});
+
+test("box_lend_accounts: planning says it lends quota, naming no account is refused, and a denied card lends nothing", async () => {
+  const { api, posted, previews } = lendApi();
+  const planning = await call(api, "box_lend_accounts", lendArgs, { caller: chat({ planning: true }) });
+  assert.ok(!planning.ok && planning.code === "PERMISSION_DENIED" && /quota/.test(planning.message), JSON.stringify(planning));
+  const none = await call(api, "box_lend_accounts", { claude: [], purpose: "p" });
+  assert.ok(!none.ok && none.code === "INVALID_ARGUMENT");
+  const tooMany = await call(api, "box_lend_accounts", { claude: ["a", "b", "c", "d"], codex: ["e", "f", "g"], purpose: "p" });
+  assert.ok(!tooMany.ok && tooMany.code === "INVALID_ARGUMENT");
+  assert.deepEqual(previews, []);
+  const denied = await call(api, "box_lend_accounts", lendArgs, { port: new FakeApprovalPort({ outcome: "denied", approvalId: "" }) });
+  assert.ok(!denied.ok);
+  assert.deepEqual(posted, []);
+});
+
+test("box_lend_accounts' default box: the VM the chat runs in, else its only live temporary box, else LEND_NO_BOX with the fix", async () => {
+  const inProject = lendApi("project-box");
+  assert.ok((await call(inProject.api, "box_lend_accounts", lendArgs, { caller: chat({ projectBoxId: "project-box" }) })).ok);
+  assert.equal(inProject.posted.length, 1);
+
+  const temporary = lendApi("tmp-2");
+  temporary.api.on("GET", temporaryBoxRoutes.list, { status: 200, body: { boxes: [boxSummary({ id: "old", state: "destroyed" }), boxSummary({ id: "tmp-2" })] } });
+  assert.ok((await call(temporary.api, "box_lend_accounts", lendArgs)).ok);
+  assert.equal(temporary.posted.length, 1);
+
+  const none = fakeApi();
+  none.api.on("GET", temporaryBoxRoutes.list, { status: 200, body: { boxes: [boxSummary({ id: "old", state: "destroyed" })] } });
+  const noBox = await call(none.api, "box_lend_accounts", lendArgs);
+  assert.ok(!noBox.ok && noBox.code === "LEND_NO_BOX" && noBox.message.includes("create_box"));
+
+  const several = fakeApi();
+  several.api.on("GET", temporaryBoxRoutes.list, { status: 200, body: { boxes: [boxSummary({ id: "tmp-a" }), boxSummary({ id: "tmp-b" })] } });
+  const ambiguous = await call(several.api, "box_lend_accounts", lendArgs);
+  assert.ok(!ambiguous.ok && ambiguous.code === "LEND_NO_BOX" && ambiguous.message.includes("box_id"));
+});
+
+test("box_lend_accounts: a refusal passes through with its fix, from the preview (no card) and from the lend itself", async () => {
+  const message = 'No Claude account "ada". Known: grace@acme.dev.';
+  const { api } = fakeApi();
+  api.on("POST", accountLendRoutes.preview("tmp-1"), { status: 404, body: { code: "ACCOUNT_NOT_FOUND", message } });
+  const port = new FakeApprovalPort();
+  const refused = await call(api, "box_lend_accounts", lendArgs, { port });
+  assert.deepEqual(refused, { ok: false, code: "ACCOUNT_NOT_FOUND", message });
+  assert.equal(port.cards.length, 0);
+
+  const late = lendApi();
+  late.api.on("POST", accountLendRoutes.box("tmp-1"), { status: 409, body: { code: "BOX_NOT_READY", message: "The VM is not connected." } });
+  assert.deepEqual(await call(late.api, "box_lend_accounts", lendArgs), { ok: false, code: "BOX_NOT_READY", message: "The VM is not connected." });
+});
+
+test("list_boxes carries this chat's lends on every VM, project VMs included", async () => {
+  const { api } = fakeApi();
+  api.on("GET", accountLendRoutes.all, { status: 200, body: { lends: [lend({ boxId: "project-box", status: "renewal-failing", statusMessage: "Retrying." })] } });
+  const listed = await call(api, "list_boxes", {});
+  assert.ok(listed.ok);
+  const [row] = listed.value.lent_accounts as Record<string, unknown>[];
+  assert.deepEqual([row!.box_id, row!.id, row!.status, row!.lent_until], ["project-box", "acct-claude", "renewal-failing", "2026-11-03T21:40:00.000Z"]);
+});
+
+test("list_boxes while no box can be rented still answers with the chat's lends; a lend read that fails still fails", async () => {
+  const { api } = fakeApi();
+  api.on("GET", temporaryBoxRoutes.list, { status: 503, body: { code: "BOXES_DISABLED", message: "Temporary boxes are not available." } });
+  api.on("GET", accountLendRoutes.all, { status: 200, body: { lends: [lend({ boxId: "project-box" })] } });
+  const listed = await call(api, "list_boxes", {});
+  assert.ok(listed.ok, listed.ok ? "" : listed.message);
+  assert.deepEqual(listed.value.boxes, []);
+  assert.equal((listed.value.lent_accounts as unknown[]).length, 1);
+  api.on("GET", temporaryBoxRoutes.list, { status: 500, body: { code: "INTERNAL", message: "x" } });
+  assert.ok(!(await call(api, "list_boxes", {})).ok);
+});
+
+test("box_return_accounts ends only this chat's lends on that VM, by name or all, with no card, while planning too", async () => {
+  const lends = [
+    lend({ boxId: "project-box", id: "l1" }),
+    lend({ boxId: "project-box", id: "l2", agent: "codex", accountId: "acct-codex", label: "bob@acme.dev" }),
+    lend({ boxId: "tmp-1", id: "l3" })
+  ];
+  const world = () => {
+    const { api, deleted } = fakeApi();
+    const ended: string[] = [];
+    api.on("GET", accountLendRoutes.all, { status: 200, body: { lends } }).on("DELETE", "/api/boxes/*", ({ path }) => {
+      ended.push(path);
+      return { status: 200, body: { lends: [] } };
+    });
+    return { api, deleted, ended };
+  };
+  const port = new FakeApprovalPort();
+  const all = world();
+  const everything = await call(all.api, "box_return_accounts", {}, { port, caller: chat({ projectBoxId: "project-box", planning: true }) });
+  assert.ok(everything.ok, everything.ok ? "" : everything.message);
+  assert.deepEqual(all.ended, [accountLendRoutes.lend("project-box", "l1"), accountLendRoutes.lend("project-box", "l2")]);
+  assert.equal(port.cards.length, 0);
+
+  const named = world();
+  const one = await call(named.api, "box_return_accounts", { box_id: "project-box", codex: ["bob", "nobody"] });
+  assert.ok(one.ok);
+  assert.deepEqual(named.ended, [accountLendRoutes.lend("project-box", "l2")]);
+  assert.deepEqual(one.value.not_lent, ["nobody"]);
+
+  // Two VMs and none named as this chat's own: it must say which.
+  const unnamed = await call(world().api, "box_return_accounts", {});
+  assert.ok(!unnamed.ok && unnamed.code === "LEND_NO_BOX");
 });

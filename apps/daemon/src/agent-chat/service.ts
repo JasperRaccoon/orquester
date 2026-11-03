@@ -970,17 +970,33 @@ export class AgentChatService {
   /**
    * What a session-tool call's context says about its thread, from the
    * thread's own chat tab (never from the call): its project, its cwd, the
-   * adapter it runs on, and — for a chat whose CLI runs in a Windows project
-   * box — that box's path map (how the agent spells paths). Null for a thread
-   * with no chat tab.
+   * adapter it runs on, the project box its CLI runs in, and — for a Windows
+   * project box — that box's path map (how the agent spells paths). Null for a
+   * thread with no chat tab.
    */
-  sessionToolThread(threadId: string): { projectPath: string; cwd: string; boxPaths?: BoxPathMap; agentId: AgentAdapterId; ownerKind?: string } | null {
+  sessionToolThread(threadId: string): { projectPath: string; cwd: string; boxPaths?: BoxPathMap; projectBoxId?: string; agentId: AgentAdapterId; ownerKind?: string } | null {
     const summary = this.chat.get(threadId);
     if (!summary) return null;
     const agentId = this.opts.registryEntry(summary.refId)?.chat?.adapter;
     if (agentId === undefined || !isAgentAdapterId(agentId)) return null;
     const boxPaths = this.boxPathsOf(summary.projectPath);
-    return { projectPath: summary.projectPath, cwd: summary.cwd, ...(boxPaths ? { boxPaths } : {}), agentId, ...(summary.owner ? { ownerKind: summary.owner.kind } : {}) };
+    const projectBoxId = this.projectBoxIdOf(summary.projectPath);
+    return {
+      projectPath: summary.projectPath,
+      cwd: summary.cwd,
+      ...(boxPaths ? { boxPaths } : {}),
+      ...(projectBoxId ? { projectBoxId } : {}),
+      agentId,
+      ...(summary.owner ? { ownerKind: summary.owner.kind } : {})
+    };
+  }
+
+  /** The box a chat in `projectPath` runs its CLI in ({@link boxLaunchFor}); none for a host project or a destroyed box. */
+  private projectBoxIdOf(projectPath: string): string | undefined {
+    const boxes = this.boxes ?? this.opts.boxes ?? null;
+    if (boxes === null || projectPath.length === 0) return undefined;
+    const location = boxes.registry.locate(projectPath);
+    return location.kind === "box" && location.record.state !== "destroyed" ? location.boxId : undefined;
   }
 
   /**

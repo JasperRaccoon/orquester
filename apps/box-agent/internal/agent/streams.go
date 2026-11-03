@@ -213,6 +213,11 @@ func (a *Agent) openFileWrite(ch *Channel, spec *wire.FileWriteSpec) {
 	}
 	commit := func() error {
 		if tmpName != "" {
+			// The temp file was made with O_EXCL, so it is no planted link; the
+			// rename replaces one at the target instead of following it.
+			if err := a.ownTemp(f, spec.Path); err != nil {
+				return err
+			}
 			if err := f.Chmod(mode); err != nil && !isWindows {
 				return err
 			}
@@ -224,11 +229,6 @@ func (a *Agent) openFileWrite(ch *Channel, spec *wire.FileWriteSpec) {
 			return err
 		}
 		if tmpName != "" {
-			if a.work != nil && statErr != nil {
-				if err := a.work.chown(tmpName); err != nil {
-					return err
-				}
-			}
 			if err := renameReplacing(tmpName, spec.Path); err != nil {
 				return err
 			}
@@ -243,6 +243,21 @@ func (a *Agent) openFileWrite(ch *Channel, spec *wire.FileWriteSpec) {
 	}
 	ch.EOF(wire.StreamFromBox)
 	ch.Close(nil)
+}
+
+// ownTemp sets the owner of the open temp file about to replace target. It is
+// orq-agent's so far: the rename would hand a replaced file to it (a 0600 login
+// the work user can no longer read). A regular file there keeps its owner;
+// anything else, a planted symlink included, says nothing about who owns the new
+// file, so it goes to the work user.
+func (a *Agent) ownTemp(f *os.File, target string) error {
+	if a.work == nil {
+		return nil
+	}
+	if info, err := os.Lstat(target); err == nil && info.Mode().IsRegular() {
+		return chownLike(f, info)
+	}
+	return a.work.chownFile(f)
 }
 
 // boundedBuffer keeps the first `limit` bytes written (tar's stderr).

@@ -51,6 +51,7 @@ import {
   toolApprovalGrantChoices,
   toolApprovalGuardKey,
   isBoxApprovalCard,
+  isAccountApprovalCard,
   toolApprovalKeyAction,
   toolApprovalKindBadge,
   toolApprovalCardKey,
@@ -307,6 +308,8 @@ export function ToolApprovalCard({
         // boxes: a temporary-box card spends money; it carries the VM glyph.
         isBoxApprovalCard(card) ? (
           <Server size={14} aria-hidden />
+        ) : isAccountApprovalCard(card) ? (
+          <KeyRound size={14} aria-hidden />
         ) : toolset ? (
           <Wrench size={14} aria-hidden />
         ) : (

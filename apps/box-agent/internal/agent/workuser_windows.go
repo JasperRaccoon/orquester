@@ -2,7 +2,10 @@
 
 package agent
 
-import "errors"
+import (
+	"errors"
+	"os"
+)
 
 // workUser: Windows boxes run processes as orq-agent's own account.
 type workUser struct {
@@ -20,6 +23,10 @@ func resolveWorkUser(name string) (*workUser, error) {
 
 func (w *workUser) chown(string) error  { return nil }
 func (w *workUser) lchown(string) error { return nil }
+
+func (w *workUser) chownFile(*os.File) error { return nil }
+
+func chownLike(*os.File, os.FileInfo) error { return nil }
 
 // loginShell: Windows has no /etc/passwd.
 func loginShell(string) string { return "" }

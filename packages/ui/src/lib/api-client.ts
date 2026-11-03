@@ -124,7 +124,7 @@ import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
 import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, githubLinkRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's routes and payloads.
-import { boxRoutes } from "@orquester/api";
+import { accountLendRoutes, boxRoutes, type AccountLendsResponse } from "@orquester/api";
 // Devices: the Device simulators plugin's routes and payloads (answers validated by `lib/devices/validate.ts`).
 import { deviceRoutes } from "@orquester/api";
 import type {
@@ -1106,6 +1106,16 @@ export class ApiClient {
   /** Destroy a temporary box (a project box answers 409 `BOX_IS_PROJECT`: delete its project instead). */
   destroyBox(id: string): Promise<BoxResponse | undefined> {
     return this.send("DELETE", boxRoutes.box(id));
+  }
+
+  /** End one lend of an account to a box: its login comes off the box. */
+  endAccountLend(boxId: string, lendId: string): Promise<AccountLendsResponse> {
+    return this.send("DELETE", accountLendRoutes.lend(boxId, lendId));
+  }
+
+  /** End every lend on a box. */
+  endAccountLends(boxId: string): Promise<AccountLendsResponse> {
+    return this.send("DELETE", accountLendRoutes.box(boxId));
   }
 
   /** "Add your machine": its `pairing` record and one-time command. */

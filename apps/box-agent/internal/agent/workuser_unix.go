@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // workUser is the account processes run as when orq-agent runs as root
@@ -61,6 +62,17 @@ func resolveWorkUser(name string) (*workUser, error) {
 func (w *workUser) chown(path string) error { return os.Chown(path, int(w.uid), int(w.gid)) }
 
 func (w *workUser) lchown(path string) error { return os.Lchown(path, int(w.uid), int(w.gid)) }
+
+func (w *workUser) chownFile(f *os.File) error { return f.Chown(int(w.uid), int(w.gid)) }
+
+// chownLike gives the open file the owner of the file it is about to replace.
+func chownLike(f *os.File, existing os.FileInfo) error {
+	st, ok := existing.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	return f.Chown(int(st.Uid), int(st.Gid))
+}
 
 // loginShell reads a user's shell from /etc/passwd ("" when not listed).
 func loginShell(name string) string {

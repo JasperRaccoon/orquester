@@ -4,6 +4,7 @@
  * hot paths (file routes call `locate` per request).
  */
 
+import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import type { BoxSummary } from "@orquester/api";
@@ -12,7 +13,7 @@ import type { StoredBox } from "@orquester/config";
 import type { BoxConnection, BoxHub, BoxProviderRegistry, BoxRegistry, ProjectLocation } from "../contracts.ts";
 import { BoxError } from "./errors.ts";
 import type { BoxStore } from "./store.ts";
-import { toBoxSummary } from "./summary.ts";
+import { toBoxSummary, type BoxLendRuntimeLookup } from "./summary.ts";
 
 /** Set on a record when its project was deleted: the record stays (month totals) but no longer owns the path. */
 export const PROJECT_DELETED_FIELD = "projectDeletedAt";
@@ -24,6 +25,7 @@ export function projectDeleted(record: StoredBox): boolean {
 export class StoreBoxRegistry implements BoxRegistry {
   /** Project path → its box record, rebuilt after a record change: `locate` runs on hot paths. */
   private projectIndex: Map<string, StoredBox> | null = null;
+  private lendRuntime: BoxLendRuntimeLookup | undefined;
 
   constructor(
     private readonly store: BoxStore,
@@ -34,6 +36,11 @@ export class StoreBoxRegistry implements BoxRegistry {
     store.events.on("changed", () => {
       this.projectIndex = null;
     });
+  }
+
+  /** Who knows the state of each lend (`boxes/lends`); summaries list no lends before it is set. */
+  setLendRuntime(lookup: BoxLendRuntimeLookup): void {
+    this.lendRuntime = lookup;
   }
 
   list(): StoredBox[] {
@@ -50,7 +57,12 @@ export class StoreBoxRegistry implements BoxRegistry {
   }
 
   summarize(record: StoredBox): BoxSummary | null {
-    return toBoxSummary(record, { providers: this.providers, connected: this.hub.get(record.id)?.connected === true, now: this.now() });
+    return toBoxSummary(record, {
+      providers: this.providers,
+      connected: this.hub.get(record.id)?.connected === true,
+      now: this.now(),
+      ...(this.lendRuntime ? { lendRuntime: this.lendRuntime } : {})
+    });
   }
 
   /** Every record this build can show, newest first. */
@@ -69,9 +81,19 @@ export class StoreBoxRegistry implements BoxRegistry {
       const project = record.project;
       if (record.purpose !== "project" || !project || projectDeleted(record)) continue;
       const root = resolve(project.path);
-      const current = index.get(root);
-      // The newest record wins when a stale one (an older build's) names the same path.
-      if (!current || record.createdAt > current.createdAt) index.set(root, record);
+      // Its canonical path too: a chat's principal names its project that way, and the workspaces
+      // root may be a symlink. Resolved here, once per record change, so `locate` stays free of syscalls.
+      let canonical = root;
+      try {
+        canonical = realpathSync.native(root);
+      } catch {
+        // No stub on this host (yet): only the path as given.
+      }
+      for (const key of new Set([root, canonical])) {
+        const current = index.get(key);
+        // The newest record wins when a stale one (an older build's) names the same path.
+        if (!current || record.createdAt > current.createdAt) index.set(key, record);
+      }
     }
     this.projectIndex = index;
     return index;

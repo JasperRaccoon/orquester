@@ -27,8 +27,9 @@
  * a path outside a project, a refused self target and a target that is not an own child are
  * denied before anything else. Grant options are the executor's (`grantOptionsFor`).
  *
- * boxes: a tool that spends the owner's money (`spendFamily`, `create_box`) opens a `spend` card
- * in every mode — for a workflow-owned caller too — and is refused only while planning.
+ * boxes: a tool that spends the owner's money or subscription quota (`spendFamily`: `create_box`,
+ * `box_lend_accounts`) opens a `spend` card in every mode — for a workflow-owned caller too — and is
+ * refused only while planning.
  */
 
 import { RUNTIME_MODES, type RuntimeMode } from "@orquester/api/agent-chat";
@@ -127,11 +128,23 @@ function needsCard(targetClass: TargetClass, access: Access, mode: RuntimeMode):
 
 const deny = (code: GateDenyCode, message: string): GateDecision => ({ kind: "deny", code, message });
 
+/** What a spend family's call spends, as the planning denial and the card's reason say it. */
+const SPEND_WORDS: Readonly<Record<SpendFamily, { planning: string; reason: string }>> = {
+  boxes: { planning: "rents a machine that costs money", reason: "renting a machine that costs money" },
+  devices: { planning: "rents a machine that costs money", reason: "renting a machine that costs money" },
+  accounts: { planning: "lends account logins that use subscription quota", reason: "lending account logins that use subscription quota" }
+};
+
 const WORKFLOW_OWNED = "This chat runs inside an automated workflow, where nobody can approve";
 
 /** The gate. Pure: every fact it needs is in `input`. */
 export function gate(input: GateInput): GateDecision {
   const { caller, scope, tool } = input;
+  const away = [
+    ...input.targets.filter((target) => target.class !== "own"),
+    ...input.pendingTargets,
+    ...input.workspaceTargets.filter((target) => target.class !== "own")
+  ];
   if (input.deniedPaths.length > 0) {
     const path = clipText(input.deniedPaths[0]!, MAX_ECHO_CHARS);
     return deny("PERMISSION_DENIED", `"${path}" is not inside a project: paths must lie inside a project directory ("<workspace>/<project>/…", list_projects).`);
@@ -143,14 +156,19 @@ export function gate(input: GateInput): GateDecision {
     return deny("PERMISSION_DENIED", scope.ownChildrenOnly ?? `${tool} acts only on chats this chat created.`);
   }
 
-  // boxes: a call that spends the owner's money (Ephemeral AI VMs spec §13.2) — a card in EVERY
+  // boxes: a call that spends the owner's money or quota (Ephemeral AI VMs spec §13.2) — a card in EVERY
   // mode, a workflow-owned chat included (its card waits for the owner, who gets a push, and
   // expires as a timeout); never a grant; never while planning.
   if (input.spendFamily !== undefined) {
-    if (caller.planning) {
-      return deny("PERMISSION_DENIED", `You are planning: ${tool} rents a machine that costs money. Propose it in your plan instead.`);
+    // A spend that also reaches another project (an account card on `create_session`) stays refused for a workflow's chat (§5.4).
+    if (input.tier === "act" && caller.workflowOwned && (away.length > 0 || input.unknownTargets.length > 0)) {
+      return deny("PERMISSION_DENIED", `${WORKFLOW_OWNED} work in another project: ${tool} may act only in this chat's own project.`);
     }
-    return { kind: "card", approvalKind: "spend", family: input.spendFamily, crossProject: false, reason: "renting a machine that costs money" };
+    const words = SPEND_WORDS[input.spendFamily];
+    if (caller.planning) {
+      return deny("PERMISSION_DENIED", `You are planning: ${tool} ${words.planning}. Propose it in your plan instead.`);
+    }
+    return { kind: "card", approvalKind: "spend", family: input.spendFamily, crossProject: false, reason: words.reason };
   }
 
   // Admin (§6): a card in every permission mode; never while planning; never for a workflow-owned chat.
@@ -181,11 +199,6 @@ export function gate(input: GateInput): GateDecision {
   }
 
   // Workflow-owned callers never act across projects, in any mode (§5.4).
-  const away = [
-    ...input.targets.filter((target) => target.class !== "own"),
-    ...input.pendingTargets,
-    ...input.workspaceTargets.filter((target) => target.class !== "own")
-  ];
   if (input.tier === "act" && caller.workflowOwned && (away.length > 0 || input.unknownTargets.length > 0)) {
     return deny("PERMISSION_DENIED", `${WORKFLOW_OWNED} work in another project: ${tool} may act only in this chat's own project.`);
   }

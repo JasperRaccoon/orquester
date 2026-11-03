@@ -208,8 +208,10 @@ test("a session-tool call from a Windows box chat carries the box's path map (fr
     assert.deepEqual(f.service.sessionToolThread(tab.id)?.boxPaths, boxPathMapFor("win32"), "a dropped box still maps its chat's paths");
     location = inBox()("/w/boxed");
     assert.equal(f.service.sessionToolThread(tab.id)?.boxPaths, undefined, "a POSIX box's paths are the host's");
+    assert.equal(f.service.sessionToolThread(tab.id)?.projectBoxId, "box-1", "a POSIX box's chat still says which box it runs in");
     const host = (await create(f, { projectPath: "/w/host", cwd: "/w/host" })) as { id: string };
     assert.equal(f.service.sessionToolThread(host.id)?.boxPaths, undefined);
+    assert.equal(f.service.sessionToolThread(host.id)?.projectBoxId, undefined);
   } finally {
     await f.cleanup();
   }

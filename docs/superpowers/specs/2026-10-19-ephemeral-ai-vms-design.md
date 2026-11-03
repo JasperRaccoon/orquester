@@ -80,7 +80,7 @@ the CLIProxyAPI model proxy, which was removed (`model-proxy-retirement.ts:5-13`
 - An agent refresh token, a git private key, a git hosting token or a provider API key present
   in a box in any form; any other secret written to disk in a box, passed in a process argument,
   or written to a log. Exceptions, each decided: short-lived agent ACCESS tokens in a 0600
-  credentials file in the box's agent home (Claude, Grok — spikes doc), and Secret files plugin
+  credentials file in the box's agent home (Claude, Grok — spikes doc; a lent Claude or Codex login — `2026-11-03-lend-accounts-to-boxes-design.md`), and Secret files plugin
   files synced into project boxes (**owner decision**, 2026-10-20). (MCP and workflow secrets reach a box only in process env, and only for a
   server the owner switched to "Run in box" or a workflow block in a box project — §8.4, §8.8.)
 - Anything other than the existing single refresher ever spending a refresh token

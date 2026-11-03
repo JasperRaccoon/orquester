@@ -50,8 +50,9 @@ export const BOUNDARY_FAMILIES = ["cross-project", "cross-project-read", "cross-
 export type BoundaryFamily = (typeof BOUNDARY_FAMILIES)[number];
 
 // boxes: the `spend` kind's families (Ephemeral AI VMs spec §13.2) — `boxes`: renting a temporary box (`create_box`);
-// `devices`: renting a device host for a device an agent opens (`open_device`, devices spec §6.3).
-export const SPEND_FAMILIES = ["boxes", "devices"] as const;
+// `devices`: renting a device host for a device an agent opens (`open_device`, devices spec §6.3);
+// `accounts`: lending account logins to a box, which spends subscription quota (`box_lend_accounts`).
+export const SPEND_FAMILIES = ["boxes", "devices", "accounts"] as const;
 export type SpendFamily = (typeof SPEND_FAMILIES)[number];
 
 /** Every card family (`toolset`: legacy, see {@link ApprovalKind}). */

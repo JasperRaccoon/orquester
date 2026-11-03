@@ -565,6 +565,8 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   box_download: "Copied out of a box",
   box_forward_port: "Forwarded a box port",
   destroy_box: "Destroyed a box",
+  box_lend_accounts: "Lent accounts to a VM",
+  box_return_accounts: "Returned lent accounts",
   // knowledge (Knowledge Graph plugin)
   knowledge_search: "Searched the knowledge base",
   knowledge_get: "Read a knowledge entry",

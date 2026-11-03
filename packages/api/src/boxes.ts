@@ -259,6 +259,51 @@ export interface BoxSummary {
   deviceHost?: boolean;
   /** Bring-your-own machines only (`provider: "byo"`). */
   byo?: BoxByoInfo;
+  /** Accounts lent to this box right now (lending spec 2026-11-03). Absent: none, or an older daemon. */
+  lentAccounts?: BoxLentAccount[];
+}
+
+/** The agents whose accounts can be lent to a box. */
+export const BOX_LEND_AGENTS = ["claude", "codex"] as const;
+export type BoxLendAgent = (typeof BOX_LEND_AGENTS)[number];
+export const BOX_LEND_DEFAULT_MINUTES = 240;
+export const BOX_LEND_MIN_MINUTES = 10;
+export const BOX_LEND_MAX_MINUTES = 1440;
+/** Most accounts one `box_lend_accounts` call may ask for. */
+export const BOX_LEND_MAX_ACCOUNTS = 6;
+
+export function isBoxLendAgent(value: unknown): value is BoxLendAgent {
+  return typeof value === "string" && (BOX_LEND_AGENTS as readonly string[]).includes(value);
+}
+
+/**
+ * - `installing`: the login is being written to the box.
+ * - `active`: the box holds a current login.
+ * - `waiting-for-vm`: the box is offline; the login is rewritten when it returns.
+ * - `renewal-failing`: the last renewal failed for a transient reason; retried while the current token lasts.
+ * - `needs-login`: the account's login on the host ended; nothing is asked until the owner signs in again.
+ */
+export type BoxLentAccountStatus = "installing" | "active" | "waiting-for-vm" | "renewal-failing" | "needs-login";
+
+/** One active lend. Never carries a token. */
+export interface BoxLentAccount {
+  id: string;
+  accountId: string;
+  agent: BoxLendAgent;
+  label: string;
+  /** The chat that asked; null when that chat no longer exists. */
+  threadId: string | null;
+  purposeNote: string;
+  createdAt: string;
+  /** When the lend ends by itself. */
+  expiresAt: string;
+  /** Expiry of the token on the box right now (ISO); null when unknown. */
+  tokenExpiresAt: string | null;
+  status: BoxLentAccountStatus;
+  /** One line explaining a status other than `active`; never a secret. */
+  statusMessage: string | null;
+  /** The account home on the box: its `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. */
+  home: string;
 }
 
 /** What a bring-your-own machine's row shows. */

@@ -1,10 +1,13 @@
 /** The tool-use eval's sandbox, stub, history and account choice: what keeps a sample fake and on the right login. */
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import type { AgentAccountRecord } from "@orquester/config";
 
-import { pickAccount } from "./accounts.ts";
+import { pickAccount, resolveAccount } from "./accounts.ts";
 import { ToolUseCase } from "./case.ts";
 import { buildTranscript, claudeProjectSlug } from "./history.ts";
 import { DEFAULT_AGENT_REPORT, DEFAULT_REFUSAL, nativePolicy, printing, readsOnlyInCwd } from "./policy.ts";
@@ -172,4 +175,31 @@ test("an account is picked only by explicit label or id, never the system login"
   assert.throws(() => pickAccount(accounts, "system"), /system login/);
   assert.throws(() => pickAccount(accounts, ""), /system login/);
   assert.throws(() => pickAccount(accounts, "nobody"), /No managed Claude account/);
+});
+
+test("on a VM, a missing account index and an account with no login name box_lend_accounts; off a VM they do not", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "eval-accounts-"));
+  const saved = process.env.ORQ_BOX_ID;
+  t.after(async () => {
+    if (saved === undefined) delete process.env.ORQ_BOX_ID;
+    else process.env.ORQ_BOX_ID = saved;
+    await rm(dir, { recursive: true, force: true });
+  });
+  const failure = (baseDir: string) => resolveAccount(baseDir, "ada").then(() => "", (error: Error) => error.message);
+  const withLogin = join(dir, "indexed");
+  await mkdir(join(withLogin, "daemon"), { recursive: true });
+  await writeFile(
+    join(withLogin, "daemon", "agent-accounts.json"),
+    JSON.stringify({
+      accounts: [{ id: "acct-1", agent: "claude", label: "ada@acme.dev", email: null, plan: null, needsReauth: false, createdAt: "2026-11-03T00:00:00.000Z", importedAt: "2026-11-03T00:00:00.000Z" }],
+      defaults: { claude: null, codex: null, grok: null }
+    })
+  );
+  delete process.env.ORQ_BOX_ID;
+  assert.doesNotMatch(await failure(join(dir, "empty")), /box_lend_accounts/);
+  assert.match(await failure(withLogin), /has no login/);
+  assert.doesNotMatch(await failure(withLogin), /box_lend_accounts/);
+  process.env.ORQ_BOX_ID = "box-1";
+  // A login already lent is found with the appdir: named before asking again, which would open a new card.
+  for (const message of [await failure(join(dir, "empty")), await failure(withLogin)]) assert.match(message, /--appdir[^]*ORQUESTER_APPDIR[^]*ask with box_lend_accounts/);
 });

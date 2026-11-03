@@ -1661,7 +1661,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // git auth, the MCP bridge, dev-server forwards, agent chats in boxes, the Template command, and
   // the box tools (connected while the plugin is on).
   await boxes
-    .attach({ sessions, browsers, agentChat, agentProfile, temporaryBoxTools })
+    .attach({ sessions, browsers, agentChat, agentProfile, temporaryBoxTools, sessionsLoaded: () => sessionsReattached })
     .catch((error) => console.error("Box wiring failed", error instanceof Error ? error.message : error));
   // boxes: end
   // umcp:t6 begin
@@ -1680,12 +1680,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         projectPath: tab.projectPath,
         canonicalProjectPath: tab.projectPath ? canonicalProjectPath(tab.projectPath) : "",
         // A chat started in a directory inside its project loads the configs down to it too.
-        ...(tab.cwd ? { cwd: tab.cwd, canonicalCwd: canonicalProjectPath(tab.cwd) } : {})
+        ...(tab.cwd ? { cwd: tab.cwd, canonicalCwd: canonicalProjectPath(tab.cwd) } : {}),
+        ...(info.projectBoxId ? { inBox: true } : {})
       };
     },
     openThreads: () => agentChat.chat.list().map((tab) => tab.id),
     catalog: () => catalogFor("chat"),
-    // boxes: the box tools are advertised only while a box can be rented.
+    // boxes: the box tools are advertised only while a box can be rented (the lending ones also to a chat in a box).
     boxesAvailable: () => temporaryBoxTools.available(),
     // Devices: the device tools only while the plugin is on, agents may use devices and a platform is enabled.
     devicesAvailable: () => devices.toolsAvailable(),
@@ -1788,6 +1789,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxes: temporaryBoxTools,
     // boxes: read_file / directory reads of box projects go to the box.
     boxRegistry: () => services.boxRegistry,
+    // boxes: which accounts a box's chats already use, as the token broker reads them.
+    boxSessions: () => sessions.list(),
     // Devices: the device MCP tools' operations (null while the plugin is off).
     devices: () => devices.service()
   });

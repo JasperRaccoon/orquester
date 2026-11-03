@@ -9,6 +9,7 @@ import { HtmlPreviewError, type HtmlPreview } from "../html-preview/index.ts";
 import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
 import { FsTools, type ListFilesResult, type ReadFileWindowResult } from "./fs-tools.ts";
 import type { BoxRegistry } from "../boxes/contracts.ts";
+import { boxUsesAccount, GONE_STATES, type TokenBrokerSession } from "../boxes/broker/broker.ts";
 import { mintPrincipalToken } from "./principal.ts";
 // boxes: the temporary-box operations (Ephemeral AI VMs spec §13), types only.
 import type { BoxExecRequest, BoxExecResult, BoxForwardResult, BoxJobOutput, BoxTransferResult } from "../boxes/temporary/contract.ts";
@@ -74,6 +75,14 @@ export interface DaemonBoxCallOptions {
   principal?: CallerPrincipal;
   signal?: AbortSignal;
 }
+
+/** A box a chat's account reaches, and whether it has an account already (`boxUsesAccount`, what `token.get` answers by). */
+export interface DaemonChatBox {
+  boxId: string;
+  /** What a card calls it: the project's name, or provider and size. */
+  label: string;
+  usesAccount(accountId: string): boolean;
+}
 // boxes: end
 
 /**
@@ -114,6 +123,8 @@ export interface DaemonApi {
   boxDownload?(boxId: string, request: { remotePath: string; localPath: string }, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxTransferResult>>;
   /** A box port on a host loopback port, until the box is destroyed. */
   boxForwardPort?(boxId: string, port: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxForwardResult>>;
+  /** The boxes a chat's account reaches: its project's box, and any temporary box that chat owns (`threadId`). None on the host. */
+  boxesOfChat?(target: { projectPath: string; threadId?: string }): DaemonChatBox[];
   // boxes: end
   // Devices (devices spec §9): the calling chat's devices, for an agent principal only (the chat is
   // the principal's, never an argument). Optional like the box operations; the device tools answer
@@ -179,6 +190,8 @@ export class InjectDaemonApi implements DaemonApi {
       boxes?: TemporaryBoxTools | null;
       // boxes: which paths live in a box project, for the file reads (absent: all host).
       boxRegistry?: () => BoxRegistry | undefined;
+      // boxes: every session, as the token broker reads them (`boxesOfChat`).
+      boxSessions?: () => Iterable<TokenBrokerSession>;
       // Devices: the device service (null while the plugin is off; absent: not wired here).
       devices?: () => DeviceToolsPort | null;
     }
@@ -294,6 +307,25 @@ export class InjectDaemonApi implements DaemonApi {
   async boxForwardPort(boxId: string, port: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxForwardResult>> {
     return this.opts.boxes ? this.opts.boxes.forwardPort(boxId, port, opts) : BOXES_UNWIRED;
   }
+
+  boxesOfChat(target: { projectPath: string; threadId?: string }): DaemonChatBox[] {
+    const registry = this.opts.boxRegistry?.();
+    if (!registry) return [];
+    const location = registry.locate(target.projectPath);
+    const records = location.kind === "box" && !GONE_STATES.has(location.record.state) ? [location.record] : [];
+    if (target.threadId !== undefined) {
+      records.push(...registry.list().filter((box) => box.purpose === "temporary" && box.threadId === target.threadId && !GONE_STATES.has(box.state)));
+    }
+    return records.map((record) => {
+      const summary = registry.summary(record.id);
+      return {
+        boxId: record.id,
+        label: summary?.project ? summary.project.name : summary ? `${summary.providerLabel} · ${summary.sizeLabel}` : record.name,
+        // With no session source nothing counts as in use, so the card opens (fail closed).
+        usesAccount: (accountId) => boxUsesAccount(record, accountId, this.opts.boxSessions?.() ?? [], registry)
+      };
+    });
+  }
   // boxes: end
 
   // Devices: each operation acts for the principal's chat (`runDeviceTool`).
@@ -353,6 +385,7 @@ export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): Daemo
     ...(api.boxJobOutput ? { boxJobOutput: (boxId: string, jobId: string, waitMs: number, opts?: DaemonBoxCallOptions) => api.boxJobOutput!(boxId, jobId, waitMs, { ...opts, principal }) } : {}),
     ...(api.boxUpload ? { boxUpload: (boxId: string, request: { localPath: string; remotePath: string }, opts?: DaemonBoxCallOptions) => api.boxUpload!(boxId, request, { ...opts, principal }) } : {}),
     ...(api.boxDownload ? { boxDownload: (boxId: string, request: { remotePath: string; localPath: string }, opts?: DaemonBoxCallOptions) => api.boxDownload!(boxId, request, { ...opts, principal }) } : {}),
+    ...(api.boxesOfChat ? { boxesOfChat: (target: { projectPath: string; threadId?: string }) => api.boxesOfChat!(target) } : {}),
     ...(api.boxForwardPort ? { boxForwardPort: (boxId: string, port: number, opts?: DaemonBoxCallOptions) => api.boxForwardPort!(boxId, port, { ...opts, principal }) } : {}),
     // Devices: each device operation acts for the bound principal's chat too.
     ...(api.devicesList ? { devicesList: (opts?: DeviceCallOptions) => api.devicesList!({ ...opts, principal }) } : {}),

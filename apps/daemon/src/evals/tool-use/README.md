@@ -23,6 +23,15 @@ Run it when a change affects what a model sees from Orquester: the instruction b
 
 A run uses one managed Claude account that you name with `--account`: a label, the part of the label before `@`, or an id prefix from `agent-accounts.json`. There is no default. The system login and the agent's default account are never picked for you. Pick an account with weekly quota left, since samples are billed to that subscription. The summary's dollar figure is the CLI's notional price.
 
+## On a VM
+
+A VM has no `agent-accounts.json` and its account folders hold no login, so a run there stops and says to pass a lent appdir, or to ask with `box_lend_accounts`. A VM is told by `ORQ_BOX_ID`, which the box agent sets on every process.
+
+- Call `box_lend_accounts` with the account you want. The owner approves it on a card, and samples bill that subscription as usual.
+- Pass the `appdir` it returns as `--appdir`. The login renews by itself until `lent_until`.
+- Call `box_return_accounts` when the run ends.
+- Never copy a login or use an API key instead: a refresh in a copy breaks the real login. If the card is denied, ask.
+
 ## Run
 
 ```sh

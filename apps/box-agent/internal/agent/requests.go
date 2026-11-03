@@ -154,7 +154,8 @@ func handleEnsurePaths(_ context.Context, a *Agent, _ *Link, raw json.RawMessage
 }
 
 // ensurePath creates `path` with parents; as root with a working user, the
-// directories it created (and `path` itself) are given to that user.
+// directories it created (and `path` itself) are given to that user. Never
+// through a symlink: one the work user planted must not give it the target.
 func (a *Agent) ensurePath(path string) error {
 	path = filepath.Clean(path)
 	var created []string
@@ -178,7 +179,7 @@ func (a *Agent) ensurePath(path string) error {
 		owned = append([]string{path}, created...)
 	}
 	for _, dir := range owned {
-		if err := a.work.chown(dir); err != nil {
+		if err := a.work.lchown(dir); err != nil {
 			return err
 		}
 	}

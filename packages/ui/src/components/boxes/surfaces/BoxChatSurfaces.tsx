@@ -8,6 +8,8 @@
  *    unreachable ("Reconnecting", non-blocking);
  *  - a card per temporary box this chat created, with its cost so far, its
  *    countdown, Watch (a terminal in the box) and Destroy;
+ *  - the logins lent to the box, on a temporary box's card and for the chat's
+ *    project box, each of which can be ended;
  *  - the box → host config change sets this chat's turns made, to approve or
  *    deny.
  *
@@ -41,6 +43,8 @@ import {
   type BoxTone
 } from "./box-surfaces.logic";
 import { ConfigChangeCard, useShownConfigChanges } from "./ConfigChangeCard";
+import { LentAccountsSection } from "./LentAccountsSection";
+import { lentAccountsModel } from "./lent-accounts.logic";
 
 const CHAT_TONE: Record<BoxTone, ChatTone> = {
   neutral: "neutral",
@@ -143,6 +147,7 @@ const TemporaryBoxCard: React.FC<{ box: BoxSummary; now: number }> = ({ box, now
           {error}
         </p>
       ) : null}
+      <LentAccountsSection box={box} now={now} className="basis-full border-t border-neutral-800/70 pt-1" />
       <ConfirmDialog
         open={confirming}
         title="Destroy VM"
@@ -218,8 +223,10 @@ export const BoxChatPanel: React.FC<{ sessionId: string; view: ProjectBoxView | 
 
   if (!view && temporary.length === 0 && shown.length === 0) return null;
   const chip = view ? boxChatChip(view.info, now) : null;
+  const projectLends = view?.box ? lentAccountsModel(view.box, now).rows.length : 0;
+  const temporaryLends = temporary.reduce((sum, box) => sum + lentAccountsModel(box, now).rows.length, 0);
   // The chip stays on the header; the rest is what folds.
-  const foldable = gate.notice !== null || temporary.length > 0 || shown.length > 0;
+  const foldable = gate.notice !== null || temporary.length > 0 || shown.length > 0 || projectLends > 0;
   const pending = shown.filter((change) => change.state === "pending").length;
   const open = foldable && !collapsed;
 
@@ -245,7 +252,9 @@ export const BoxChatPanel: React.FC<{ sessionId: string; view: ProjectBoxView | 
           >
             {collapsed ? <ChevronRight size={12} aria-hidden /> : <ChevronDown size={12} aria-hidden />}
             {collapsed || !chip ? (
-              <span className={cn("truncate", pending > 0 && "text-warn-300")}>{boxPanelSummary(temporary, pending)}</span>
+              <span className={cn("truncate", pending > 0 && "text-warn-300")}>
+                {boxPanelSummary(temporary, pending, projectLends + temporaryLends)}
+              </span>
             ) : null}
           </button>
         ) : (
@@ -287,6 +296,13 @@ export const BoxChatPanel: React.FC<{ sessionId: string; view: ProjectBoxView | 
                 <p className={cn("font-medium", TONE_BAND_TEXT[CHAT_TONE[gate.notice.tone]])}>{gate.notice.title}</p>
                 <p className="text-neutral-300">{gate.notice.text}</p>
               </div>
+            ) : null}
+            {view?.box ? (
+              <LentAccountsSection
+                box={view.box}
+                now={now}
+                className="rounded-xl border border-neutral-800 bg-neutral-900/60 px-2.5 py-1.5"
+              />
             ) : null}
             {temporary.map((box) => (
               <TemporaryBoxCard key={box.id} box={box} now={now} />

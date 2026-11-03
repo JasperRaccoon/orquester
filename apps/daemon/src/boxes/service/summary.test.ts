@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { StoredBox } from "@orquester/config";
 
-import { boxesTotals, estimatedCostUsd, monthCostUsd, toBoxSummary, utcMonthStart } from "./summary.ts";
+import { boxesTotals, estimatedCostUsd, lentAccountsOf, monthCostUsd, toBoxSummary, utcMonthStart } from "./summary.ts";
 import { FakeAdapter } from "./testing.ts";
 
 function box(extra: Partial<StoredBox>): StoredBox {
@@ -68,4 +68,26 @@ test("a record with a kind, provider or state this build does not know has no su
   assert.equal(summary.connected, false, "a destroyed box is never connected");
   assert.equal(summary.destroyedReason, "provider-gone");
   assert.equal(summary.providerLabel, "Fake Cloud");
+});
+
+test("a summary lists active lends only: not ended ones, not an agent this build does not know, never a stored extra", () => {
+  const accountId = "11111111-1111-4111-8111-111111111111";
+  const active = "22222222-2222-4222-8222-222222222222";
+  const lend = { accountId, agent: "claude", label: "me@example.com", createdAt: "2026-10-20T10:00:00.000Z", expiresAt: "2026-10-20T14:00:00.000Z" };
+  const record = box({
+    accountLends: [
+      { ...lend, id: active, threadId: "chat", purposeNote: "evals", futureField: "kept" },
+      { ...lend, id: "33333333-3333-4333-8333-333333333333", endedAt: "2026-10-20T11:00:00.000Z", endReason: "returned" },
+      { ...lend, id: "44444444-4444-4444-8444-444444444444", agent: "gemini" },
+      { ...lend, id: "55555555-5555-4555-8555-555555555555", accountId: "../../../etc" },
+      { id: "malformed" }
+    ]
+  });
+  const options = { providers: new Map([["hetzner" as const, new FakeAdapter({ id: "hetzner" })]]), connected: true, now: at("2026-10-20T12:00:00.000Z") };
+  const lendRuntime = () => ({ status: "active" as const, statusMessage: null, tokenExpiresAt: null, home: "/home" });
+  assert.deepEqual(lentAccountsOf(record, lendRuntime), [
+    { id: active, accountId, agent: "claude", label: "me@example.com", threadId: "chat", purposeNote: "evals", createdAt: lend.createdAt, expiresAt: lend.expiresAt, status: "active", statusMessage: null, tokenExpiresAt: null, home: "/home" }
+  ]);
+  assert.deepEqual(toBoxSummary(record, { ...options, lendRuntime })?.lentAccounts?.map((lent) => lent.id), [active]);
+  assert.equal("lentAccounts" in toBoxSummary(box({}), { ...options, lendRuntime })!, false);
 });

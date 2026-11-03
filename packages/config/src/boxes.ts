@@ -55,6 +55,38 @@ export const storedBoxProjectSchema = z
  * record from a newer build (a state or provider this build does not know) is never
  * dropped; readers narrow them with the `isBox*` guards from `@orquester/api`.
  */
+/**
+ * An account lent to a box (lending spec 2026-11-03): names and times only, never a token. `endedAt`
+ * set: ended, and its files on the box are still to be removed once the box is connected.
+ */
+export const storedAccountLendSchema = z
+  .object({
+    id: z.string().min(1),
+    accountId: z.string().min(1),
+    agent: z.string(),
+    label: z.string(),
+    threadId: z.string().nullable().optional(),
+    purposeNote: z.string().optional(),
+    createdAt: isoString,
+    expiresAt: isoString,
+    endedAt: isoString.nullable().optional(),
+    endReason: z.string().nullable().optional()
+  })
+  .passthrough();
+export type StoredAccountLend = z.infer<typeof storedAccountLendSchema>;
+
+/**
+ * The lends of `StoredBox.accountLends` that parse. That field stays unknown in the box's own schema:
+ * one malformed lend must not lose its box, and a rewrite keeps an entry this build cannot read.
+ */
+export function parseStoredAccountLends(raw: unknown): StoredAccountLend[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    const parsed = storedAccountLendSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
 export const storedBoxSchema = z
   .object({
     id: z.string().min(1),
@@ -87,6 +119,8 @@ export const storedBoxSchema = z
     project: storedBoxProjectSchema.nullable().optional(),
     threadId: z.string().nullable().optional(),
     purposeNote: z.string().nullable().optional(),
+    /** Read with {@link parseStoredAccountLends}. */
+    accountLends: z.unknown().optional(),
     /** SHA-256 (hex) of the per-box credential issued at first connect. */
     credentialHash: z.string().optional(),
     /** SHA-256 (hex) of the single-use bootstrap token, until used or expired. */

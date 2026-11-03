@@ -8,9 +8,9 @@
  * 2. `start()` — right after `plugins.start()` and before `sessions.reattach()`: the box records
  *    load (a reattached box terminal finds its box), the plugin switch is followed.
  * 3. `attach(...)` — once the session list, the browser tabs, the temporary-box tools and the agent
- *    chat exist: the token broker, dev-server forwards, the agent host's view of box projects, the
- *    MCP bridge, the Template command runner, and the temporary-box tools (connected only while the
- *    plugin is on, so the box tools are hidden while it is off).
+ *    chat exist: the token broker, account lends, dev-server forwards, the agent host's view of box
+ *    projects, the MCP bridge, the Template command runner, and the temporary-box tools (connected
+ *    only while the plugin is on, so the box tools are hidden while it is off).
  * 4. Routes, per transport: {@link DaemonBoxes.registerRoutes}.
  * 5. `stop()` at shutdown.
  *
@@ -61,6 +61,7 @@ import { BoxDevForwards } from "./remote/exec/dev-forwards.ts";
 import { createBoxGitRouteResolver } from "./remote/exec/git.ts";
 import { registerBoxStatsRoute } from "./remote/exec/stats.ts";
 import { BoxAwareSessionManager, BoxTerminalManager, composeIndexContributors } from "./remote/exec/terminals.ts";
+import { AccountLends, hasActiveLend, registerAccountLendRoutes } from "./lends/index.ts";
 import { registerBoxGitAuth, workspaceAccountFromFiles } from "./remote/git-auth.ts";
 import { registerMcpBridge } from "./remote/mcp-bridge.ts";
 import { createDaemonBoxService, managedAgentHomes } from "./service/daemon-wiring.ts";
@@ -130,6 +131,8 @@ export interface DaemonBoxesAttachment {
   agentChat: AgentChatService;
   agentProfile: Pick<AgentProfileService, "snapshot">;
   temporaryBoxTools: TemporaryBoxTools;
+  /** False when the session index failed to load: an empty session list then says nothing about any chat. */
+  sessionsLoaded: () => boolean;
 }
 
 export interface DaemonBoxes {
@@ -295,6 +298,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
   // ---- attached later ----------------------------------------------------------------------
   let transcripts: BoxTranscriptSyncService | null = null;
   let broker: AgentTokenBroker | null = null;
+  let lends: AccountLends | null = null;
   let forwards: BoxDevForwards | null = null;
   let boxBrowsers: BoxBrowsers | null = null;
   let agentChat: AgentChatService | null = null;
@@ -453,22 +457,51 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
 
       // Sessions in box projects never refresh their account on this host (spec §7).
       sessions.setBoxProjectPredicate((path) => registry.locate(path).kind === "box");
+      const credentialFiles = nodeCredentialFiles(agentAccountsDir(deps.baseDir));
+      const onSessionsChanged = (listener: () => void): (() => void) => {
+        const events = ["created", "updated", "exited", "closed"] as const;
+        for (const event of events) sessions.lifecycle.on(event, listener);
+        return () => {
+          for (const event of events) sessions.lifecycle.off(event, listener);
+        };
+      };
       const tokenBroker = createAgentTokenBroker({
         accounts: deps.agentAccounts,
         registry,
         sessions: () => sessions.list(),
         hostLocalAccountIds: () => sessions.hostLocalAccountIds(),
-        onSessionsChanged: (listener) => {
-          const events = ["created", "updated", "exited", "closed"] as const;
-          for (const event of events) sessions.lifecycle.on(event, listener);
-          return () => {
-            for (const event of events) sessions.lifecycle.off(event, listener);
-          };
-        },
-        files: nodeCredentialFiles(agentAccountsDir(deps.baseDir))
+        onSessionsChanged,
+        files: credentialFiles,
+        isAccountLent: (boxId, accountId) => hasActiveLend(registry.get(boxId), accountId, Date.now())
       });
       broker = tokenBroker;
       registerTokenBroker(hub, tokenBroker);
+      // Lends run whatever the plugin switch says: with it off their boxes are away, so nothing is
+      // asked, and a lend must still reach its time limit. Only new ones need it on.
+      const accountLends = new AccountLends({
+        baseDir: deps.baseDir,
+        accounts: deps.agentAccounts,
+        records: boxes.records,
+        registry,
+        hub,
+        broker: tokenBroker,
+        files: credentialFiles,
+        sessions: () => sessions.list(),
+        onSessionsChanged,
+        sessionsLoaded: attachment.sessionsLoaded,
+        chatOpen: (threadId) => attachment.agentChat.chat.has(threadId),
+        enabled: () => boxes.enabled(),
+        publishChanged: () => boxes.publishChanged(),
+        logger
+      });
+      registry.setLendRuntime(accountLends.runtimeOf);
+      const onChatClosed = ({ id, rolledBack }: { id: string; rolledBack?: boolean }): void => {
+        if (!rolledBack) accountLends.chatClosed(id);
+      };
+      attachment.agentChat.chat.lifecycle.on("closed", onChatClosed);
+      unsubscribers.push(() => void attachment.agentChat.chat.lifecycle.off("closed", onChatClosed));
+      await accountLends.start();
+      lends = accountLends;
       registerBoxGitAuth(hub, {
         workspaceAccount: workspaceAccountFromFiles({ accountsFile: deps.accountsFile, workspacesMetaFile: deps.workspacesMetaFile }),
         knownHosts: (host, port) => knownHostsForBox({ keysDir: deps.keysDir, home: deps.home, host, port }),
@@ -542,6 +575,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     registerRoutes(app, mode) {
       registerBoxConfigChangeRoutes(app, { sync: configSync, logger: { error: (message) => logger.error(`[boxes] ${message}`) } });
       registerBoxStatsRoute(app, { registry, hub });
+      registerAccountLendRoutes(app, () => lends);
       registerBoxMcpRunInBoxRoutes(app, {
         file: boxMcpSettingsPath(deps.baseDir),
         snapshot: async (agent) => {
@@ -572,6 +606,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
 
     async stop() {
       for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+      await lends?.stop().catch((error) => logger.warn("[boxes] Stopping account lends failed", errorText(error)));
       // Box Chromiums end while the links still carry the kill (kill and relaunch, never reattach).
       await boxBrowsers?.stop().catch((error) => logger.warn("[boxes] Closing VM browsers failed", errorText(error)));
       if (disconnectTools) {

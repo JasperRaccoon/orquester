@@ -42,6 +42,8 @@ export interface ManifestThread {
   denyEveryKnown?: boolean;
   /** Spec §5.4: no Admin tool is advertised to it. */
   workflowOwned: boolean;
+  /** boxes: its CLI runs in a project box ({@link BOX_CHAT_TOOLS}). */
+  inBox?: boolean;
 }
 
 export interface ManifestInput {
@@ -78,10 +80,13 @@ export const KNOWLEDGE_WORKER_TOOLS: readonly string[] = ["knowledge_worker_next
 /** The knowledge tools a chat that sees no collection is not advertised: they act on entries it can see (saving and listing collections stay). */
 export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get", "knowledge_insights", "knowledge_update", "knowledge_delete", "knowledge_merge"];
 
+/** The `boxes` tools a chat already running in a box is advertised even while no box can be rented. */
+const BOX_CHAT_TOOLS: readonly string[] = ["list_boxes", "box_lend_accounts", "box_return_accounts"];
+
 /**
  * The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for
  * a workflow-owned chat — and (boxes) less the `boxes` toolset while no box can be rented, so no
- * chat pays for tools it cannot use; (devices) less the `devices` toolset likewise. Knowledge Graph:
+ * chat pays for tools it cannot use, but for {@link BOX_CHAT_TOOLS} in a chat running in a box; (devices) less the `devices` toolset likewise. Knowledge Graph:
  * the `knowledge` toolset only while the plugin is on, without the entry tools
  * ({@link KNOWLEDGE_SEARCH_TOOLS}) for a chat that sees no collection, and never the worker tools; a
  * worker session gets ONLY the worker tools.
@@ -91,7 +96,8 @@ function advertisedChatTools(
   workflowOwned: boolean,
   boxesAvailable = false,
   knowledge?: ManifestKnowledge,
-  devicesAvailable = false
+  devicesAvailable = false,
+  inBox = false
 ): string[] {
   if (knowledge?.worker === true) return catalog.filter((tool) => KNOWLEDGE_WORKER_TOOLS.includes(tool.name)).map((tool) => tool.name);
   const knowledgeTool = (tool: AnyOrquesterTool): boolean => {
@@ -104,7 +110,7 @@ function advertisedChatTools(
     .filter(
       (tool) =>
         !(workflowOwned && tool.tier === "admin") &&
-        (boxesAvailable || tool.toolset !== "boxes") &&
+        (boxesAvailable || tool.toolset !== "boxes" || (inBox && BOX_CHAT_TOOLS.includes(tool.name))) &&
         (devicesAvailable || tool.toolset !== "devices") &&
         knowledgeTool(tool)
     )
@@ -162,7 +168,7 @@ function denyFor(thread: ManifestThread, servers: readonly DaemonPointingServer[
 /** The manifest of one thread. */
 export function buildSessionToolsManifest(input: ManifestInput): SessionToolsManifest {
   const knowledge = input.knowledge;
-  const tools = advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true, knowledge, input.devicesAvailable === true);
+  const tools = advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true, knowledge, input.devicesAvailable === true, input.thread.inBox === true);
   const instructions =
     knowledge?.worker === true
       ? KNOWLEDGE_WORKER_INSTRUCTIONS

@@ -12,7 +12,8 @@ import {
   toolApprovalKindBadge,
   toolApprovalPreviewIsCut,
   // boxes:
-  isBoxApprovalCard
+  isBoxApprovalCard,
+  isAccountApprovalCard
 } from "./banner-model.ts";
 import { parseToolApprovalSummary } from "@orquester/api/agent-chat";
 
@@ -165,6 +166,24 @@ test("a box rental (spend card) says what approving costs and reads as money, no
   assert.match(sentence, /billed to your account/);
   assert.match(sentence, /when this chat closes/);
   assert.equal(toolApprovalKindBadge({ kind: "spend" }), "Costs money");
+});
+
+test("a lend card is known to this build and does not read as money or a rental", () => {
+  const card = parsed({ kind: "spend", family: "accounts", tool: "box_lend_accounts" });
+  const sentence = toolApprovalChangeSentence(card);
+  assert.notEqual(sentence, toolApprovalChangeSentence({ ...card, family: "unknown" }));
+  assert.notEqual(sentence, toolApprovalChangeSentence({ ...card, family: "boxes" }));
+  assert.notEqual(toolApprovalKindBadge(card), toolApprovalKindBadge({ kind: "spend" }));
+  assert.notEqual(toolApprovalKindBadge(card), toolApprovalKindBadge({ kind: "spend", tool: "create_box" }));
+});
+
+test("an accounts card for a chat's tool does not read as a lend", () => {
+  const lend = parsed({ kind: "spend", family: "accounts", tool: "box_lend_accounts" });
+  const chat = parsed({ kind: "spend", family: "accounts", tool: "create_session" });
+  assert.notEqual(toolApprovalKindBadge(chat), toolApprovalKindBadge(lend));
+  assert.notEqual(toolApprovalChangeSentence(chat), toolApprovalChangeSentence(lend));
+  assert.notEqual(toolApprovalChangeSentence(chat), toolApprovalChangeSentence({ ...chat, family: "unknown" }));
+  assert.equal(isAccountApprovalCard(chat), true);
 });
 
 test("a late answer says the agent stopped waiting; a bad one keeps the card", () => {

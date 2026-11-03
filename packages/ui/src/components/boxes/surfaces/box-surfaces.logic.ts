@@ -580,13 +580,14 @@ export function chatTemporaryBoxes(boxes: readonly BoxSummary[], threadId: strin
     });
 }
 
-/** The folded box panel's line: "1 VM running · 2 destroyed · 1 config change to review". */
-export function boxPanelSummary(temporary: readonly Pick<BoxSummary, "state">[], pendingChanges: number): string {
+/** The folded box panel's line: "1 VM running · 2 destroyed · 1 lent login · 1 config change to review". */
+export function boxPanelSummary(temporary: readonly Pick<BoxSummary, "state">[], pendingChanges: number, lentLogins = 0): string {
   const live = temporary.filter((box) => box.state !== "destroyed").length;
   const ended = temporary.length - live;
   const parts: string[] = [];
   if (live > 0) parts.push(`${live} ${live === 1 ? "VM" : "VMs"} running`);
   if (ended > 0) parts.push(`${ended} destroyed`);
+  if (lentLogins > 0) parts.push(`${lentLogins} lent ${lentLogins === 1 ? "login" : "logins"}`);
   if (pendingChanges > 0) parts.push(`${pendingChanges} config ${pendingChanges === 1 ? "change" : "changes"} to review`);
   return parts.length > 0 ? parts.join(" · ") : "VM details";
 }

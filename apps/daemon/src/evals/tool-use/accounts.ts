@@ -29,14 +29,26 @@ export function pickAccount(accounts: readonly AgentAccountRecord[], wanted: str
   throw new Error(`"${wanted}" names ${hits.length} accounts; use more of the id. Known: ${known}.`);
 }
 
+/**
+ * The fix on a VM (the box agent sets `ORQ_BOX_ID` on every process it starts): a login already lent
+ * is at another appdir, and asking again would open a new card, so that comes first.
+ */
+const onVm = (): string =>
+  process.env.ORQ_BOX_ID ? " On a VM: if it was lent, pass the appdir box_lend_accounts returned (--appdir or ORQUESTER_APPDIR). If not, ask with box_lend_accounts." : "";
+
 /** The account named `wanted` under appdir `baseDir`, checked to hold a login. */
 export async function resolveAccount(baseDir: string, wanted: string): Promise<EvalAccount> {
-  const index = parseAgentAccounts(JSON.parse(await readFile(agentAccountsFile(baseDir), "utf8")));
+  const file = agentAccountsFile(baseDir);
+  const raw = await readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") throw new Error(`No managed accounts: ${file} does not exist.${onVm()}`);
+    throw error;
+  });
+  const index = parseAgentAccounts(JSON.parse(raw));
   const account = pickAccount(index.accounts, wanted);
   if (account.needsReauth) throw new Error(`Account ${account.label} needs a new login in Orquester first.`);
   const home = join(agentAccountsDir(baseDir), "claude", account.id, "home");
   await access(join(home, ".credentials.json")).catch(() => {
-    throw new Error(`Account ${account.label} has no login in ${home}.`);
+    throw new Error(`Account ${account.label} has no login in ${home}.${onVm()}`);
   });
   return { id: account.id, label: account.label, home };
 }
