@@ -46,7 +46,7 @@
 import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 
-import { SYSTEM_ACCOUNT_ID, type AccountSelectionDecision, type AgentAdapterId, type SessionSummary } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type AccountSelectionDecision, type AgentAccount, type AgentAdapterId, type SessionSummary } from "@orquester/api";
 import {
   agentChatCommandPath,
   OVERLOAD_RETRY_BASE_MS,
@@ -136,6 +136,8 @@ export interface LimitRecoveryOptions {
   retryMs?: number;
   settleTimeoutMs?: number;
 }
+
+const BOX_ACCOUNT_REFUSAL = "This chat has a VM that does not use that account yet, so it did not move there by itself. Switch to it yourself, or wait for the reset.";
 
 /** What one attempt to post a turn came to. */
 type PostOutcome = { kind: "sent"; seq: number } | { kind: "busy" } | { kind: "unavailable" } | { kind: "refused"; message: string };
@@ -393,7 +395,7 @@ export class ChatLimitRecovery {
     };
     this.opts.chat.setUsageLimit(id, state);
 
-    if (prefs.switchAccount && this.canSwitch(tab)) {
+    if (prefs.switchAccount && this.canFailOver(tab)) {
       const switched = await this.failover(id, {
         commandId: limitCommandId("limit-switch", id, state.turnId ?? state.noticeId),
         automatic: true
@@ -536,7 +538,7 @@ export class ChatLimitRecovery {
     }
     const ownReset = state.resetAt === null ? Number.NaN : Date.parse(state.resetAt);
     const ownFree = Number.isFinite(ownReset) && ownReset <= now;
-    if (!ownFree && state.kind !== "overloaded" && prefs.switchAccount && this.canSwitch(tab)) {
+    if (!ownFree && state.kind !== "overloaded" && prefs.switchAccount && this.canFailOver(tab)) {
       // Woken by another account's reset (every account was cooling down): move to it.
       const outcome = await this.failover(id, {
         commandId: limitCommandId("limit-switch", id, state.turnId ?? state.noticeId, String(due)),
@@ -579,8 +581,31 @@ export class ChatLimitRecovery {
     return this.opts.adapterOf(tab.refId) !== "opencode" && accountFamilyOf(tab.refId) !== null;
   }
 
+  /**
+   * A failover nobody asked for, so no one approved its login reaching a box: for a chat with a box,
+   * only to an account that box already has. A person's switch is that person's decision.
+   */
+  private canFailOver(tab: SessionSummary): boolean {
+    return this.canSwitch(tab) && (!this.boxBound(tab) || this.boxAccounts(tab).length > 0);
+  }
+
+  private boxBound(tab: SessionSummary): boolean {
+    return (this.api?.boxesOfChat?.({ projectPath: tab.projectPath, threadId: tab.id }).length ?? 0) > 0;
+  }
+
+  /** May this chat move to the account with no card? A box of its would gain that account's `token.get`, so only if it has it already. */
+  private boxAllows(tab: SessionSummary, accountId: string): boolean {
+    return (this.api?.boxesOfChat?.({ projectPath: tab.projectPath, threadId: tab.id }) ?? []).every((box) => box.usesAccount(accountId));
+  }
+
+  /** The family's other accounts every box of this chat already uses. */
+  private boxAccounts(tab: SessionSummary): AgentAccount[] {
+    const family = accountFamilyOf(tab.refId);
+    return this.opts.accounts.list().accounts.filter((account) => account.agent === family && account.id !== tab.accountId && this.boxAllows(tab, account.id));
+  }
+
   /** The best other account for the chat: the workflows' least-used selection over its family. */
-  private pick(tab: SessionSummary, model: string): AccountSelectionDecision {
+  private pick(tab: SessionSummary, model: string, automatic: boolean): AccountSelectionDecision {
     const family = accountFamilyOf(tab.refId)!;
     const chain: AgentChainEntry[] = [
       {
@@ -598,7 +623,7 @@ export class ChatLimitRecovery {
     return selectAccount({
       chain,
       usage: this.opts.usage.snapshot(),
-      accounts: this.opts.accounts.list(),
+      accounts: automatic && this.boxBound(tab) ? { ...this.opts.accounts.list(), accounts: this.boxAccounts(tab) } : this.opts.accounts.list(),
       cooldowns: this.opts.cooldowns.list(),
       now: this.opts.clock.now(),
       exclude: new Set([cooldownKey(family, accountKeyOf(tab))])
@@ -759,10 +784,11 @@ export class ChatLimitRecovery {
     let decision: AccountSelectionDecision | undefined;
     if (target === undefined) {
       const head = await readThreadHead(api, id).catch(() => null);
-      decision = this.pick(tab, head?.head.modelSelection.model ?? "");
+      decision = this.pick(tab, head?.head.modelSelection.model ?? "", input.automatic);
       target = decision.chosen?.accountId;
       if (target === undefined) return { switched: false, decision, reason: noCandidateReason(decision, this.opts.clock.now()) };
     }
+    if (input.automatic && !this.boxAllows(tab, target)) return { switched: false, ...(decision ? { decision } : {}), reason: BOX_ACCOUNT_REFUSAL };
     const fromAccountId = tab.accountId ?? "";
     this.forget(id);
     const state: ChatUsageLimitState = {

@@ -41,7 +41,7 @@ import { requireBoxes, type BoxLaunch } from "../../boxes/index.ts";
 import { claudeMcpSpec, type McpBridgePlan, type McpServerSpec } from "../../boxes/mcp-plan.ts";
 import { BoxLaunchError } from "../../boxes/errors.ts";
 import { joinBoxPath } from "../../boxes/launch-info.ts";
-import { claudeBoxCredentials } from "../../../boxes/broker/credentials.ts";
+import { claudeBoxCredentials, isOwnBoxLogin, NOT_OURS, readOwnBoxFile } from "../../../boxes/broker/credentials.ts";
 import { claudeConfigDir, claudeJsonPath } from "./config-dir.ts";
 import { claudeVersionGateMessage, meetsMinimumClaudeVersion, parseClaudeVersion } from "./models.ts";
 import type { ClaudeProfileLaunch, ClaudeProfileLaunchFiles } from "./profile-launch.ts";
@@ -232,12 +232,24 @@ export async function prepareClaudeBoxSession(input: {
       throw new BoxLaunchError("BOX_SYSTEM_ACCOUNT", "This chat's Claude account has no config directory, so it cannot run in a box.");
     }
     const credentialsPath = joinBoxPath(launch.sys.os, configDir, ".credentials.json");
-    await launch.installCredentials((grant) =>
-      launch.connection.writeFile(credentialsPath, `${JSON.stringify(claudeBoxCredentials(grant, Date.now()))}\n`, {
+    // A machine paired on this very host maps to this host's own account home, and a real login
+    // there holds the only copy of its refresh token. Read before every write, rewrites included.
+    const refuseRealLogin = async (): Promise<void> => {
+      const found = await readOwnBoxFile(launch.connection, credentialsPath);
+      if (found === null || (found !== NOT_OURS && isOwnBoxLogin(found, await launch.hostLogin()))) return;
+      throw new BoxLaunchError(
+        "BOX_LOGIN_IN_USE",
+        `${credentialsPath} on this machine is a real login, so this chat will not overwrite it. It may be this account's own home on a machine paired on this host; run the chat there without a box, or on another machine.`
+      );
+    };
+    await refuseRealLogin();
+    await launch.installCredentials(async (grant) => {
+      await refuseRealLogin();
+      await launch.connection.writeFile(credentialsPath, `${JSON.stringify(claudeBoxCredentials(grant, Date.now()))}\n`, {
         mode: 0o600,
         mkdirs: true
-      })
-    );
+      });
+    });
 
     const cwd = launch.toBox(start.cwd);
     await launch.ensureDirs([context.attachmentsDir(start.threadId)]);

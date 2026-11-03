@@ -54,6 +54,7 @@ The owner's first requirement is that nothing happens to the real logins: no ref
 ### What is not guaranteed, and must be stated honestly
 
 - A token copied off the VM keeps working until it expires. Deleting the file cannot stop it. It can spend quota, not take over the login. Claude tokens last hours; Codex tokens last about 10 days, so the card shows each token's real expiry.
+- The ownership check of a file on a VM and the write or removal after it are separate requests, because the VM has no compare-and-replace. A process on the VM writing a real login in between is not excluded.
 - A provider can end any login at any time, and a daemon crash between a provider's refresh response and the save loses the rotated token, requiring a new login. Both exist today, and a lend adds no new path to them.
 
 ## 4. Lifecycle
@@ -101,7 +102,8 @@ Paths are the host's mapped by `hostToBoxPath(connection.paths, …)`, using `ag
   "OPENAI_API_KEY": null,
   "auth_mode": "chatgpt",
   "tokens": { "id_token": "<synthetic>", "access_token": "<grant>", "refresh_token": "", "account_id": "<grant.extra.chatgptAccountId>" },
-  "last_refresh": "<now ISO>"
+  "last_refresh": "<now ISO>",
+  "lentBy": "orquester"
 }
 ```
 
@@ -129,7 +131,7 @@ Every write goes through `connection.writeFile` with mode 0600. It is an atomic 
 **A real login is never touched.** POSIX paths map to themselves, so on a bring-your-own machine, possibly this same host, the lend's paths may be a real install's. Before any write or removal the service reads what is there:
 
 - An index without `"lentBy": "orquester"` is not ours.
-- A login is not ours if it holds a non-empty refresh token anywhere in it or an `OPENAI_API_KEY`, or does not parse (ours are written whole).
+- A login is ours only if it says so: `"lentBy": "orquester"`, which a Claude chat's login carries too, and which both CLIs ignore (`claude auth status` 2.1.307 and `codex login status` 0.163.0, with fake tokens). The one exception is a login an older daemon wrote: `claudeAiOauth` alone, with only the fields that code wrote. Never ours: a non-empty `claudeAiOauth.refreshToken` or `tokens.refresh_token` (someone signed in over ours), an `OPENAI_API_KEY`, a file that does not parse, or the very bytes of the host's login at that path, which on a machine paired on this host is that same file.
 - A symlink, a folder, an oversized or an unreadable file is not ours.
 
 Something not ours refuses the preview and the install with `LEND_APPDIR_IN_USE`, and is never overwritten or removed. If it appears later, a keeper rewrite refuses too: status `renewal-failing` with the reason, no broker call and no timed retries, and only a host login change or a reconnect looks again. A return leaves it there and deletes the record. The check and the write are separate requests, so a process on the VM writing in between is not excluded; the VM has no compare-and-replace.
@@ -228,7 +230,7 @@ Do not grow the `## Orquester` instruction block: the deferred tool's name and t
 Title: "Lend 2 accounts to a VM". Scope label: "Uses your subscription quota". Sections, in order:
 
 1. **Purpose** (text).
-2. **The VM** (fields): provider and size, or project name; time limit; ends at.
+2. **The VM** (fields): provider and size, or project name; time limit.
 3. **Accounts** (fields), one row each: label as the row label, value such as "Claude · current token valid until 19:40" or "Codex · current token valid until Nov 13".
 4. Unattended warning, when it applies (existing constant).
 5. **Warning** (caution): "Anything running on this VM can read these logins and use their quota until each token expires, even after the lend ends. Their refresh tokens stay on this server, so nothing on the VM can renew them or change your login."
@@ -250,7 +252,7 @@ Plus an extra caution section when a Codex account is included, stating the real
 ### In Settings
 
 - `BoxesList`: the same rows on each box.
-- `AgentsSettings`: an account lent anywhere shows a chip such as "Lent to 1 VM until 21:40".
+- `AgentAccountsSettings`: an account lent anywhere shows a chip such as "Lent to 1 VM until 21:40".
 
 Shared UI goes in `packages/ui`, so desktop and web both get it. Copy stays out of tests.
 

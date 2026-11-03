@@ -81,7 +81,7 @@ export const KNOWLEDGE_WORKER_TOOLS: readonly string[] = ["knowledge_worker_next
 export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get", "knowledge_insights", "knowledge_update", "knowledge_delete", "knowledge_merge"];
 
 /** The `boxes` tools a chat already running in a box is advertised even while no box can be rented. */
-export const BOX_CHAT_TOOLS: readonly string[] = ["list_boxes", "box_lend_accounts", "box_return_accounts"];
+const BOX_CHAT_TOOLS: readonly string[] = ["list_boxes", "box_lend_accounts", "box_return_accounts"];
 
 /**
  * The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for

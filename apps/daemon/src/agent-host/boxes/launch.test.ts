@@ -211,7 +211,8 @@ test("Claude's box login: a refresh-token-free credentials file, rewritten only 
       scopes: ["user:inference", "user:profile"],
       subscriptionType: "max",
       rateLimitTier: "default_claude_max_20x"
-    }
+    },
+    lentBy: "orquester"
   });
   assert.equal("refreshToken" in written.claudeAiOauth, false);
   assert.deepEqual(tokens.requests[0], { boxId: connection.boxId, agent: "claude", accountId: "acct-1", minValidSeconds: 2700 });
@@ -825,6 +826,66 @@ test("a box that cannot list its processes fails the start before anything is sy
     (error: unknown) => error instanceof BoxLaunchError && error.code === "BOX_UNAVAILABLE" && /link dropped/.test(error.message)
   );
   assert.equal(sync.calls.length, 0);
+});
+
+test("a Claude chat never overwrites a real login at its box path: not at the start, not on any rewrite", async () => {
+  const home = await boxHome(["claude"]);
+  const root = await scratch("box-root-");
+  const hostHome = "/accounts/claude/acct-1/home";
+  const hostPath = `${hostHome}/.credentials.json`;
+  const now = Date.now();
+  const local = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
+  const connection = redirectedBoxConnection(rootedReadsBoxConnection(local, join(root, "box")), join(root, "box"));
+  const onBox = connection.localPathOf(hostPath);
+  const real = JSON.stringify({ claudeAiOauth: { accessToken: "real", refreshToken: "REFRESH-MARKER", expiresAt: now + 8 * 60 * 60_000 } });
+  const loginFiles = manualLoginFiles();
+  loginFiles.files.set(hostPath, hostLogin("access-1", now + 8 * 60 * 60_000));
+  const tokens = recordingTokens({ accessToken: "access-1", expiresAt: now + 8 * 60 * 60_000 });
+  const boxes = createAgentHostBoxes({ appdir: join(root, "appdir"), connector: () => connection, tokens, sync: recordingSync(), logger: quiet, loginFiles });
+  const { context } = createFakeContext({ boxes, attachmentsDir: (threadId) => join(root, "attachments", threadId) });
+  const start = () =>
+    prepareClaudeBoxSession({
+      context,
+      start: {
+        threadId: "t1",
+        cwd: "/w/p",
+        projectPath: "/w/p",
+        home: { kind: "account", accountId: "acct-1", path: hostHome },
+        box: launchBox(connection),
+        modelSelection: { model: "opus" },
+        runtimeMode: "approval-required"
+      },
+      hostEnv: { CLAUDE_CONFIG_DIR: hostHome, HOME: "/var/lib/orquester" },
+      resumeSessionId: undefined,
+      loadProfileLaunch: async () => null
+    });
+
+  await mkdir(dirname(onBox), { recursive: true });
+  await writeFile(onBox, real);
+  await assert.rejects(start(), (error: unknown) => error instanceof BoxLaunchError && error.code === "BOX_LOGIN_IN_USE");
+  assert.equal(await readFile(onBox, "utf8"), real);
+  assert.equal(tokens.requests.length, 0, "no refresh spent on a login that cannot be written");
+
+  // Ours: replaced as ever, and it carries the marker that says so.
+  await rm(onBox);
+  await (await start()).launch.close();
+  assert.equal(JSON.parse(await readFile(onBox, "utf8")).lentBy, "orquester");
+  const again = await start();
+  try {
+    assert.equal(JSON.parse(await readFile(onBox, "utf8")).claudeAiOauth.accessToken, "access-1", "our own file does not stop a restart");
+
+    // A real login appears: the host's renewal and a refused token each try to rewrite.
+    await writeFile(onBox, real);
+    loginFiles.files.set(hostPath, hostLogin("access-2", now + 8 * 60 * 60_000));
+    tokens.grant = { accessToken: "access-2", expiresAt: now + 8 * 60 * 60_000 };
+    loginFiles.fire(hostPath);
+    await again.launch.refreshCredentials();
+    assert.equal(await readFile(onBox, "utf8"), real);
+    await again.launch.renewRejectedLogin().catch(() => undefined);
+    assert.equal(await readFile(onBox, "utf8"), real);
+  } finally {
+    await again.launch.close();
+  }
 });
 
 test("a Claude box start loads the profile launch through the box: the project's files are the box's, the walk stops at the box's home", async () => {

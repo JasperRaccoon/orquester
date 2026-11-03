@@ -9,9 +9,9 @@
  * - **Records first.** A lend is persisted before the box is touched; ended, it stays with `endedAt`
  *   until its files were removed, so a restart or an offline box loses no cleanup.
  * - **A real login is never touched.** A bring-your-own machine may be a real install at the same
- *   appdir, even this host. Our index carries {@link LEND_INDEX_MARKER}, our logins hold no refresh
- *   token; anything else at those paths is refused with `LEND_APPDIR_IN_USE` in the preview, the
- *   install and every rewrite, and is never removed.
+ *   appdir, even this host. Our files carry `BOX_FILE_MARKER` (`isOwnBoxLogin`); anything else at
+ *   those paths is refused with `LEND_APPDIR_IN_USE` in the preview, the install and every rewrite,
+ *   and is never removed.
  * - **What a cleanup keeps.** A login file stays only while another active lend of that account is on
  *   the box, or a live Claude chat in the project box reads it. In the second case the ended record
  *   stays too, so the file goes when that session does.
@@ -54,7 +54,7 @@ import { agentAccountsFile, createDefaultAgentAccounts, type AgentAccountsIndex,
 import { BoxTokenTracker } from "../../agent-host/boxes/token-policy.ts";
 import { ACCOUNT_ID_PATTERN } from "../../agent-account-paths.ts";
 import { AgentTokenError, GONE_STATES } from "../broker/broker.ts";
-import { boxLoginFile, credentialPath, grantFromCredentials, holdsRealLogin, type CredentialFiles } from "../broker/credentials.ts";
+import { BOX_FILE_MARKER, boxLoginFile, credentialPath, grantFromCredentials, isOwnBoxLogin, NOT_OURS, readOwnBoxFile, type CredentialFiles } from "../broker/credentials.ts";
 import type { AgentTokenBroker, BoxConnection, BoxHub, BoxRegistry } from "../contracts.ts";
 import { errorLine } from "../service/errors.ts";
 import type { BoxRecordStore } from "../service/store.ts";
@@ -65,16 +65,10 @@ import { LendKeeper, LendStoppedError, type LendKeeperState } from "./keeper.ts"
 const END_RETRY_MS = 60_000;
 /** `setTimeout`'s range; a later time limit (a record from elsewhere) looks again then. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
-/** Marks an `agent-accounts.json` on a box as ours: one without it belongs to a real install. */
-export const LEND_INDEX_MARKER = { lentBy: "orquester" } as const;
-/** The largest file on a box taken for one of ours (a login and an index are small). */
-const MAX_OWN_FILE_BYTES = 1024 * 1024;
-/** What a box's file reads as when it cannot be one of ours: not a file, too large, unreadable. */
-const NOT_OURS = Symbol("not ours");
 /** A chat's session statuses with no CLI running: the next start installs its own login. */
 const CHAT_NOT_RUNNING: ReadonlySet<string> = new Set(["idle", "stopped", "error"]);
 
-export type LendEndReason = "returned" | "time-limit" | "chat-closed" | "box-released" | "install-failed";
+type LendEndReason = "returned" | "time-limit" | "chat-closed" | "box-released" | "install-failed";
 
 /** A refusal the routes answer verbatim, written for the agent. Never names a token. */
 export class AccountLendError extends Error {
@@ -124,7 +118,7 @@ export interface LendAccounts {
 /** What lending reads of a session. */
 export type LendSession = Pick<SessionSummary, "id" | "kind" | "refId" | "accountId" | "projectPath" | "status" | "chatSessionStatus">;
 
-export interface AccountLendsDeps {
+interface AccountLendsDeps {
   /** The appdir base (the index's path, and the appdir an eval is told). */
   baseDir: string;
   accounts: LendAccounts;
@@ -851,7 +845,13 @@ export class AccountLends {
       const connection = this.deps.hub.get(boxId);
       const active = activeLends(record);
       if (!connection?.connected || active.length === 0) return;
-      await this.ensureFolders(connection, active);
+      // Giving a folder to the box's working user is a write too: nothing of a real install's.
+      await this.assertIndexFree(connection);
+      const free: StoredAccountLend[] = [];
+      for (const lend of active) {
+        if (await this.loginFree(connection, lend.agent as BoxLendAgent, lend.accountId)) free.push(lend);
+      }
+      await this.ensureFolders(connection, free);
       await this.writeIndex(boxId);
     });
   }
@@ -866,34 +866,29 @@ export class AccountLends {
     return connection.request("agent.ensurePaths", { paths: [...new Set(folders)].map((folder) => hostToBoxPath(connection.paths, folder)) });
   }
 
-  /**
-   * A box file's text; null when there is nothing there; {@link NOT_OURS} for anything that cannot be
-   * ours (a symlink, a folder, too large, unreadable). Throws only when the link is gone.
-   */
+  /** {@link readOwnBoxFile}, with a lost link said the way the routes say it. */
   private async readBoxFile(connection: BoxConnection, path: string): Promise<string | null | typeof NOT_OURS> {
-    try {
-      const stats = await connection.request("fs.stat", { path, followSymlinks: false });
-      if (stats === null) return null;
-      if (stats.kind !== "file" || stats.size > MAX_OWN_FILE_BYTES) return NOT_OURS;
-      const chunks: Buffer[] = [];
-      for await (const chunk of await connection.readFile(path)) chunks.push(Buffer.from(chunk as Uint8Array));
-      return Buffer.concat(chunks).toString("utf8");
-    } catch (error) {
-      if (!connection.connected) throw notConnected();
-      this.warnBox(connection.boxId, `could not read ${path}, so it is left alone`, error);
-      return NOT_OURS;
-    }
+    return readOwnBoxFile(connection, path).catch(() => {
+      throw notConnected();
+    });
   }
 
   private loginBoxPath(connection: BoxConnection, agent: BoxLendAgent, accountId: string): string {
     return hostToBoxPath(connection.paths, this.loginPath(agent, accountId));
   }
 
+  /** Whether the login's path holds nothing, or a login of ours. */
+  private async loginFree(connection: BoxConnection, agent: BoxLendAgent, accountId: string): Promise<boolean> {
+    const found = await this.readBoxFile(connection, this.loginBoxPath(connection, agent, accountId));
+    if (found === null) return true;
+    if (found === NOT_OURS) return false;
+    const hostLogin = await this.deps.files.read(this.loginPath(agent, accountId)).catch(() => null);
+    return isOwnBoxLogin(found, hostLogin);
+  }
+
   /** Throws `LEND_APPDIR_IN_USE` unless the login's path holds nothing, or a login of ours. */
   private async assertLoginFree(connection: BoxConnection, agent: BoxLendAgent, accountId: string): Promise<void> {
-    const path = this.loginBoxPath(connection, agent, accountId);
-    const found = await this.readBoxFile(connection, path);
-    if (found !== null && (found === NOT_OURS || holdsRealLogin(found))) throw appdirInUse(path);
+    if (!(await this.loginFree(connection, agent, accountId))) throw appdirInUse(this.loginBoxPath(connection, agent, accountId));
   }
 
   /** Throws `LEND_APPDIR_IN_USE` unless the index's path holds nothing, or an index of ours. */
@@ -907,7 +902,7 @@ export class AccountLends {
     if (found === NOT_OURS) return false;
     try {
       const parsed: unknown = JSON.parse(found);
-      return isRecord(parsed) && parsed.lentBy === LEND_INDEX_MARKER.lentBy;
+      return isRecord(parsed) && parsed.lentBy === BOX_FILE_MARKER.lentBy;
     } catch {
       return false;
     }
@@ -920,14 +915,11 @@ export class AccountLends {
 
   /** Remove a lent login; a real one stays. Call inside {@link serial}. */
   private async removeLogin(connection: BoxConnection, agent: BoxLendAgent, accountId: string): Promise<void> {
-    const path = this.loginBoxPath(connection, agent, accountId);
-    const found = await this.readBoxFile(connection, path);
-    if (found === null) return;
-    if (found === NOT_OURS || holdsRealLogin(found)) {
+    if (!(await this.loginFree(connection, agent, accountId))) {
       this.deps.logger.warn(`[boxes] Box ${connection.boxId}: account ${accountId} has a real login at its lent login's path; it is left alone`);
       return;
     }
-    await connection.request("fs.rm", { path, recursive: false, force: true });
+    await connection.request("fs.rm", { path: this.loginBoxPath(connection, agent, accountId), recursive: false, force: true });
   }
 
   /**
@@ -969,7 +961,7 @@ export class AccountLends {
         importedAt: lend.createdAt
       });
     }
-    await connection.writeFile(path, `${JSON.stringify({ ...index, ...LEND_INDEX_MARKER }, null, 2)}\n`, { mode: 0o600, mkdirs: true });
+    await connection.writeFile(path, `${JSON.stringify({ ...index, ...BOX_FILE_MARKER }, null, 2)}\n`, { mode: 0o600, mkdirs: true });
   }
 
   private homeOf(lend: Pick<StoredAccountLend, "agent" | "accountId">): string {

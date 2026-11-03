@@ -5,4 +5,4 @@
  */
 
 export { registerAccountLendRoutes } from "./routes.ts";
-export { AccountLendError, AccountLends, hasActiveLend, type AccountLendsDeps, type LendEndReason } from "./service.ts";
+export { AccountLendError, AccountLends, hasActiveLend } from "./service.ts";

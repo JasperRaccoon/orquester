@@ -60,8 +60,6 @@ const CODEX_AUTH_ENV_UNSET = ["OPENAI_API_KEY"];
 // OAuth login in GROK_HOME/auth.json.
 const GROK_AUTH_ENV_UNSET = ["XAI_API_KEY"];
 
-/** An account home's directory name: the UUID `importAccount` mints. */
-
 /**
  * The first file under `src` (relative path) whose namesake under `dst` has
  * different bytes, or null when every shared name holds the same content.

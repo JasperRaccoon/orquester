@@ -401,6 +401,11 @@ export class BoxLaunch {
     });
   }
 
+  /** The account's login file on this machine; null when there is none. */
+  hostLogin(): Promise<string | null> {
+    return this.host.hostLoginText(this);
+  }
+
   /** Write `content` into the box at `hostPath`'s mapped path (parents created); answers the box path. */
   async writeFile(hostPath: string, content: string | Uint8Array, mode = 0o600): Promise<string> {
     const target = this.toBox(hostPath);
@@ -701,11 +706,15 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
 
   /** The access token of the launch's account login on this machine; null when the file has none (or is mid-rewrite). */
   async hostLoginToken(launch: BoxLaunch): Promise<string | null> {
-    const path = this.hostLoginPath(launch);
     const agent = launch.input.agent;
-    if (path === null || !isTokenAgent(agent)) return null;
-    const text = await this.loginFiles.read(path);
-    return text === null ? null : (grantFromCredentials(agent, text)?.accessToken ?? null);
+    const text = await this.hostLoginText(launch);
+    return text === null || !isTokenAgent(agent) ? null : (grantFromCredentials(agent, text)?.accessToken ?? null);
+  }
+
+  /** The launch's account login file on this machine; null when there is none. */
+  async hostLoginText(launch: BoxLaunch): Promise<string | null> {
+    const path = this.hostLoginPath(launch);
+    return path === null ? null : this.loginFiles.read(path);
   }
 
   /** A detached process id: unique per launch, readable in the box's process list. */
