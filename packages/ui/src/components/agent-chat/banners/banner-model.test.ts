@@ -167,6 +167,15 @@ test("a box rental (spend card) says what approving costs and reads as money, no
   assert.equal(toolApprovalKindBadge({ kind: "spend" }), "Costs money");
 });
 
+test("a lend card is known to this build and does not read as money or a rental", () => {
+  const card = parsed({ kind: "spend", family: "accounts", tool: "box_lend_accounts" });
+  const sentence = toolApprovalChangeSentence(card);
+  assert.notEqual(sentence, toolApprovalChangeSentence({ ...card, family: "unknown" }));
+  assert.notEqual(sentence, toolApprovalChangeSentence({ ...card, family: "boxes" }));
+  assert.notEqual(toolApprovalKindBadge(card), toolApprovalKindBadge({ kind: "spend" }));
+  assert.notEqual(toolApprovalKindBadge(card), toolApprovalKindBadge({ kind: "spend", tool: "create_box" }));
+});
+
 test("a late answer says the agent stopped waiting; a bad one keeps the card", () => {
   assert.equal(toolApprovalAnswerFailure(409).closed, true);
   assert.equal(toolApprovalAnswerFailure(404).closed, true);
