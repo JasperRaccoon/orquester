@@ -459,13 +459,19 @@ test("a chat with a VM moves only to an account that VM already has, and otherwi
   assert.equal(state?.message, "Usage limit reached");
   assert.equal(state?.autoResume, "armed");
   assert.equal(state?.resumeAt, iso(T0 + HOUR + USAGE_LIMIT_RESUME_MARGIN_MS), "it resumes at its own reset, not on the switch's retry");
-  await assert.rejects(h.recovery.switchAndContinue("s1", { commandId: "c1" }), /VM/);
 
-  // A session on that VM uses a third account: only that one will do, named or picked.
+  // A person's switch is their own decision, to any account.
+  assert.equal((await h.recovery.switchAndContinue("s1", { commandId: "c1", accountId: "acc2" })).limitFailover?.toAccountId, "acc2");
+});
+
+test("a chat with a VM fails over by itself to an account that VM already has", async () => {
+  const h = harness({ prefs: { switchAccount: true } });
   h.accounts.push(account("acc3"));
-  uses.add("acc3");
-  await assert.rejects(h.recovery.switchAndContinue("s1", { commandId: "c2", accountId: "acc2" }), /VM/);
-  assert.equal((await h.recovery.switchAndContinue("s1", { commandId: "c3" })).limitFailover?.toAccountId, "acc3");
+  h.api.boxesOfChat = () => [{ boxId: "box-1", label: "p", usesAccount: (accountId) => accountId === "acc3" }];
+  h.api.onAccount = (accountId) => h.chat.setAccount("s1", { accountId, home: "account" });
+
+  await report(h, notice());
+  assert.equal(h.chat.get("s1")?.accountId, "acc3");
 });
 
 test("manual switch and resume now: idempotent by the client's command id, refused when nothing is limited", async () => {

@@ -137,7 +137,7 @@ export interface LimitRecoveryOptions {
   settleTimeoutMs?: number;
 }
 
-const BOX_ACCOUNT_REFUSAL = "This chat has a VM that does not use that account yet, and a switch would give the VM its login. Ask for it with a lend, or wait for the reset.";
+const BOX_ACCOUNT_REFUSAL = "This chat has a VM that does not use that account yet, so it did not move there by itself. Switch to it yourself, or wait for the reset.";
 
 /** What one attempt to post a turn came to. */
 type PostOutcome = { kind: "sent"; seq: number } | { kind: "busy" } | { kind: "unavailable" } | { kind: "refused"; message: string };
@@ -395,7 +395,7 @@ export class ChatLimitRecovery {
     };
     this.opts.chat.setUsageLimit(id, state);
 
-    if (prefs.switchAccount && this.canSwitch(tab)) {
+    if (prefs.switchAccount && this.canFailOver(tab)) {
       const switched = await this.failover(id, {
         commandId: limitCommandId("limit-switch", id, state.turnId ?? state.noticeId),
         automatic: true
@@ -538,7 +538,7 @@ export class ChatLimitRecovery {
     }
     const ownReset = state.resetAt === null ? Number.NaN : Date.parse(state.resetAt);
     const ownFree = Number.isFinite(ownReset) && ownReset <= now;
-    if (!ownFree && state.kind !== "overloaded" && prefs.switchAccount && this.canSwitch(tab)) {
+    if (!ownFree && state.kind !== "overloaded" && prefs.switchAccount && this.canFailOver(tab)) {
       // Woken by another account's reset (every account was cooling down): move to it.
       const outcome = await this.failover(id, {
         commandId: limitCommandId("limit-switch", id, state.turnId ?? state.noticeId, String(due)),
@@ -576,13 +576,17 @@ export class ChatLimitRecovery {
     return state;
   }
 
-  /**
-   * Accounts of the same family can be swapped in: not OpenCode (one server identity), nor an agent
-   * without accounts, and for a chat with a box only an account that box already has (below).
-   */
+  /** Accounts of the same family can be swapped in: not OpenCode (one server identity), nor an agent without accounts. */
   private canSwitch(tab: SessionSummary): boolean {
-    if (this.opts.adapterOf(tab.refId) === "opencode" || accountFamilyOf(tab.refId) === null) return false;
-    return !this.boxBound(tab) || this.boxAccounts(tab).length > 0;
+    return this.opts.adapterOf(tab.refId) !== "opencode" && accountFamilyOf(tab.refId) !== null;
+  }
+
+  /**
+   * A failover nobody asked for, so no one approved its login reaching a box: for a chat with a box,
+   * only to an account that box already has. A person's switch is that person's decision.
+   */
+  private canFailOver(tab: SessionSummary): boolean {
+    return this.canSwitch(tab) && (!this.boxBound(tab) || this.boxAccounts(tab).length > 0);
   }
 
   private boxBound(tab: SessionSummary): boolean {
@@ -601,7 +605,7 @@ export class ChatLimitRecovery {
   }
 
   /** The best other account for the chat: the workflows' least-used selection over its family. */
-  private pick(tab: SessionSummary, model: string): AccountSelectionDecision {
+  private pick(tab: SessionSummary, model: string, automatic: boolean): AccountSelectionDecision {
     const family = accountFamilyOf(tab.refId)!;
     const chain: AgentChainEntry[] = [
       {
@@ -619,7 +623,7 @@ export class ChatLimitRecovery {
     return selectAccount({
       chain,
       usage: this.opts.usage.snapshot(),
-      accounts: this.boxBound(tab) ? { ...this.opts.accounts.list(), accounts: this.boxAccounts(tab) } : this.opts.accounts.list(),
+      accounts: automatic && this.boxBound(tab) ? { ...this.opts.accounts.list(), accounts: this.boxAccounts(tab) } : this.opts.accounts.list(),
       cooldowns: this.opts.cooldowns.list(),
       now: this.opts.clock.now(),
       exclude: new Set([cooldownKey(family, accountKeyOf(tab))])
@@ -674,10 +678,7 @@ export class ChatLimitRecovery {
       this.requireApi();
       const tab = this.opts.chat.get(id)!;
       if (!this.canSwitch(tab)) {
-        throw new UsageLimitError(
-          this.boxBound(tab) ? BOX_ACCOUNT_REFUSAL : "This agent always runs under one identity; its account cannot be switched.",
-          "COMMAND_REJECTED"
-        );
+        throw new UsageLimitError("This agent always runs under one identity; its account cannot be switched.", "COMMAND_REJECTED");
       }
       const accountId = typeof input.accountId === "string" && input.accountId.trim() ? input.accountId.trim() : undefined;
       if (accountId !== undefined && accountId === (state.accountId || SYSTEM_ACCOUNT_ID)) {
@@ -783,11 +784,11 @@ export class ChatLimitRecovery {
     let decision: AccountSelectionDecision | undefined;
     if (target === undefined) {
       const head = await readThreadHead(api, id).catch(() => null);
-      decision = this.pick(tab, head?.head.modelSelection.model ?? "");
+      decision = this.pick(tab, head?.head.modelSelection.model ?? "", input.automatic);
       target = decision.chosen?.accountId;
       if (target === undefined) return { switched: false, decision, reason: noCandidateReason(decision, this.opts.clock.now()) };
     }
-    if (!this.boxAllows(tab, target)) return { switched: false, ...(decision ? { decision } : {}), reason: BOX_ACCOUNT_REFUSAL };
+    if (input.automatic && !this.boxAllows(tab, target)) return { switched: false, ...(decision ? { decision } : {}), reason: BOX_ACCOUNT_REFUSAL };
     const fromAccountId = tab.accountId ?? "";
     this.forget(id);
     const state: ChatUsageLimitState = {
