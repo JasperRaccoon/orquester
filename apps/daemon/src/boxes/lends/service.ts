@@ -811,4 +811,3 @@ export class AccountLends {
     this.deps.logger.warn(`[boxes] Box ${boxId}: ${what} (${errorLine(error)})`);
   }
 }
-
