@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { writeFileAtomic } from "../../agent-hooks.ts";
-import { boxLoginFile, claudeRefreshLockPaths, grantFromCredentials, nodeCredentialFiles } from "./credentials.ts";
+import { boxLoginFile, claudeBoxCredentials, claudeRefreshLockPaths, grantFromCredentials, isOwnBoxLogin, nodeCredentialFiles } from "./credentials.ts";
 import { claudeCreds, codexAuth, grokAuth, jwt, NOW } from "./testing.ts";
 
 test("grants are built field by field: no refresh token, id token or other secret survives", () => {
@@ -47,7 +47,7 @@ test("a lent Codex login has the verified shape; its id token holds the access t
   assert.equal(filename, "auth.json");
   assert.doesNotMatch(content, /SECRET/);
   const file = JSON.parse(content);
-  assert.deepEqual(Object.keys(file).sort(), ["OPENAI_API_KEY", "auth_mode", "last_refresh", "tokens"]);
+  assert.deepEqual(Object.keys(file).sort(), ["OPENAI_API_KEY", "auth_mode", "last_refresh", "lentBy", "tokens"]);
   assert.equal(file.OPENAI_API_KEY, null);
   assert.equal(file.auth_mode, "chatgpt");
   assert.equal(file.last_refresh, new Date(NOW).toISOString());
@@ -73,6 +73,34 @@ test("a lent Claude login carries no refresh token", () => {
   assert.equal(filename, ".credentials.json");
   assert.equal(JSON.parse(content).claudeAiOauth.accessToken, "access");
   assert.doesNotMatch(content, /SECRET|refreshToken/);
+});
+
+test("a login on a box is ours only if it says so, or is exactly what an older daemon wrote", () => {
+  const grant = { accessToken: "access", expiresAt: NOW, extra: { chatgptAccountId: "ws-1", scopes: "user:inference", subscriptionType: "max" } };
+  const older = { claudeAiOauth: { accessToken: "a", expiresAt: NOW, scopes: [], subscriptionType: "max", rateLimitTier: "t" } };
+  for (const ours of [boxLoginFile("claude", grant, NOW).content, boxLoginFile("codex", grant, NOW).content, JSON.stringify(claudeBoxCredentials(grant, NOW)), JSON.stringify(older)]) {
+    assert.equal(isOwnBoxLogin(ours, null), true, ours);
+  }
+  const marked = { lentBy: "orquester" };
+  for (const real of [
+    "not json",
+    "[]",
+    "{}",
+    // An access-token-only real login, the kind `runRefresh` knows exists.
+    JSON.stringify({ claudeAiOauth: { accessToken: "a" } }),
+    JSON.stringify({ ...older, mcpOAuth: { server: { accessToken: "m" } } }),
+    JSON.stringify({ claudeAiOauth: { ...older.claudeAiOauth, oauthAccount: "x" } }),
+    JSON.stringify({ OPENAI_API_KEY: null, auth_mode: "chatgpt", tokens: { id_token: "i", access_token: "a", refresh_token: "", account_id: "w" } }),
+    // Someone signed in over a login of ours, and the CLI kept the marker.
+    JSON.stringify({ ...marked, claudeAiOauth: { accessToken: "a", refreshToken: "r" } }),
+    JSON.stringify({ ...marked, tokens: { access_token: "a", refresh_token: "r" } }),
+    JSON.stringify({ ...marked, OPENAI_API_KEY: "sk-real" })
+  ]) {
+    assert.equal(isOwnBoxLogin(real, null), false, real);
+  }
+  // The very bytes of the host's login are that login, whatever they look like.
+  const same = JSON.stringify(older);
+  assert.equal(isOwnBoxLogin(same, same), false);
 });
 
 test("nodeCredentialFiles: missing files read as null, lock ages, and the watch sees a rename-replace", async (t) => {

@@ -46,7 +46,7 @@
 import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 
-import { SYSTEM_ACCOUNT_ID, type AccountSelectionDecision, type AgentAdapterId, type SessionSummary } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type AccountSelectionDecision, type AgentAccount, type AgentAdapterId, type SessionSummary } from "@orquester/api";
 import {
   agentChatCommandPath,
   OVERLOAD_RETRY_BASE_MS,
@@ -136,6 +136,8 @@ export interface LimitRecoveryOptions {
   retryMs?: number;
   settleTimeoutMs?: number;
 }
+
+const BOX_ACCOUNT_REFUSAL = "This chat has a VM that does not use that account yet, and a switch would give the VM its login. Ask for it with a lend, or wait for the reset.";
 
 /** What one attempt to post a turn came to. */
 type PostOutcome = { kind: "sent"; seq: number } | { kind: "busy" } | { kind: "unavailable" } | { kind: "refused"; message: string };
@@ -574,9 +576,28 @@ export class ChatLimitRecovery {
     return state;
   }
 
-  /** Accounts of the same family can be swapped in: not OpenCode (one server identity), nor an agent without accounts. */
+  /**
+   * Accounts of the same family can be swapped in: not OpenCode (one server identity), nor an agent
+   * without accounts, and for a chat with a box only an account that box already has (below).
+   */
   private canSwitch(tab: SessionSummary): boolean {
-    return this.opts.adapterOf(tab.refId) !== "opencode" && accountFamilyOf(tab.refId) !== null;
+    if (this.opts.adapterOf(tab.refId) === "opencode" || accountFamilyOf(tab.refId) === null) return false;
+    return !this.boxBound(tab) || this.boxAccounts(tab).length > 0;
+  }
+
+  private boxBound(tab: SessionSummary): boolean {
+    return (this.api?.boxesOfChat?.({ projectPath: tab.projectPath, threadId: tab.id }).length ?? 0) > 0;
+  }
+
+  /** May this chat move to the account with no card? A box of its would gain that account's `token.get`, so only if it has it already. */
+  private boxAllows(tab: SessionSummary, accountId: string): boolean {
+    return (this.api?.boxesOfChat?.({ projectPath: tab.projectPath, threadId: tab.id }) ?? []).every((box) => box.usesAccount(accountId));
+  }
+
+  /** The family's other accounts every box of this chat already uses. */
+  private boxAccounts(tab: SessionSummary): AgentAccount[] {
+    const family = accountFamilyOf(tab.refId);
+    return this.opts.accounts.list().accounts.filter((account) => account.agent === family && account.id !== tab.accountId && this.boxAllows(tab, account.id));
   }
 
   /** The best other account for the chat: the workflows' least-used selection over its family. */
@@ -598,7 +619,7 @@ export class ChatLimitRecovery {
     return selectAccount({
       chain,
       usage: this.opts.usage.snapshot(),
-      accounts: this.opts.accounts.list(),
+      accounts: this.boxBound(tab) ? { ...this.opts.accounts.list(), accounts: this.boxAccounts(tab) } : this.opts.accounts.list(),
       cooldowns: this.opts.cooldowns.list(),
       now: this.opts.clock.now(),
       exclude: new Set([cooldownKey(family, accountKeyOf(tab))])
@@ -653,7 +674,10 @@ export class ChatLimitRecovery {
       this.requireApi();
       const tab = this.opts.chat.get(id)!;
       if (!this.canSwitch(tab)) {
-        throw new UsageLimitError("This agent always runs under one identity; its account cannot be switched.", "COMMAND_REJECTED");
+        throw new UsageLimitError(
+          this.boxBound(tab) ? BOX_ACCOUNT_REFUSAL : "This agent always runs under one identity; its account cannot be switched.",
+          "COMMAND_REJECTED"
+        );
       }
       const accountId = typeof input.accountId === "string" && input.accountId.trim() ? input.accountId.trim() : undefined;
       if (accountId !== undefined && accountId === (state.accountId || SYSTEM_ACCOUNT_ID)) {
@@ -763,6 +787,7 @@ export class ChatLimitRecovery {
       target = decision.chosen?.accountId;
       if (target === undefined) return { switched: false, decision, reason: noCandidateReason(decision, this.opts.clock.now()) };
     }
+    if (!this.boxAllows(tab, target)) return { switched: false, ...(decision ? { decision } : {}), reason: BOX_ACCOUNT_REFUSAL };
     const fromAccountId = tab.accountId ?? "";
     this.forget(id);
     const state: ChatUsageLimitState = {

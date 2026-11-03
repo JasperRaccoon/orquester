@@ -15,7 +15,7 @@ import type { BoxLendAgent } from "@orquester/api";
 
 import { decodeJwtPayload, grokAuthEntry } from "../../agent-account-identity.ts";
 import { assertOwnedAccountHome } from "../../agent-account-paths.ts";
-import type { AgentTokenGrant, BoxAgentId } from "../contracts.ts";
+import type { AgentTokenGrant, BoxAgentId, BoxConnection } from "../contracts.ts";
 
 /** The file each CLI keeps its login in, inside the account home (`agent-accounts.ts`). */
 export const CREDENTIAL_FILENAME: Readonly<Record<BoxAgentId, string>> = {
@@ -100,6 +100,13 @@ export function grantFromCredentials(agent: BoxAgentId, text: string): AgentToke
   return { accessToken, expiresAt: Number.isFinite(at) ? at : null };
 }
 
+/**
+ * Marks a file on a box as written by Orquester: a login file or a lent account index. Both CLIs
+ * ignore an extra top-level key (`claude auth status` 2.1.307 and `codex login status` 0.163.0, with
+ * fake tokens). What lacks it may be someone's real login: {@link isOwnBoxLogin}.
+ */
+export const BOX_FILE_MARKER = { lentBy: "orquester" } as const;
+
 /** Without an expiry from the broker, the file says one hour; the CLI does not refresh either way. */
 const UNKNOWN_EXPIRY_MS = 60 * 60_000;
 
@@ -109,7 +116,7 @@ const UNKNOWN_EXPIRY_MS = 60 * 60_000;
  * that give the CLI its subscription defaults. NEVER a `refreshToken`: without one the CLI cannot
  * refresh, so it can never race the host's refresher.
  */
-export function claudeBoxCredentials(grant: AgentTokenGrant, now: number): { claudeAiOauth: Record<string, unknown> } {
+export function claudeBoxCredentials(grant: AgentTokenGrant, now: number): { claudeAiOauth: Record<string, unknown>; lentBy: "orquester" } {
   const extra = grant.extra ?? {};
   const scopes = (extra.scopes ?? "").split(/\s+/).filter((scope) => scope.length > 0);
   return {
@@ -119,7 +126,8 @@ export function claudeBoxCredentials(grant: AgentTokenGrant, now: number): { cla
       scopes,
       ...(extra.subscriptionType !== undefined ? { subscriptionType: extra.subscriptionType } : {}),
       ...(extra.rateLimitTier !== undefined ? { rateLimitTier: extra.rateLimitTier } : {})
-    }
+    },
+    ...BOX_FILE_MARKER
   };
 }
 
@@ -146,7 +154,7 @@ function syntheticCodexIdToken(accessToken: string): string {
  * the field to parse the file (posting it is refused and consumes nothing); `last_refresh` is the
  * write time, so its age-based refresh does not fire during a lend.
  */
-export function codexBoxAuth(
+function codexBoxAuth(
   grant: AgentTokenGrant,
   now: number
 ): {
@@ -154,6 +162,7 @@ export function codexBoxAuth(
   auth_mode: "chatgpt";
   tokens: { id_token: string; access_token: string; refresh_token: ""; account_id: string | null };
   last_refresh: string;
+  lentBy: "orquester";
 } {
   return {
     OPENAI_API_KEY: null,
@@ -164,7 +173,8 @@ export function codexBoxAuth(
       refresh_token: "",
       account_id: grant.extra?.chatgptAccountId ?? null
     },
-    last_refresh: new Date(now).toISOString()
+    last_refresh: new Date(now).toISOString(),
+    ...BOX_FILE_MARKER
   };
 }
 
@@ -174,26 +184,59 @@ export function boxLoginFile(agent: BoxLendAgent, grant: AgentTokenGrant, now: n
   return { filename: CREDENTIAL_FILENAME[agent], content: `${JSON.stringify(login)}\n` };
 }
 
+/** Exactly what a daemon wrote before {@link BOX_FILE_MARKER}: `claudeAiOauth` alone, with only these fields. */
+function isUnmarkedClaudeBoxLogin(login: Record<string, unknown>): boolean {
+  const oauth = login.claudeAiOauth;
+  if (Object.keys(login).length !== 1 || !isRecord(oauth)) return false;
+  const fields = Object.keys(oauth);
+  return (
+    ["accessToken", "expiresAt", "scopes"].every((field) => fields.includes(field)) &&
+    fields.every((field) => ["accessToken", "expiresAt", "scopes", "subscriptionType", "rateLimitTier"].includes(field))
+  );
+}
+
 /**
- * Whether a login file found on a box is someone's real login rather than one of ours: it holds a
- * refresh token anywhere, or an API key, or cannot be read as a login at all. Ours are written whole
- * and atomically, so a file that does not parse is never ours. Such a file is never replaced or removed.
+ * Whether a login file found on a box is one Orquester wrote, so it may be replaced or removed. It
+ * must say so: an access-token-only file can be a real login too, and may hold more than the token.
+ * Never ours: the account's refresh token or an API key in it (someone signed in over ours), or the
+ * very bytes of the host's login, which on a machine paired on this host is that same file.
  */
-export function holdsRealLogin(text: string): boolean {
+export function isOwnBoxLogin(text: string, hostLogin: string | null): boolean {
+  if (text === hostLogin) return false;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return true;
+    return false;
   }
-  if (!isRecord(parsed)) return true;
-  if (nonEmptyString(parsed.OPENAI_API_KEY)) return true;
-  const holdsRefreshToken = (value: unknown): boolean => {
-    if (Array.isArray(value)) return value.some(holdsRefreshToken);
-    if (!isRecord(value)) return false;
-    return Object.entries(value).some(([key, inner]) => (/^refresh_?token$/i.test(key) && nonEmptyString(inner) !== null) || holdsRefreshToken(inner));
-  };
-  return holdsRefreshToken(parsed);
+  if (!isRecord(parsed) || nonEmptyString(parsed.OPENAI_API_KEY)) return false;
+  const oauth = parsed.claudeAiOauth;
+  const tokens = parsed.tokens;
+  if ((isRecord(oauth) && nonEmptyString(oauth.refreshToken)) || (isRecord(tokens) && nonEmptyString(tokens.refresh_token))) return false;
+  return parsed.lentBy === BOX_FILE_MARKER.lentBy || isUnmarkedClaudeBoxLogin(parsed);
+}
+
+/** The largest file on a box taken for one of ours (a login and an index are small). */
+const MAX_OWN_FILE_BYTES = 1024 * 1024;
+/** What a box's file reads as when it cannot be one of ours: not a file, too large, unreadable. */
+export const NOT_OURS = Symbol("not ours");
+
+/**
+ * A box file's text; null when there is nothing there; {@link NOT_OURS} for anything that cannot be
+ * ours (a symlink, a folder, too large, unreadable). Rejects only when the link is gone.
+ */
+export async function readOwnBoxFile(connection: BoxConnection, path: string): Promise<string | null | typeof NOT_OURS> {
+  try {
+    const stats = await connection.request("fs.stat", { path, followSymlinks: false });
+    if (stats === null) return null;
+    if (stats.kind !== "file" || stats.size > MAX_OWN_FILE_BYTES) return NOT_OURS;
+    const chunks: Buffer[] = [];
+    for await (const chunk of await connection.readFile(path)) chunks.push(Buffer.from(chunk as Uint8Array));
+    return Buffer.concat(chunks).toString("utf8");
+  } catch (error) {
+    if (!connection.connected) throw error;
+    return NOT_OURS;
+  }
 }
 
 /** Owned account-home file operations used by the broker and host credential watch. */

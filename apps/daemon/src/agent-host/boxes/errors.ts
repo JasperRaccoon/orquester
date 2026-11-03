@@ -12,6 +12,8 @@ export type BoxLaunchErrorCode =
   | "BOX_CLI_INSTALL_FAILED"
   | "BOX_CLI_VERSION"
   | "BOX_TOKEN_UNAVAILABLE"
+  /** A real login is at the path a box login would be written to: it is left alone. */
+  | "BOX_LOGIN_IN_USE"
   | "BOX_SYNC_FAILED"
   | "BOX_UNSUPPORTED";
 

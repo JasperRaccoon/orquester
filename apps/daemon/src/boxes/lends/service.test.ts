@@ -25,7 +25,7 @@ async function world(t: Parameters<typeof lendWorld>[0], box: Parameters<typeof 
   return w;
 }
 
-const STALE_LOGIN = JSON.stringify({ claudeAiOauth: { accessToken: "stale" } });
+const STALE_LOGIN = JSON.stringify({ claudeAiOauth: { accessToken: "stale" }, lentBy: "orquester" });
 const LEND_CLAUDE = { accounts: [{ agent: "claude", accountId: CLAUDE }], minutes: 240, purposeNote: "paid evals" };
 const LEND_BOTH = { ...LEND_CLAUDE, accounts: [...LEND_CLAUDE.accounts, { agent: "codex", accountId: CODEX }] };
 
@@ -676,6 +676,59 @@ test("a real index or login refuses the preview and the lend, and is left byte f
       assert.ok(!w.connection.calls.some((call) => call.method === "agent.ensurePaths" || call.method === "fs.rm"));
     });
   }
+});
+
+test("an access-token-only real login holds no refresh token and is still not ours: not overwritten, not deleted on end", async (t) => {
+  const real = JSON.stringify({ claudeAiOauth: { accessToken: "real", expiresAt: NOW + HOUR }, mcpOAuth: { server: { accessToken: "mcp" } } });
+  const w = await world(t);
+  await plant(w.vmPath("claude", CLAUDE), real);
+  await assert.rejects(w.lends.preview(chat("chat-1"), BOX, { claude: ["ana"] }), { code: "LEND_APPDIR_IN_USE" });
+  await assert.rejects(w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE), { code: "LEND_APPDIR_IN_USE" });
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), real);
+
+  // It appears under a stored active record.
+  await writeFile(w.vmPath("claude", CLAUDE), STALE_LOGIN);
+  const { lent } = await w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE);
+  await writeFile(w.vmPath("claude", CLAUDE), real);
+  w.setConnected(false);
+  w.setConnected(true);
+  await w.lends.settled();
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), real);
+  await w.lends.endOne(chat("chat-1"), BOX, lent[0]!.id);
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), real);
+});
+
+test("a file with the very bytes of the host's login is that login, on a machine paired on this host", async (t) => {
+  const w = await world(t);
+  const sameShape = JSON.stringify({ claudeAiOauth: { accessToken: "real", expiresAt: NOW + HOUR, scopes: [] } });
+  w.files.texts.set(w.hostPath("claude", CLAUDE), sameShape);
+  await plant(w.vmPath("claude", CLAUDE), sameShape);
+  await assert.rejects(w.lends.lend(chat("chat-1"), BOX, LEND_CLAUDE), { code: "LEND_APPDIR_IN_USE" });
+  assert.equal(await w.readVm(w.vmPath("claude", CLAUDE)), sameShape);
+});
+
+test("a reconnect gives no folder to the box's working user before ownership is checked", async (t) => {
+  const w = await world(t);
+  await w.lends.lend(chat("chat-1"), BOX, LEND_BOTH);
+  const folders = () => w.connection.calls.filter((call) => call.method === "agent.ensurePaths").flatMap((call) => (call.params as { paths: string[] }).paths);
+
+  // A real login on one account: that home stays out, the other's is still prepared.
+  await writeFile(w.vmPath("claude", CLAUDE), realClaude);
+  const before = folders().length;
+  w.setConnected(false);
+  w.setConnected(true);
+  await w.lends.settled();
+  const prepared = folders().slice(before);
+  assert.ok(prepared.includes(join(w.vmPath("codex", CODEX), "..")));
+  assert.ok(!prepared.includes(join(w.vmPath("claude", CLAUDE), "..")));
+
+  // A real index: nothing at all.
+  await writeFile(w.vmIndexPath, REAL_INDEX);
+  const after = folders().length;
+  w.setConnected(false);
+  w.setConnected(true);
+  await w.lends.settled();
+  assert.equal(folders().length, after);
 });
 
 test("a symlink at a login's path is not ours: refused, its target untouched", async (t) => {

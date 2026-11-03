@@ -73,6 +73,7 @@ class FakeApi implements DaemonApi {
   goal: unknown = null;
   onAccount?: (accountId: string) => void;
   onInterrupt?: () => void;
+  boxesOfChat?: DaemonApi["boxesOfChat"];
 
   async request(method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse> {
     if (method === "GET" && path.endsWith("/head")) {
@@ -443,6 +444,25 @@ test("never fails over for OpenCode: it only resumes", async () => {
   assert.equal(h.api.posts.filter((post) => post.path.endsWith("/account")).length, 0);
   assert.equal(h.chat.get("s1")?.usageLimit?.autoResume, "armed");
   await assert.rejects(h.recovery.switchAndContinue("s1", { commandId: "c1" }), /cannot be switched/);
+});
+
+test("a chat with a VM moves only to an account that VM already has, and otherwise waits with the usual limit message", async () => {
+  const h = harness({ prefs: { switchAccount: true } });
+  const uses = new Set<string>();
+  h.api.boxesOfChat = () => [{ boxId: "box-1", label: "p", usesAccount: (accountId) => uses.has(accountId) }];
+  h.api.onAccount = (accountId) => h.chat.setAccount("s1", { accountId, home: "account" });
+
+  await report(h, notice());
+  assert.equal(h.chat.get("s1")?.accountId, "acc1", "no account moved, so the VM gained no login");
+  assert.ok(!h.api.posts.some((post) => JSON.stringify(post.body).includes("acc2")));
+  const state = h.chat.usageLimitOf("s1");
+  assert.equal(state?.message, "Usage limit reached");
+  assert.equal(state?.autoResume, "armed", "it resumes at its own reset");
+  await assert.rejects(h.recovery.switchAndContinue("s1", { commandId: "c1", accountId: "acc2" }), /VM/);
+
+  // A session on that VM already uses the other account: nothing new reaches the VM.
+  uses.add("acc2");
+  assert.equal((await h.recovery.switchAndContinue("s1", { commandId: "c2" })).limitFailover?.toAccountId, "acc2");
 });
 
 test("manual switch and resume now: idempotent by the client's command id, refused when nothing is limited", async () => {
