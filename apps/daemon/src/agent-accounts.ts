@@ -25,7 +25,7 @@ import {
   type AgentAccountRecord,
   type AgentAccountsIndex
 } from "@orquester/config";
-import { assertOwnedAccountHome, AgentAccountError, ACCOUNT_MARKER } from "./agent-account-paths.ts";
+import { assertOwnedAccountHome, AgentAccountError, ACCOUNT_ID_PATTERN, ACCOUNT_MARKER } from "./agent-account-paths.ts";
 import { writeFileAtomic } from "./agent-hooks.ts";
 import {
   detectAgentFromBlob,
@@ -61,7 +61,6 @@ const CODEX_AUTH_ENV_UNSET = ["OPENAI_API_KEY"];
 const GROK_AUTH_ENV_UNSET = ["XAI_API_KEY"];
 
 /** An account home's directory name: the UUID `importAccount` mints. */
-const ACCOUNT_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * The first file under `src` (relative path) whose namesake under `dst` has
@@ -293,7 +292,7 @@ export class AgentAccountsService {
       const names = await readdir(familyDir, { withFileTypes: true }).catch(() => []);
       for (const entry of names) {
         const id = entry.name;
-        if (!entry.isDirectory() || registered.has(id) || inUse.has(id) || !ACCOUNT_DIR_NAME.test(id)) {
+        if (!entry.isDirectory() || registered.has(id) || inUse.has(id) || !ACCOUNT_ID_PATTERN.test(id)) {
           continue;
         }
         const dir = join(familyDir, id);

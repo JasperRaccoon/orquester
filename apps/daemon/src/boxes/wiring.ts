@@ -131,6 +131,8 @@ export interface DaemonBoxesAttachment {
   agentChat: AgentChatService;
   agentProfile: Pick<AgentProfileService, "snapshot">;
   temporaryBoxTools: TemporaryBoxTools;
+  /** False when the session index failed to load: an empty session list then says nothing about any chat. */
+  sessionsLoaded: () => boolean;
 }
 
 export interface DaemonBoxes {
@@ -456,18 +458,19 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       // Sessions in box projects never refresh their account on this host (spec §7).
       sessions.setBoxProjectPredicate((path) => registry.locate(path).kind === "box");
       const credentialFiles = nodeCredentialFiles(agentAccountsDir(deps.baseDir));
+      const onSessionsChanged = (listener: () => void): (() => void) => {
+        const events = ["created", "updated", "exited", "closed"] as const;
+        for (const event of events) sessions.lifecycle.on(event, listener);
+        return () => {
+          for (const event of events) sessions.lifecycle.off(event, listener);
+        };
+      };
       const tokenBroker = createAgentTokenBroker({
         accounts: deps.agentAccounts,
         registry,
         sessions: () => sessions.list(),
         hostLocalAccountIds: () => sessions.hostLocalAccountIds(),
-        onSessionsChanged: (listener) => {
-          const events = ["created", "updated", "exited", "closed"] as const;
-          for (const event of events) sessions.lifecycle.on(event, listener);
-          return () => {
-            for (const event of events) sessions.lifecycle.off(event, listener);
-          };
-        },
+        onSessionsChanged,
         files: credentialFiles,
         isAccountLent: (boxId, accountId) => hasActiveLend(registry.get(boxId), accountId, Date.now())
       });
@@ -484,6 +487,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
         broker: tokenBroker,
         files: credentialFiles,
         sessions: () => sessions.list(),
+        onSessionsChanged,
+        sessionsLoaded: attachment.sessionsLoaded,
         chatOpen: (threadId) => attachment.agentChat.chat.has(threadId),
         enabled: () => boxes.enabled(),
         publishChanged: () => boxes.publishChanged(),

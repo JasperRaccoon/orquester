@@ -174,7 +174,7 @@ export interface AgentTokenBrokerDeps {
 }
 
 /** Whether one of the box's own launches uses the account: a session in its project, or its owning chat. */
-export function boxUsesAccount(
+function boxUsesAccount(
   box: Pick<StoredBox, "id" | "purpose" | "threadId">,
   accountId: string,
   sessions: Iterable<TokenBrokerSession>,

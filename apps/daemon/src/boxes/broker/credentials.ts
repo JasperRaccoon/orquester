@@ -174,6 +174,28 @@ export function boxLoginFile(agent: BoxLendAgent, grant: AgentTokenGrant, now: n
   return { filename: CREDENTIAL_FILENAME[agent], content: `${JSON.stringify(login)}\n` };
 }
 
+/**
+ * Whether a login file found on a box is someone's real login rather than one of ours: it holds a
+ * refresh token anywhere, or an API key, or cannot be read as a login at all. Ours are written whole
+ * and atomically, so a file that does not parse is never ours. Such a file is never replaced or removed.
+ */
+export function holdsRealLogin(text: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return true;
+  }
+  if (!isRecord(parsed)) return true;
+  if (nonEmptyString(parsed.OPENAI_API_KEY)) return true;
+  const holdsRefreshToken = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.some(holdsRefreshToken);
+    if (!isRecord(value)) return false;
+    return Object.entries(value).some(([key, inner]) => (/^refresh_?token$/i.test(key) && nonEmptyString(inner) !== null) || holdsRefreshToken(inner));
+  };
+  return holdsRefreshToken(parsed);
+}
+
 /** Owned account-home file operations used by the broker and host credential watch. */
 export interface CredentialFiles {
   /** `assertOwnedAccountHome`: the home is the account's own, not a symlink, marker matches. Throws otherwise. */

@@ -4,6 +4,7 @@
  * hot paths (file routes call `locate` per request).
  */
 
+import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import type { BoxSummary } from "@orquester/api";
@@ -80,9 +81,19 @@ export class StoreBoxRegistry implements BoxRegistry {
       const project = record.project;
       if (record.purpose !== "project" || !project || projectDeleted(record)) continue;
       const root = resolve(project.path);
-      const current = index.get(root);
-      // The newest record wins when a stale one (an older build's) names the same path.
-      if (!current || record.createdAt > current.createdAt) index.set(root, record);
+      // Its canonical path too: a chat's principal names its project that way, and the workspaces
+      // root may be a symlink. Resolved here, once per record change, so `locate` stays free of syscalls.
+      let canonical = root;
+      try {
+        canonical = realpathSync.native(root);
+      } catch {
+        // No stub on this host (yet): only the path as given.
+      }
+      for (const key of new Set([root, canonical])) {
+        const current = index.get(key);
+        // The newest record wins when a stale one (an older build's) names the same path.
+        if (!current || record.createdAt > current.createdAt) index.set(key, record);
+      }
     }
     this.projectIndex = index;
     return index;

@@ -35,6 +35,7 @@ The owner's first requirement is that nothing happens to the real logins: no ref
 - A VM writing any credential back to the host.
 - A second refresher: a lend adds no process that spends a refresh token, and does not count as a live holder of the account.
 - A lend affecting a chat on the same VM that uses the same account.
+- A real login or account index destroyed or overwritten, on a bring-your-own machine or this same host (§5).
 - A token value in a log, API response, tool result, approval card, process argument or persisted record.
 
 ## 3. The guarantees and how each is enforced
@@ -61,8 +62,9 @@ The owner's first requirement is that nothing happens to the real logins: no ref
 
 **Approve.** A `spend` card in every permission mode, never grantable, refused while planning. Same rules as `create_box`, because it spends subscription quota and exposes tokens. Unanswered, it is denied after 30 minutes.
 
-**Install.** All or nothing per call:
+**Install.** All or nothing per call, one call at a time per VM:
 
+0. Check the VM's index and each login path (§5, `LEND_APPDIR_IN_USE`). The preview runs the same check.
 1. Persist the lend records (`StoredBox.accountLends`) before touching the VM.
 2. `agent.ensurePaths` for each home and the index's directory.
 3. For each account: `getLentToken`, then write the login file (mode 0600).
@@ -73,11 +75,18 @@ On any failure, end every lend of the call (normal cleanup) and return an error 
 
 **Keep.** §6.
 
-**End.** Set `endedAt` and `endReason` and persist, stop the keeper, then clean up on the VM: remove the login file unless a live session on this VM uses the same account (a Claude chat reads that same file), and rewrite the index, or remove it when no active lend remains. If the VM is offline, the record stays with `endedAt` set and cleanup runs when it reconnects. Delete the record once cleaned. When the box is destroyed, drop its records with no cleanup.
+**End.** Set `endedAt` and `endReason` and persist, stop the keeper, then clean up on the VM: rewrite the index, or remove it when no active lend remains, and remove the login file unless one of these holds:
+
+- Another active lend of that account is on this VM. The record is deleted; that lend's end decides.
+- A live Claude chat running in this project box uses that account, because its CLI reads that same file. That means an open `agent-chat` tab of `claude` whose session status is not `idle`, `stopped` or `error`. The record stays too, and cleanup runs again when sessions change and on reconnect.
+
+Nothing else keeps it: a temporary box's owning chat runs on the host, a Codex chat never reads `auth.json`, and an exited terminal or a tab with no CLI running reads nothing. If the session index failed to load, no lend ends for its chat and no file is removed, because nothing is known about any chat.
+
+If the VM is offline, the record stays with `endedAt` set and cleanup runs when it reconnects. Delete the record once cleaned. When the box is destroyed, drop its records with no cleanup. When a bring-your-own machine is released, end its lends normally: it stays up.
 
 Calling `box_lend_accounts` again for an account already lent to that VM asks again and, once approved, replaces the end time. Tokens are unchanged.
 
-**Restart.** At daemon start the service loads every record. It ends those past their time limit or whose chat is gone, and resumes keepers for the rest. Reconnects go through `hub.onConnectionChange`.
+**Restart.** At daemon start the service loads every record. It ends those past their time limit or whose chat is gone, and resumes keepers for the rest. Reconnects go through `hub.onConnectionChange`. A lend entry that does not parse, or whose ids are not UUIDs, is ignored and written back unchanged; its box is unaffected. A lend in flight when the daemon stops writes nothing more: its records are marked ended, and the next start cleans up.
 
 ## 5. Files on the VM
 
@@ -110,12 +119,20 @@ Verified offline with Codex 0.163.0 against a local fake backend, with fake toke
 **Index:** `<appdir>/daemon/agent-accounts.json` must pass `parseAgentAccounts`, and lists only accounts lent to this VM:
 
 ```json
-{ "accounts": [{ "id": "…", "agent": "claude", "label": "…", "email": null, "plan": null, "needsReauth": false, "createdAt": "…", "importedAt": "…" }], "defaults": { "claude": null, "codex": null, "grok": null } }
+{ "accounts": [{ "id": "…", "agent": "claude", "label": "…", "email": null, "plan": null, "needsReauth": false, "createdAt": "…", "importedAt": "…" }], "defaults": { "claude": null, "codex": null, "grok": null }, "lentBy": "orquester" }
 ```
 
 `needsReauth` follows the lend's `needs-login` state, so an eval refuses the account with its usual message. No other account's label appears on a VM.
 
-Every write goes through `connection.writeFile` with mode 0600. It must be an atomic replace on the VM, because a CLI re-reads this file during a turn. Confirm this in `apps/box-agent`.
+Every write goes through `connection.writeFile` with mode 0600. It is an atomic replace on the VM (`orq-agent`: temp file, fsync, rename; a replaced file keeps its owner), because a CLI re-reads this file during a turn.
+
+**A real login is never touched.** POSIX paths map to themselves, so on a bring-your-own machine, possibly this same host, the lend's paths may be a real install's. Before any write or removal the service reads what is there:
+
+- An index without `"lentBy": "orquester"` is not ours.
+- A login is not ours if it holds a non-empty refresh token anywhere in it or an `OPENAI_API_KEY`, or does not parse (ours are written whole).
+- A symlink, a folder, an oversized or an unreadable file is not ours.
+
+Something not ours refuses the preview and the install with `LEND_APPDIR_IN_USE`, and is never overwritten or removed. If it appears later, a keeper rewrite refuses too: status `renewal-failing` with the reason, no broker call and no timed retries, and only a host login change or a reconnect looks again. A return leaves it there and deletes the record. The check and the write are separate requests, so a process on the VM writing in between is not excluded; the VM has no compare-and-replace.
 
 ## 6. The keeper
 
@@ -123,8 +140,9 @@ One per active lend, on the host, in the daemon process (`boxes/lends/keeper.ts`
 
 - **Short token:** a timer armed for `msUntilStale` (30-minute margin) asks `getLentToken` with `BOX_TOKEN_MIN_VALID_SECONDS` and rewrites the file. The delay is capped at `BOX_TOKEN_RENEW_MAX_DELAY_MS`.
 - **Host renewal:** a shared watch on the host's login file per path (`CredentialFiles.watch`, which watches the directory, so rename-replace works). If the token differs from the one on the VM, fetch and rewrite right away.
-- **Transient failure** (`TOKEN_UNAVAILABLE`, connection errors): keep the current token, status `renewal-failing`, retry after `BOX_TOKEN_RENEW_RETRY_MS`.
-- **`TOKEN_NEEDS_REAUTH`:** status `needs-login` and no more attempts until the host's login file changes. Never loop on a refresh token the provider refused. Rewrite the index so `needsReauth` is true.
+- **Transient failure** (`TOKEN_UNAVAILABLE`, connection errors): keep the current token, status `renewal-failing`, retry with backoff per lend from `BOX_TOKEN_RENEW_RETRY_MS` (1 minute) doubling to 15 minutes, reset on success. A change to the host's login looks at once.
+- **`TOKEN_NEEDS_REAUTH`, or an account the host already flags `needsReauth`:** status `needs-login` and no more attempts until the host's login file changes, so a restart posts nothing to the provider. Never loop on a refresh token the provider refused. Rewrite the index so `needsReauth` is true.
+- **Unknown expiry:** the Claude file claims one hour, so it is rewritten with the same token every 30 minutes, with no broker call.
 - **VM offline:** status `waiting-for-vm`, no attempts. On reconnect, compare and rewrite immediately. The VM's file may be stale, so always rewrite on reconnect.
 - **401 on the VM:** the keeper does not hear about it and is not told. The host-change path covers revocation by renewal. A token refused for any other reason makes the eval's samples error out, and the agent reports it. Nothing on the VM can trigger a refresh.
 - All of one lend's work is serialized and coalesced. Timers do not keep the process alive. `end()` aborts in-flight waits.
@@ -177,6 +195,7 @@ Errors name the fix:
 | `ACCOUNT_AMBIGUOUS` | Use more of the id, and the matches. |
 | `ACCOUNT_NEEDS_LOGIN` | Owner must sign in again in Settings → Agent accounts. |
 | `ACCOUNT_NOT_LENDABLE` | The System login is never lent. |
+| `LEND_APPDIR_IN_USE` | That path on this machine is a real login or account index, so lending would overwrite it; lend to a VM without one. |
 
 ### `box_return_accounts`
 

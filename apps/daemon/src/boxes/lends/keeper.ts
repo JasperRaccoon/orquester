@@ -6,9 +6,15 @@
  * - **Short token:** a timer armed for the moment the token turns stale asks the broker again.
  * - **Host renewal:** renewing an account revokes its previous token at once, so a host login whose
  *   token differs from the box's is fetched and written right away.
- * - **Transient failure:** the box keeps its token, status `renewal-failing`, retried a minute later.
- * - **`TOKEN_NEEDS_REAUTH`:** status `needs-login`, and nothing is asked until the host's login file
- *   holds something else: a refresh token the provider refused is never tried again.
+ * - **Transient failure:** the box keeps its token, status `renewal-failing`, retried with backoff
+ *   (1 minute doubling to 15, back to 1 on a success); a change to the host's login looks at once.
+ * - **`TOKEN_NEEDS_REAUTH`, or an account the host already flags:** status `needs-login`, and nothing
+ *   is asked until the host's login file holds something else: a refresh token the provider refused
+ *   is never tried again, across restarts too.
+ * - **A real login on the box** (`LEND_APPDIR_IN_USE`): never overwritten. Status `renewal-failing`
+ *   with the reason, and no retries: only a host change or a reconnect looks again.
+ * - **Unknown expiry:** the file claims an hour (`claudeBoxCredentials`), so it is rewritten with the
+ *   same token before that runs out, with no refresh spent on it.
  * - **Box offline:** status `waiting-for-vm`, no attempts. The box's file may be stale when it
  *   returns, so it is always rewritten then, before the timer is armed again.
  *
@@ -23,6 +29,7 @@ import type { BoxLendAgent, BoxLentAccountStatus } from "@orquester/api";
 import {
   BOX_TOKEN_MIN_VALID_SECONDS,
   BOX_TOKEN_RENEW_MAX_DELAY_MS,
+  BOX_TOKEN_RESTART_MARGIN_MS,
   BOX_TOKEN_RENEW_RETRY_MS,
   type BoxTokenTracker
 } from "../../agent-host/boxes/token-policy.ts";
@@ -31,7 +38,9 @@ import { grantFromCredentials } from "../broker/credentials.ts";
 import type { AgentTokenBroker, AgentTokenGrant } from "../contracts.ts";
 
 /** How long one request may wait on the broker (a host CLI renewing) before it counts as a failure and is retried. */
-export const LEND_TOKEN_WAIT_MS = 2 * 60_000;
+const LEND_TOKEN_WAIT_MS = 2 * 60_000;
+/** The longest wait between attempts after failures (they start at `BOX_TOKEN_RENEW_RETRY_MS`). */
+const LEND_RETRY_MAX_MS = 15 * 60_000;
 
 export interface LendKeeperState {
   status: BoxLentAccountStatus;
@@ -53,6 +62,10 @@ export interface LendKeeperDeps {
   /** The tracker shared by all keepers, keyed by lend id. */
   tracker: BoxTokenTracker;
   connected(): boolean;
+  /** Whether the host already knows this account's login was refused. */
+  accountNeedsLogin(): boolean;
+  /** Rejects with code `LEND_APPDIR_IN_USE` when the box's login file is someone's real login. */
+  checkBoxLogin(): Promise<void>;
   /** Writes the login file on the box unless `wanted()` turned false before the write started. */
   writeLogin(grant: AgentTokenGrant, wanted: () => boolean): Promise<void>;
   onStateChange(state: LendKeeperState, previous: LendKeeperState): void;
@@ -82,6 +95,10 @@ export class LendKeeper {
   private grant: AgentTokenGrant | null = null;
   /** The host's login file when the provider refused it: asked again only once it differs. */
   private refused: { text: string | null } | null = null;
+  /** The host's login file at the last pass. */
+  private seenHostLogin: { text: string | null } | null = null;
+  /** Failed attempts in a row. */
+  private failures = 0;
   private work: Promise<unknown> = Promise.resolve();
   private lookQueued = false;
   private attempt: AbortController | null = null;
@@ -176,7 +193,17 @@ export class LendKeeper {
     const hostLogin = await this.deps.readHostLogin().catch(() => null);
     if (this.stopped) return;
 
+    const hostChanged = this.seenHostLogin !== null && this.seenHostLogin.text !== hostLogin;
+    this.seenHostLogin = { text: hostLogin };
+
     if (this.refused !== null && this.refused.text === hostLogin) {
+      await this.rewriteLastGrant();
+      return;
+    }
+    // Refused before (a restart, or the host's own refresher): no provider post to learn it again.
+    if (this.refused === null && !hostChanged && this.deps.accountNeedsLogin()) {
+      this.refused = { text: hostLogin };
+      this.setStatus("needs-login", "This account's login has expired. Sign in to it again in Settings → Agent accounts.");
       await this.rewriteLastGrant();
       return;
     }
@@ -191,13 +218,24 @@ export class LendKeeper {
       !hostDiffers &&
       !this.deps.tracker.stale(this.deps.lendId);
     if (nothingToDo) {
-      this.setStatus("active");
-      this.arm();
+      if (this.grant?.expiresAt === null) {
+        try {
+          await this.write(this.grant);
+        } catch (error) {
+          if (!this.stopped) await this.askFailed(error, hostLogin);
+          return;
+        }
+        if (this.stopped) return;
+      }
+      this.succeeded();
       return;
     }
 
     let grant: AgentTokenGrant;
     try {
+      // Before the broker: a login this could never replace must not cost a refresh.
+      await this.deps.checkBoxLogin();
+      if (this.stopped) return;
       grant = await this.ask();
     } catch (error) {
       if (this.stopped) return;
@@ -217,6 +255,11 @@ export class LendKeeper {
     } else {
       this.note(grant);
     }
+    this.succeeded();
+  }
+
+  private succeeded(): void {
+    this.failures = 0;
     this.setStatus("active");
     this.arm();
   }
@@ -251,6 +294,11 @@ export class LendKeeper {
   }
 
   private async askFailed(error: unknown, hostLogin: string | null): Promise<void> {
+    if (errorCode(error) === "LEND_APPDIR_IN_USE") {
+      this.deps.warn(`Box ${this.deps.boxId}: a real login is at the lent login's path of account ${this.deps.accountId}; it is left alone`);
+      this.setStatus("renewal-failing", (error as Error).message);
+      return;
+    }
     if (error instanceof AgentTokenError && error.code === "TOKEN_NEEDS_REAUTH") {
       this.refused = { text: hostLogin };
       this.setStatus("needs-login", error.message);
@@ -280,13 +328,15 @@ export class LendKeeper {
   private arm(): void {
     if (this.stopped) return;
     const until = this.deps.tracker.msUntilStale(this.deps.lendId);
-    // An unknown expiry, or one days away: still looks at the host's login now and then.
-    const delay = until === null ? BOX_TOKEN_RENEW_MAX_DELAY_MS : Math.min(until < 0 ? BOX_TOKEN_RENEW_RETRY_MS : until + 1, BOX_TOKEN_RENEW_MAX_DELAY_MS);
+    // An unknown expiry: back before the hour the file claims runs out. One days away: still looks at
+    // the host's login now and then.
+    const delay = until === null ? BOX_TOKEN_RESTART_MARGIN_MS : Math.min(until < 0 ? BOX_TOKEN_RENEW_RETRY_MS : until + 1, BOX_TOKEN_RENEW_MAX_DELAY_MS);
     this.setTimer(delay);
   }
 
   private retryLater(): void {
-    this.setTimer(BOX_TOKEN_RENEW_RETRY_MS);
+    this.setTimer(Math.min(BOX_TOKEN_RENEW_RETRY_MS * 2 ** this.failures, LEND_RETRY_MAX_MS));
+    this.failures += 1;
   }
 
   private setTimer(delay: number): void {

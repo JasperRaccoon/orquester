@@ -32,7 +32,8 @@ Rules every module follows:
   appear in logs, API responses or process arguments, nor in files in a box, with one exception: a
   box's login file (a Claude chat's, or a lent login's, mode 0600) holds a short-lived ACCESS token,
   and anything on that box can read it until it expires. Agent refresh tokens and id tokens never
-  leave the host in any form: a Codex login's id token is synthetic.
+  leave the host in any form: a Codex login's id token is synthetic. A lend never overwrites or
+  removes a real login or account index found on a box (`LEND_APPDIR_IN_USE`).
 - A box is reached only through `BoxConnection`. No SSH.
 - Persist a box record before any provider call that creates something billable.
 - Waits use events, receipts or deadlines — never sleeps.

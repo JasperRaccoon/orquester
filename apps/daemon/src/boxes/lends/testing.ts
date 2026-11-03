@@ -23,7 +23,7 @@ import type { AgentTokenBroker, BoxAgentId, BoxHub } from "../contracts.ts";
 import { StoreBoxRegistry } from "../service/registry.ts";
 import { BoxStore } from "../service/store.ts";
 import { localBoxConnection, type LocalBoxConnection } from "../testing.ts";
-import { AccountLends, hasActiveLend } from "./service.ts";
+import { AccountLends, hasActiveLend, type LendSession } from "./service.ts";
 
 export { MIN, NOW };
 export const BOX = "box-1";
@@ -36,6 +36,11 @@ export const ID_TOKEN_MARKER = "id-token-SECRET-MARKER";
 
 export function chat(threadId: string, projectPath = PROJECT): CallerPrincipal {
   return { kind: "agent", threadId, projectPath };
+}
+
+/** A session in the box's project: a Claude chat with its CLI running, unless told otherwise. */
+export function sessionRow(accountId: string, overrides: Partial<LendSession> = {}): LendSession {
+  return { id: "a-chat", kind: "agent-chat", refId: "claude", accountId, projectPath: `${PROJECT}/sub`, status: "running", chatSessionStatus: "ready", ...overrides };
 }
 
 /** A host `.credentials.json`, the refresh token being the marker. */
@@ -68,7 +73,10 @@ export interface LendWorld {
   lends: AccountLends;
   /** Editable: `needsReauth`, new accounts. */
   accounts: { id: string; agent: string; label: string; needsReauth: boolean }[];
-  sessions: { id: string; projectPath: string; accountId?: string }[];
+  sessions: LendSession[];
+  /** The session list changed, as its lifecycle events report. */
+  sessionsChanged(): void;
+  sessionsLoaded: { value: boolean };
   hostLocal: Set<string>;
   closedChats: Set<string>;
   refreshCalls: string[];
@@ -121,6 +129,10 @@ export async function lendWorld(t: TestContext, box: Partial<StoredBox> = {}): P
     registry,
     accounts,
     sessions: [],
+    sessionsChanged: () => {
+      for (const listener of [...sessionListeners]) listener();
+    },
+    sessionsLoaded: { value: true },
     hostLocal: new Set(),
     closedChats: new Set(),
     refreshCalls: [],
@@ -179,6 +191,11 @@ export async function lendWorld(t: TestContext, box: Partial<StoredBox> = {}): P
       broker,
       files,
       sessions: () => world.sessions,
+      onSessionsChanged: (listener) => {
+        sessionListeners.add(listener);
+        return () => sessionListeners.delete(listener);
+      },
+      sessionsLoaded: () => world.sessionsLoaded.value,
       chatOpen: (threadId) => !world.closedChats.has(threadId),
       enabled: () => world.enabled.value,
       publishChanged: () => {

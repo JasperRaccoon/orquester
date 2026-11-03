@@ -3,6 +3,9 @@ import { join, sep } from "node:path";
 
 export const ACCOUNT_MARKER = ".orq-account";
 
+/** What a managed account's id looks like (`randomUUID`): one safe path segment, its home's directory name. */
+export const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export class AgentAccountError extends Error {
   constructor(message: string) {
     super(message);

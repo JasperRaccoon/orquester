@@ -1661,7 +1661,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // git auth, the MCP bridge, dev-server forwards, agent chats in boxes, the Template command, and
   // the box tools (connected while the plugin is on).
   await boxes
-    .attach({ sessions, browsers, agentChat, agentProfile, temporaryBoxTools })
+    .attach({ sessions, browsers, agentChat, agentProfile, temporaryBoxTools, sessionsLoaded: () => sessionsReattached })
     .catch((error) => console.error("Box wiring failed", error instanceof Error ? error.message : error));
   // boxes: end
   // umcp:t6 begin
