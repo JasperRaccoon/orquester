@@ -464,3 +464,63 @@ test("rejectedAccessToken must be a non-empty string of bounded length", async (
   }
   assert.equal(w.refreshCalls.length, 0);
 });
+
+test("getLentToken needs the lend, not a session in the box; getToken is not widened by a lend", async () => {
+  const w = world();
+  w.sessions.length = 0;
+  w.files.texts.set(claudePath, claudeCreds("claude-access", NOW + 8 * 60 * MIN));
+  const broker = createAgentTokenBroker(w.deps);
+  const signal = new AbortController().signal;
+  const request = { boxId: "box-1", agent: "claude" as const, accountId: CLAUDE_ID };
+  await assert.rejects(broker.getLentToken(request, signal), { code: "TOKEN_FORBIDDEN" });
+
+  w.lent.add(`box-1 ${CLAUDE_ID}`);
+  assert.equal((await broker.getLentToken(request, signal)).accessToken, "claude-access");
+  await assert.rejects(broker.getToken(request, signal), { code: "TOKEN_FORBIDDEN" });
+
+  // Every other rule of getToken's holds: wrong agent, a box on its way out, the System account.
+  await assert.rejects(broker.getLentToken({ ...request, agent: "codex" }, signal), { code: "TOKEN_FORBIDDEN" });
+  w.lent.add("box-1 system");
+  await assert.rejects(broker.getLentToken({ ...request, accountId: "system" }, signal), { code: "TOKEN_FORBIDDEN" });
+  w.boxes.set("box-1", storedBox({ state: "destroying" }));
+  await assert.rejects(broker.getLentToken(request, signal), { code: "TOKEN_FORBIDDEN" });
+});
+
+test("getLentToken refuses an agent that is not lendable", async () => {
+  const w = world();
+  w.files.texts.set(grokPath, grokAuth("grok-access", NOW + 8 * 60 * MIN));
+  w.lent.add(`box-1 ${GROK_ID}`);
+  const broker = createAgentTokenBroker(w.deps);
+  await assert.rejects(broker.getLentToken({ boxId: "box-1", agent: "grok", accountId: GROK_ID }, new AbortController().signal), { code: "TOKEN_FORBIDDEN" });
+});
+
+test("a refused token named to getLentToken cannot force a renewal", async () => {
+  const w = world();
+  w.files.texts.set(claudePath, claudeCreds("claude-access", NOW + 8 * 60 * MIN));
+  w.lent.add(`box-1 ${CLAUDE_ID}`);
+  const broker = createAgentTokenBroker(w.deps);
+  const forged = { boxId: "box-1", agent: "claude" as const, accountId: CLAUDE_ID, rejectedAccessToken: "claude-access" };
+  assert.equal((await broker.getLentToken(forged, new AbortController().signal)).accessToken, "claude-access");
+  assert.equal(w.refreshCalls.length, 0);
+});
+
+test("getLentToken shares the loop: an expiring token is refreshed once, and a wait on a holder's CLI ends with the signal", async () => {
+  const w = world();
+  w.files.texts.set(claudePath, claudeCreds("claude-old", NOW + 10 * MIN));
+  w.lent.add(`box-1 ${CLAUDE_ID}`);
+  const broker = createAgentTokenBroker(w.deps);
+  const request = { boxId: "box-1", agent: "claude" as const, accountId: CLAUDE_ID };
+  assert.equal((await broker.getLentToken(request, new AbortController().signal)).accessToken, "claude-access-NEW");
+  assert.equal(w.refreshCalls.length, 1);
+
+  // A Claude CLI on this host is renewing right now and no token is usable: the request waits for it.
+  w.files.texts.set(claudePath, claudeCreds("claude-gone", NOW));
+  w.hostLocal.add(CLAUDE_ID);
+  w.files.lockAges.set(`${homeOf("claude", CLAUDE_ID)}/.oauth_refresh.lock`, 0);
+  const end = new AbortController();
+  const waiting = broker.getLentToken(request, end.signal);
+  await settle(() => w.files.watcherCount(claudePath) === 1);
+  end.abort();
+  await assert.rejects(waiting, { code: "TOKEN_WAIT_TIMEOUT" });
+  assert.equal(w.files.watcherCount(claudePath), 0);
+});

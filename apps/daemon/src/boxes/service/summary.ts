@@ -6,10 +6,12 @@
 import {
   BOX_SETUP_STEP_IDS,
   isBoxKind,
+  isBoxLendAgent,
   isBoxProviderId,
   isBoxPurpose,
   type BoxArch,
   type BoxDestroyedReason,
+  type BoxLentAccount,
   type BoxOs,
   type BoxProjectRef,
   type BoxPurpose,
@@ -21,7 +23,7 @@ import {
   type BoxesTotals,
   BOX_STATES
 } from "@orquester/api";
-import type { StoredBox } from "@orquester/config";
+import type { StoredAccountLend, StoredBox } from "@orquester/config";
 
 import type { BoxProviderRegistry } from "../contracts.ts";
 
@@ -168,6 +170,35 @@ function projectRef(record: StoredBox): BoxProjectRef | null {
   return project ? { workspace: project.workspace, name: project.name, path: project.path } : null;
 }
 
+/** What a lend's record does not hold: its state right now (`boxes/lends`). Never a token. */
+export type BoxLendRuntime = Pick<BoxLentAccount, "status" | "statusMessage" | "tokenExpiresAt" | "home">;
+
+/** Asks the lends module about one lend of a record. */
+export type BoxLendRuntimeLookup = (record: StoredBox, lend: StoredAccountLend) => BoxLendRuntime;
+
+/**
+ * The record's active lends as the API shows them: ended ones wait only for their cleanup, and one
+ * of an agent this build does not know stays in the record, unread.
+ */
+export function lentAccountsOf(record: StoredBox, runtime: BoxLendRuntimeLookup): BoxLentAccount[] {
+  const lent: BoxLentAccount[] = [];
+  for (const lend of record.accountLends ?? []) {
+    if (lend.endedAt || !isBoxLendAgent(lend.agent)) continue;
+    lent.push({
+      id: lend.id,
+      accountId: lend.accountId,
+      agent: lend.agent,
+      label: lend.label,
+      threadId: lend.threadId ?? null,
+      purposeNote: lend.purposeNote ?? "",
+      createdAt: lend.createdAt,
+      expiresAt: lend.expiresAt,
+      ...runtime(record, lend)
+    });
+  }
+  return lent;
+}
+
 const OSES: readonly BoxOs[] = ["linux", "win32", "darwin"];
 const ARCHES: readonly BoxArch[] = ["x64", "arm64"];
 
@@ -175,9 +206,13 @@ const ARCHES: readonly BoxArch[] = ["x64", "arm64"];
  * The summary of one record, or null when the record names a kind, provider or state this build
  * does not know (it is kept in the store, just not shown).
  */
-export function toBoxSummary(record: StoredBox, options: { providers: BoxProviderRegistry; connected: boolean; now: number }): BoxSummary | null {
+export function toBoxSummary(
+  record: StoredBox,
+  options: { providers: BoxProviderRegistry; connected: boolean; now: number; lendRuntime?: BoxLendRuntimeLookup }
+): BoxSummary | null {
   if (!isBoxKind(record.kind) || !isBoxProviderId(record.provider) || !isBoxState(record.state)) return null;
   const adapter = options.providers.get(record.provider);
+  const lentAccounts = options.lendRuntime ? lentAccountsOf(record, options.lendRuntime) : [];
   return {
     id: record.id,
     purpose: purposeOf(record),
@@ -215,6 +250,7 @@ export function toBoxSummary(record: StoredBox, options: { providers: BoxProvide
             pairingExpiresAt: record.state === "pairing" && record.pairingCodeHash ? (record.pairingExpiresAt ?? null) : null
           }
         }
-      : {})
+      : {}),
+    ...(lentAccounts.length > 0 ? { lentAccounts } : {})
   };
 }

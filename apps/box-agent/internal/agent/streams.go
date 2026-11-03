@@ -224,8 +224,14 @@ func (a *Agent) openFileWrite(ch *Channel, spec *wire.FileWriteSpec) {
 			return err
 		}
 		if tmpName != "" {
-			if a.work != nil && statErr != nil {
-				if err := a.work.chown(tmpName); err != nil {
+			// The temp file is orq-agent's: the rename would hand a replaced file
+			// to it (a 0600 login the work user can no longer read).
+			if a.work != nil {
+				give := a.work.chown
+				if statErr == nil {
+					give = func(path string) error { return chownLike(path, existing) }
+				}
+				if err := give(tmpName); err != nil {
 					return err
 				}
 			}
