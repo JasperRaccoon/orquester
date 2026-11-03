@@ -127,6 +127,8 @@ export interface BoxService {
   /** Stop timers and setup runs (records stay; the next start resumes them); queued writes land. */
   stop(): Promise<void>;
   boxesResponse(): BoxesResponse;
+  /** Tell clients the box list changed without a record changing (a lent login's status). Coalesced. */
+  publishChanged(): void;
   setupLog(boxId: string): Promise<string>;
   /**
    * Persist a temporary box's record and start its setup in the background; resolves with its
@@ -429,6 +431,8 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     boxesResponse(): BoxesResponse {
       return { boxes: registry.summaries(), totals: boxesTotals(store.list(), clock.now()) };
     },
+
+    publishChanged: publishBoxes,
 
     setupLog: (boxId) => setupLog.read(boxId),
     startTemporaryBox,

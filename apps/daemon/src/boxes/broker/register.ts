@@ -22,7 +22,7 @@ import { AgentTokenError, BOX_MAX_MIN_VALID_SECONDS, parseTokenRequest } from ".
 /** Longest a token request waits for a host CLI to renew a held account's login. */
 export const TOKEN_REQUEST_MAX_WAIT_MS = 10 * 60_000;
 
-export function registerTokenBroker(hub: Pick<BoxHub, "handle">, broker: AgentTokenBroker): void {
+export function registerTokenBroker(hub: Pick<BoxHub, "handle">, broker: Pick<AgentTokenBroker, "getToken">): void {
   hub.handle("token.get", (context, params, signal) => {
     const fields = typeof params === "object" && params !== null ? (params as unknown as Record<string, unknown>) : {};
     // Untrusted shapes go through `parseTokenRequest` inside `getToken`; the box id is the link's,
@@ -40,7 +40,7 @@ export function registerTokenBroker(hub: Pick<BoxHub, "handle">, broker: AgentTo
 }
 
 /** Register on the unix-socket app ONLY. */
-export function registerTokenBrokerRoutes(app: FastifyInstance, broker: AgentTokenBroker): void {
+export function registerTokenBrokerRoutes(app: FastifyInstance, broker: Pick<AgentTokenBroker, "getToken">): void {
   app.post<{ Body: unknown }>(boxRoutes.internalToken, async (request, reply): Promise<AgentTokenGrant | FastifyReply> => {
     void reply.header("Cache-Control", "no-store");
     let parsed: ReturnType<typeof parseTokenRequest>;

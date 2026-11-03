@@ -121,6 +121,7 @@ function realBroker(
       };
     },
     files,
+    isAccountLent: () => false,
     now: () => now
   });
 }
