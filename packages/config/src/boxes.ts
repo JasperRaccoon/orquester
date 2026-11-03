@@ -55,6 +55,26 @@ export const storedBoxProjectSchema = z
  * record from a newer build (a state or provider this build does not know) is never
  * dropped; readers narrow them with the `isBox*` guards from `@orquester/api`.
  */
+/**
+ * An account lent to a box (lending spec 2026-11-03): names and times only, never a token. `endedAt`
+ * set: ended, and its files on the box are still to be removed once the box is connected.
+ */
+export const storedAccountLendSchema = z
+  .object({
+    id: z.string().min(1),
+    accountId: z.string().min(1),
+    agent: z.string(),
+    label: z.string(),
+    threadId: z.string().nullable().optional(),
+    purposeNote: z.string().optional(),
+    createdAt: isoString,
+    expiresAt: isoString,
+    endedAt: isoString.nullable().optional(),
+    endReason: z.string().nullable().optional()
+  })
+  .passthrough();
+export type StoredAccountLend = z.infer<typeof storedAccountLendSchema>;
+
 export const storedBoxSchema = z
   .object({
     id: z.string().min(1),
@@ -87,6 +107,7 @@ export const storedBoxSchema = z
     project: storedBoxProjectSchema.nullable().optional(),
     threadId: z.string().nullable().optional(),
     purposeNote: z.string().nullable().optional(),
+    accountLends: z.array(storedAccountLendSchema).optional(),
     /** SHA-256 (hex) of the per-box credential issued at first connect. */
     credentialHash: z.string().optional(),
     /** SHA-256 (hex) of the single-use bootstrap token, until used or expired. */
