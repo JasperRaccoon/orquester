@@ -1023,10 +1023,14 @@ describe("orchestrator — compaction (§3.4)", () => {
 });
 
 describe("orchestrator — session restart policy (§3.4)", () => {
-  it("a runtime-mode change restarts the session carrying the cursor", async () => {
+  it("a runtime-mode change at an idle point restarts the session carrying the cursor", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    await host.orchestrator.ingestionSink(threadId, [
+      sinkEvent(host, threadId, "turn-end", "thread.session-set", { session: { status: "ready", activeTurnId: null } })
+    ]);
     await host.settle();
 
     await host.orchestrator.command(threadId, "mode", {
@@ -1039,6 +1043,31 @@ describe("orchestrator — session restart policy (§3.4)", () => {
     assert.equal(starts.length, 2);
     assert.equal(host.adapter.lastStart?.runtimeMode, "full-access");
     assert.deepEqual(host.adapter.lastStart?.resumeCursor, { cursor: "turn-1" });
+    await host.stop();
+  });
+
+  it("under a running turn, a model change waits for the idle point and a permission change is refused", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+
+    await host.orchestrator.command(threadId, "mode", { commandId: cmd(), modelSelection: { model: "next-model" } });
+    await host.settle();
+    await assert.rejects(
+      () => host.orchestrator.command(threadId, "mode", { commandId: cmd(), runtimeMode: "full-access" }),
+      (error: unknown) => isAgentChatCommandError(error) && error.code === "COMMAND_REJECTED"
+    );
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "startSession").length, 1, "the running turn lives on");
+
+    await host.orchestrator.ingestionSink(threadId, [
+      sinkEvent(host, threadId, "turn-end", "thread.session-set", { session: { status: "ready", activeTurnId: null } })
+    ]);
+    await host.settle();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "next" });
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "startSession").length, 2, "the next idle send applies it");
+    assert.equal(host.adapter.lastStart?.modelSelection.model, "next-model");
     await host.stop();
   });
 
@@ -1085,6 +1114,53 @@ describe("orchestrator — session restart policy (§3.4)", () => {
     assert.equal(host.adapter.calls.filter((call) => call.kind === "startSession").length, 2);
     assert.deepEqual(host.adapter.lastStart?.resumeCursor, { cursor: "turn-1" });
     stale = false;
+    await host.stop();
+  });
+
+  it("…but not while the turn's background subagents still run: a restart would kill them", async () => {
+    let stale = false;
+    const host = createTestHost({ sessionToolsStale: () => stale });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    const consumed = host.orchestrator.consume(host.adapter);
+    const base = { threadId, createdAt: host.clock.nowIso() };
+    host.adapter.emit({
+      ...base,
+      eventId: "bg-1",
+      type: "task.started",
+      payload: { taskId: "t1", taskType: "subagent" }
+    } as unknown as RuntimeEvent);
+    await new Promise((resolve) => setImmediate(resolve));
+    await host.orchestrator.ingestionSink(threadId, [
+      sinkEvent(host, threadId, `turn-end-${threadId}`, "thread.session-set", { session: { status: "ready", activeTurnId: null } })
+    ]);
+    await host.settle();
+    assert.equal(host.orchestrator.threadContext(threadId)?.session?.activeTurnId ?? null, null, "the turn is over");
+    assert.deepEqual(host.orchestrator.backgroundWorkThreadIds(), [threadId], "its subagent still runs");
+
+    stale = true;
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "while they work" });
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "startSession").length, 1, "the live session takes the message");
+
+    host.adapter.emit({
+      ...base,
+      eventId: "bg-2",
+      type: "task.completed",
+      payload: { taskId: "t1", taskType: "subagent", status: "completed" }
+    } as unknown as RuntimeEvent);
+    await new Promise((resolve) => setImmediate(resolve));
+    await host.orchestrator.ingestionSink(threadId, [
+      sinkEvent(host, threadId, `turn-end-2-${threadId}`, "thread.session-set", { session: { status: "ready", activeTurnId: null } })
+    ]);
+    await host.settle();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "now" });
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "startSession").length, 2, "restarted once nothing runs");
+    stale = false;
+    host.adapter.close();
+    await consumed;
     await host.stop();
   });
 
@@ -1591,7 +1667,11 @@ describe("orchestrator — error state and session stop (§6.2)", () => {
     const restarted = await host.createThread({ threadId: "thread-restarted" });
     await host.orchestrator.command(restarted, "turn", { commandId: cmd(), input: "go" });
     await host.settle();
-    // A permission-mode change restarts the session on the next turn: the
+    await host.orchestrator.ingestionSink(restarted, [
+      sinkEvent(host, restarted, "turn-end", "thread.session-set", { session: { status: "ready", activeTurnId: null } })
+    ]);
+    await host.settle();
+    // A permission-mode change at an idle point restarts the session: the
     // thread goes on, and so must what its agent left running.
     await host.orchestrator.command(restarted, "mode", { commandId: cmd(), runtimeMode: "full-access" });
     await host.settle();

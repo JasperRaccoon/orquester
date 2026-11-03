@@ -1991,6 +1991,26 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
+   * What makes a thread busy for a session restart, or null when it is idle: the status light's
+   * "not idle" (`resolveSidebarThreadStatus`: a turn running, an approval or question open, live
+   * subagents or monitors) plus a goal its provider is continuing. A restart kills all of it.
+   * The turn is read off the session alone, not `turnIsActive`: the send that asks is itself a
+   * turn on its way.
+   */
+  const restartBlocker = (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    adapter: AgentAdapter | undefined
+  ): "turn" | "request" | "background" | "goal" | null => {
+    const live = currentSession(runtime);
+    if (live.activeTurnId !== null || live.status === "running") return "turn";
+    if (requestPending(runtime.state.pending)) return "request";
+    if (liveness.liveness(runtime.id) !== null) return "background";
+    if (goalContinuingNow(runtime, head, adapter)) return "goal";
+    return null;
+  };
+
+  /**
    * §3.4: "the check runs on the send path, not beside it". Either returns the
    * live session or restarts it and rebinds, and only then does the caller
    * send. Nothing else starts sessions.
@@ -2027,17 +2047,24 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         bound,
         capabilities: adapter.capabilities
       });
-      // Unified MCP §9.3: a session-tool list the session cannot take in-session — at an idle
-      // point only (a steer into a running turn never restarts it), carrying the cursor.
-      if (!decision.restart && options.sessionToolsStale !== undefined) {
-        const live = currentSession(runtime);
-        const idle = live.activeTurnId === null && live.status !== "running";
-        if (idle && options.sessionToolsStale(runtime.id)) {
-          decision.restart = true;
-          decision.reasons.push("sessionTools");
-        }
+      // Unified MCP §9.3: a session-tool list the session cannot take in-session, carrying the
+      // cursor.
+      if (!decision.restart && options.sessionToolsStale?.(runtime.id) === true) {
+        decision.restart = true;
+        decision.reasons.push("sessionTools");
       }
-      if (!decision.restart) {
+      // A restart kills the provider process and everything running inside it — the turn, its
+      // subagents, its monitors — so it only ever happens at an idle point; a busy thread keeps
+      // its live session (a steer goes into it) and restarts at the first send that finds it idle.
+      const blocker = decision.restart ? restartBlocker(runtime, head, adapter) : null;
+      if (blocker !== null) {
+        logger.info("agent-host: provider session restart deferred until idle", {
+          threadId: runtime.id,
+          reasons: decision.reasons,
+          blocker
+        });
+      }
+      if (!decision.restart || blocker !== null) {
         snapshots.ensureWorkspaceSnapshot(head.adapter, head.cwd);
         return bound.session;
       }
@@ -4430,6 +4457,25 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         }
         const events: AppendableDomainEvent[] = [];
         const occurredAt = clock.nowIso();
+        const modeAdapter = options.adapters.get(head.adapter);
+        // A live session restarts for either change, which never happens while the thread is busy
+        // (`restartBlocker`). A model change waits for the idle point; a permission change is
+        // refused instead, so a running agent never keeps permissions the user just took away.
+        const busy =
+          modeAdapter !== undefined && modeAdapter.hasSession(runtime.id)
+            ? restartBlocker(runtime, head, modeAdapter)
+            : null;
+        if (busy !== null && runtimeMode !== undefined && runtimeMode !== head.runtimeMode) {
+          throw commandRejected(
+            busy === "turn"
+              ? "Wait for the agent to finish the current turn before changing the permission mode."
+              : busy === "request"
+                ? "Answer the agent's open request before changing the permission mode."
+                : busy === "background"
+                  ? "Wait for the background work to finish before changing the permission mode."
+                  : "Pause the goal before changing the permission mode."
+          );
+        }
         if (runtimeMode !== undefined && runtimeMode !== head.runtimeMode) {
           events.push(
             buildEvent(
@@ -4452,6 +4498,26 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               { commandId, occurredAt }
             )
           );
+          if (busy !== null) {
+            events.push(
+              buildEvent(
+                runtime.id,
+                "thread.activity-appended",
+                {
+                  activity: makeActivity({
+                    id: `mode-deferred:${commandId}`,
+                    tone: "info",
+                    activityKind: "provider.session.restart.deferred",
+                    summary: "The new model settings apply once the agent is idle",
+                    payload: {},
+                    turnId: session.activeTurnId,
+                    createdAt: occurredAt
+                  })
+                },
+                { commandId, occurredAt }
+              )
+            );
+          }
         }
         if (events.length === 0) {
           // Nothing changed: still a receipt, still `{seq}`, no provider work.
