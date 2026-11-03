@@ -46,6 +46,8 @@ export interface SessionToolThread {
   cwd: string;
   /** The path map of the box its CLI runs in, when that box's is not identity (a Windows project box). */
   boxPaths?: BoxPathMap;
+  /** The project box its CLI runs in, when it runs in one. */
+  projectBoxId?: string;
   agentId: AgentAdapterId;
   /** The tab's `owner.kind`, when it has one (`"workflow"`, `"knowledge-indexer"`, …). */
   ownerKind?: string;
@@ -93,6 +95,7 @@ export async function buildThreadCaller(
     workspace: project?.workspace ?? "",
     cwd: thread.cwd,
     ...(thread.boxPaths ? { boxPaths: thread.boxPaths } : {}),
+    ...(thread.projectBoxId ? { projectBoxId: thread.projectBoxId } : {}),
     agentId: thread.agentId,
     callId,
     runtimeMode: ownHead.head.runtimeMode,

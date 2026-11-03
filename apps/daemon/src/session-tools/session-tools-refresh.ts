@@ -80,6 +80,8 @@ export interface SessionToolsRefreshThread {
   cwd?: string;
   /** Its canonical spelling, when the daemon resolves one. */
   canonicalCwd?: string;
+  /** boxes: its CLI runs in a project box. */
+  inBox?: boolean;
 }
 
 /** A read of the daemon-pointing servers for a chat in a directory inside its project. */
@@ -366,7 +368,8 @@ export class SessionToolsRefresher {
       projectPaths,
       ...(cwdPaths.length > 0 ? { cwdPaths } : {}),
       ...(denyEveryKnown ? { denyEveryKnown: true } : {}),
-      workflowOwned
+      workflowOwned,
+      ...(thread.inBox ? { inBox: true } : {})
     };
     const read = await this.knowledgeFor(threadId);
     const knowledge: ManifestKnowledge | undefined = knowledgeWorker && read?.worker !== true ? { enabled: read?.enabled === true, worker: true, searchable: false, visibleCollectionNames: [] } : read;

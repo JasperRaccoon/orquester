@@ -157,8 +157,9 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
     label: "Secret files (pushing needs your approval)",
     tools: [read("secret_files_status"), admin("push_secret_files")]
   },
-  // boxes: advertised only while the Ephemeral AI VMs plugin can rent a box (`session-tools/manifest.ts`).
-  // `create_box` is Act: its card is a `spend` card, raised in every permission mode.
+  // boxes: advertised only while the Ephemeral AI VMs plugin can rent a box (`session-tools/manifest.ts`);
+  // the two lending tools also to a chat running in a box. `create_box` and `box_lend_accounts` are
+  // Act: their cards are `spend` cards, raised in every permission mode.
   {
     id: "boxes",
     label: "Temporary boxes (renting needs your approval)",
@@ -170,7 +171,9 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       act("box_upload"),
       act("box_download"),
       act("box_forward_port"),
-      act("destroy_box")
+      act("destroy_box"),
+      act("box_lend_accounts"),
+      act("box_return_accounts")
     ]
   },
   // Knowledge Graph: advertised only while the plugin is on (`session-tools/manifest.ts`); search,

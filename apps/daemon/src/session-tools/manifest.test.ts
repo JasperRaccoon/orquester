@@ -188,6 +188,12 @@ test("knowledge gating matrix: plugin off/on × Global / profile with collection
     assert.ok(both.tools.includes(name), name);
     assert.ok(ownedRenting.tools.includes(name), `${name}: a workflow-owned chat may rent a box`);
   }
+  // A chat already in a box may borrow logins even while no box can be rented; that is all it gains.
+  const inBox = buildSessionToolsManifest({ thread: thread({ inBox: true }), catalog: chat, daemonPointing: [] });
+  assert.deepEqual(inBox.tools.filter((name) => !build().tools.includes(name)), ["box_lend_accounts", "box_return_accounts"]);
+  assert.ok(both.tools.includes("box_lend_accounts"));
+  assert.ok(!build().tools.includes("box_lend_accounts"));
+  assert.doesNotMatch(inBox.instructions, /create_box/);
   // The block names create_box exactly where it is advertised.
   assert.doesNotMatch(build().instructions, /create_box/);
   assert.match(both.instructions, /create_box/);
