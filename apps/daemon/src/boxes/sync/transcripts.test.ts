@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
@@ -148,6 +148,54 @@ test("pushForResume copies the session's files into the box once", async (t) => 
   await f.sync.pullAfterTurn("b1", request, signal());
   assert.equal(await readFile(join(hostDir, "s1.jsonl"), "utf8"), LINE(1) + LINE(4));
   assert.equal(f.reads.filter((read) => read.path.endsWith("s1.jsonl"))[0]?.offset, Buffer.byteLength(LINE(1)));
+});
+
+test("a session the CLI relocated into a worktree's folder mirrors from there, and the host's stale cwd copy goes", async (t) => {
+  const f = await fixture(t);
+  const cwdName = claudeProjectDirName(f.cwd);
+  const wtName = claudeProjectDirName(join(f.cwd, ".claude", "worktrees", "wt"));
+  // Mirrored before the move: the host's cwd folder holds the session as it was.
+  await put(join(f.shared, cwdName, "s1.jsonl"), LINE(1));
+  await put(join(f.shared, cwdName, "s2.jsonl"), LINE(7));
+  // The CLI moved both sessions into the worktree's folder and wrote on there.
+  const boxWt = f.box.local(join(f.home, "projects", wtName));
+  await put(join(boxWt, "s1.jsonl"), LINE(1) + LINE(2) + LINE(3));
+  await put(join(boxWt, "s1", "subagents", "agent-a.jsonl"), LINE(9));
+  await put(join(boxWt, "s2.jsonl"), LINE(8) + LINE(2));
+
+  await f.sync.pullAfterTurn("b1", { agent: "claude", configRoot: f.home, cwd: f.cwd, sessionRef: "s1" }, signal());
+  assert.equal(await readFile(join(f.shared, wtName, "s1.jsonl"), "utf8"), LINE(1) + LINE(2) + LINE(3));
+  assert.equal(await readFile(join(f.shared, wtName, "s1", "subagents", "agent-a.jsonl"), "utf8"), LINE(9));
+  assert.equal(await exists(join(f.shared, cwdName, "s1.jsonl")), false, "the host mirrors the move");
+
+  // A host copy that is not where the box's copy began is never deleted.
+  await f.sync.pullAfterTurn("b1", { agent: "claude", configRoot: f.home, cwd: f.cwd, sessionRef: "s2" }, signal());
+  assert.equal(await readFile(join(f.shared, cwdName, "s2.jsonl"), "utf8"), LINE(7));
+  assert.ok(f.warnings.some((message) => message.includes("s2.jsonl")), f.warnings.join("\n"));
+});
+
+test("a resume never puts a stale cwd copy beside a relocated session; a fresh box gets the relocated one", async (t) => {
+  const f = await fixture(t);
+  const cwdName = claudeProjectDirName(f.cwd);
+  const wtName = claudeProjectDirName(join(f.cwd, ".claude", "worktrees", "wt"));
+  const request = { agent: "claude" as const, configRoot: f.home, cwd: f.cwd, sessionRef: "s1" };
+  // A host whose stale cwd copy survived (an older daemon mirrored only the cwd folder).
+  await put(join(f.shared, cwdName, "s1.jsonl"), LINE(1));
+  await utimes(join(f.shared, cwdName, "s1.jsonl"), 1_000, 1_000);
+  await put(join(f.shared, wtName, "s1.jsonl"), LINE(1) + LINE(2));
+  await utimes(join(f.shared, wtName, "s1.jsonl"), 2_000, 2_000);
+  const boxCwd = f.box.local(join(f.home, "projects", cwdName));
+  const boxWt = f.box.local(join(f.home, "projects", wtName));
+  await put(join(boxWt, "s1.jsonl"), LINE(1) + LINE(2));
+
+  await f.sync.pushForResume("b1", request, signal());
+  assert.equal(await exists(join(boxCwd, "s1.jsonl")), false, "the CLI would resume the stale copy");
+
+  // A fresh box: the session goes where the CLI last wrote it, and only there.
+  await rm(boxWt, { recursive: true, force: true });
+  await f.sync.pushForResume("b1", request, signal());
+  assert.equal(await readFile(join(boxWt, "s1.jsonl"), "utf8"), LINE(1) + LINE(2));
+  assert.equal(await exists(join(boxCwd, "s1.jsonl")), false);
 });
 
 test("macOS: a transcript folder named after the box's realpath maps to the host's folder", async (t) => {

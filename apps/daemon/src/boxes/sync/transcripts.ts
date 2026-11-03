@@ -41,6 +41,17 @@
  * whose first host-size bytes are the host copy has its tail mirrored to the host instead; a box
  * copy that changed since its last sync in any other way has diverged and is kept (warned). A
  * copy the box did not change since its last sync is replaced by the host's.
+ *
+ * **Relocated sessions (Claude).** When a session's cwd moves into another project folder (an
+ * `EnterWorktree` into `<cwd>/.claude/worktrees/<name>`), the CLI MOVES the transcript and its
+ * sidecar into that folder and writes on there; `--resume` from the cwd still finds it there
+ * (its recorded cwd is below the cwd) — unless a copy sits in the cwd's own folder, which
+ * shadows it. So the folders of paths below the cwd that hold the session (`<cwd folder>-…`,
+ * paired by suffix) are mirrored too; after a pull, a host copy in a folder the box no longer
+ * holds the transcript in is deleted when it is where the box's live copy began (the host
+ * mirrors the move), and kept with a warning otherwise; and a resume pushes only into the
+ * folders where the box holds the transcript — a box without one gets the host's newest copy,
+ * where the CLI last wrote it — never a stale copy beside the live one.
  */
 
 import { spawn } from "node:child_process";
@@ -191,7 +202,8 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
         return;
       }
       const files: FileToMirror[] = [];
-      for (const pair of await this.dirPairs(connection, request, signal)) {
+      const pairs = await this.dirPairs(connection, request, signal);
+      for (const pair of pairs) {
         const tree = await walkBox(connection, [pair.box], (path, isDir) => this.inSession(request, pair.box, path, isDir), signal);
         for (const file of tree.files.values()) {
           const rel = file.path.slice(pair.box.length + 1);
@@ -202,6 +214,9 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
         }
       }
       await this.mirrorToHost(connection, files, signal);
+      if (request.agent === "claude" && request.sessionRef !== null) {
+        await this.dropMovedHostCopies(connection, pairs, request.sessionRef, signal);
+      }
     });
   }
 
@@ -214,7 +229,9 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
         await this.opencodePush(connection, request, signal);
         return;
       }
-      const pairs = await this.dirPairs(connection, request, signal, { forPush: true });
+      const all = await this.dirPairs(connection, request, signal, { forPush: true });
+      const resumeHosts = request.agent === "claude" ? await this.claudeResumeHosts(connection, all, request.sessionRef, signal) : null;
+      const pairs = resumeHosts === null ? all : all.filter((pair) => resumeHosts.has(pair.host));
       // The host dirs are shared by every spelling; list each once.
       const hostFiles = new Map<string, string[]>();
       for (const pair of pairs) {
@@ -275,6 +292,9 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
           pairs.push({ host, box: `${projects}/${name}` });
         }
       }
+      if (request.sessionRef !== null) {
+        pairs.push(...(await this.relocatedPairs(connection, projects, hostName, spellings, request.sessionRef, signal)));
+      }
       return pairs;
     }
     if (request.agent === "codex") {
@@ -284,6 +304,119 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
     const sessions = `${root}/sessions`;
     const hostDir = `${sessions}/${encodeURIComponent(request.cwd)}`;
     return spellings.map((spelling) => ({ host: hostDir, box: `${sessions}/${encodeURIComponent(spelling)}` }));
+  }
+
+  /**
+   * Claude folders of paths below the cwd (`<cwd folder>-<suffix>`, e.g. a worktree's under
+   * `.claude/worktrees/`) holding the session on either side, paired by suffix: the CLI moves a
+   * session into the folder of its new cwd (see "Relocated sessions" in the module doc). The
+   * encoding makes `/w/proj-x` read as a path below `/w/proj` too, so only a folder holding the
+   * session's own files is taken. A cwd folder name over 200 characters ends in a hash of the
+   * whole path, so nothing below it shares a prefix with it: such a cwd has no related folders.
+   * A related name that is itself truncated hashes its whole path, so it pairs only between
+   * identical spellings.
+   */
+  private async relocatedPairs(
+    connection: BoxConnection,
+    projects: string,
+    hostName: string,
+    spellings: readonly string[],
+    sessionRef: string,
+    signal: AbortSignal
+  ): Promise<DirPair[]> {
+    if (hostName.length > CLAUDE_DIR_NAME_MAX) return [];
+    const hostEntries = await readdir(projects, { withFileTypes: true }).catch(() => []);
+    const boxEntries = await connection.request("fs.readdir", { path: boxPathOf(connection, projects) }, { signal }).catch(() => []);
+    const rename = (name: string, from: string, to: string): string | null => {
+      if (name.length > CLAUDE_DIR_NAME_MAX) return from === to ? name : null;
+      const renamed = `${to}${name.slice(from.length)}`;
+      return renamed.length <= CLAUDE_DIR_NAME_MAX && isSafeEntryName(renamed) ? renamed : null;
+    };
+    const candidates = new Map<string, DirPair>();
+    const add = (host: string, box: string): void => {
+      if (!candidates.has(box)) candidates.set(box, { host: `${projects}/${host}`, box: `${projects}/${box}` });
+    };
+    for (const spelling of spellings) {
+      const boxName = claudeProjectDirName(spelling);
+      if (boxName.length > CLAUDE_DIR_NAME_MAX) continue;
+      for (const entry of boxEntries) {
+        if (entry.kind !== "dir" || !isSafeEntryName(entry.name) || !entry.name.startsWith(`${boxName}-`)) continue;
+        const host = rename(entry.name, boxName, hostName);
+        if (host !== null) add(host, entry.name);
+      }
+      for (const entry of hostEntries) {
+        if (!entry.isDirectory() || !entry.name.startsWith(`${hostName}-`)) continue;
+        const box = rename(entry.name, hostName, boxName);
+        if (box !== null) add(entry.name, box);
+      }
+    }
+    const pairs: DirPair[] = [];
+    for (const pair of candidates.values()) {
+      const held =
+        (await boxStat(connection, `${pair.box}/${sessionRef}.jsonl`, signal)) !== null ||
+        (await boxStat(connection, `${pair.box}/${sessionRef}`, signal)) !== null ||
+        (await orAbsent(lstat(`${pair.host}/${sessionRef}.jsonl`))) !== null ||
+        (await orAbsent(lstat(`${pair.host}/${sessionRef}`))) !== null;
+      if (held) pairs.push(pair);
+    }
+    return pairs;
+  }
+
+  /** Every pair's box copy of the Claude session's transcript that exists, as the box stats it. */
+  private async boxSessionCopies(connection: BoxConnection, pairs: readonly DirPair[], sessionRef: string, signal: AbortSignal): Promise<{ pair: DirPair; box: string; info: BoxFsStat }[]> {
+    const copies: { pair: DirPair; box: string; info: BoxFsStat }[] = [];
+    for (const pair of pairs) {
+      const box = `${pair.box}/${sessionRef}.jsonl`;
+      const info = await boxStat(connection, box, signal);
+      if (info?.kind === "file") copies.push({ pair, box, info });
+    }
+    return copies;
+  }
+
+  /**
+   * After a pull: a host copy of the transcript in a folder where the box no longer has one was
+   * moved away by the CLI (relocated). When it is where the box's live copy (the newest) began,
+   * the host mirrors the move and deletes it, so no reader or resume takes it for the session;
+   * anything else is kept and warned about.
+   */
+  private async dropMovedHostCopies(connection: BoxConnection, pairs: readonly DirPair[], sessionRef: string, signal: AbortSignal): Promise<void> {
+    const copies = await this.boxSessionCopies(connection, pairs, sessionRef, signal);
+    if (copies.length === 0) return;
+    const live = copies.reduce((newest, copy) => (copy.info.mtimeMs > newest.info.mtimeMs ? copy : newest));
+    const holding = new Set(copies.map((copy) => copy.pair.host));
+    for (const host of new Set(pairs.map((pair) => pair.host))) {
+      if (holding.has(host)) continue;
+      const path = `${host}/${sessionRef}.jsonl`;
+      if (isDeniedTranscriptPath(path, this.denyRoots)) continue;
+      const local = await orAbsent(lstat(path));
+      if (!local?.isFile()) continue;
+      if (live.info.size >= local.size) {
+        const [boxHash] = await this.hasher(connection, [{ path: live.box, length: local.size }], signal);
+        if (boxHash === (await sha256FilePrefix(path, local.size))) {
+          await rm(path, { force: true });
+          continue;
+        }
+      }
+      this.warn(connection, `${path} is not where the box's relocated copy of the session began; the host keeps it`);
+    }
+  }
+
+  /**
+   * Before a Claude resume: the host folders whose files go into the box, null for all. Where the
+   * box holds the transcript, only there (a copy beside it would shadow it: the CLI resumes the
+   * cwd folder's first); a box without one gets the host's newest copy, which is where the CLI
+   * last wrote it.
+   */
+  private async claudeResumeHosts(connection: BoxConnection, pairs: readonly DirPair[], sessionRef: string | null, signal: AbortSignal): Promise<Set<string> | null> {
+    if (sessionRef === null) return null;
+    const copies = await this.boxSessionCopies(connection, pairs, sessionRef, signal);
+    if (copies.length > 0) return new Set(copies.map((copy) => copy.pair.host));
+    let newest: { host: string; mtimeMs: number } | null = null;
+    for (const host of new Set(pairs.map((pair) => pair.host))) {
+      const local = await orAbsent(stat(`${host}/${sessionRef}.jsonl`));
+      if (local?.isFile() && (newest === null || local.mtimeMs > newest.mtimeMs)) newest = { host, mtimeMs: local.mtimeMs };
+    }
+    return newest === null ? null : new Set([newest.host]);
   }
 
   private async prefixMatches(dir: string, name: string): Promise<string[]> {
