@@ -694,6 +694,9 @@ test("box_lend_accounts in full access opens a spend card naming every account a
   const warnings = card.sections.flatMap((section) => (section.kind === "warning" ? [section.text] : []));
   assert.ok(warnings.some((text) => text.includes("can read these logins")));
   assert.ok(warnings.some((text) => text.includes("Codex tokens last about 10 days")));
+  // The real end is counted from approval, so the card promises no clock time.
+  assert.ok(!rows.some((row) => row.label === "Ends at"));
+  assert.match(rows.find((row) => row.label === "Time limit")!.value, /^1 h 30 min from approval, at most until/);
   assert.deepEqual(previews, [{ claude: ["ada"], codex: ["bob"], minutes: 1440 }]);
   // The clamped minutes and the resolved ids, not the arguments.
   assert.deepEqual(posted, [{ accounts: [{ agent: "claude", accountId: "acct-claude" }, { agent: "codex", accountId: "acct-codex" }], minutes: 90, purposeNote: lendArgs.purpose }]);
@@ -763,6 +766,18 @@ test("list_boxes carries this chat's lends on every VM, project VMs included", a
   assert.ok(listed.ok);
   const [row] = listed.value.lent_accounts as Record<string, unknown>[];
   assert.deepEqual([row!.box_id, row!.id, row!.status, row!.lent_until], ["project-box", "acct-claude", "renewal-failing", "2026-11-03T21:40:00.000Z"]);
+});
+
+test("list_boxes while no box can be rented still answers with the chat's lends; a lend read that fails still fails", async () => {
+  const { api } = fakeApi();
+  api.on("GET", temporaryBoxRoutes.list, { status: 503, body: { code: "BOXES_DISABLED", message: "Temporary boxes are not available." } });
+  api.on("GET", accountLendRoutes.all, { status: 200, body: { lends: [lend({ boxId: "project-box" })] } });
+  const listed = await call(api, "list_boxes", {});
+  assert.ok(listed.ok, listed.ok ? "" : listed.message);
+  assert.deepEqual(listed.value.boxes, []);
+  assert.equal((listed.value.lent_accounts as unknown[]).length, 1);
+  api.on("GET", temporaryBoxRoutes.list, { status: 500, body: { code: "INTERNAL", message: "x" } });
+  assert.ok(!(await call(api, "list_boxes", {})).ok);
 });
 
 test("box_return_accounts ends only this chat's lends on that VM, by name or all, with no card, while planning too", async () => {

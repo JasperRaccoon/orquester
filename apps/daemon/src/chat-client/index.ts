@@ -6,6 +6,7 @@ import type { AgentChatService } from "../agent-chat/service.ts";
 import { InjectDaemonApi, type LivePath } from "../mcp/daemon-api.ts";
 import type { TemporaryBoxTools } from "../boxes/temporary/tools.ts";
 import type { BoxRegistry } from "../boxes/contracts.ts";
+import type { TokenBrokerSession } from "../boxes/broker/broker.ts";
 import type { DeviceToolsPort } from "../devices/tools-port.ts";
 
 export type { DaemonApi } from "../mcp/daemon-api.ts";
@@ -40,6 +41,8 @@ interface InternalDaemonApiOptions {
   boxes?: TemporaryBoxTools | null;
   // boxes: which paths live in a box project, for the file reads (absent: all host).
   boxRegistry?: () => BoxRegistry | undefined;
+  // boxes: every session, as the token broker reads them (`DaemonApi.boxesOfChat`).
+  boxSessions?: () => Iterable<TokenBrokerSession>;
   // Devices: the device service behind the device MCP tools (null while the plugin is off).
   devices?: () => DeviceToolsPort | null;
 }
@@ -60,6 +63,7 @@ export function createInternalDaemonApi(opts: InternalDaemonApiOptions): InjectD
     workspacesDir: opts.workspacesDir,
     boxes: opts.boxes,
     boxRegistry: opts.boxRegistry,
+    boxSessions: opts.boxSessions,
     devices: opts.devices
   });
 }

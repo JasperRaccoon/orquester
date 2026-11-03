@@ -137,7 +137,7 @@ const LEGACY_CHAT_TOOL_ALIASES: Readonly<Record<string, LegacyChatToolAlias>> = 
 };
 
 /**
- * The legacy name as a catalog tool running `target` with the mapped arguments: tier, family,
+ * The legacy name as a catalog tool running `target` with the mapped arguments: tier, families,
  * scope, preview and run are the target's — so the gate, cards and turn policy judge
  * the call exactly as they judge the target.
  */
@@ -156,6 +156,7 @@ function aliasTool(name: string, alias: LegacyChatToolAlias, target: AnyOrqueste
   };
   const targetTier = target.tier;
   const targetFamily = target.adminFamily;
+  const targetSpend = target.spendFamily;
   const approval = target.approval;
   return {
     name,
@@ -167,6 +168,9 @@ function aliasTool(name: string, alias: LegacyChatToolAlias, target: AnyOrqueste
     tier: typeof targetTier === "function" ? (args: Args, scope: ScopeClaim): Tier => targetTier(mapped(args), scope) : targetTier,
     ...(targetFamily !== undefined
       ? { adminFamily: typeof targetFamily === "function" ? (args: Args, scope: ScopeClaim) => targetFamily(mapped(args), scope) : targetFamily }
+      : {}),
+    ...(targetSpend !== undefined
+      ? { spendFamily: typeof targetSpend === "function" ? (args: Args, scope: ScopeClaim) => targetSpend(mapped(args), scope) : targetSpend }
       : {}),
     ...(target.planSafe ? { planSafe: true } : {}),
     scope: (args: Args, ctx: ScopeContext) => target.scope(mapped(args), ctx),

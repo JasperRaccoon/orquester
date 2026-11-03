@@ -43,7 +43,7 @@ The owner's first requirement is that nothing happens to the real logins: no ref
 |---|---|---|
 | G1 | The VM cannot refresh | The file holds no refresh token (Claude: field absent. Codex: `""`). Claude returns `no_refresh_token` before any network call (spike (a)). Codex posts an empty refresh token, which the provider refuses and which consumes nothing (verified offline, see §5). |
 | G2 | The VM cannot overwrite a real login | `.credentials.json` and `auth.json` are on the hard deny list of box config sync in both directions (`boxes/sync/rules.ts`). A test must keep this true for lent homes. |
-| G3 | The VM cannot request tokens for lent accounts | `token.get` from the box link goes through `boxUsesAccount` and is not extended. Only the host-side keeper can get a lent token (`getLentToken`). |
+| G3 | The VM cannot request tokens for lent accounts, and cannot gain an account by opening a chat | `token.get` from the box link goes through `boxUsesAccount` and is not extended. Only the host-side keeper can get a lent token (`getLentToken`). `boxUsesAccount` turns true for an account once a session on that box uses it, so an agent's `create_session`, `fork_session` or `update_session` that would run on a box with an account new to it needs an `accounts` spend card (§8). The account of a chat already on the box can still be requested by that VM, renewal included. That is intentional: the chat's own CLI needs it. |
 | G4 | The VM cannot force a renewal of a lent account | Same as G3. `getLentToken` has no `rejectedAccessToken` parameter. |
 | G5 | One refresher | The keeper only calls the broker, which uses the existing `refreshOnce` and `mayRefreshHeld` rules. A lend is not in `hostLocalAccountIds` or `liveAccountIds`. |
 | G6 | A renewal never strands the VM | The keeper watches the host's login file and pushes the new token at once (a renewal revokes the old Claude token immediately). |
@@ -147,7 +147,7 @@ Both tools are chat-only, in the `boxes` family, and advertised only while the p
 
 ### `box_lend_accounts`
 
-Description (keep to this length): "Put short-lived logins of named managed accounts on this chat's VM, so a paid eval or CLI there can use them. Needs the owner's approval on a card (up to 30 min); if denied, don't retry: ask. Never copy logins yourself. Names from `list_agents`, quota from `get_usage`."
+Description (keep to this length): "Put logins without refresh tokens of named managed accounts on this chat's VM, so a paid eval or CLI there can use them. Needs the owner's approval on a card (up to 30 min); if denied, don't retry: ask. Never copy logins yourself. Names from `list_agents`, quota from `get_usage`."
 
 | Argument | Notes |
 |---|---|
@@ -186,9 +186,19 @@ Errors name the fix:
 
 Gains a top-level `lent_accounts` listing this chat's active lends on every VM, with `status`, because project VMs are not rows there.
 
+### A chat that would give a box a new account
+
+A chat on a box can ask for its own account's token and renewal (§3 G3), so choosing a chat's account is lending too, with more reach. The rule is on the target. When an agent's `create_session`, `fork_session` or `update_session` would run a chat on a box with an account no session there uses, it needs an `accounts` spend card: in every permission mode, never grantable, refused while planning. This covers a host chat targeting a box project, and an account switch on a chat that owns a temporary box.
+
+- The account is resolved to its real id before the card: named, inherited, forced by a resume, or the family default. The card names the account and the VM and warns that anything on the VM can read the login and ask for renewals while such a chat exists.
+- The id is pinned, so what runs is what was approved. `run` re-checks, and refuses an account new to the box without a pin.
+- No card: a person opening a tab in the UI, external MCP clients (full trust), and an account already in use on that box.
+- A workflow-owned chat stays refused across projects.
+- Not covered: a workflow's agent block picks its account inside the graph. That goes through the workflow's own Admin card, which a grant can cover.
+
 ### Hint at the point of failure
 
-In `apps/daemon/src/evals/tool-use/accounts.ts`, "no login" and a missing index name the fix when running on a box: "On a VM, ask for it with box_lend_accounts." Detect a VM by the env var box launches already set, if there is one; otherwise phrase it conditionally ("If this is a VM…").
+In `apps/daemon/src/evals/tool-use/accounts.ts`, "no login" and a missing index name the fix when running on a box: first pass a lent appdir (`--appdir` or `ORQUESTER_APPDIR`), and only then ask with `box_lend_accounts`, because asking again opens a new card. Detect a VM by the env var box launches already set, if there is one; otherwise phrase it conditionally ("If this is a VM…").
 
 Do not grow the `## Orquester` instruction block: the deferred tool's name and the eval's error carry it, unless a paid eval proves otherwise.
 

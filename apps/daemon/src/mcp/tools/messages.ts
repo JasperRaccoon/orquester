@@ -27,9 +27,10 @@ import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, 
 import { proposedPlan } from "../transcript.ts";
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { awaitReplySubscription, turnBaseline, waitForTurn, waitWhileWorking, type TurnBaseline, type TurnOutcome } from "../wait.ts";
-import { defineTool, MUTATING, type AnyOrquesterTool, type CallContext, type ScopeContext, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
+import { defineTool, MUTATING, type AnyOrquesterTool, type ApprovalPreview, type CallContext, type ScopeContext, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
 import { NEW_SESSION, openedThreadRuntimeMode, runtimeModesUpTo } from "../gate/turn-policy.ts";
 import { asWaiter } from "../../agent-chat/waits.ts";
+import { ACCOUNT_SPEND, BOX_ACCOUNT_PIN, boxAccountCard, exposedBox, requireBoxAccountCard, type BoxAccountExposure } from "./boxes.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT, optionsSchema, runtimeModeSchema } from "./sessions.ts";
 import { agentLabel, chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./session-access.ts";
 
@@ -886,6 +887,23 @@ async function resumeRowFor(api: ScopeContext["api"], projectPath: string, conve
   return { id: row.id, agent: row.agentRefId, title: row.title, home: row.home ?? "system", ...(row.accountId ? { accountId: row.accountId } : {}) };
 }
 
+/**
+ * What a chat's `create_session` would newly give a box (`exposedBox`): the account it really gets,
+ * named, inherited, forced by a resume or the family default. Null: no box, or nothing new to it.
+ */
+async function createBoxAccount(args: CreateArgs, api: ScopeContext["api"], caller: ThreadCaller): Promise<BoxAccountExposure | null> {
+  const projectPath = await createTarget(api, caller, args.project);
+  if (!api.boxesOfChat?.({ projectPath }).length) return null;
+  const tab = (await listSessions(api)).find((s) => s.id === caller.threadId);
+  if (!tab) throw new ToolError("THREAD_NOT_FOUND", "This chat thread is no longer open.");
+  const resume = args.resume ? await resumeRowFor(api, projectPath, args.resume.conversationId) : undefined;
+  const refId = args.agent ?? resume?.agent ?? tab.refId;
+  const agent = findAgent(await loadAgents(api, { includeLegacyModels: true }), refId);
+  const accountId = launchAccount(agent, args.accountId, refId === tab.refId && tab.accountId ? tab.accountId : undefined, resume).accountId ?? agent.defaultAccountId;
+  const box = exposedBox(api, { projectPath }, accountId);
+  return box ? { box, accountId: accountId!, label: agent.accounts.find((account) => account.id === accountId)?.label ?? accountId!, agent: agent.id } : null;
+}
+
 /** The reply mode a create asks for (§4.1): chat `delegate` → notify, else none; `wait`/`notify` need a prompt. */
 function createReply(args: CreateArgs, chat: boolean): ReplyMode {
   const reply = args.reply ?? (chat && args.delegate === true ? "notify" : "none");
@@ -922,6 +940,8 @@ export const createSessionTool = defineTool({
   audiences: ["external", "chat"],
   toolset: "core",
   tier: "act",
+  // Only a chat's call that gives a box a new account spends (looked up by `scope`).
+  spendFamily: (_args, scope) => scope.resolved?.spendFamily,
   async scope(args, ctx) {
     const caller = threadCaller(ctx.caller);
     if (caller === null) {
@@ -943,7 +963,8 @@ export const createSessionTool = defineTool({
       writes: false,
       // The first turn is agent-caused (§8.4); the opened chat runs no broader than this one (turn policy a).
       causesTurnIn: args.prompt !== undefined ? [NEW_SESSION] : [],
-      ...(args.cwd !== undefined ? { paths: [resolvePath(callerHostPath(caller, args.cwd, project.canonical))] } : {})
+      ...(args.cwd !== undefined ? { paths: [resolvePath(callerHostPath(caller, args.cwd, project.canonical))] } : {}),
+      ...((await createBoxAccount(args, ctx.api, caller)) ? { resolved: ACCOUNT_SPEND } : {})
     };
   },
   async approval(args, ctx) {
@@ -967,7 +988,9 @@ export const createSessionTool = defineTool({
     ];
     const sections: ApprovalPreviewSection[] = [{ kind: "fields", title: "Request", rows }];
     if (args.prompt !== undefined) sections.push({ kind: "text", title: "First message", text: args.prompt });
-    return { title: `${agentLabel(ctx.caller)} wants to open a chat in ${where}`, scopeLabel: `Project ${where}`, sections };
+    const base: ApprovalPreview = { title: `${agentLabel(ctx.caller)} wants to open a chat in ${where}`, scopeLabel: `Project ${where}`, sections };
+    const exposure = caller ? await createBoxAccount(args, ctx.api, caller) : null;
+    return exposure && caller ? boxAccountCard(base, exposure, caller) : base;
   },
   annotations: MUTATING,
   resultKind: "json",
@@ -1076,7 +1099,11 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
   const current = sameAgent ? (await readThreadHead(api, caller.threadId)).head.modelSelection : undefined;
   const model = launchModel(agent, args.model, current?.model);
   const selection = resolveModelSelection(agent, { model: model.slug, ...(args.options !== undefined ? { options: args.options } : {}), ...(current ? { current } : {}) });
-  const account = launchAccount(agent, args.accountId, sameAgent && tab.accountId ? tab.accountId : undefined, resume);
+  const resolved = launchAccount(agent, args.accountId, sameAgent && tab.accountId ? tab.accountId : undefined, resume);
+  // What the card approved is what runs; an account new to a box runs only with a card.
+  const pinned = ctx.approval?.pins?.[BOX_ACCOUNT_PIN];
+  const account = pinned !== undefined ? { ...resolved, accountId: pinned } : resolved;
+  requireBoxAccountCard(ctx, { projectPath }, account.accountId ?? agent.defaultAccountId, "create_session");
   const ownProject = canonical !== null && canonical.canonical === caller.projectPath;
   const cwd = args.cwd !== undefined ? await cwdInProject(api, caller, projectPath, args.cwd) : ownProject && caller.cwd ? caller.cwd : projectPath;
   const profile = args.profile === undefined ? null : await resolveProfileArg(api, args.profile);

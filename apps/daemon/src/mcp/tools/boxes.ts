@@ -42,6 +42,7 @@ import {
   boxRoutes,
   isBoxLendAgent,
   isBoxProviderId,
+  SYSTEM_ACCOUNT_ID,
   TEMPORARY_BOX_DEFAULT_LIFETIME_MINUTES,
   TEMPORARY_BOX_MAX_LIFETIME_MINUTES,
   TEMPORARY_BOX_MIN_LIFETIME_MINUTES,
@@ -69,8 +70,8 @@ import {
 
 import type { BoxExecResult, BoxJobOutput, BoxOutputTail } from "../../boxes/temporary/contract.ts";
 import { callerHostPath } from "../addressing.ts";
-import { defineTool, DESTRUCTIVE, MUTATING, type AnyOrquesterTool, type ApprovalPreview, type ScopeClaim, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
-import type { DaemonApi, DaemonOutcome } from "../daemon-api.ts";
+import { defineTool, DESTRUCTIVE, MUTATING, type AnyOrquesterTool, type ApprovalPreview, type CallContext, type ScopeClaim, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
+import type { DaemonApi, DaemonChatBox, DaemonOutcome } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { clipText, MAX_ECHO_CHARS } from "../result.ts";
 
@@ -485,9 +486,11 @@ const listBoxes = defineTool({
   async run(_args, { api, caller }) {
     threadCaller(caller, "list_boxes");
     const [boxes, lends] = await Promise.all([api.request("GET", temporaryBoxRoutes.list), api.request("GET", accountLendRoutes.all)]);
-    if (boxes.status >= 400) throw daemonError(boxes);
+    // No box can be rented, but a chat running in a box may still have lends to see.
+    const noRental = (boxes.body as { code?: unknown } | null)?.code === "BOXES_DISABLED";
+    if (boxes.status >= 400 && !noRental) throw daemonError(boxes);
     if (lends.status >= 400) throw daemonError(lends);
-    return { boxes: (boxes.body as TemporaryBoxesResponse).boxes.map(boxView), lent_accounts: (lends.body as AccountLendsResponse).lends.map(lentView) };
+    return { boxes: noRental ? [] : (boxes.body as TemporaryBoxesResponse).boxes.map(boxView), lent_accounts: (lends.body as AccountLendsResponse).lends.map(lentView) };
   }
 });
 
@@ -711,7 +714,7 @@ async function defaultLendBox(api: DaemonApi, caller: ThreadCaller): Promise<str
 }
 
 /** The card (spec §9): what is lent, to what, until when, and what approving exposes. */
-function lendCard(boxId: string, plan: LendAccountsPreviewResponse, purpose: string, unattended: boolean, now: number): ApprovalPreview {
+function lendCard(boxId: string, plan: LendAccountsPreviewResponse, purpose: string, caller: ThreadCaller, now: number): ApprovalPreview {
   const count = plan.accounts.length;
   const sections: ApprovalPreviewSection[] = [
     { kind: "text", title: "Purpose", text: purpose },
@@ -720,8 +723,8 @@ function lendCard(boxId: string, plan: LendAccountsPreviewResponse, purpose: str
       title: "The VM",
       rows: [
         { label: "VM", value: plan.boxLabel },
-        { label: "Time limit", value: durationLabel(plan.minutes) },
-        { label: "Ends at", value: timeLabel(plan.expiresAt, now) }
+        // Counted from approval, however long the card waited; a temporary box's own limit still ends it.
+        { label: "Time limit", value: `${durationLabel(plan.minutes)} from approval${boxId === caller.projectBoxId ? "" : ", at most until the VM's own time limit"}` }
       ]
     },
     {
@@ -737,7 +740,7 @@ function lendCard(boxId: string, plan: LendAccountsPreviewResponse, purpose: str
       }))
     }
   ];
-  if (unattended) sections.push({ kind: "warning", level: "caution", text: UNATTENDED_WARNING });
+  if (caller.workflowOwned || caller.exchange !== null) sections.push({ kind: "warning", level: "caution", text: UNATTENDED_WARNING });
   sections.push({
     kind: "warning",
     level: "caution",
@@ -776,10 +779,10 @@ const boxLendAccounts = defineTool({
   name: "box_lend_accounts",
   title: "Lend accounts to a VM",
   description:
-    "Put short-lived logins of named managed accounts on this chat's VM, so a paid eval or CLI there can use them. Needs the owner's approval on a card (up to 30 min); if denied, don't retry: ask. Never copy logins yourself. Names from `list_agents`, quota from `get_usage`.",
+    "Put logins without refresh tokens of named managed accounts on this chat's VM, so a paid eval or CLI there can use them. Needs the owner's approval on a card (up to 30 min); if denied, don't retry: ask. Never copy logins yourself. Names from `list_agents`, quota from `get_usage`.",
   input: {
     claude: lendNames().describe("Account labels, label parts before @, or id prefixes."),
-    codex: lendNames().describe("Same, for Codex."),
+    codex: lendNames().describe("Same."),
     purpose: z.string().trim().min(1).max(TEMPORARY_BOX_PURPOSE_MAX_CHARS).describe("What you need them for, shown to the owner."),
     minutes: z.number().int().min(BOX_LEND_MIN_MINUTES).max(BOX_LEND_MAX_MINUTES).optional().describe("Default 240. Clamped to a temporary box's time limit."),
     box_id: boxIdField.optional().describe("Default: this chat's VM, or its only temporary box.")
@@ -802,7 +805,7 @@ const boxLendAccounts = defineTool({
     };
     const res = await ctx.api.request("POST", accountLendRoutes.preview(boxId), { body });
     if (res.status >= 400) throw daemonError(res);
-    return lendCard(boxId, res.body as LendAccountsPreviewResponse, args.purpose, caller.workflowOwned || caller.exchange !== null, ctx.now());
+    return lendCard(boxId, res.body as LendAccountsPreviewResponse, args.purpose, caller, ctx.now());
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   resultKind: "json",
@@ -834,7 +837,7 @@ function namesLend(lend: AccountLendsResponse["lends"][number], name: string): b
 const boxReturnAccounts = defineTool({
   name: "box_return_accounts",
   title: "Return lent accounts",
-  description: "End logins box_lend_accounts put on a VM, once the run is done. Without claude or codex: everything this chat borrowed on that VM. No card; always safe.",
+  description: "End logins box_lend_accounts put on a VM, when the run ends. Without claude or codex: all this chat borrowed on that VM. No card; always safe.",
   input: {
     box_id: boxIdField.optional().describe("Default: the VM this chat borrowed on."),
     claude: lendNames(),
@@ -872,6 +875,71 @@ const boxReturnAccounts = defineTool({
     };
   }
 });
+
+// ---------------------------------------------------------------------------
+// A chat that would give a box an account it does not use yet
+// ---------------------------------------------------------------------------
+
+/** The account a card approved for a chat on a box (`ApprovalPreview.pins`): what `run` launches. */
+export const BOX_ACCOUNT_PIN = "boxAccountId";
+
+/** What the card for {@link exposedBox} names. */
+export interface BoxAccountExposure {
+  box: DaemonChatBox;
+  accountId: string;
+  label: string;
+  /** The account's agent family, for the Codex caution. */
+  agent: string;
+}
+
+/**
+ * A chat using an account makes `token.get` answer for it on that box, so a process there could get
+ * and renew its token. The box this chat would newly open to `accountId`, or null: on the host, the
+ * box already uses it, or the System login (a box chat refuses it, spec §7).
+ */
+export function exposedBox(api: DaemonApi, target: { projectPath: string; threadId?: string }, accountId: string | undefined): DaemonChatBox | null {
+  if (accountId === undefined || accountId === "" || accountId === SYSTEM_ACCOUNT_ID) return null;
+  return api.boxesOfChat?.(target).find((box) => !box.usesAccount(accountId)) ?? null;
+}
+
+/** A call that needs the card, as `scope` claims it (`ScopeClaim.resolved`, read by the tool's `spendFamily`). */
+export const ACCOUNT_SPEND = { tier: "act", spendFamily: "accounts" } as const;
+
+/** The tool's own card, led by what approving really gives the VM. */
+export function boxAccountCard(base: ApprovalPreview, exposure: BoxAccountExposure, caller: ThreadCaller): ApprovalPreview {
+  const sections: ApprovalPreviewSection[] = [
+    {
+      kind: "fields",
+      title: "The login",
+      rows: [
+        { label: "Account", value: exposure.label },
+        { label: "VM", value: exposure.box.label }
+      ]
+    },
+    ...base.sections
+  ];
+  if (caller.workflowOwned || caller.exchange !== null) sections.push({ kind: "warning", level: "caution", text: UNATTENDED_WARNING });
+  sections.push({
+    kind: "warning",
+    level: "caution",
+    text: `No chat on this VM uses ${exposure.label} yet. While one does, anything running on the VM can read this login, ask this server for its token and for a renewal, and use its quota; a copied token works until it expires. Its refresh token stays on this server.`
+  });
+  if (exposure.agent === "codex") sections.push({ kind: "warning", level: "caution", text: "Codex tokens last about 10 days." });
+  return {
+    ...base,
+    title: `Run a chat on a VM as ${exposure.label}`,
+    scopeLabel: "Uses your subscription quota",
+    sections,
+    pins: { ...base.pins, [BOX_ACCOUNT_PIN]: exposure.accountId },
+    ungrantable: true
+  };
+}
+
+/** The last check before a launch or switch: an account new to the box runs only as a card approved it (fail closed). */
+export function requireBoxAccountCard(ctx: Pick<CallContext, "api" | "approval">, target: { projectPath: string; threadId?: string }, accountId: string | undefined, tool: string): void {
+  if (ctx.approval?.pins?.[BOX_ACCOUNT_PIN] === accountId) return;
+  if (exposedBox(ctx.api, target, accountId)) throw new ToolError("PERMISSION_DENIED", `${tool}: this account is new to the VM and needs the owner's approval. Call it again to ask.`);
+}
 
 /** This family in the catalog (`../catalog/index.ts`). */
 export const boxesFamily: readonly AnyOrquesterTool[] = [createBox, listBoxes, boxExec, boxExecOutput, boxUpload, boxDownload, boxForwardPort, destroyBox, boxLendAccounts, boxReturnAccounts];
