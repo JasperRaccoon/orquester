@@ -30,6 +30,9 @@ test("a box launch field reads field-wise; one without its facts is refused", ()
   assert.equal(parseHostThreadBox(box({ boxId: "../x" })), undefined);
   assert.equal(parseHostThreadBox(box({ sys: { os: "linux" } })), undefined);
   assert.equal(parseHostThreadBox(box({ paths: { kind: "future" } })), undefined);
+  // Only a launch field that says so allows system packages (one from an older daemon does not).
+  assert.equal(parseHostThreadBox(box({ systemPackages: true }))?.systemPackages, true);
+  assert.equal(parseHostThreadBox(box())?.systemPackages, undefined);
   // A tooling block that does not read is no tooling, never a refusal.
   assert.deepEqual(parseHostThreadBox(box({ tooling: "nope" }))?.tooling, { pathPrepend: [], env: {}, nodeRequire: [] });
 });

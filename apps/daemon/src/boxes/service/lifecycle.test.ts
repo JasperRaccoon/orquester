@@ -269,6 +269,43 @@ test("the agents step puts each managed account's agent CLI in the box once; a f
   assert.match(await service.setupLog(record.id), /\[agents\] Codex: Codex is not installed in the box/);
 });
 
+test("a Node.js install that fails fails the toolchain step and no other, on a rented box that tried libatomic too; the box is still ready", async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const boxHome = await tempDir(t, "orq-box-home-");
+  const workspaceDir = join(base, "workspaces", "acme");
+  await mkdir(workspaceDir, { recursive: true });
+  const adapter = new FakeAdapter();
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  const nodeScripts: string[] = [];
+  hub.autoConnect = (boxId) => {
+    const connection = isolatedBoxConnection(boxId, boxHome);
+    const exec = connection.exec.bind(connection);
+    connection.exec = (options) => {
+      if (!options.command.includes("command -v npm")) return exec(options);
+      nodeScripts.push(options.command);
+      return exec({ ...options, command: "exit 127" });
+    };
+    return connection;
+  };
+  const project = await service.projects.create({
+    workspace: "acme",
+    workspaceDir,
+    gitAccountId: null,
+    body: { source: "empty", name: "one", location: { kind: "box", boxKind: "linux", provider: "hetzner", size: "big", region: "ash" } }
+  });
+  await service.settled();
+  const record = service.registry.get(project.box!.boxId)!;
+  const toolchain = record.setup!.find((step) => step.id === "toolchain")!;
+  assert.equal(toolchain.state, "failed");
+  assert.match(String(toolchain.message), /Node\.js/);
+  assert.equal(record.state, "ready");
+  assert.equal(nodeScripts.length, 1);
+  assert.match(nodeScripts[0]!, /libatomic/);
+});
+
 test("the config step says which account it syncs and how many files are sent, at most once a second", async (t) => {
   const base = await tempDir(t, "orq-box-life-");
   const root = await tempDir(t, "orq-box-repo-");

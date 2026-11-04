@@ -727,7 +727,8 @@ export class AgentChatService {
         socketPath: boxSocketPath(this.opts.baseDir, location.boxId),
         sys: connection.sys,
         paths: connection.paths,
-        tooling: boxes.tooling?.contribution(location.boxId) ?? { pathPrepend: [], env: {}, nodeRequire: [] }
+        tooling: boxes.tooling?.contribution(location.boxId) ?? { pathPrepend: [], env: {}, nodeRequire: [] },
+        systemPackages: location.record.provider !== "byo"
       }
     };
   }

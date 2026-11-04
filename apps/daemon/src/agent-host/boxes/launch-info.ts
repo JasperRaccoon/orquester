@@ -101,7 +101,14 @@ export function parseHostThreadBox(value: unknown): HostThreadBox | undefined {
   const sys = parseBoxSysInfo(value.sys);
   const paths = parseBoxPathMap(value.paths);
   if (sys === undefined || paths === undefined) return undefined;
-  return { boxId: value.boxId, socketPath: value.socketPath, sys, paths, tooling: parseTooling(value.tooling) };
+  return {
+    boxId: value.boxId,
+    socketPath: value.socketPath,
+    sys,
+    paths,
+    tooling: parseTooling(value.tooling),
+    ...(value.systemPackages === true ? { systemPackages: true } : {})
+  };
 }
 
 /** The path separator and PATH delimiter of a box's OS. */

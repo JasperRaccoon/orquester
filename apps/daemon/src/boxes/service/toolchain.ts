@@ -187,13 +187,37 @@ export function swapScript(sizeGiB: number, path = "/swapfile", fstab = "/etc/fs
 }
 
 /**
+ * Node.js 26's builds do not start without libatomic.so.1, which minimal images (Hetzner's Ubuntu)
+ * lack. Best effort, in a subshell so its exits end only this part: an image may have it already,
+ * and a failed Node.js install says what it missed.
+ */
+const LIBATOMIC_INSTALL = [
+  "(",
+  'SUDO=""',
+  'if [ "$(id -u)" != 0 ]; then',
+  "  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SUDO='sudo -n'; else echo 'No root access: skipped libatomic.'; exit 0; fi",
+  "fi",
+  "if command -v apt-get >/dev/null 2>&1; then",
+  "  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends libatomic1 || { $SUDO apt-get update -q && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends libatomic1; }",
+  "elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y -q libatomic",
+  "elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y -q libatomic",
+  "elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache libatomic",
+  "elif command -v zypper >/dev/null 2>&1; then $SUDO zypper --non-interactive install libatomic1",
+  "elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -S --noconfirm --needed gcc-libs",
+  "else echo 'No package manager: skipped libatomic.'; fi",
+  ")"
+].join("\n");
+
+/**
  * Install Node.js LTS through mise where `node` or `npm` is missing, whatever the repo uses: the
  * npm-installed agent CLIs (Codex, Grok, OpenCode) and the `npx` MCP servers synced into the box
  * need it. Puts mise's shims and npm's global bin dir on the PATH of terminals opened later.
+ * `systemPackages`: a Linux box whose system is Orquester's to change, not the owner's own machine.
  */
-export function nodeScript(): string {
+export function nodeScript(options: { systemPackages: boolean }): string {
   return script(
     "command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && { echo 'Node.js is installed.'; exit 0; }",
+    ...(options.systemPackages ? [LIBATOMIC_INSTALL] : []),
     "echo 'Installing Node.js LTS with mise.'",
     ENSURE_MISE,
     "mise use -g node@lts",

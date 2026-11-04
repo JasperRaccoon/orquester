@@ -125,13 +125,25 @@ async function makeFixture(options: { boxesCapability?: boolean; location?: (pat
 }
 
 const connection = localBoxConnection({ boxId: "box-1", sys: { os: "linux", home: "/root", agentPath: "/usr/local/bin/orq-agent" } });
-const inBox = (state = "ready", connected: boolean = true) => (path: string): ProjectLocation =>
+const inBox = (state = "ready", connected: boolean = true, provider = "hetzner") => (path: string): ProjectLocation =>
   path.startsWith("/w/boxed")
-    ? { kind: "box", boxId: "box-1", record: { id: "box-1", state } as never, connection: connected ? connection : undefined }
+    ? { kind: "box", boxId: "box-1", record: { id: "box-1", state, provider } as never, connection: connected ? connection : undefined }
     : { kind: "host" };
 
 const create = (f: Fixture, extra: Record<string, unknown> = {}) =>
   f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/boxed", cwd: "/w/boxed", accountId: "acc-1", ...extra } as never, 0);
+
+test("a chat may install system packages in a rented box, not on the owner's own machine", async () => {
+  for (const [provider, systemPackages] of [["hetzner", true], ["byo", false]] as const) {
+    const f = await makeFixture({ location: inBox("ready", true, provider) });
+    try {
+      await create(f);
+      assert.equal(f.created[0]?.box?.systemPackages, systemPackages, provider);
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
 
 test("a chat of a box project tells the host where its CLI runs: relay socket, the box's facts, its tooling", async () => {
   const f = await makeFixture({ location: inBox() });

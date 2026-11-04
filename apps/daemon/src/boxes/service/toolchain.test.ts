@@ -164,7 +164,10 @@ test("a failed install refreshes the package lists, retries, then fails with a m
  * A home and a PATH of stubs for {@link nodeScript}: `grep`, and `mise` (logging its calls), whose
  * `use -g node@lts` puts `node` and `npm` stubs in its shims dir. `node: true` puts them on PATH first.
  */
-async function nodeStubs(t: TestContext, options: { node: boolean; miseFails?: boolean }): Promise<{ home: string; bin: string; log: string }> {
+async function nodeStubs(
+  t: TestContext,
+  options: { node: boolean; miseFails?: boolean; miseNeedsLibatomic?: boolean; aptFails?: boolean }
+): Promise<{ home: string; bin: string; log: string }> {
   const home = await mkdtemp(join(tmpdir(), "orq-node-home-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   const bin = join(home, "stubs");
@@ -176,17 +179,21 @@ async function nodeStubs(t: TestContext, options: { node: boolean; miseFails?: b
   };
   await symlink("/bin/grep", join(bin, "grep"));
   const shims = join(home, ".local", "share", "mise", "shims");
+  await symlink("/usr/bin/env", join(bin, "env"));
+  const libatomic = join(home, "libatomic-installed");
+  await stub(bin, "id", "echo 0");
+  await stub(bin, "apt-get", `echo "apt-get $*" >> "${log}"\n${options.aptFails ? "exit 100" : `[ "$1" != install ] || : > "${libatomic}"`}`);
   const install = options.miseFails
     ? "exit 1"
-    : `/bin/mkdir -p "${shims}"; for tool in node npm; do /usr/bin/printf '#!/bin/sh\\n' > "${shims}/$tool"; /bin/chmod 755 "${shims}/$tool"; done`;
+    : `${options.miseNeedsLibatomic ? `[ -e "${libatomic}" ] || exit 127; ` : ""}/bin/mkdir -p "${shims}"; for tool in node npm; do /usr/bin/printf '#!/bin/sh\\n' > "${shims}/$tool"; /bin/chmod 755 "${shims}/$tool"; done`;
   await stub(bin, "mise", `echo "mise $*" >> "${log}"\n${install}`);
   if (options.node) for (const tool of ["node", "npm"]) await stub(bin, tool, "exit 0");
   return { home, bin, log };
 }
 
-function runNodeScript(home: string, bin: string): Promise<{ code: number; out: string }> {
+function runNodeScript(home: string, bin: string, systemPackages = false): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
-    execFile("/bin/sh", ["-c", nodeScript()], { env: { HOME: home, PATH: bin } }, (error, stdout, stderr) => {
+    execFile("/bin/sh", ["-c", nodeScript({ systemPackages })], { env: { HOME: home, PATH: bin } }, (error, stdout, stderr) => {
       const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
       resolve({ code, out: `${stdout}${stderr}` });
     });
@@ -215,6 +222,26 @@ test("no Node.js: mise installs the LTS globally and the profiles get its shims 
     assert.equal(profile.match(/\.local\/share\/mise\/shims/g)?.length, 1, file);
     assert.equal(profile.match(/\.npm-global\/bin/g)?.length, 1, file);
   }
+});
+
+test("no Node.js where system packages may be installed: libatomic goes in first, as Node.js cannot start without it", async (t) => {
+  const { home, bin, log } = await nodeStubs(t, { node: false, miseNeedsLibatomic: true });
+  const { code, out } = await runNodeScript(home, bin, true);
+  assert.equal(code, 0, out);
+  assert.match(await readFile(log, "utf8"), /^apt-get install .*libatomic1$/m);
+});
+
+test("no Node.js and system packages off limits (the owner's own machine): the package manager is left alone", async (t) => {
+  const { home, bin, log } = await nodeStubs(t, { node: false });
+  assert.equal((await runNodeScript(home, bin, false)).code, 0);
+  assert.doesNotMatch(await readFile(log, "utf8"), /apt-get/);
+});
+
+test("libatomic that cannot be installed does not stop the Node.js install: an image may have it already", async (t) => {
+  const { home, bin, log } = await nodeStubs(t, { node: false, aptFails: true });
+  const { code, out } = await runNodeScript(home, bin, true);
+  assert.equal(code, 0, out);
+  assert.match(await readFile(log, "utf8"), /^mise use -g node@lts$/m);
 });
 
 test("a failed Node.js install fails the node script", async (t) => {

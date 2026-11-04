@@ -894,6 +894,8 @@ export interface HostThreadBox {
   sys: BoxSysInfo;
   paths: BoxPathMap;
   tooling: SessionToolingContribution;
+  /** Orquester may install system packages in the box: a rented one, not the owner's own machine. */
+  systemPackages?: boolean;
 }
 
 /**

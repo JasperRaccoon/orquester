@@ -12,6 +12,7 @@ import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
 import type { BoxConnection } from "../../boxes/contracts.ts";
+import { nodeScript } from "../../boxes/service/toolchain.ts";
 import { withDeadline } from "../support/deadline.ts";
 import { boxPathSyntax, joinBoxPath } from "./launch-info.ts";
 import { BoxLaunchError, describeBoxFailure } from "./errors.ts";
@@ -183,7 +184,8 @@ const AGENT_LABELS: Record<AgentAdapterId, string> = {
 /**
  * The agent CLI's absolute path in the box. A box without it gets it installed
  * now with the registry's own install command (the same one Settings → Agents
- * runs on the host), through the box's login PATH; a failed install is a
+ * runs on the host), through the box's login PATH, after Node.js where that
+ * command needs npm and the box has none; a failed install is a
  * {@link BoxLaunchError} the chat shows.
  */
 export async function ensureBoxAgentCli(
@@ -193,6 +195,8 @@ export async function ensureBoxAgentCli(
     path: string;
     env?: Record<string, string>;
     onProgress?: (message: string) => void;
+    /** Orquester may install system packages in the box (`HostThreadBox.systemPackages`). */
+    systemPackages?: boolean;
     /** Overrides the registry's install command (tests). */
     installCommand?: string;
   }
@@ -208,6 +212,9 @@ export async function ensureBoxAgentCli(
   const command = input.installCommand ?? (os === "win32" ? (entry?.installCmdWin32 ?? entry?.installCmd) : entry?.installCmd);
   if (command === undefined) {
     throw new BoxLaunchError("BOX_CLI_INSTALL_FAILED", `${label} is not installed in the box, and Orquester has no installer for it.`);
+  }
+  if (/^npm\s/.test(command) && (await resolveBoxCommand(connection, "npm", input.path)) === null) {
+    await installBoxNode(connection, label, input);
   }
   input.onProgress?.(`Installing ${label} in the box…`);
   // npm's global packages go under the home, on the lookup PATH (`wellKnownBinDirs`) whichever
@@ -226,7 +233,7 @@ export async function ensureBoxAgentCli(
     throw new BoxLaunchError("BOX_CLI_INSTALL_FAILED", `${label} is not installed in the box, and installing it failed: ${describeBoxFailure(error)}`);
   }
   if (result.code !== 0) {
-    const tail = result.stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400);
+    const tail = stderrTail(result);
     throw new BoxLaunchError(
       "BOX_CLI_INSTALL_FAILED",
       `${label} is not installed in the box, and \`${command}\` failed there${tail.length > 0 ? `: ${tail}` : "."} Install it in the box's terminal, then send the message again.`
@@ -244,6 +251,37 @@ export async function ensureBoxAgentCli(
     "BOX_CLI_INSTALL_FAILED",
     `${label} was installed in the box but \`${bins[0]}\` is still not on its PATH. Open the box's terminal to check the install, then send the message again.`
   );
+}
+
+function stderrTail(result: BoxCommandResult): string {
+  return result.stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400);
+}
+
+/** Node.js for an npm install, the toolchain step's way: that step may have failed, or the box may predate it. */
+async function installBoxNode(connection: BoxConnection, label: string, input: { path: string; systemPackages?: boolean; onProgress?: (message: string) => void }): Promise<void> {
+  const { os } = connection.sys;
+  if (os === "win32") {
+    throw new BoxLaunchError("BOX_CLI_INSTALL_FAILED", `${label} installs with npm, and the box has no Node.js. Install Node.js in the box's terminal, then send the message again.`);
+  }
+  input.onProgress?.("Installing Node.js in the box…");
+  const failed = (cause: string) =>
+    new BoxLaunchError(
+      "BOX_CLI_INSTALL_FAILED",
+      `${label} installs with npm, and installing Node.js in the box failed${cause.length > 0 ? `: ${cause}` : "."} Install Node.js in the box's terminal, then send the message again.`
+    );
+  let result: BoxCommandResult;
+  try {
+    result = await runInBox(connection, {
+      command: "/bin/sh",
+      args: ["-c", nodeScript({ systemPackages: os === "linux" && input.systemPackages === true })],
+      env: { PATH: input.path },
+      timeoutMs: BOX_INSTALL_TIMEOUT_MS,
+      label: "install Node.js in the box"
+    });
+  } catch (error) {
+    throw failed(describeBoxFailure(error));
+  }
+  if (result.code !== 0) throw failed(stderrTail(result));
 }
 
 /** `npm prefix -g`'s bin dir, when npm is there. */

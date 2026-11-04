@@ -922,10 +922,13 @@ export class BoxLifecycle {
     log("Checking Node.js (npm-installed agent CLIs and npx MCP servers).");
     const node = await runBoxCommand(
       connection,
-      { command: nodeScript(), shell: true },
+      { command: nodeScript({ systemPackages: sys.os === "linux" && this.require(boxId).provider !== "byo" }), shell: true },
       { signal: AbortSignal.any([signal, AbortSignal.timeout(TOOLCHAIN_COMMAND_TIMEOUT_MS)]), onLine: log }
     );
-    if (node.code !== 0) log(`Could not install Node.js (exit ${node.code ?? node.signal}); Codex, Grok and OpenCode cannot be installed with npm here.`);
+    // Fails the step once the repo's own commands had their chance: they may not need Node.js.
+    const nodeFailure =
+      node.code !== 0 ? `Could not install Node.js (exit ${node.code ?? node.signal}), so Codex, Grok and OpenCode cannot be installed with npm; see the setup log.` : null;
+    if (nodeFailure !== null) log(nodeFailure);
     const present = new Set<string>();
     const contents: Record<string, string> = {};
     for (const file of TOOLCHAIN_PROBE_FILES) {
@@ -938,7 +941,6 @@ export class BoxLifecycle {
     }
     const plan = planToolchain({ os: sys.os, docker: sys.docker, projectDir: boxDir, present, contents });
     for (const note of plan.notes) log(note);
-    if (plan.mode === "none") return { state: "done", message: "Nothing to install." };
     for (const command of plan.commands) {
       log(`$ ${command.label}`);
       const result = await runBoxCommand(
@@ -948,6 +950,8 @@ export class BoxLifecycle {
       );
       if (result.code !== 0) throw new SetupStepError(`${command.label} failed (exit ${result.code ?? result.signal}).`);
     }
+    if (nodeFailure !== null) throw new SetupStepError(nodeFailure);
+    if (plan.mode === "none") return { state: "done", message: "Nothing to install." };
     return {
       state: "done",
       message: plan.mode === "devcontainer" ? "The devcontainer is up." : plan.commands.map((command) => command.label).join("; ")

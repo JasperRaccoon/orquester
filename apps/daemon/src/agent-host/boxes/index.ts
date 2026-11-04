@@ -881,6 +881,7 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
         const found = await ensureBoxAgentCli(connection, input.agent, {
           path,
           ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
+          ...(input.box.systemPackages === true ? { systemPackages: true } : {}),
           ...(installCommand !== undefined ? { installCommand } : {})
         });
         if (found.installed) this.versions.clear();

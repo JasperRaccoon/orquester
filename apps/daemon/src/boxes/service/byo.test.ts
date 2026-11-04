@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,7 +10,7 @@ import { byoAdapter } from "../providers/byo.ts";
 import { localBoxConnection } from "../testing.ts";
 import { BoxError } from "./errors.ts";
 import { PairingThrottle } from "./byo.ts";
-import { testBoxService, testClock } from "./testing.ts";
+import { isolatedBoxConnection, testBoxService, testClock } from "./testing.ts";
 
 async function tempDir(t: test.TestContext): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "orq-byo-"));
@@ -171,6 +171,35 @@ test("first connect pairs the machine; it is offline while away and ready when b
   hub.connect(id, localBoxConnection({ boxId: id }));
   await until(service, id, () => service.registry.get(id)?.state === "ready");
   await assert.rejects(service.destroyBox(id, "deleted"), (error: unknown) => error instanceof BoxError && error.status === 409 && error.code === "BOX_INVALID_REQUEST", "an idle machine is removed, not destroyed");
+});
+
+test("a project on the owner's own machine: setup's Node.js install leaves system packages alone", async (t) => {
+  const { service, hub, base } = await setup(t);
+  const pairing = await service.byo.add({ kind: "linux", name: "Box" });
+  const id = pairing.box.id;
+  const home = join(base, "home");
+  await mkdir(home);
+  const connection = isolatedBoxConnection(id, home);
+  const exec = connection.exec.bind(connection);
+  const nodeScripts: string[] = [];
+  connection.exec = (options) => {
+    if (!options.command.includes("command -v npm")) return exec(options);
+    nodeScripts.push(options.command);
+    return exec({ ...options, command: "exit 0" });
+  };
+  hub.connect(id, connection);
+  await until(service, id, () => service.registry.get(id)?.state === "ready");
+  const workspaceDir = join(base, "workspaces", "acme");
+  await mkdir(workspaceDir, { recursive: true });
+  await service.projects.create({
+    workspace: "acme",
+    workspaceDir,
+    gitAccountId: null,
+    body: { source: "empty", name: "own", location: { kind: "box", boxKind: "linux", provider: "byo", size: id, region: "own" } }
+  });
+  await service.settled();
+  assert.equal(nodeScripts.length, 1, await service.setupLog(id));
+  assert.doesNotMatch(nodeScripts[0]!, /libatomic/);
 });
 
 test("a chat borrows an idle machine (provider byo) and destroying it gives it back", async (t) => {
