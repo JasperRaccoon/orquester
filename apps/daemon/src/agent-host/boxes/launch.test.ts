@@ -140,7 +140,7 @@ test("a launch whose sync loses the box's link runs again once it is back; any o
   assert.equal(launch.bin, join(home, ".local", "bin", "claude"));
   assert.deepEqual(
     dropped.sync.calls.map((call) => call.op),
-    ["ensureSynced"]
+    ["ensureSynced", "pushForResume"]
   );
   // Twice in a row is the chat's error, as is a failure that is not the link.
   for (const failures of [

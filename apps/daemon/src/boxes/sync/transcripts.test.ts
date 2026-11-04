@@ -85,7 +85,7 @@ test("Claude: new transcripts and sidecars land at the identical host path, thro
   assert.equal((await lstat(join(f.home, "projects"))).isSymbolicLink(), true);
 });
 
-test("append-only transcripts move only their new tail; a rewrite or a shrink moves the whole file", async (t) => {
+test("append-only transcripts move only their new tail; a rewrite moves the whole file; a shorter copy never replaces the host's", async (t) => {
   const f = await fixture(t);
   const rel = join("projects", claudeProjectDirName(f.cwd), "s1.jsonl");
   const boxFile = f.box.local(join(f.home, rel));
@@ -116,15 +116,87 @@ test("append-only transcripts move only their new tail; a rewrite or a shrink mo
   assert.equal(await readFile(hostFile, "utf8"), rewritten);
   assert.equal(f.reads.filter((read) => read.path === join(f.home, rel))[0]?.offset, undefined, "read from the start");
 
-  // Shrunk: whole file.
+  // Shrunk: the host keeps the longer transcript.
   await put(boxFile, LINE(7));
   await f.sync.pullAfterTurn("b1", request, signal());
-  assert.equal(await readFile(hostFile, "utf8"), LINE(7));
+  assert.equal(await readFile(hostFile, "utf8"), rewritten);
 
   // Same size, different bytes: whole file.
-  await put(boxFile, LINE(8));
+  const sameSize = LINE(8) + LINE(2) + LINE(3) + LINE(4);
+  await put(boxFile, sameSize);
   await f.sync.pullAfterTurn("b1", request, signal());
-  assert.equal(await readFile(hostFile, "utf8"), LINE(8));
+  assert.equal(await readFile(hostFile, "utf8"), sameSize);
+});
+
+/** A second account whose home links the same shared history, as `syncAccountHome` makes it. */
+async function secondAccount(f: Awaited<ReturnType<typeof fixture>>): Promise<string> {
+  const home = join(f.base, "app", "agent-accounts", "claude", "a2", "home");
+  await mkdir(home, { recursive: true });
+  await symlink(f.shared, join(home, "projects"));
+  return home;
+}
+
+/** Turn 1 on the first account, whose CLI adds a row after the mirror; turns on the second; the limit moves the chat back. */
+async function accountRoundTrip(f: Awaited<ReturnType<typeof fixture>>, home2: string): Promise<{ hostFile: string; conversation: string; backOnFirst: string }> {
+  const dir = claudeProjectDirName(f.cwd);
+  const hostFile = join(f.shared, dir, "s1.jsonl");
+  const first = { agent: "claude" as const, configRoot: f.home, cwd: f.cwd, sessionRef: "s1" };
+  const second = { ...first, configRoot: home2 };
+  const boxFirst = f.box.local(join(f.home, "projects", dir, "s1.jsonl"));
+  const boxSecond = f.box.local(join(home2, "projects", dir, "s1.jsonl"));
+  await put(boxFirst, LINE(1));
+  await f.sync.pullAfterTurn("b1", first, signal());
+  await put(boxFirst, LINE(1) + LINE(100));
+  await f.sync.pushForResume("b1", second, signal());
+  const conversation = (await readFile(boxSecond, "utf8")) + LINE(2) + LINE(3) + LINE(4);
+  await put(boxSecond, conversation);
+  await f.sync.pullAfterTurn("b1", second, signal());
+  await f.sync.pushForResume("b1", first, signal());
+  return { hostFile, conversation, backOnFirst: boxFirst };
+}
+
+test("a chat back on an account it used earlier resumes the whole conversation", async (t) => {
+  const f = await fixture(t);
+  const home2 = await secondAccount(f);
+  const { hostFile, conversation, backOnFirst } = await accountRoundTrip(f, home2);
+  const resumed = await readFile(backOnFirst, "utf8");
+  assert.ok(resumed.includes(LINE(4)), "the box copy the CLI resumes has the last turn");
+  await put(backOnFirst, resumed + LINE(5));
+  await f.sync.pullAfterTurn("b1", { agent: "claude", configRoot: f.home, cwd: f.cwd, sessionRef: "s1" }, signal());
+  const host = await readFile(hostFile, "utf8");
+  assert.ok(host.includes(LINE(4)) && host.endsWith(LINE(5)) && host.length > conversation.length, "and the host keeps it");
+});
+
+test("on a box where history stays per account, an account's old copy is replaced by the host's", async (t) => {
+  const f = await fixture(t);
+  const home2 = await secondAccount(f);
+  const request = f.box.request.bind(f.box);
+  f.box.request = (async (method: string, params: unknown, options: unknown) =>
+    method === "proc.list" ? [{ procId: "agent-claude-other-1", running: true }] : (request as (m: string, p: unknown, o: unknown) => Promise<unknown>)(method, params, options)) as typeof f.box.request;
+  // A real dir holds the first account's copy, so a running CLI keeps it from being merged.
+  const { conversation, backOnFirst, hostFile } = await accountRoundTrip(f, home2);
+  assert.equal((await lstat(f.box.local(join(f.home, "projects")))).isSymbolicLink(), false);
+  assert.equal(await readFile(backOnFirst, "utf8"), conversation);
+  assert.equal(await readFile(hostFile, "utf8"), conversation);
+});
+
+test("a box's per-account history merges into the shared dir, the longest transcript winning, and nothing is deleted", async (t) => {
+  const f = await fixture(t);
+  const home2 = await secondAccount(f);
+  const dir = claudeProjectDirName(f.cwd);
+  const shortCopy = f.box.local(join(f.home, "projects", dir, "s1.jsonl"));
+  const longCopy = f.box.local(join(home2, "projects", dir, "s1.jsonl"));
+  await put(shortCopy, LINE(1));
+  await put(longCopy, LINE(1) + LINE(2) + LINE(3));
+  await put(f.box.local(join(f.home, "projects", dir, "only-here.jsonl")), LINE(9));
+  await f.sync.pushForResume("b1", { agent: "claude", configRoot: f.home, cwd: f.cwd, sessionRef: null }, signal());
+  await f.sync.pushForResume("b1", { agent: "claude", configRoot: home2, cwd: f.cwd, sessionRef: null }, signal());
+  assert.equal((await lstat(f.box.local(join(f.home, "projects")))).isSymbolicLink(), true);
+  assert.equal((await lstat(f.box.local(join(home2, "projects")))).isSymbolicLink(), true);
+  assert.equal(await readFile(shortCopy, "utf8"), LINE(1) + LINE(2) + LINE(3));
+  assert.equal(await readFile(longCopy, "utf8"), LINE(1) + LINE(2) + LINE(3));
+  assert.equal(await readFile(f.box.local(join(f.home, "projects", dir, "only-here.jsonl")), "utf8"), LINE(9));
+  assert.equal(await readFile(f.box.local(join(home2, "projects.pre-share", dir, "s1.jsonl")), "utf8"), LINE(1), "the copy that lost is kept");
 });
 
 test("pushForResume copies the session's files into the box once", async (t) => {

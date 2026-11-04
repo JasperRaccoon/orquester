@@ -52,12 +52,22 @@
  * mirrors the move), and kept with a warning otherwise; and a resume pushes only into the
  * folders where the box holds the transcript — a box without one gets the host's newest copy,
  * where the CLI last wrote it — never a stale copy beside the live one.
+ *
+ * **One history per box.** The host's account homes all link their history dir (Claude `projects`,
+ * Codex and Grok `sessions`) to one shared dir, so a chat moving between accounts keeps one
+ * transcript. A POSIX box with identity paths gets the same link at every CLI start. A real dir an
+ * earlier sync left in an account home is merged into the shared one first, the longest `*.jsonl`
+ * (the newest other file) winning per file, and what lost stays in `<entry>.pre-share`. Files of a
+ * running CLI must not move, so a box running another CLI of that agent is merged at a later start.
+ * Until then, and on boxes without links, a home can hold a copy older than the chat: a resume
+ * replaces a shorter copy that is no prefix of the host's, and a pull never shortens a host
+ * transcript, so an account's old copy can neither be resumed nor overwrite the conversation.
  */
 
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
-import { lstat, open, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, open, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -118,6 +128,8 @@ export function claudeProjectDirName(cwd: string): string {
 
 const CLAUDE_DIR_NAME_MAX = 200;
 const OPENCODE_TIMEOUT_MS = 120_000;
+/** The dir of a config root that every account home shares on the host. */
+const HISTORY_DIR: Partial<Record<TranscriptRequest["agent"], string>> = { claude: "projects", codex: "sessions", grok: "sessions" };
 
 /** One host dir and the box dir standing for it. */
 interface DirPair {
@@ -221,10 +233,11 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
   }
 
   async pushForResume(boxId: string, request: TranscriptRequest, signal: AbortSignal): Promise<void> {
-    if (request.sessionRef === null) return; // a new session has nothing to resume
     checkSessionRef(request);
     await this.queued(boxId, async () => {
       const connection = this.connection(boxId);
+      await this.shareBoxHistory(connection, request, signal);
+      if (request.sessionRef === null) return; // a new session has nothing to resume
       if (request.agent === "opencode") {
         await this.opencodePush(connection, request, signal);
         return;
@@ -239,6 +252,68 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
       }
       for (const pair of pairs) await this.pushPair(connection, pair, hostFiles.get(pair.host) ?? [], signal);
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // One history per box
+  // -------------------------------------------------------------------------
+
+  /** Make the box's history dir of this config root the link the host's is (see the module doc). */
+  private async shareBoxHistory(connection: BoxConnection, request: TranscriptRequest, signal: AbortSignal): Promise<void> {
+    const entry = HISTORY_DIR[request.agent];
+    if (entry === undefined || connection.paths.kind !== "identity" || connection.sys.os === "win32") return;
+    const link = `${posix.normalize(request.configRoot).replace(/\/+$/, "")}/${entry}`;
+    const target = await readlink(link).catch(() => null);
+    if (target === null || !posix.isAbsolute(target) || posix.basename(target) !== entry) return;
+    if (isDeniedTranscriptPath(target, this.denyRoots)) return;
+    const info = await connection.request("fs.stat", { path: boxPathOf(connection, link), followSymlinks: false }, { signal });
+    if (info?.kind === "symlink") return;
+    if (info !== null && info.kind !== "dir") return;
+    const aside = `${link}.pre-share`;
+    try {
+      if (info?.kind === "dir") {
+        const procs = await connection.request("proc.list", {}, { signal });
+        if (procs.some((proc) => proc.running && proc.procId.startsWith(`agent-${request.agent}-`))) return;
+      }
+      await connection.request("agent.ensurePaths", { paths: [boxPathOf(connection, target)] }, { signal });
+      if (info?.kind === "dir") {
+        await this.mergeBoxDir(connection, link, target, signal);
+        await connection.request("fs.rename", { from: boxPathOf(connection, link), to: boxPathOf(connection, aside) }, { signal });
+      }
+      await connection.request("fs.symlink", { target: boxPathOf(connection, target), path: boxPathOf(connection, link) }, { signal });
+    } catch (error) {
+      if (!connection.connected || signal.aborted) throw error;
+      if (info?.kind === "dir" && (await boxStat(connection, link, signal)) === null) {
+        await connection.request("fs.rename", { from: boxPathOf(connection, aside), to: boxPathOf(connection, link) }, { signal }).catch(() => undefined);
+      }
+      this.warn(connection, `${link} stays per account in the box: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** Move what `from` holds into `to`; a file that loses to the one already there stays in `from`. */
+  private async mergeBoxDir(connection: BoxConnection, from: string, to: string, signal: AbortSignal): Promise<void> {
+    for (const entry of await connection.request("fs.readdir", { path: boxPathOf(connection, from) }, { signal })) {
+      if (!isSafeEntryName(entry.name) || isTempName(entry.name)) continue;
+      const source = `${from}/${entry.name}`;
+      const target = `${to}/${entry.name}`;
+      const there = await boxStat(connection, target, signal);
+      if (there?.kind === "dir" && entry.kind === "dir") {
+        await this.mergeBoxDir(connection, source, target, signal);
+        continue;
+      }
+      if (there !== null) {
+        const here = await boxStat(connection, source, signal);
+        if (here?.kind !== "file" || there.kind !== "file") continue;
+        if (entry.name.endsWith(".jsonl") ? here.size <= there.size : here.mtimeMs <= there.mtimeMs) continue;
+        // The two swap, so the copy that lost is the one left behind in `from`.
+        const swap = `${source}.swap`;
+        await connection.request("fs.rename", { from: boxPathOf(connection, target), to: boxPathOf(connection, swap) }, { signal });
+        await connection.request("fs.rename", { from: boxPathOf(connection, source), to: boxPathOf(connection, target) }, { signal });
+        await connection.request("fs.rename", { from: boxPathOf(connection, swap), to: boxPathOf(connection, source) }, { signal });
+        continue;
+      }
+      await connection.request("fs.rename", { from: boxPathOf(connection, source), to: boxPathOf(connection, target) }, { signal });
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -518,6 +593,10 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
       if (isDeniedTranscriptPath(target, this.denyRoots)) continue;
       const local = await orAbsent(lstat(target));
       const hostSize = local?.isFile() ? local.size : null;
+      if (hostSize !== null && file.rel.endsWith(".jsonl") && file.size < hostSize) {
+        this.warn(connection, `not mirroring ${target}: the box's copy is shorter than the host's`);
+        continue;
+      }
       let check: "prefix" | "whole" | null = null;
       if (hostSize !== null && file.rel.endsWith(".jsonl") && file.size > hostSize) check = "prefix";
       else if (hostSize !== null && file.size === hostSize) check = "whole";
@@ -633,6 +712,7 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
         if (matches && info.size === plan.hostSize) action = "same";
         else if (matches && info.size > plan.hostSize) action = "pull-tail"; // the box is ahead
         else if (matches || unchanged) action = "push"; // the host is ahead, or only the host changed
+        else if (plan.rel.endsWith(".jsonl") && info.size < plan.hostSize) action = "push"; // an account's old copy: the chat went on elsewhere
         else action = "diverged";
       }
       if (action === "diverged") {

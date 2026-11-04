@@ -777,14 +777,12 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
       try {
         input.onProgress?.("Syncing the agent configuration into the box…");
         await this.sync.ensureSynced(box.boxId, { agent: input.agent, configRoots, threadId: input.threadId }, input.signal);
-        const sessionRef = input.resumeSessionRef ?? null;
-        if (sessionRef !== null) {
-          await this.sync.pushForResume(
-            box.boxId,
-            { agent: input.agent, configRoot: input.configRoot ?? input.home.path, cwd: input.cwd, sessionRef },
-            input.signal
-          );
-        }
+        // Also for a new session: this is what makes the box's history dir the shared one.
+        await this.sync.pushForResume(
+          box.boxId,
+          { agent: input.agent, configRoot: input.configRoot ?? input.home.path, cwd: input.cwd, sessionRef: input.resumeSessionRef ?? null },
+          input.signal
+        );
       } catch (error) {
         throw new BoxLaunchError(
           "BOX_SYNC_FAILED",
