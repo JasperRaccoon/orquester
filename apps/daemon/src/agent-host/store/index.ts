@@ -71,6 +71,7 @@ import {
   createEmptyThreadState,
   deserializeFoldState,
   htmlRenderReferenceOfActivityPayload,
+  imageToolReferenceOfActivityPayload,
   mcpAppReferenceOfActivityPayload,
   isHtmlRenderAttachmentId,
   parseFoldSnapshotFile,
@@ -200,6 +201,9 @@ function isCursorCount(value: number): boolean {
  * uploaded for a turn that has not dispatched yet (§6.3).
  */
 const UNREFERENCED_ATTACHMENT_GRACE_MS = PENDING_ATTACHMENT_MAX_AGE_MS;
+
+/** An image attachment's id (`<thread>-<uuid>-<ext>`): what an inline image row shows (design 2026-11-10 §9). */
+const IMAGE_ATTACHMENT_ID = /-(?:png|jpe?g|webp|gif)$/;
 
 export interface ThreadStoreOptions {
   /** `<appdir>/daemon/agent` — the directory that holds `threads/` and `receipts.json`. */
@@ -1093,6 +1097,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         if (app !== undefined) {
           referenced.add(app.attachmentId);
         }
+        // An inline image row (`show_image`, `generate_image`, a Codex
+        // `image_generation` item; design 2026-11-10 §9): its images.
+        for (const image of imageToolReferenceOfActivityPayload(item.payload)?.images ?? []) {
+          referenced.add(image.attachmentId);
+        }
       }
     }
     return referenced;
@@ -1142,10 +1151,13 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
   }
 
   /**
-   * The published pages in `entries` the fold does not reference that are past
-   * the unreferenced grace — the only ones the sweep would delete — that the
-   * log still names. Anything younger is kept by the grace anyway, so the log
-   * is read only when a page could actually go.
+   * The published pages and images in `entries` the fold does not reference
+   * that are past the unreferenced grace — the only ones the sweep would
+   * delete — that the log still names. An image row's reference, like a
+   * page's, lives only in its call's result, which the activity window
+   * forgets; an image upload never sent is named nowhere and still goes.
+   * Anything younger is kept by the grace anyway, so the log is read only
+   * when a file could actually go.
    */
   async function pagesStillNamed(
     threadId: string,
@@ -1157,7 +1169,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     const candidates = new Set<string>();
     for (const entry of entries) {
       const attachmentId = parseAttachmentIdFromRelativePath(entry);
-      if (attachmentId === null || !isHtmlRenderAttachmentId(attachmentId) || referenced.has(attachmentId)) {
+      if (
+        attachmentId === null ||
+        !(isHtmlRenderAttachmentId(attachmentId) || IMAGE_ATTACHMENT_ID.test(attachmentId)) ||
+        referenced.has(attachmentId)
+      ) {
         continue;
       }
       const stat = await fsp.stat(path.join(dir, entry)).catch(() => null);
