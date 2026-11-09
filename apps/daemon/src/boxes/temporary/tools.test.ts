@@ -445,6 +445,27 @@ test("box project: upload relays a file and a directory's contents from the proj
   assert.equal(existsSync(project), false, "nothing was read from the host stub");
 });
 
+test("box project: readChatFile reads one file of the chat's own project box, bounded, and nothing of a host chat", async () => {
+  const { tools, project, projectBox } = boxProjectWorld("boxed-show");
+  const principal = agent("chat-a", project);
+  mkdirSync(projectBox.local("/tmp/shots"), { recursive: true });
+  writeFileSync(projectBox.local("/tmp/shots/shot.png"), "PNGBYTES");
+
+  const read = await tools.readChatFile("/tmp/shots/shot.png", 64, { principal });
+  assert.ok(read.ok, read.ok ? "" : read.message);
+  assert.equal(read.value.bytes.toString(), "PNGBYTES");
+
+  const tooBig = await tools.readChatFile("/tmp/shots/shot.png", 4, { principal });
+  assert.ok(!tooBig.ok && tooBig.code === "TOO_LARGE");
+  const missing = await tools.readChatFile("/tmp/shots/gone.png", 64, { principal });
+  assert.ok(!missing.ok && missing.code === "NOT_FOUND");
+  const dir = await tools.readChatFile("/tmp/shots", 64, { principal });
+  assert.ok(!dir.ok && dir.code === "INVALID_ARGUMENT");
+  // A chat on the host has no box to read from: never another box.
+  const host = await tools.readChatFile("/tmp/shots/shot.png", 64, { principal: agent("chat-a", PROJECT) });
+  assert.ok(!host.ok && host.code === "INVALID_ARGUMENT");
+});
+
 test("box project: download writes a file and a directory into the project box, with the host's rules", async () => {
   const { tools, project, inBox } = boxProjectWorld("boxed-down");
   mkdirSync(join(BOX, "bp-out", "logs", "nested"), { recursive: true });

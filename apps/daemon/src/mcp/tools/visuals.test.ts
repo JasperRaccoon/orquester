@@ -6,6 +6,9 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -196,5 +199,78 @@ describe("html_preview", () => {
     aborted.abort();
     assert.equal(errorOf(await call(api, "html_preview", { html: "<p>x</p>" }, { signal: aborted.signal })).code, "CANCELLED");
     assert.equal(api.previews.length, 0);
+  });
+});
+
+describe("show_image", () => {
+  const PNG = (() => {
+    const bytes = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+    bytes.write("IHDR", 12, "ascii");
+    bytes.writeUInt32BE(320, 16);
+    bytes.writeUInt32BE(200, 20);
+    return bytes;
+  })();
+
+  async function sandbox(t: { after(fn: () => Promise<void>): void }) {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "show-image-")));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const ws = join(root, "workspaces");
+    const attachments = join(root, "threads", THREAD, "attachments");
+    await mkdir(join(ws, "acme", "app"), { recursive: true });
+    await mkdir(attachments, { recursive: true });
+    const api = new FakeDaemonApi();
+    api.fsRoot = ws;
+    api.workspacesDir = ws;
+    const stored = join(attachments, "thread-1-kept.png");
+    await writeFile(stored, PNG);
+    Object.assign(api, {
+      chatImageRoots: () => ({ attachmentsDir: attachments, tempDirs: [] }),
+      chatAttachmentPath: async (_threadId: string, id: string) => (id === "thread-1-kept-png" ? stored : null)
+    });
+    return { ws, api };
+  }
+
+  it("copies each image into the CALLING chat and answers the image row's reference and Markdown, never the bytes", async (t) => {
+    const s = await sandbox(t);
+    await writeFile(join(s.ws, "acme", "app", "logo.png"), PNG);
+    const result = await call(s.api, "show_image", {
+      title: "Logo",
+      images: [{ path: "acme/app/logo.png", caption: "the new logo" }, { ref: "attachment:thread-1-kept-png" }]
+    });
+    assert.equal(result.isError, undefined);
+    // The project file is stored as this chat's attachment; one already stored here is shown as it is, not copied.
+    assert.deepEqual(s.api.uploads.map((upload) => [upload.sessionId, upload.meta, upload.bytes]), [[THREAD, { name: "logo.png", type: "image/png" }, PNG]]);
+    const body = result.structuredContent as Record<string, unknown>;
+    const uploaded = `${THREAD}-att-1`;
+    assert.deepEqual(body.imageRef, {
+      title: "Logo",
+      images: [
+        { attachmentId: uploaded, mimeType: "image/png", width: 320, height: 200, caption: "the new logo", path: join(s.ws, "acme", "app", "logo.png") },
+        { attachmentId: "thread-1-kept-png", mimeType: "image/png", width: 320, height: 200 }
+      ]
+    });
+    assert.deepEqual(body.images, [
+      { attachmentId: uploaded, markdown: `![the new logo](attachment:${uploaded})` },
+      { attachmentId: "thread-1-kept-png", markdown: "![image](attachment:thread-1-kept-png)" }
+    ]);
+    assert.equal(body.shown, 2);
+    assert.ok(result.content.every((block) => block.type === "text"), "no image content goes back to the model");
+    assert.ok(!JSON.stringify(result).includes(PNG.toString("base64")), "no bytes are echoed");
+  });
+
+  it("stores nothing when any image is refused", async (t) => {
+    const s = await sandbox(t);
+    await writeFile(join(s.ws, "acme", "app", "logo.png"), PNG);
+    await writeFile(join(s.ws, "acme", "app", "readme.png"), "# not an image");
+    const error = errorOf(await call(s.api, "show_image", { images: [{ path: "acme/app/logo.png" }, { path: "acme/app/readme.png" }] }));
+    assert.equal(error.code, "INVALID_ARGUMENT");
+    assert.match(error.message, /^images\[1\]: not a PNG, JPEG, WebP or GIF image/);
+    assert.equal(s.api.uploads.length, 0);
+  });
+
+  it("is no external tool", async () => {
+    const api = new FakeDaemonApi();
+    assert.equal(errorOf(await call(api, "show_image", { images: [{ ref: "recent:1" }] }, { caller: { kind: "external" } })).code, "TOOL_NOT_FOUND");
   });
 });

@@ -1785,6 +1785,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Getters: the client lives as long as the daemon, and PUT /api/config/daemon moves both.
     fsRoot: () => resolved.fsRoot,
     workspacesDir: () => resolved.workspacesDir,
+    // show_image: the calling chat's attachments and the temp directories its agents write to.
+    baseDir: paths.baseDir,
     // boxes: the box MCP tools' streamed operations.
     boxes: temporaryBoxTools,
     // boxes: read_file / directory reads of box projects go to the box.

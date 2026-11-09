@@ -97,6 +97,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       read("get_usage"),
       read("html_preview"),
       act("html_render"),
+      act("show_image"),
       act("request_secret")
     ]
   },
