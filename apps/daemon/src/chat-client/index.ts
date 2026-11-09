@@ -8,6 +8,7 @@ import type { TemporaryBoxTools } from "../boxes/temporary/tools.ts";
 import type { BoxRegistry } from "../boxes/contracts.ts";
 import type { TokenBrokerSession } from "../boxes/broker/broker.ts";
 import type { DeviceToolsPort } from "../devices/tools-port.ts";
+import type { GptImageToolPort } from "../gpt-image/tool-port.ts";
 
 export type { DaemonApi } from "../mcp/daemon-api.ts";
 export { ToolError, expectOk } from "../mcp/errors.ts";
@@ -47,6 +48,8 @@ interface InternalDaemonApiOptions {
   boxSessions?: () => Iterable<TokenBrokerSession>;
   // Devices: the device service behind the device MCP tools (null while the plugin is off).
   devices?: () => DeviceToolsPort | null;
+  // GPT Image: the image service behind generate_image (it refuses while the plugin is off).
+  gptImage?: () => GptImageToolPort | null;
 }
 
 /**
@@ -67,6 +70,7 @@ export function createInternalDaemonApi(opts: InternalDaemonApiOptions): InjectD
     boxes: opts.boxes,
     boxRegistry: opts.boxRegistry,
     boxSessions: opts.boxSessions,
-    devices: opts.devices
+    devices: opts.devices,
+    gptImage: opts.gptImage
   });
 }

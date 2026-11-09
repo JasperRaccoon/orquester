@@ -30,8 +30,11 @@ import {
   type DeviceToolOpenResult,
   type DeviceToolsPort
 } from "../devices/tools-port.ts";
+// GPT Image: generate_image's operation (GPT Image design 2026-11-10 §6), types and the outcome adapter.
+import { runGptImageTool, type GptImageCallOptions, type GptImageToolInput, type GptImageToolPort, type GptImageToolResult } from "../gpt-image/tool-port.ts";
 
 export type { DeviceCallOptions };
+export type { GptImageCallOptions };
 
 export type DaemonMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export interface DaemonResponse { status: number; body: unknown }
@@ -152,6 +155,11 @@ export interface DaemonApi {
   deviceInstall?(input: DeviceToolInstallInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolInstallResult>>;
   /** Release one of the chat's devices. */
   deviceClose?(input: DeviceToolCloseInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<{ lease: DeviceLeaseSummary }>>;
+
+  // GPT Image (GPT Image design 2026-11-10 §6): one generation for an agent principal's chat.
+  // Optional like the device operations; generate_image answers GPT_IMAGE_DISABLED without it.
+  /** Generate or edit one image with the plugin's ChatGPT account; writes the project copy when asked. */
+  generateImage?(input: GptImageToolInput, opts?: GptImageCallOptions): Promise<DaemonOutcome<GptImageToolResult>>;
   readonly fsRoot: string;
   readonly workspacesDir: string;
 }
@@ -208,6 +216,8 @@ export class InjectDaemonApi implements DaemonApi {
       boxSessions?: () => Iterable<TokenBrokerSession>;
       // Devices: the device service (null while the plugin is off; absent: not wired here).
       devices?: () => DeviceToolsPort | null;
+      // GPT Image: the image service (null while the plugin is off; absent: not wired here).
+      gptImage?: () => GptImageToolPort | null;
     }
   ) {}
 
@@ -398,6 +408,11 @@ export class InjectDaemonApi implements DaemonApi {
     return runDeviceTool(this.devices(), opts, (port, threadId) => port.toolClose(threadId, input));
   }
 
+  // GPT Image: acts for the principal's chat (`runGptImageTool`).
+  generateImage(input: GptImageToolInput, opts?: GptImageCallOptions): Promise<DaemonOutcome<GptImageToolResult>> {
+    return runGptImageTool(this.opts.gptImage?.() ?? null, input, opts);
+  }
+
   subscribe(listener: (event: EventMessage) => void): () => void {
     // `Broadcaster.publish` drops a sink whose `send` throws — never throw here.
     const sink = { send: (data: string) => { try { listener(JSON.parse(data) as EventMessage); } catch { /* ignore */ } } };
@@ -442,6 +457,8 @@ export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): Daemo
       : {}),
     ...(api.deviceInstall ? { deviceInstall: (input: DeviceToolInstallInput, opts?: DeviceCallOptions) => api.deviceInstall!(input, { ...opts, principal }) } : {}),
     ...(api.deviceClose ? { deviceClose: (input: DeviceToolCloseInput, opts?: DeviceCallOptions) => api.deviceClose!(input, { ...opts, principal }) } : {}),
+    // GPT Image: the generation acts for the bound principal's chat too.
+    ...(api.generateImage ? { generateImage: (input: GptImageToolInput, opts?: GptImageCallOptions) => api.generateImage!(input, { ...opts, principal }) } : {}),
     get fsRoot() { return api.fsRoot; },
     get workspacesDir() { return api.workspacesDir; }
   };

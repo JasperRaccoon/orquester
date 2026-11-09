@@ -18,6 +18,17 @@ test("showing images is always on: every chat's block names show_image (design 2
   }
 });
 
+test("images line: only while generate_image is advertised, within its own 160-byte allowance", () => {
+  const without = composeOrquesterInstructions({ workflowOwned: true });
+  const withImages = composeOrquesterInstructions({ workflowOwned: true, images: true });
+  assert.doesNotMatch(without, /generate_image/);
+  const lines = withImages.split("\n").filter((line) => line.includes("generate_image"));
+  assert.equal(lines.length, 1);
+  for (const words of ["recent:1", "never write image API scripts"]) assert.ok(lines[0]!.includes(words), words);
+  assert.ok(bytes(withImages) - bytes(without) <= 160, `${bytes(withImages) - bytes(without)} bytes`);
+  assert.ok(bytes(withImages) <= 2_048 + 160, `${bytes(withImages)} bytes`);
+});
+
 test("knowledge line: names only, last; absent for no collection — a chat without knowledge pays nothing", () => {
   const line = knowledge(["SEO", "AI search", "Ads"]);
   for (const name of ["SEO", "AI search", "Ads", "knowledge_search"]) assert.ok(line.includes(name), name);

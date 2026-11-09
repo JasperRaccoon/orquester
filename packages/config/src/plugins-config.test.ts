@@ -5,6 +5,7 @@ import {
   parsePluginsConfig,
   pluginStateOf,
   pluginsConfigPath,
+  storedGptImageSettings,
   storedKnowledgeSettings,
   storedTsCheckerEngine,
   tsRustPluginDir,
@@ -121,6 +122,22 @@ test("knowledge-graph settings read field by field; a bad value never makes the 
   assert.deepEqual(read({ accountId: 7, model: "", concurrency: 2.5 }), {});
   assert.deepEqual(read("on"), {});
   assert.deepEqual(read(undefined), {});
+});
+
+test("gpt-image settings read field by field; a bad value falls back without making the record unreadable", () => {
+  const read = (settings: unknown) => storedGptImageSettings(pluginStateOf(parsePluginsConfig({ plugins: { "gpt-image": { settings } } }), "gpt-image"));
+  assert.deepEqual(read({ account: "acc-1", saveTo: { kind: "project", folder: "assets/img" }, future: 1 }), {
+    account: "acc-1",
+    saveTo: { kind: "project", folder: "assets/img" }
+  });
+  assert.deepEqual(read({ account: "auto", saveTo: { kind: "chat" } }), { account: "auto", saveTo: { kind: "chat" } });
+  // An unsafe folder keeps the project save, without the folder (the daemon's default then applies).
+  for (const folder of ["../out", "/etc", "a/../b", "a//b", "a\\b", "", 7]) {
+    assert.deepEqual(read({ saveTo: { kind: "project", folder } }), { saveTo: { kind: "project" } }, String(folder));
+  }
+  assert.deepEqual(read({ account: "", saveTo: { kind: "disk" } }), {});
+  assert.deepEqual(read({ account: 3, saveTo: "project" }), {});
+  assert.deepEqual(read("on"), {});
 });
 
 test("knowledge-graph settings read the account policy field by field, keeping unknown keys", () => {

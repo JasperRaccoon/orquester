@@ -1,0 +1,49 @@
+{
+  "note": "A reference image that is not an image.",
+  "request": {
+    "path": "/backend-api/codex/images/edits",
+    "headers": [
+      "Authorization",
+      "chatgpt-account-id",
+      "Content-Type"
+    ],
+    "body": {
+      "prompt": "A small flat-style icon of a red apple on a plain background",
+      "model": "gpt-image-2",
+      "quality": "low",
+      "images": [
+        {
+          "image_url": "data:image/png;base64,Zm9vYmFy"
+        }
+      ]
+    }
+  },
+  "status": 400,
+  "headers": {
+    "cf-ray": "<id>",
+    "content-type": "application/json",
+    "x-codex-active-limit": "imagegen_premium",
+    "x-codex-credits-balance": "",
+    "x-codex-credits-has-credits": "True",
+    "x-codex-credits-unlimited": "False",
+    "x-codex-imagegen-request-id": "<id>",
+    "x-codex-plan-type": "pro",
+    "x-codex-primary-over-secondary-limit-percent": "0",
+    "x-codex-primary-reset-after-seconds": "81547",
+    "x-codex-primary-reset-at": "1794348905",
+    "x-codex-primary-used-percent": "0",
+    "x-codex-primary-window-minutes": "1440",
+    "x-codex-secondary-reset-after-seconds": "0",
+    "x-codex-secondary-reset-at": "",
+    "x-codex-secondary-used-percent": "0",
+    "x-codex-secondary-window-minutes": "0"
+  },
+  "body": {
+    "error": {
+      "message": "Invalid image data.",
+      "type": "image_generation_user_error",
+      "param": "images[0].image_url",
+      "code": "invalid_image_file"
+    }
+  }
+}

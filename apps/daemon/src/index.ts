@@ -186,6 +186,9 @@ import { ensureKnowledgeIndexerProfile } from "./knowledge/linking/indexer-profi
 import { isBoxLocation, sendBoxError, type BoxService } from "./boxes/service/index.ts";
 // Device simulators plugin: the device service, its routes and the device tools' backend.
 import { createDaemonDevices, type DaemonDevices } from "./devices/wiring.ts";
+// GPT Image plugin (GPT Image design 2026-11-10): generate_image's service and its settings routes.
+import { registerGptImageRoutes } from "./gpt-image/routes.ts";
+import { GptImageService } from "./gpt-image/service.ts";
 import { detectRepoInfo, remoteRepoFields } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
@@ -1588,6 +1591,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     threadExists: (id) => !sessionsReattached || agentChat.chat.has(id),
     logger: console
   });
+  // GPT Image: generate_image on a connected Codex account's ChatGPT plan, while the plugin is on.
+  // Its logins are read and renewed through the accounts service only (`gpt-image/accounts.ts`).
+  const gptImage = new GptImageService({ plugins, accounts: agentAccounts, fsRoot: () => resolved.fsRoot, logger: console });
   const services: Services = {
     buildInfo,
     authSessions,
@@ -1612,7 +1618,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxes: boxes.service,
     boxRegistry: boxes.registry,
     boxWiring: boxes,
-    devices
+    devices,
+    gptImage
   };
   // umcp:t3 begin
   // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
@@ -1657,6 +1664,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (!rolledBack) devices.chatClosed(id);
   });
   await devices.start().catch((error) => console.error("Device service start failed", error instanceof Error ? error.message : error));
+  // GPT Image: follows the plugin switch and the Codex accounts (their plans) from now on.
+  await gptImage.start().catch((error) => console.error("GPT Image start failed", error instanceof Error ? error.message : error));
   // The rest of the box wiring over the session list, browser tabs and chats: the token broker,
   // git auth, the MCP bridge, dev-server forwards, agent chats in boxes, the Template command, and
   // the box tools (connected while the plugin is on).
@@ -1690,6 +1699,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxesAvailable: () => temporaryBoxTools.available(),
     // Devices: the device tools only while the plugin is on, agents may use devices and a platform is enabled.
     devicesAvailable: () => devices.toolsAvailable(),
+    // GPT Image: generate_image only while the plugin is on and a Codex account can make images.
+    imagesAvailable: () => gptImage.toolsAvailable(),
     // Knowledge Graph: the plugin's view of each chat (on or off, worker or not, what it sees).
     knowledgeForSession: (threadId) => knowledge.knowledgeForSession(threadId),
     api: () => services.internalApi,
@@ -1714,6 +1725,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Devices: likewise when the device tools come or go.
   devices.onToolsChange(() => {
     void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: device tools refresh failed", error instanceof Error ? error.message : String(error)));
+  });
+  // GPT Image: likewise when the plugin toggles or the Codex accounts change what can make images.
+  gptImage.onToolsChange(() => {
+    void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: image tool refresh failed", error instanceof Error ? error.message : String(error)));
   });
   // A changed MCP server config (agent profile) is read afresh by the next manifest.
   const agentProfileSink = {
@@ -1794,7 +1809,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // boxes: which accounts a box's chats already use, as the token broker reads them.
     boxSessions: () => sessions.list(),
     // Devices: the device MCP tools' operations (null while the plugin is off).
-    devices: () => devices.service()
+    devices: () => devices.service(),
+    // GPT Image: generate_image's operation (it refuses while the plugin is off).
+    gptImage: () => gptImage
   });
 
   lineage.attachApi(services.internalApi);
@@ -1901,6 +1918,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Devices: before the plugins (no switch is followed any more). Setups and boots in flight are
     // cancelled; devices keep running and a restart reattaches.
     await devices.stop().catch((error) => console.error("Device service stop failed", error instanceof Error ? error.message : error));
+    // GPT Image: stops following the plugin and the accounts.
+    gptImage.stop();
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
@@ -2137,6 +2156,8 @@ interface Services {
   boxWiring?: DaemonBoxes;
   /** Device simulators: the device service (while the plugin is on) and its routes. Optional: route tests build a partial `services`. */
   devices?: DaemonDevices;
+  /** GPT Image: the plugin's service (settings routes). Optional: route tests build a partial `services`. */
+  gptImage?: GptImageService;
 }
 
 export function createServer(
@@ -5028,6 +5049,8 @@ export function createServer(
   services.boxes?.registerRoutes(app);
   // Devices (`deviceRoutes`): both transports, the hub proxy too (the desktop app's relay reaches it here).
   services.devices?.registerRoutes(app);
+  // GPT Image (`gptImageRoutes.settings`): both transports like the plugin routes (the bearer hook gates HTTP).
+  if (services.gptImage) registerGptImageRoutes(app, { service: services.gptImage });
 
   // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
   // transports; the bearer hook above gates HTTP. Secret values are write-only.

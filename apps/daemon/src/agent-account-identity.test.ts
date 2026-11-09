@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claudeLoginStatus, detectAgentFromBlob, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity.ts";
+import { claudeLoginStatus, detectAgentFromBlob, parseCodexIdentity, parseCodexPlan, parseGrokIdentity } from "./agent-account-identity.ts";
 
 function jwt(payload: Record<string, unknown>): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -46,6 +46,14 @@ test("codex identity from id_token JWT and account_id", () => {
 test("codex accountId falls back to JWT chatgpt_account_id", () => {
   const blob = { tokens: { access_token: "a", id_token: jwt({ email: "e@e.com", chatgpt_account_id: "from-jwt" }) } };
   assert.equal(parseCodexIdentity(blob).accountId, "from-jwt");
+});
+
+test("codex plan comes from the access token's auth claim, else the id token's", () => {
+  const auth = (plan: unknown) => ({ "https://api.openai.com/auth": { chatgpt_plan_type: plan } });
+  assert.equal(parseCodexPlan({ tokens: { access_token: jwt(auth("Plus")), id_token: jwt(auth("free")) } }), "plus");
+  assert.equal(parseCodexPlan({ tokens: { access_token: "opaque", id_token: jwt(auth("pro")) } }), "pro");
+  assert.equal(parseCodexPlan({ tokens: { access_token: jwt(auth("")) } }), null);
+  assert.equal(parseCodexPlan({ tokens: {} }), null);
 });
 
 const GROK_KEY = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";

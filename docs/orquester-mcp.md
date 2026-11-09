@@ -25,7 +25,7 @@ from the 72-tool 2.x surface).
 Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
 these 42 tools plus five chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
 `push_secret_files`), and — while their plugins allow — the plugin families: temporary boxes,
-the knowledge base, and devices (§15). (`show_image` copies PNG, JPEG, WebP or GIF files — from the
+the knowledge base, devices (§15) and GPT Image (§16). (`show_image` copies PNG, JPEG, WebP or GIF files — from the
 workspaces, the chat's own attachments or the host's temp folders, or named `recent:N` /
 `attachment:<id>` — into the chat as an inline image row; it reads nothing else.) Every
 tool has a **tier** — Read, Act or Admin — and a **toolset** (a group label only: every chat gets
@@ -2427,6 +2427,48 @@ agents use devices, and at least one platform is enabled. Design:
   names the missing readiness items, or that no Mac host can be rented; the owner fixes it in
   Settings → Devices).
 
+## 16. GPT Image (chat-only)
+
+The "GPT Image" plugin (Settings → Plugins) lets agent chats generate and edit images with GPT
+Image on the ChatGPT plan behind a Codex account connected in Settings → Accounts: no API key and
+no per-image charge (images count toward the account's Codex limits, faster than messages). The one
+tool, `generate_image`, is **chat-only** (toolset `images`) and is advertised only while the plugin
+is on and at least one Codex account can make images (not flagged "needs signing in", not on the
+Free plan). It calls the ChatGPT image endpoint the Codex CLI uses
+(`chatgpt.com/backend-api/codex/images/generations`, `…/edits`), which OpenAI does not document.
+Design: `docs/superpowers/specs/2026-11-10-gpt-image-plugin-design.md`.
+
+| Tool | Tier | Input | Returns |
+|---|---|---|---|
+| `generate_image` | Act (no card: it cannot cost money) | `prompt`; `images?` (≤ 5 reference images to edit or restyle); `transparent?`; `save_as?` | An MCP image block (omitted with a `note` past ~3.7 MB), then `{imageRef, attachmentId, path?, relativePath?, markdown, revisedPrompt?, width, height, transparent, account, note?}` |
+
+- **`images`** entries are strings: `recent:N` (the Nth most recent image in this chat, pasted by
+  the user or generated or shown in it; `recent:1` is the latest), `attachment:<id>` (an
+  `attachmentId` an earlier result returned, of this chat only), or a path (as `read_file` takes
+  it, or inside this chat's own attachments). Any entry switches the call to editing. A bad entry
+  fails the call as `images[i]: …` before anything is sent.
+- **Size and quality** are chosen by the endpoint (the spike found `size` and `quality` ignored), so
+  the tool has neither. `transparent: true` returns a PNG with an alpha channel.
+- **Where it goes.** Every image is stored as an attachment of the calling chat and shown there
+  inline. It is also written into the chat's project when `save_as` is given (a project-relative
+  file, or a folder ending in `/`) or when the plugin is set to save to a project folder (default
+  `assets/generated`), named from the prompt (`dog-in-snow.png`). An existing file is never
+  overwritten: the name becomes `-v2`, `-v3`, …, and `path` reports the real one. `save_as` outside
+  the project is `INVALID_ARGUMENT`. A chat with no project, or in a box, gets the image in the chat
+  only, with the reason in `note`.
+- **`markdown`** is `![prompt](attachment:<id>)`: put it in a reply to show the image again.
+  **`account`** is the label of the account that made it (never an id or a token).
+- **Accounts.** The plugin's account setting is `auto` (the first eligible Codex account in Settings
+  order; on a used-up limit it tries the next one once) or one account (never swapped). A login near
+  expiry is renewed through the daemon's one token refresher, never by this tool.
+- **Instructions**: while the tool is advertised the chat's Orquester block gains one line naming
+  `generate_image`, `recent:1`, and that agents never write image API scripts.
+- **Errors**: `GPT_IMAGE_DISABLED`, `GPT_IMAGE_NO_ACCOUNT`, `GPT_IMAGE_QUOTA` (with the reset time
+  when ChatGPT gives one), `GPT_IMAGE_FREE_PLAN`, `GPT_IMAGE_NEEDS_SIGN_IN` (the account is flagged
+  in Settings → Accounts), `GPT_IMAGE_REFUSED` (a safety refusal, with its text; not retried),
+  `GPT_IMAGE_INVALID`, `GPT_IMAGE_UNAVAILABLE` (after retries with backoff), `GPT_IMAGE_TIMEOUT`
+  (5 minutes), `GPT_IMAGE_UNEXPECTED`.
+
 ---
 
 *Design references: `docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md` (the unified
@@ -2437,5 +2479,5 @@ runner of a tool), `gate/` (tiers, scope and the turn policy), `server.ts` (this
 the instructions and the external audience), `daemon-api.ts` (the in-process client), `views.ts`,
 `transcript.ts`, `wait.ts`, `attachments.ts` and `tools/` (one module per family:
 `tools/workflows.ts` for §12, `tools/agent-profile.ts` for §13, `tools/desktops.ts` for §14,
-`tools/devices.ts` for §15, over `apps/daemon/src/devices/`). The
+`tools/devices.ts` for §15, over `apps/daemon/src/devices/`, `tools/images.ts` for §16, over `apps/daemon/src/gpt-image/`). The
 in-chat transport is `apps/daemon/src/session-tools/` (its README).*

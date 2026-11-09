@@ -4,11 +4,13 @@
  * chat inside an automated workflow the line saying approvals are not available, and (Knowledge
  * Graph plugin) for a chat that can see at least one knowledge collection the knowledge line
  * naming them, (boxes) the machines line while the box tools are advertised, and (Device
- * simulators plugin) the devices line while the device tools are advertised. Every chat tool is
+ * simulators plugin) the devices line while the device tools are advertised, and (GPT Image plugin)
+ * the images line while `generate_image` is advertised. Every chat tool is
  * on in every chat, so nothing here names tools that are off. Detail stays in tool descriptions.
  * Without boxes or devices, the worst case stays under 2 048 bytes, plus exactly
  * {@link KNOWLEDGE_LINE_MAX_BYTES} when the knowledge line is present (asserted by
- * `instructions.test.ts`). Boxes and devices add their lines only while advertised. A knowledge
+ * `instructions.test.ts`), and exactly 160 more with the images line. Boxes,
+ * devices and images add their lines only while advertised. A knowledge
  * worker session gets {@link KNOWLEDGE_WORKER_INSTRUCTIONS} instead.
  *
  * Pure: the daemon composes it; the agent host only passes it on.
@@ -49,6 +51,14 @@ const BOXES_LINE = "Machines: asked to rent a VM or server (any provider), or sh
 /** Devices spec §9: the one line the devices toolset adds (the rest travels in `open_device`'s quick start). */
 const DEVICES_LINE =
   "Mobile devices: list_devices, open_device; prefer device_action snapshot refs to coordinates; the user watches the Device panel and may take control.";
+
+/**
+ * GPT Image design 2026-11-10 §10: the one line the images toolset adds; it must keep agents off
+ * hand-written image API scripts. Its allowance is 160 bytes with its line break: like the knowledge
+ * line's, the block's cap rises by exactly that much only while the line is present.
+ */
+const IMAGES_LINE =
+  "Images: to make or edit a picture call generate_image (GPT Image on the user's ChatGPT plan; recent:1 or paths to edit); never write image API scripts.";
 
 const KNOWLEDGE_LINE_PREFIX = "Knowledge: ";
 const KNOWLEDGE_LINE_SUFFIX = ". Search it (knowledge_search) before deciding on these topics.";
@@ -96,6 +106,8 @@ export interface OrquesterInstructionsInput {
   boxes?: boolean;
   /** Devices: the device tools are advertised to it (the devices line is added). */
   devices?: boolean;
+  /** GPT Image: `generate_image` is advertised to it (the images line is added). */
+  images?: boolean;
   /**
    * Knowledge Graph: the names of the collections the chat can see while the plugin is on; absent
    * or empty = no knowledge line.
@@ -109,6 +121,7 @@ export function composeOrquesterInstructions(input: OrquesterInstructionsInput):
   if (input.workflowOwned) lines.push(WORKFLOW_OWNED_LINE);
   if (input.boxes === true) lines.push(BOXES_LINE);
   if (input.devices === true) lines.push(DEVICES_LINE);
+  if (input.images === true) lines.push(IMAGES_LINE);
   const knowledge = knowledgeLine(input.knowledgeCollections ?? []);
   if (knowledge !== null) lines.push(knowledge);
   return lines.join("\n");

@@ -1776,6 +1776,56 @@ export function storedKnowledgeSettings(state: PluginState): StoredKnowledgeSett
   return out;
 }
 
+/**
+ * Mirrors `GptImageSaveTo` in `@orquester/api` (`gpt-image.ts`); a project save whose folder does
+ * not read has none (the caller uses its default folder).
+ */
+export type StoredGptImageSaveTo = { kind: "chat" } | { kind: "project"; folder?: string };
+
+/** The GPT Image settings fields a record carries with a usable value; others read as absent. */
+export interface StoredGptImageSettings {
+  /** `"auto"` or a Codex account id (whether it still exists is the caller's to check). */
+  account?: string;
+  saveTo?: StoredGptImageSaveTo;
+}
+
+const GPT_IMAGE_FOLDER_MAX_LENGTH = 200;
+
+/**
+ * Whether `folder` is a project-relative folder GPT Image may write into: POSIX separators, no
+ * leading `/`, no `.` or `..` segment, no empty segment, no control character or backslash, at most
+ * 200 characters. A trailing `/` is allowed.
+ */
+export function isSafeGptImageFolder(folder: unknown): folder is string {
+  if (typeof folder !== "string" || folder.length === 0 || folder.length > GPT_IMAGE_FOLDER_MAX_LENGTH) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f\\:]/.test(folder) || folder.startsWith("/")) return false;
+  const segments = folder.replace(/\/$/, "").split("/");
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== ".." && segment.trim() === segment);
+}
+
+/**
+ * The GPT Image record's `settings`, field by field: a field that does not read (a `settings` that
+ * is not an object, an empty account, an unknown `saveTo` kind) reads as absent, so the caller falls
+ * back to its default; a project folder that is not a safe relative path is dropped from its save. Unknown fields are left
+ * in the record: writes go through `PluginsService.updatePluginSettings`, which merges.
+ */
+export function storedGptImageSettings(state: Pick<PluginState, "settings">): StoredGptImageSettings {
+  const raw = state.settings;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const record = raw as Record<string, unknown>;
+  const out: StoredGptImageSettings = {};
+  if (typeof record.account === "string" && record.account.trim() !== "" && record.account.length <= 200) out.account = record.account;
+  const saveTo = record.saveTo;
+  if (typeof saveTo === "object" && saveTo !== null && !Array.isArray(saveTo)) {
+    const kind = (saveTo as Record<string, unknown>).kind;
+    const folder = (saveTo as Record<string, unknown>).folder;
+    if (kind === "chat") out.saveTo = { kind: "chat" };
+    else if (kind === "project") out.saveTo = isSafeGptImageFolder(folder) ? { kind: "project", folder } : { kind: "project" };
+  }
+  return out;
+}
+
 /** The engine a ts-rust record names, or undefined when it names none this build knows. */
 export function storedTsCheckerEngine(state: PluginState): StoredTsCheckerEngine | undefined {
   return (TS_CHECKER_ENGINE_IDS as readonly unknown[]).includes(state.engine)
