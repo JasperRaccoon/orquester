@@ -189,6 +189,9 @@ import {
   parseKnowledgeStatus,
   type KnowledgeSettingsAnswer
 } from "./knowledge/validate";
+// The GPT Image plugin's settings route (answers validated by `lib/gpt-image/validate.ts`).
+import { gptImageRoutes, type GptImageSettingsResponse, type UpdateGptImageSettingsRequest } from "@orquester/api";
+import { parseGptImageSettingsResponse } from "./gpt-image/validate";
 import {
   authRoutes,
   authSessionPath,
@@ -1241,6 +1244,17 @@ export class ApiClient {
 
   async updateKnowledgeSettings(req: UpdateKnowledgeSettingsRequest): Promise<KnowledgeSettingsAnswer> {
     return readKnowledge(parseKnowledgeSettings(await this.send<unknown>("PUT", knowledgeRoutes.settings, { body: req })), "settings");
+  }
+
+  // --- GPT Image (`gptImageRoutes`): the plugin's settings, validated here like the knowledge reads ---
+
+  async getGptImageSettings(signal?: AbortSignal): Promise<GptImageSettingsResponse> {
+    return readGptImageSettings(parseGptImageSettingsResponse(await this.send<unknown>("GET", gptImageRoutes.settings, { signal })));
+  }
+
+  /** A partial update; answers with the settings as they now are. */
+  async updateGptImageSettings(req: UpdateGptImageSettingsRequest): Promise<GptImageSettingsResponse> {
+    return readGptImageSettings(parseGptImageSettingsResponse(await this.send<unknown>("PUT", gptImageRoutes.settings, { body: req })));
   }
 
   async listKnowledgeCollections(signal?: AbortSignal): Promise<KnowledgeCollectionsResponse> {
@@ -2654,6 +2668,12 @@ export function parseWorkflowLogWindow(data: ArrayBuffer, headers: Record<string
 /** A validated knowledge answer, or a rejection naming what could not be read. */
 function readKnowledge<T>(value: T | null, what: string): T {
   if (value === null) throw new Error(`The server sent a knowledge ${what} this app cannot read.`);
+  return value;
+}
+
+/** A validated GPT Image settings answer, or a rejection saying it could not be read. */
+function readGptImageSettings(value: GptImageSettingsResponse | null): GptImageSettingsResponse {
+  if (value === null) throw new Error("The server sent GPT Image settings this app cannot read.");
   return value;
 }
 

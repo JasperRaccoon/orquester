@@ -6,6 +6,7 @@ import { BOX_KIND_LABELS, type BoxSummary } from "@orquester/api";
 
 import {
   filterPlugins,
+  firstEnableMessage,
   pluginControls,
   pluginEngineChange,
   pluginEngineLabel,
@@ -65,6 +66,14 @@ test("turning tsc-rs on asks first; turning it off, or another plugin on, goes a
   assert.equal(pluginToggleDecision(plugin({ platform: "unsupported" }), true), "blocked");
   // On where there is no build (a carried-over plugins.json): it can still be turned off.
   assert.equal(pluginToggleDecision(plugin({ platform: "unsupported", enabled: true }), false), "apply");
+});
+
+test("turning GPT Image on asks first, with its own warning; turning it off goes ahead", () => {
+  const images = plugin({ id: "gpt-image", updates: false });
+  assert.equal(pluginToggleDecision(images, true), "confirm");
+  assert.equal(pluginToggleDecision({ ...images, enabled: true }, false), "apply");
+  assert.ok(firstEnableMessage(images));
+  assert.notEqual(firstEnableMessage(images), firstEnableMessage(plugin()));
 });
 
 test("a bundled plugin: no confirmation, no version actions", () => {
