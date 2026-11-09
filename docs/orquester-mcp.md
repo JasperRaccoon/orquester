@@ -23,9 +23,11 @@ from the 72-tool 2.x surface).
 
 **One catalog, two audiences.** The same tool definitions also serve the agents chatting *inside*
 Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
-these 42 tools plus four chat-only ones (`html_preview`, `html_render`, `request_secret`,
+these 42 tools plus five chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
 `push_secret_files`), and — while their plugins allow — the plugin families: temporary boxes,
-the knowledge base, and devices (§15). Every
+the knowledge base, and devices (§15). (`show_image` copies PNG, JPEG, WebP or GIF files — from the
+workspaces, the chat's own attachments or the host's temp folders, or named `recent:N` /
+`attachment:<id>` — into the chat as an inline image row; it reads nothing else.) Every
 tool has a **tier** — Read, Act or Admin — and a **toolset** (a group label only: every chat gets
 every tool, and nothing switches one on or off); in a chat the tier decides what runs without
 asking and what needs the user's approval card. **An external client is full trust:** for you the tier is information only (`_meta` on every

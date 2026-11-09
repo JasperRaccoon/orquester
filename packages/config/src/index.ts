@@ -73,6 +73,14 @@ export function daemonConfigDir(baseDir: string): string {
   return joinPath(baseDir, "daemon");
 }
 
+/**
+ * `<appdir>/tmp`: the scratch directory the agent host and its agent processes get as `TMPDIR`
+ * when the daemon itself was started without one (`/tmp` may be unavailable under systemd).
+ */
+export function appTmpDir(baseDir: string): string {
+  return joinPath(baseDir, "tmp");
+}
+
 export function appConfigPath(baseDir: string): string {
   return joinPath(appConfigDir(baseDir), "app.json");
 }

@@ -1,5 +1,7 @@
 import type { FastifyInstance } from "fastify";
+import { tmpdir } from "node:os";
 import type { Readable } from "node:stream";
+import { agentChatThreadAttachmentsDir, appTmpDir } from "@orquester/config";
 import type { BoxSummary, DeviceActionInput, DeviceLeaseSummary, DevicePlatform, EventMessage } from "@orquester/api";
 import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal, type HtmlRenderAppearance, type HtmlRenderReference } from "@orquester/api/agent-chat";
 import type { Broadcaster } from "../broadcaster.ts";
@@ -107,6 +109,13 @@ export interface DaemonApi {
   listDirectory?(path: string): Promise<ListFilesResult>;
   /** A text file's byte window inside the sandbox (`FsTools.readFileWindow`); a directory throws `FsDirectoryError`. */
   readFileRange?(path: string, opts: { offset?: number; maxBytes?: number }): Promise<ReadFileWindowResult>;
+  // Images in chats (design 2026-11-10 §9.3): what `show_image` may read besides the sandbox. The thread is always the
+  // CALLER's (`ToolCaller.threadId`), never an argument. Optional so the many test doubles of this seam need not grow
+  // them; without them only sandbox paths resolve.
+  /** `threadId`'s own attachments directory and the host's temp directories (the daemon's, and the one its agents get). */
+  chatImageRoots?(threadId: string): { attachmentsDir: string; tempDirs: string[] };
+  /** One stored attachment of `threadId`, as its host path; null when that thread has none by that id. */
+  chatAttachmentPath?(threadId: string, attachmentId: string): Promise<string | null>;
   // boxes: begin
   // The temporary-box operations (Ephemeral AI VMs spec §13): streamed or abortable, so not routes
   // (the box records are: `temporaryBoxRoutes`). Optional so the many test doubles of this seam
@@ -121,6 +130,8 @@ export interface DaemonApi {
   boxUpload?(boxId: string, request: { localPath: string; remotePath: string }, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxTransferResult>>;
   /** A file or directory from the box into the calling chat's project, streamed. */
   boxDownload?(boxId: string, request: { remotePath: string; localPath: string }, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxTransferResult>>;
+  /** One regular file of the calling box chat's OWN project box, as the agent there names it, read whole up to `maxBytes`. */
+  boxReadChatFile?(remotePath: string, maxBytes: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<{ bytes: Buffer }>>;
   /** A box port on a host loopback port, until the box is destroyed. */
   boxForwardPort?(boxId: string, port: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxForwardResult>>;
   /** The boxes a chat's account reaches: its project's box, and any temporary box that chat owns (`threadId`). None on the host. */
@@ -145,7 +156,8 @@ export interface DaemonApi {
   readonly workspacesDir: string;
 }
 
-type ChatUploads = Pick<AgentChatService, "uploadAttachment" | "publishHtmlRender" | "previewHtmlRender">;
+type ChatUploads = Pick<AgentChatService, "uploadAttachment" | "publishHtmlRender" | "previewHtmlRender"> &
+  Partial<Pick<AgentChatService, "attachmentPath">>;
 
 const HOST_RESTARTING: DaemonOutcome<never> = { ok: false, code: "HOST_UNAVAILABLE", message: "The agent host is restarting." };
 
@@ -186,6 +198,8 @@ export class InjectDaemonApi implements DaemonApi {
       broadcaster: Broadcaster;
       fsRoot: LivePath;
       workspacesDir: LivePath;
+      /** The appdir (`show_image`'s attachments and temp directories); absent: only sandbox paths resolve. */
+      baseDir?: string;
       // boxes: the temporary-box backend (the daemon's own client of itself has it).
       boxes?: TemporaryBoxTools | null;
       // boxes: which paths live in a box project, for the file reads (absent: all host).
@@ -283,6 +297,29 @@ export class InjectDaemonApi implements DaemonApi {
     return new FsTools({ fsRoot: this.fsRoot, ...(this.opts.boxRegistry ? { boxes: this.opts.boxRegistry } : {}) }).readFileWindow(path, opts);
   }
 
+  chatImageRoots(threadId: string): { attachmentsDir: string; tempDirs: string[] } {
+    const baseDir = this.opts.baseDir;
+    // A caller's thread id is the daemon's own, but it becomes a path segment here: nothing that could climb out.
+    if (baseDir === undefined || !/^[A-Za-z0-9_-]+$/.test(threadId)) return { attachmentsDir: "", tempDirs: [] };
+    return {
+      attachmentsDir: agentChatThreadAttachmentsDir(baseDir, threadId),
+      // The daemon's TMPDIR, which its agent host and agents inherit, else `<appdir>/tmp`, which they get instead.
+      tempDirs: [...new Set([tmpdir(), appTmpDir(baseDir)])]
+    };
+  }
+
+  async chatAttachmentPath(threadId: string, attachmentId: string): Promise<string | null> {
+    const agentChat = this.opts.agentChat;
+    if (!agentChat?.attachmentPath) return null;
+    try {
+      return await agentChat.attachmentPath(threadId, attachmentId);
+    } catch (error) {
+      // The host's text can name a host path: logged, never returned.
+      console.error("[mcp] attachment resolve failed", error);
+      return null;
+    }
+  }
+
   // boxes: begin
   async boxWaitReady(boxId: string, timeoutMs: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxSummary>> {
     return this.opts.boxes ? this.opts.boxes.waitReady(boxId, timeoutMs, opts) : BOXES_UNWIRED;
@@ -302,6 +339,10 @@ export class InjectDaemonApi implements DaemonApi {
 
   async boxDownload(boxId: string, request: { remotePath: string; localPath: string }, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxTransferResult>> {
     return this.opts.boxes ? this.opts.boxes.download(boxId, request, opts) : BOXES_UNWIRED;
+  }
+
+  async boxReadChatFile(remotePath: string, maxBytes: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<{ bytes: Buffer }>> {
+    return this.opts.boxes ? this.opts.boxes.readChatFile(remotePath, maxBytes, opts) : BOXES_UNWIRED;
   }
 
   async boxForwardPort(boxId: string, port: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxForwardResult>> {
@@ -379,12 +420,17 @@ export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): Daemo
     previewHtmlRender: (request) => api.previewHtmlRender(request),
     ...(api.listDirectory ? { listDirectory: (path: string) => api.listDirectory!(path) } : {}),
     ...(api.readFileRange ? { readFileRange: (path: string, opts: { offset?: number; maxBytes?: number }) => api.readFileRange!(path, opts) } : {}),
+    ...(api.chatImageRoots ? { chatImageRoots: (threadId: string) => api.chatImageRoots!(threadId) } : {}),
+    ...(api.chatAttachmentPath ? { chatAttachmentPath: (threadId: string, attachmentId: string) => api.chatAttachmentPath!(threadId, attachmentId) } : {}),
     // boxes: each box operation acts for the bound principal too (a tool cannot choose another).
     ...(api.boxWaitReady ? { boxWaitReady: (boxId: string, timeoutMs: number, opts?: DaemonBoxCallOptions) => api.boxWaitReady!(boxId, timeoutMs, { ...opts, principal }) } : {}),
     ...(api.boxExec ? { boxExec: (boxId: string, request: BoxExecRequest, opts?: DaemonBoxCallOptions) => api.boxExec!(boxId, request, { ...opts, principal }) } : {}),
     ...(api.boxJobOutput ? { boxJobOutput: (boxId: string, jobId: string, waitMs: number, opts?: DaemonBoxCallOptions) => api.boxJobOutput!(boxId, jobId, waitMs, { ...opts, principal }) } : {}),
     ...(api.boxUpload ? { boxUpload: (boxId: string, request: { localPath: string; remotePath: string }, opts?: DaemonBoxCallOptions) => api.boxUpload!(boxId, request, { ...opts, principal }) } : {}),
     ...(api.boxDownload ? { boxDownload: (boxId: string, request: { remotePath: string; localPath: string }, opts?: DaemonBoxCallOptions) => api.boxDownload!(boxId, request, { ...opts, principal }) } : {}),
+    ...(api.boxReadChatFile
+      ? { boxReadChatFile: (remotePath: string, maxBytes: number, opts?: DaemonBoxCallOptions) => api.boxReadChatFile!(remotePath, maxBytes, { ...opts, principal }) }
+      : {}),
     ...(api.boxesOfChat ? { boxesOfChat: (target: { projectPath: string; threadId?: string }) => api.boxesOfChat!(target) } : {}),
     ...(api.boxForwardPort ? { boxForwardPort: (boxId: string, port: number, opts?: DaemonBoxCallOptions) => api.boxForwardPort!(boxId, port, { ...opts, principal }) } : {}),
     // Devices: each device operation acts for the bound principal's chat too.

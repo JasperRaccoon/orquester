@@ -12,6 +12,12 @@ test("the worst case — workflow-owned — stays under 2 048 bytes", () => {
   assert.ok(bytes(worst) <= 2_048, `${bytes(worst)} bytes`);
 });
 
+test("showing images is always on: every chat's block names show_image (design 2026-11-10 §10)", () => {
+  for (const input of [{ workflowOwned: false }, { workflowOwned: true, boxes: true, devices: true, knowledgeCollections: ["SEO"] }]) {
+    assert.match(composeOrquesterInstructions(input), /\bshow_image\b/);
+  }
+});
+
 test("knowledge line: names only, last; absent for no collection — a chat without knowledge pays nothing", () => {
   const line = knowledge(["SEO", "AI search", "Ads"]);
   for (const name of ["SEO", "AI search", "Ads", "knowledge_search"]) assert.ok(line.includes(name), name);

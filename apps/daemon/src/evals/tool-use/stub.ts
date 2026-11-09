@@ -163,6 +163,10 @@ export function defaultResult(name: string, args: Record<string, unknown>, state
       return { width: args.width ?? 728, contentHeight: 640, capturedHeight: 640, consoleMessages: [] };
     case "html_render":
       return { htmlRender: { title: args.title ?? "Page", height: args.height ?? 640 }, message: HTML_RENDER_MESSAGE };
+    case "show_image": {
+      const images = (Array.isArray(args.images) ? args.images : []).map((_, i) => ({ attachmentId: `eval-image-${i + 1}-png`, markdown: `![image](attachment:eval-image-${i + 1}-png)` }));
+      return { imageRef: { images: images.map(({ attachmentId }) => ({ attachmentId, mimeType: "image/png" })) }, images, shown: images.length, message: "Shown to the user above your reply: don't describe what they can now see." };
+    }
     case "request_secret":
       return { secretRequest: { name: args.name ?? "SECRET", outcome: "provided" }, value: "sk_test_eval_00000000", note: SECRET_PROVIDED_NOTE };
     case "create_box":
