@@ -3,11 +3,12 @@ import { Image as ImageIcon } from "lucide-react";
 import Markdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { parseForgeLink, parseKnowledgeCitationHref } from "@orquester/api";
+import { parseChatImageSource } from "@orquester/api/agent-chat";
 
-import { useApi } from "../../../../context/orquester-context";
-import { useObjectUrl } from "../../../../hooks";
 import { cn } from "../../../../lib/cn";
-import { detectFileKind } from "../../../../lib/file-kind";
+import type { ChatImageItem } from "../../images/chat-image";
+import { ChatImageLightbox } from "../../images/ChatImageLightbox";
+import { ChatImageView } from "../../images/ChatImageView";
 import { isUrlText } from "../../../../lib/github-links/text-links";
 import { useAppStore } from "../../../../store/app";
 import { ForgeLinkPill } from "../../forge-links/ForgeLinkPill";
@@ -146,7 +147,22 @@ function MarkdownCode({
  * and nothing as an image source.
  */
 export const chatUrlTransform: UrlTransform = (url, key) =>
-  key === "href" && parseKnowledgeCitationHref(url) ? url : defaultUrlTransform(url);
+  (key === "href" && parseKnowledgeCitationHref(url)) || (key === "src" && isChatImageSourceText(url))
+    ? url
+    : defaultUrlTransform(url);
+
+/**
+ * An image source naming a chat image (`attachment:<id>`, `recent:N`, design
+ * 2026-11-10 §9.2), exactly as written: never a URL — `resolveMarkdownImageSource`
+ * reads it, and only a well-formed attachment id ever loads anything.
+ */
+function isChatImageSourceText(url: string): boolean {
+  const source = parseChatImageSource(url);
+  return (
+    source !== null &&
+    url === (source.kind === "attachment" ? `attachment:${source.attachmentId}` : `recent:${source.n}`)
+  );
+}
 
 function MarkdownLink({
   href,
@@ -201,15 +217,21 @@ function MissingImage({ label }: { label: string }): React.ReactElement {
   return <span className="text-xs text-neutral-500">Image unavailable: {label}</span>;
 }
 
-/** A file on the daemon's host, read through the file API (`local-image.ts`). */
-function LocalMarkdownImage({ path, alt }: { path: string; alt: string }): React.ReactElement {
-  const api = useApi();
-  const fetchBytes = React.useCallback((p: string, signal?: AbortSignal) => api.readFileBytes(p, signal), [api]);
-  const { kind, mime } = detectFileKind(path);
-  const { url, error } = useObjectUrl(fetchBytes, path, mime, kind === "image");
-  if (kind !== "image" || error) return <MissingImage label={alt || path} />;
-  if (!url) return <span className="text-xs text-neutral-600">Loading image…</span>;
-  return <img src={url} alt={alt} title={path} className={IMAGE_CLASS} />;
+/**
+ * A file on the daemon's host, read through the file API (`local-image.ts`),
+ * or a stored image of the chat being viewed (`attachment:<id>`, design
+ * 2026-11-10 §9.2), read through its attachment route — an id of another
+ * chat is not found there, and shows as unavailable. Either enlarges on
+ * click, with the chat image's actions.
+ */
+function ChatMarkdownImage({ item }: { item: ChatImageItem }): React.ReactElement {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <>
+      <ChatImageView item={item} layout="inline" onOpen={() => setOpen(true)} />
+      {open ? <ChatImageLightbox items={[item]} index={0} onIndexChange={() => {}} onClose={() => setOpen(false)} /> : null}
+    </>
+  );
 }
 
 /** A remote image held back until clicked (`remoteImages: "click"`): nothing is requested before. */
@@ -237,10 +259,32 @@ function ClickToLoadImage({ src, alt }: { src: string; alt: string }): React.Rea
 }
 
 function MarkdownImage({ src, alt }: { src?: string | undefined; alt?: string | undefined }): React.ReactElement {
-  const { workspaceRoot } = useTimelineRowContext();
+  const { workspaceRoot, sessionId } = useTimelineRowContext();
   const { remoteImages } = React.useContext(MarkdownConfigCtx);
   const source = resolveMarkdownImageSource(src ?? "", workspaceRoot);
-  if (source.kind === "local") return <LocalMarkdownImage path={source.path} alt={alt ?? ""} />;
+  if (source.kind === "local") {
+    return (
+      <ChatMarkdownImage
+        key={source.path}
+        item={{ key: source.path, source: { kind: "file", path: source.path }, alt: alt || source.path, path: source.path }}
+      />
+    );
+  }
+  if (source.kind === "attachment") {
+    // Outside a chat's timeline there is no chat to read it from.
+    if (sessionId === undefined) return <MissingImage label={alt || `attachment:${source.attachmentId}`} />;
+    return (
+      <ChatMarkdownImage
+        key={source.attachmentId}
+        item={{
+          key: source.attachmentId,
+          source: { kind: "attachment", sessionId, attachmentId: source.attachmentId },
+          alt: alt ?? "",
+          ...(alt ? { caption: alt } : {})
+        }}
+      />
+    );
+  }
   if (source.kind === "unresolved") return <MissingImage label={alt || source.src} />;
   if (remoteImages === "click") return <ClickToLoadImage key={source.src} src={source.src} alt={alt ?? ""} />;
   return <img src={source.src} alt={alt ?? ""} className={IMAGE_CLASS} />;

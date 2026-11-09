@@ -35,6 +35,7 @@ import type {
   TurnState,
   HistoryImportProgress,
   HtmlRenderReference,
+  ImageToolReference,
   McpAppReference,
   ThreadToolReference,
   ToolApprovalReference
@@ -464,6 +465,14 @@ export interface WorkLogEntry {
    */
   visual?: HtmlRenderReference;
   /**
+   * Present on a COMPLETED image call (design 2026-11-10 §9): a session-tool
+   * `show_image` / `generate_image` call (the ingestion's `sessionTool`
+   * marker) or a Codex `image_generation` item, read by the shared reader
+   * (`imageToolReferenceOfActivityPayload`). Such an entry is its own `image`
+   * row — never grouped, never folded. A failed call carries none.
+   */
+  image?: ImageToolReference;
+  /**
    * Present on a COMPLETED MCP tool call whose app the adapter captured
    * (spec 2026-10-14 §3): the app, read from the row's `data.mcpApp` by the
    * shared reader (`mcpAppReferenceOfActivityPayload`, own server+tool
@@ -645,6 +654,33 @@ export type AgentChatTimelineRow =
       createdAt: string;
       turnId: string | null;
       htmlRender: HtmlRenderReference;
+    }
+  /**
+   * Images an agent put in the chat (design 2026-11-10 §9), in place of the
+   * `show_image` / `generate_image` call or Codex `image_generation` item
+   * that produced them: always visible, left-aligned with the reply text.
+   * Never grouped, never folded into a settled turn, and keyed by its first
+   * image (`image:<attachmentId>`), so it keeps its loaded bytes through
+   * every re-derivation. A failed call stays an ordinary failed tool row.
+   */
+  | {
+      kind: "image";
+      id: string;
+      createdAt: string;
+      turnId: string | null;
+      image: ImageToolReference;
+    }
+  /**
+   * The place an image is coming in (design 2026-11-10 §9.1): a running
+   * `generate_image` call or Codex `image_generation` item of the live
+   * response, keyed by its call. A call left running by a turn that is over
+   * is an ordinary tool row instead.
+   */
+  | {
+      kind: "image-pending";
+      id: string;
+      createdAt: string;
+      turnId: string | null;
     }
   /**
    * An MCP App (spec 2026-10-14 §3), in place of the tool call that produced

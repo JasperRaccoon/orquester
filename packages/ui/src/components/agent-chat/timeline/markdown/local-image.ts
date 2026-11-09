@@ -1,3 +1,5 @@
+import { parseChatImageSource } from "@orquester/api/agent-chat";
+
 /**
  * Where a markdown image's `src` points.
  *
@@ -8,12 +10,21 @@
  *
  *  - `remote`: a URL the browser loads itself (`https:`, protocol-relative).
  *  - `local`: an absolute host path, relative ones joined onto the project.
- *  - `unresolved`: a local path with no project to anchor it, or a `~` path.
+ *  - `attachment`: one stored image of the chat being viewed
+ *    (`attachment:<id>`, design 2026-11-10 §9.2), read back through the
+ *    chat's attachment route.
+ *  - `unresolved`: a local path with no project to anchor it, a `~` path, or
+ *    a chat image source Markdown does not take: `recent:N` names a tool
+ *    argument's image, and is ambiguous in a reply (§9.2).
  */
 export type MarkdownImageSource =
   | { kind: "remote"; src: string }
   | { kind: "local"; path: string }
+  | { kind: "attachment"; attachmentId: string }
   | { kind: "unresolved"; src: string };
+
+/** `attachment:` and `recent:` name chat images, never URLs, whether or not the rest parses. */
+const CHAT_IMAGE_SCHEME = /^(?:attachment|recent):/i;
 
 function normalizeAbsolute(path: string): string {
   const out: string[] = [];
@@ -34,6 +45,10 @@ function decodePath(path: string): string {
 }
 
 export function resolveMarkdownImageSource(src: string, root: string | undefined): MarkdownImageSource {
+  if (CHAT_IMAGE_SCHEME.test(src)) {
+    const source = parseChatImageSource(src);
+    return source?.kind === "attachment" ? { kind: "attachment", attachmentId: source.attachmentId } : { kind: "unresolved", src };
+  }
   if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//")) return { kind: "remote", src };
   // A query or fragment means nothing to a file on disk.
   const path = decodePath(src.replace(/[?#].*$/, ""));

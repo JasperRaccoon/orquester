@@ -31,6 +31,7 @@ import {
   WorkingRow
 } from "./rows/StructureRows";
 import { VisualRow } from "./rows/VisualRow";
+import { ImagePendingRow, ImageRow } from "./rows/ImageRow";
 import { DelegateGroupRow } from "./rows/DelegateGroupRow";
 import { McpAppRow } from "./rows/McpAppRow";
 
@@ -54,6 +55,10 @@ function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | n
       return <GoalMarkerRow row={row} />;
     case "visual":
       return <VisualRow row={row} />;
+    case "image":
+      return <ImageRow row={row} />;
+    case "image-pending":
+      return <ImagePendingRow />;
     case "mcp-app":
       return <McpAppRow row={row} />;
     case "message": {
