@@ -80,6 +80,7 @@ export * from "./workflows/index.ts";
 export * from "./desktops.ts";
 export * from "./plugins.ts";
 export * from "./knowledge.ts";
+export * from "./gpt-image.ts";
 export * from "./devices.ts";
 export * from "./boxes.ts";
 export * from "./box-protocol.ts";

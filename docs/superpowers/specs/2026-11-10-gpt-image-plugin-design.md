@@ -199,7 +199,7 @@ If the target exists, the name becomes `name-v2.png`, `name-v3.png` and so on. T
 There is no extra tool: agents use Markdown images in their reply text.
 
 - **Project files:** already render. `![](path)` in `timeline/markdown/ChatMarkdown.tsx` (`LocalMarkdownImage`) reads files in the workspaces sandbox.
-- **Chat images:** add an image source that resolves within the current chat. Use `![alt](recent:N)` and `![alt](attachment:<id>)`, the same references `generate_image` takes (§6.1), so pasted and generated images can be shown again or side by side. The builder may pick a different scheme as long as the tool description and instruction line teach the same one.
+- **Chat images:** add the image source `![alt](attachment:<id>)`, which resolves within the current chat, so generated and shown images can be shown again or side by side. `recent:N` is for tool arguments only (`show_image`, `generate_image`). In Markdown it would be ambiguous: the latest image when written, or the latest when read? Pasted images are shown with `show_image` and `recent:N`. (Builder's call, implementation 2026-11-10.)
   - Resolution goes through the serving route below and is scoped to the chat being viewed. A reference to another chat's attachment shows the existing "Image unavailable" placeholder.
 - **Size and enlarge:** Markdown images keep their current inline size (`max-h-64`), get the same click-to-enlarge, and get the copy and save actions where the source is a chat image.
 - **Result text:** the `generate_image` JSON includes a ready-made `markdown` field (e.g. `![dog in snow](attachment:<id>)`) so agents don't have to build the reference themselves.
@@ -258,7 +258,7 @@ Anything else gets "path is not allowed".
 - **Instruction line** (`session-tools/instructions.ts`), added only while the tool is advertised. Wording is the builder's, within the instruction block's byte cap and its test. The meaning:
   - "Images: to make or edit a picture, call generate_image (GPT Image on the user's ChatGPT plan); pass pasted or project images to edit them; it shows in the chat and save_as puts it in the project."
   - It must steer agents away from writing API scripts.
-- **Showing images is always on.** The fixed part of the instruction block gains a short clause, within its byte cap, along the lines of: "To show the user an image (a screenshot, a file, a pasted or generated image), call show_image; in a reply, `![](path)` or `![](recent:N)` also works." It does not depend on the plugin.
+- **Showing images is always on.** The fixed part of the instruction block gains a short clause, within its byte cap, along the lines of: "To show the user an image (a screenshot, a file, a pasted or generated image), call show_image; in a reply, `![](path)` or `![](attachment:<id>)` also works." It does not depend on the plugin.
 - **Chat-row labels:** a label for `generate_image` in `packages/ui/src/lib/agent-chat/presentation.logic.ts`.
 
 ## 11. Errors

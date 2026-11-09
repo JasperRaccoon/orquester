@@ -10,6 +10,7 @@ import {
   RotateCcw,
   Search,
   Server,
+  ImagePlus,
   Smartphone,
   Trash2,
   Waypoints,
@@ -57,7 +58,8 @@ const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = {
   "secret-files": <KeyRound size={15} />,
   "ephemeral-vms": <Server size={15} />,
   "knowledge-graph": <Waypoints size={15} />,
-  devices: <Smartphone size={15} />
+  devices: <Smartphone size={15} />,
+  "gpt-image": <ImagePlus size={15} />
 };
 
 /** The daemon's error text for a failed request, else the error's own. */
