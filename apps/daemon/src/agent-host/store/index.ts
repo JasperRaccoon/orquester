@@ -180,6 +180,18 @@ const IMAGE_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
   ".webp"
 ]);
 
+/** Whether an attachment id is an image's: its stored extension is an image extension. */
+const isImageAttachmentId = (attachmentId: string): boolean =>
+  IMAGE_FILE_EXTENSIONS.has(`.${parseAttachmentFileExtension(attachmentId) ?? ""}`);
+
+/**
+ * What a fork copies from an ancestor under the same id (`copyPages`): a
+ * published page or MCP App snapshot (`-html`), or an image an inline image
+ * row shows (design 2026-11-10 §9).
+ */
+const isForkCopyableAttachmentId = (attachmentId: string): boolean =>
+  isHtmlRenderAttachmentId(attachmentId) || isImageAttachmentId(attachmentId);
+
 /**
  * A thread id may name a directory the store creates, reads and recursively
  * deletes, so it is shape-checked here rather than trusted from the caller.
@@ -1001,11 +1013,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (segment === toSafeThreadAttachmentSegment(threadId)) {
       return threadAttachmentsDir(rootDir, threadId);
     }
-    // A page or MCP App snapshot an ANCESTOR published keeps its ancestor's
-    // segment when a fork copies it here (`copyPages`): it is looked up in
-    // this thread's own directory only, so it resolves only once copied —
-    // never another thread's file.
-    return isHtmlRenderAttachmentId(attachmentId) ? threadAttachmentsDir(rootDir, threadId) : null;
+    // A page, MCP App snapshot or image row's image an ANCESTOR kept keeps
+    // its ancestor's segment when a fork copies it here (`copyPages`): it is
+    // looked up in this thread's own directory only, so it resolves only once
+    // copied — never another thread's file.
+    return isForkCopyableAttachmentId(attachmentId) ? threadAttachmentsDir(rootDir, threadId) : null;
   }
 
   async function findAttachmentFile(dir: string, attachmentId: string): Promise<string | null> {
@@ -1197,7 +1209,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       if (attachmentId === null || referenced.has(attachmentId)) {
         continue;
       }
-      const image = IMAGE_FILE_EXTENSIONS.has(`.${parseAttachmentFileExtension(attachmentId) ?? ""}`);
+      const image = isImageAttachmentId(attachmentId);
       if (!image && !isHtmlRenderAttachmentId(attachmentId)) {
         continue;
       }
@@ -1734,7 +1746,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       const copied: string[] = [];
       for (const entry of entries) {
         const attachmentId = parseAttachmentIdFromRelativePath(entry);
-        if (attachmentId === null || !isHtmlRenderAttachmentId(attachmentId) || !keep(attachmentId)) {
+        if (attachmentId === null || !isForkCopyableAttachmentId(attachmentId) || !keep(attachmentId)) {
           continue;
         }
         const source = path.join(fromDir, entry);

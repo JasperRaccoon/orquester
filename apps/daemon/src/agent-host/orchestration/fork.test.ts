@@ -1322,6 +1322,54 @@ describe("a fork's child and its parent's pages", () => {
     });
   }
 
+  it("claude (native): a retained turn's image row loads its image in the child; another turn's and a pasted image stay behind", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-images-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const store = createThreadStore({ rootDir: join(root, "threads") });
+    t.after(() => store.close());
+    const adapter = createScriptedAdapter({
+      id: "claude",
+      forkConversation: async (input) => ({ resumeCursor: { threadId: input.threadId, resume: "forked" } })
+    });
+    const host = createTestHost({ adapters: { claude: adapter }, store });
+    t.after(() => host.stop());
+    const parentId = await host.createThread({ threadId: "parent", refId: "claude" });
+    const asFake = host as unknown as TestHost;
+    const first = await runTurn(asFake, adapter, parentId, "show it", "here");
+    const second = await runTurn(asFake, adapter, parentId, "another", "there");
+
+    const putImage = async (name: string) => {
+      const source = join(root, name);
+      await writeFile(source, name);
+      return (await store.putAttachment({ threadId: parentId, name, mimeType: "image/png", sourcePath: source })).id;
+    };
+    const imageRow = (attachmentId: string) =>
+      sessionToolMarkedData(
+        {
+          toolName: "mcp__orquester__show_image",
+          input: { images: [{ path: "/tmp/shot.png" }] },
+          result: { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ imageRef: { images: [{ attachmentId }] }, shown: 1 }) }] }
+        },
+        new Set(["show_image"])
+      );
+    const kept = await putImage("kept.png");
+    const dropped = await putImage("dropped.png");
+    const pasted = await putImage("pasted.png");
+    await pushPageRow(host, parentId, first.turnId, "row-kept", imageRow(kept));
+    await pushPageRow(host, parentId, second.turnId, "row-dropped", imageRow(dropped));
+
+    const result = await host.orchestrator.forkThread(parentId, forkRequest("child", "claude", { messageId: first.replyId }));
+    await host.settle();
+    assert.equal(result.strategy, "native");
+
+    const path = await store.resolveAttachment("child", kept);
+    assert.ok(path.includes(join("child", "attachments")), path);
+    assert.equal(await readFile(path, "utf8"), "kept.png");
+    await assert.rejects(store.resolveAttachment("child", dropped), /not found/);
+    await assert.rejects(store.resolveAttachment("child", pasted), /not found/);
+    await assert.rejects(store.resolveAttachment("stranger", kept));
+  });
+
   it("codex (native): a replayed MCP App call gets its parent row's app, naming the child's own snapshot, which its sweep keeps", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "orq-fork-apps-"));
     t.after(() => rm(root, { recursive: true, force: true }));

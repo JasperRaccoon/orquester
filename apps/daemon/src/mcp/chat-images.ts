@@ -29,6 +29,7 @@ import {
   imageToolReferenceOfActivityPayload,
   MAX_TURN_IMAGE_BYTES,
   parseChatImageSource,
+  sniffChatImage,
   THREAD_HISTORY_MAX_TURNS,
   type ChatImageMimeType,
   type ThreadItem
@@ -84,70 +85,11 @@ function inside(parent: string, child: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-// ---------------------------------------------------------------------------
-// Sniffing
-// ---------------------------------------------------------------------------
-
-const u16be = (b: Uint8Array, at: number): number => (b[at]! << 8) | b[at + 1]!;
-const u16le = (b: Uint8Array, at: number): number => b[at]! | (b[at + 1]! << 8);
-const u24le = (b: Uint8Array, at: number): number => b[at]! | (b[at + 1]! << 8) | (b[at + 2]! << 16);
-const u32be = (b: Uint8Array, at: number): number => ((b[at]! << 24) >>> 0) + (b[at + 1]! << 16) + (b[at + 2]! << 8) + b[at + 3]!;
-const ascii = (b: Uint8Array, at: number, text: string): boolean => [...text].every((char, i) => b[at + i] === char.charCodeAt(0));
-
-/** Both dimensions when both are plausible pixel counts, else neither. */
-function size(width: number, height: number): { width?: number; height?: number } {
-  const ok = (value: number): boolean => Number.isInteger(value) && value >= 1 && value <= 100_000;
-  return ok(width) && ok(height) ? { width, height } : {};
-}
-
-function jpegSize(b: Uint8Array): { width?: number; height?: number } {
-  let at = 2;
-  while (at + 9 < b.length) {
-    if (b[at] !== 0xff) return {};
-    const marker = b[at + 1]!;
-    if (marker === 0xff) { at += 1; continue; } // fill byte
-    // Markers without a length: TEM, RST0–7, SOI, EOI.
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) { at += 2; continue; }
-    const length = u16be(b, at + 2);
-    if (length < 2) return {};
-    // SOF0–SOF15 carry the frame size; C4 (DHT), C8 (JPG) and CC (DAC) share the range but are not frames.
-    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-      return size(u16be(b, at + 7), u16be(b, at + 5));
-    }
-    at += 2 + length;
-  }
-  return {};
-}
-
-function webpSize(b: Uint8Array): { width?: number; height?: number } {
-  if (b.length < 30) return {};
-  if (ascii(b, 12, "VP8 ") && b[23] === 0x9d && b[24] === 0x01 && b[25] === 0x2a) {
-    return size(u16le(b, 26) & 0x3fff, u16le(b, 28) & 0x3fff);
-  }
-  if (ascii(b, 12, "VP8L") && b[20] === 0x2f) {
-    const bits = (b[21]! | (b[22]! << 8) | (b[23]! << 16) | (b[24]! << 24)) >>> 0;
-    return size((bits & 0x3fff) + 1, ((bits >>> 14) & 0x3fff) + 1);
-  }
-  if (ascii(b, 12, "VP8X")) return size(u24le(b, 24) + 1, u24le(b, 27) + 1);
-  return {};
-}
-
 /**
- * The image type by its magic bytes — PNG, JPEG, WebP or GIF — and its pixel size from the headers when they hold
- * one; null for anything else, whatever its name says.
+ * The image type by its magic bytes and its pixel size (`sniffChatImage`, shared with the Codex adapter's
+ * `image_generation` items).
  */
-export function sniffImage(bytes: Uint8Array): { mimeType: ChatImageMimeType; width?: number; height?: number } | null {
-  const b = bytes;
-  if (b.length >= 8 && b[0] === 0x89 && ascii(b, 1, "PNG\r\n\x1a\n")) {
-    return { mimeType: "image/png", ...(b.length >= 24 && ascii(b, 12, "IHDR") ? size(u32be(b, 16), u32be(b, 20)) : {}) };
-  }
-  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { mimeType: "image/jpeg", ...jpegSize(b) };
-  if (b.length >= 12 && ascii(b, 0, "RIFF") && ascii(b, 8, "WEBP")) return { mimeType: "image/webp", ...webpSize(b) };
-  if (b.length >= 6 && (ascii(b, 0, "GIF87a") || ascii(b, 0, "GIF89a"))) {
-    return { mimeType: "image/gif", ...(b.length >= 10 ? size(u16le(b, 6), u16le(b, 8)) : {}) };
-  }
-  return null;
-}
+export const sniffImage = sniffChatImage;
 
 /** `bytes` as an image named after `name` with its real type's extension, or the refusal. */
 function asImage(bytes: Buffer, name: string, extra: Pick<ResolvedChatImage, "attachmentId" | "path"> = {}): ResolvedChatImage {

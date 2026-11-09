@@ -18,6 +18,7 @@ import {
   IMAGE_GENERATION_ITEM_TYPE,
   MAX_TURN_IMAGE_BYTES,
   readImageToolReference,
+  sniffChatImage,
   type ChatImageMimeType,
   type ImageToolReference
 } from "@orquester/api/agent-chat";
@@ -90,7 +91,7 @@ export async function storeCodexImage(input: StoreCodexImageInput): Promise<Code
       async () => {
         const bytes = await imageBytes(input);
         if (bytes === null) return { failure: NO_IMAGE };
-        const sniffed = sniffImage(bytes);
+        const sniffed = sniffChatImage(bytes);
         if (sniffed === null) return { failure: "Codex image generation returned something that is not an image" };
         if (input.signal.aborted) return notSaved;
         const attachmentId = await store(input.threadId, {
@@ -201,67 +202,3 @@ const MIME_EXTENSIONS: Record<ChatImageMimeType, string> = {
   "image/webp": "webp",
   "image/gif": "gif"
 };
-
-interface SniffedImage {
-  mimeType: ChatImageMimeType;
-  width?: number;
-  height?: number;
-}
-
-/**
- * The image type a file's magic bytes name, with its pixel size when the
- * header gives it; null for anything that is not a PNG, JPEG, WebP or GIF.
- */
-function sniffImage(bytes: Uint8Array): SniffedImage | null {
-  const b = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const sized = (mimeType: ChatImageMimeType, width: number, height: number): SniffedImage =>
-    width > 0 && height > 0 ? { mimeType, width, height } : { mimeType };
-  // PNG: signature, then the IHDR chunk's width and height (big-endian).
-  if (b.length >= 24 && b.readUInt32BE(0) === 0x89504e47 && b.readUInt32BE(4) === 0x0d0a1a0a) {
-    return b.toString("latin1", 12, 16) === "IHDR" ? sized("image/png", b.readUInt32BE(16), b.readUInt32BE(20)) : { mimeType: "image/png" };
-  }
-  // GIF: `GIF87a` / `GIF89a`, then the logical screen size (little-endian).
-  if (b.length >= 10 && /^GIF8[79]a$/.test(b.toString("latin1", 0, 6))) {
-    return sized("image/gif", b.readUInt16LE(6), b.readUInt16LE(8));
-  }
-  // WebP: `RIFF....WEBP`, then a VP8 / VP8L / VP8X chunk.
-  if (b.length >= 16 && b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WEBP") {
-    const chunk = b.toString("latin1", 12, 16);
-    if (chunk === "VP8 " && b.length >= 30) {
-      return sized("image/webp", b.readUInt16LE(26) & 0x3fff, b.readUInt16LE(28) & 0x3fff);
-    }
-    if (chunk === "VP8L" && b.length >= 25) {
-      const bits = b.readUInt32LE(21);
-      return sized("image/webp", (bits & 0x3fff) + 1, ((bits >>> 14) & 0x3fff) + 1);
-    }
-    if (chunk === "VP8X" && b.length >= 30) {
-      return sized("image/webp", b.readUIntLE(24, 3) + 1, b.readUIntLE(27, 3) + 1);
-    }
-    return { mimeType: "image/webp" };
-  }
-  // JPEG: SOI, then segments up to the first start-of-frame marker.
-  if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) {
-    let offset = 2;
-    while (offset + 9 <= b.length) {
-      if (b[offset] !== 0xff) break;
-      const marker = b[offset + 1]!;
-      if (marker === 0xff) {
-        offset += 1;
-        continue;
-      }
-      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
-        offset += 2;
-        continue;
-      }
-      const length = b.readUInt16BE(offset + 2);
-      const isFrame = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
-      if (isFrame) {
-        return sized("image/jpeg", b.readUInt16BE(offset + 7), b.readUInt16BE(offset + 5));
-      }
-      if (length < 2) break;
-      offset += 2 + length;
-    }
-    return { mimeType: "image/jpeg" };
-  }
-  return null;
-}

@@ -114,7 +114,12 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
-import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
+import {
+  htmlRenderReferenceOfActivityPayload,
+  imageToolReferenceOfActivityPayload,
+  isHtmlRenderAttachmentId,
+  mcpAppReferenceOfActivityPayload
+} from "@orquester/api/agent-chat";
 import {
   APPROVAL_ALREADY_ANSWERED_REASON,
   APPROVAL_ARRIVED_REASON,
@@ -5313,7 +5318,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     for (const activity of activities) {
       for (const reference of [
         htmlRenderReferenceOfActivityPayload(activity.payload),
-        mcpAppReferenceOfActivityPayload(activity.payload)
+        mcpAppReferenceOfActivityPayload(activity.payload),
+        ...(imageToolReferenceOfActivityPayload(activity.payload)?.images ?? [])
       ]) {
         if (reference === undefined) continue;
         named.add(reference.attachmentId);
@@ -5321,7 +5327,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     }
     try {
-      await store.copyPages(parentThreadId, threadId, (id) => kept.has(id) || !named.has(id));
+      // An image row's image (design 2026-11-10 §9) only when a retained turn's
+      // row shows it: an image no row names is a pasted upload, never a page.
+      await store.copyPages(
+        parentThreadId,
+        threadId,
+        (id) => kept.has(id) || (!named.has(id) && isHtmlRenderAttachmentId(id))
+      );
     } catch (error) {
       logger.warn("agent-host: a fork's pages could not be copied to the child", {
         threadId,
