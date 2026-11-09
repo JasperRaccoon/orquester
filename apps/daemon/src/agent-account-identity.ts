@@ -90,3 +90,20 @@ export function parseCodexIdentity(parsed: unknown): { email: string | null; acc
         : null;
   return { email, accountId };
 }
+
+/**
+ * The ChatGPT plan a Codex `auth.json` names (`plus`, `pro`, `team`, `free`, …): the access token's
+ * `https://api.openai.com/auth` → `chatgpt_plan_type` claim, else the id token's. Null when neither
+ * says. A display and eligibility hint only: the token can predate a plan change.
+ */
+export function parseCodexPlan(parsed: unknown): string | null {
+  if (!isRecord(parsed) || !isRecord(parsed.tokens)) return null;
+  for (const key of ["access_token", "id_token"] as const) {
+    const token = parsed.tokens[key];
+    const claims = typeof token === "string" ? decodeJwtPayload(token) : null;
+    const auth = claims?.["https://api.openai.com/auth"];
+    const plan = isRecord(auth) ? auth.chatgpt_plan_type : undefined;
+    if (typeof plan === "string" && plan.trim() !== "") return plan.trim().toLowerCase();
+  }
+  return null;
+}

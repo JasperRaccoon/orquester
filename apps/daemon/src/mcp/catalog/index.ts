@@ -18,6 +18,8 @@ import { desktopsFamily } from "../tools/desktops.ts";
 import { devicesFamily } from "../tools/devices.ts";
 import { filesFamily } from "../tools/files.ts";
 import { gitFamily } from "../tools/git.ts";
+// GPT Image plugin: generate_image for agent chats (GPT Image design 2026-11-10 §6).
+import { imagesFamily } from "../tools/images.ts";
 // Knowledge Graph plugin: the shared knowledge base for agent chats (its spec, "Agent tools").
 import { knowledgeFamily } from "../tools/knowledge.ts";
 import { lineageFamily } from "../tools/lineage.ts";
@@ -85,7 +87,9 @@ export const CATALOG: readonly AnyOrquesterTool[] = buildCatalog([
   // Knowledge Graph: chat-only, advertised while the plugin is on.
   knowledgeFamily,
   // Devices: chat-only, advertised while the plugin is on and a platform is enabled.
-  devicesFamily
+  devicesFamily,
+  // GPT Image: chat-only, advertised while the plugin is on and a Codex account can make images.
+  imagesFamily
 ]);
 
 const byAudience = new Map<Audience, readonly AnyOrquesterTool[]>();

@@ -33,6 +33,7 @@ import {
   claudeBlobHasTokens,
   claudeLoginStatus,
   parseCodexIdentity,
+  parseCodexPlan,
   parseGrokIdentity,
   grokAuthEntry,
   decodeJwtPayload
@@ -206,6 +207,7 @@ export class AgentAccountsService {
       const idn = parseCodexIdentity(parsed);
       email = idn.email;
       label = input.label?.trim() || idn.email || "Codex account";
+      plan = parseCodexPlan(parsed);
     } else if (agent === "grok") {
       const idn = parseGrokIdentity(parsed);
       email = idn.email;
@@ -832,6 +834,34 @@ export class AgentAccountsService {
    */
   refreshNow(agent: ManagedAgent, id: string, options: { allowHeld?: boolean } = {}): Promise<AccountRefreshOutcome> {
     return this.refreshAccount(agent, id, options);
+  }
+
+  /**
+   * A managed Codex account's current login, read-only, for a daemon-side call to the ChatGPT backend
+   * (GPT Image, design 2026-11-10 §5): the access token, the ChatGPT account id, the token's expiry
+   * and the plan its claims name. Built field by field — never the refresh or id token. Null when the
+   * account is not a Codex one, its home is not its own, or its `auth.json` has no usable access
+   * token. Renewing it is {@link refreshNow}'s alone; the caller never writes the file.
+   */
+  async codexLogin(id: string): Promise<{ accessToken: string; chatgptAccountId: string | null; expiresAt: number | null; plan: string | null } | null> {
+    const record = this.getRecord(id);
+    if (!record || record.agent !== "codex") return null;
+    const home = this.homePath("codex", id);
+    try {
+      await assertOwnedAccountHome(this.opts.accountsDir, "codex", id, home);
+      const parsed = JSON.parse(await readFile(join(home, CRED_FILENAME.codex), "utf8"));
+      const accessToken = parsed?.tokens?.access_token;
+      if (typeof accessToken !== "string" || accessToken === "") return null;
+      const exp = decodeJwtPayload(accessToken)?.exp;
+      return {
+        accessToken,
+        chatgptAccountId: parseCodexIdentity(parsed).accountId,
+        expiresAt: typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : null,
+        plan: parseCodexPlan(parsed)
+      };
+    } catch {
+      return null;
+    }
   }
 
   /** Refresh one managed account's OAuth token and persist it in place. De-duped
