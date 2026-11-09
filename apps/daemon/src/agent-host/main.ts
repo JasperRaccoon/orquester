@@ -468,7 +468,12 @@ export async function startAgentHost(
       const staged = join(stagingDir, `adapter-${randomUUID()}.part`);
       try {
         // An MCP App's snapshot: a remembered secret is masked here too (§5).
-        await writeFile(staged, secretRedactor.maskText(threadId, input.bytes), { encoding: "utf8", mode: 0o600 });
+        // A generated image's bytes are binary, written as they decode.
+        if (input.encoding === "base64") {
+          await writeFile(staged, Buffer.from(input.bytes, "base64"), { mode: 0o600 });
+        } else {
+          await writeFile(staged, secretRedactor.maskText(threadId, input.bytes), { encoding: "utf8", mode: 0o600 });
+        }
         const ref = await store.putAttachment({
           threadId,
           name: input.name,

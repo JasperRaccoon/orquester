@@ -2254,6 +2254,8 @@ function childToolName(classified: ClassifiedItem): string {
       return "Web search";
     case "image_view":
       return "View image";
+    case "image_generation":
+      return "Generate image";
     case "collab_agent_tool_call":
       return classified.title ?? "Agent";
     case "mcp_tool_call":

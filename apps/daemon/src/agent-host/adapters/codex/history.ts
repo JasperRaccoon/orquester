@@ -21,7 +21,7 @@ import type {
   ThreadSnapshot,
   TurnTokenUsage
 } from "@orquester/api/agent-chat";
-import { HISTORICAL_RAW_SOURCE, isToolLifecycleItemType } from "@orquester/api/agent-chat";
+import { HISTORICAL_RAW_SOURCE, IMAGE_GENERATION_ITEM_TYPE, isToolLifecycleItemType } from "@orquester/api/agent-chat";
 
 import { stripAttachmentPathLines } from "../attachment-lines.ts";
 import { stripForkHandoff } from "../../orchestration/fork.ts";
@@ -150,15 +150,22 @@ function projectItem(
 
   // --- tool lifecycle -----------------------------------------------------
   if (isToolLifecycleItemType(classified.itemType)) {
+    const status = classified.status === "declined" ? "declined" : terminalStatus(classified.status);
+    // Codex's own image is stored only from the live stream (`image-generation.ts`):
+    // a projection is synchronous and replays, so a history row says why it has none.
+    const detail =
+      classified.itemType === IMAGE_GENERATION_ITEM_TYPE && status === "completed"
+        ? "The image was not imported with the chat's Codex history"
+        : classified.detail;
     return {
       type: "item.completed",
       payload: {
         itemType: classified.itemType,
         // A history item is finished by construction; an `inProgress` status
         // read back from the rollout would put a spinner on a dead turn.
-        status: classified.status === "declined" ? "declined" : terminalStatus(classified.status),
+        status,
         ...(classified.title !== undefined ? { title: classified.title } : {}),
-        ...(classified.detail !== undefined ? { detail: classified.detail } : {}),
+        ...(detail !== undefined ? { detail } : {}),
         ...(classified.data !== undefined ? { data: classified.data } : {}),
         // A replayed command keeps its output as a live one does, bounded and
         // marked the same way (`items.ts`).

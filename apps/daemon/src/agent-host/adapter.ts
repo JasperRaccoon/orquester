@@ -705,11 +705,17 @@ export interface AdapterContext {
   attachmentsDir(threadId: string): string;
   /**
    * Store bytes the ADAPTER produced as one of the thread's attachments (an
-   * MCP App's snapshot, spec 2026-10-14 §3) and answer its id. The id's
-   * suffix is the name's extension (`app.html` → `…-html`). Optional: a
-   * context without it captures nothing.
+   * MCP App's snapshot, spec 2026-10-14 §3; Codex's own generated image,
+   * design 2026-11-10 §9.4) and answer its id. The id's suffix is the name's
+   * extension (`app.html` → `…-html`). `bytes` is text, written as UTF-8
+   * with the thread's remembered secrets masked — or, with `encoding:
+   * "base64"`, binary content written as it decodes. Optional: a context
+   * without it captures nothing.
    */
-  storeAttachment?(threadId: string, input: { name: string; mimeType: string; bytes: string }): Promise<string>;
+  storeAttachment?(
+    threadId: string,
+    input: { name: string; mimeType: string; bytes: string; encoding?: "utf8" | "base64" }
+  ): Promise<string>;
   /**
    * Append one untranslated provider frame to `raw.ndjson`. Best-effort and
    * never blocking; transient delta frames are dropped by the writer (§3.1).
