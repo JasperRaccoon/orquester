@@ -18,7 +18,7 @@ import {
   refreshProjectIndex,
   useProjectIndex
 } from "../../lib/project-index";
-import { agentRepo, groupAgentSessionsByRepo, matchesAgentQuery } from "../../lib/opened-agents";
+import { agentRepo, groupAgentSessionsByRepo } from "../../lib/opened-agents";
 import { useRepoIdentities } from "../../lib/repo-identities/hooks";
 import { RepoIcon } from "../repo/RepoIcon";
 import { serverViewOpen, useAppStore, useThreadUnread } from "../../store/app";
@@ -167,8 +167,7 @@ const AgentCard: React.FC<{
  * belongs to (every checkout of one remote side by side), never reshuffled by
  * activity. Status stays on each card's dot.
  *
- * Every agent is shown; a search (`query`) narrows the cards to those whose
- * title, project, workspace or repo label matches. `Ctrl+Shift+A` still walks the bucket-derived Needs-Attention
+ * Every agent is shown. `Ctrl+Shift+A` still walks the bucket-derived Needs-Attention
  * list (see GlobalShortcutListener) — display order doesn't change it.
  *
  * "Seen" semantics: an attention episode counts as looked-at only while the
@@ -176,7 +175,7 @@ const AgentCard: React.FC<{
  * drawer stays mounted off-canvas. The count turns amber only for episodes the
  * user has genuinely not seen.
  */
-export const OpenedAgents: React.FC<{ query: string }> = ({ query }) => {
+export const OpenedAgents: React.FC = () => {
   const api = useApi();
   const isDesktop = useIsDesktop();
   const drawerOpen = useAppStore((s) => s.sidebarDrawerOpen);
@@ -252,23 +251,15 @@ export const OpenedAgents: React.FC<{ query: string }> = ({ query }) => {
     setSeenKeys((prev) => nextSeenKeys(prev, keys));
   }, [contentVisible, flaggedKeyString]);
 
-  const searching = query.trim().length > 0;
   const ordered = useMemo(() => {
     if (index === null) return [];
-    const matching = entries.filter((entry) => matchesAgentQuery(query, entry, index, identities));
-    return groupAgentSessionsByRepo(matching, index).flatMap((group) => group.items);
-  }, [entries, index, query, identities]);
+    return groupAgentSessionsByRepo(entries, index).flatMap((group) => group.items);
+  }, [entries, index]);
   // A child card's parent title, from every agent the section knows (spec 2026-10-14 §6).
   const titleById = useMemo(
     () => new Map(entries.map((entry) => [entry.session.id, entry.session.title])),
     [entries]
   );
-
-  // A search with no matching agent drops the section; the workspaces below
-  // may still match.
-  if (searching && ordered.length === 0) {
-    return null;
-  }
 
   return (
     <section aria-label="Opened agents" className="space-y-1.5">

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   Archive,
   Box,
@@ -13,29 +13,26 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { LONG_PRESS_SURFACE, useLongPress } from "../../hooks/use-long-press";
-import { ConfirmDialog, ContextMenu, IconButton, type ContextMenuItem } from "../ui";
+import {
+  AdaptiveMenu,
+  ConfirmDialog,
+  ContextMenu,
+  DropdownItem,
+  DropdownSeparator,
+  type ContextMenuItem
+} from "../ui";
 import { useAppStore } from "../../store/app";
-import { useApi } from "../../context/orquester-context";
 import { copyText } from "../../lib/clipboard";
-import { matchesSidebarQuery } from "../../lib/opened-agents";
-import { ensureProjectIndex, useProjectIndex } from "../../lib/project-index";
-import { projectMatchesQuery } from "../../lib/repo-groups";
-import { useRepoIdentities } from "../../lib/repo-identities/hooks";
-import { useWorkflowTempProjects } from "../../lib/workflows/hooks";
-import { isWorkflowTempProject } from "../../lib/workflows/temp-projects";
-import type { ProjectSummary, WorkspaceSummary } from "../../types";
+import type { WorkspaceSummary } from "../../types";
 import { ArchivedFooter } from "./ArchivedFooter";
 import { CountPill, RowActionsButton, SectionHeader } from "./parts";
-import { ProjectRow, WorkspaceProjects, type InlineCreate } from "./WorkspaceProjects";
+import { WorkspaceProjects, type InlineCreate } from "./WorkspaceProjects";
 import type { NewProjectPreset } from "./NewProjectModal";
-import { RepoIcon } from "../repo/RepoIcon";
 
-/** Something to create inside a workspace, from its menu or the sidebar's "+". */
+/** Something to create inside a workspace, from its menu or the Workspaces "+". */
 export type WorkspaceCreateKind = "project" | "folder" | "todo";
 
 export interface WorkspaceListProps {
-  /** The sidebar search; empty shows the plain tree. */
-  query: string;
   /** A folder or to-do list being named inline in the open workspace. */
   inlineCreate: InlineCreate;
   onInlineCreateDone: () => void;
@@ -47,52 +44,29 @@ export interface WorkspaceListProps {
 }
 
 /**
- * Open a project of any workspace: its workspace first when another one is
- * open — the store lists only the open workspace's projects — then the
- * project, as the daemon lists it now (an archived or vanished one leaves just
- * its workspace open).
- */
-async function openProjectAnywhere(project: ProjectSummary): Promise<void> {
-  if (useAppStore.getState().currentWorkspace !== project.workspace) {
-    await useAppStore.getState().openWorkspace(project.workspace);
-  }
-  const fresh = useAppStore.getState().projects.find((p) => p.path === project.path);
-  if (fresh && !fresh.isArchived) {
-    useAppStore.getState().openProject(fresh);
-  }
-}
-
-/**
  * The workspaces, as an accordion: each row expands in place to its projects
  * and to-do lists. The expanded row is the open workspace (`currentWorkspace`)
  * — opening another collapses it, and collapsing it closes it — so the tree
  * never shows a project list the store does not hold.
  *
- * While searching, every workspace whose name or projects (by name or repo label) match stays listed,
- * and one with matching projects shows them even when it is not the open one
- * (from the verified project index, so an archived project never surfaces).
+ * The header's "+" opens the "New" menu: a project, folder or to-do list in
+ * the open workspace, or a new workspace.
  */
 export const WorkspaceList: React.FC<WorkspaceListProps> = ({
-  query,
   inlineCreate,
   onInlineCreateDone,
   onCreate,
   onCloneRepo,
   onNewWorkspace
 }) => {
-  const api = useApi();
   const workspaces = useAppStore((s) => s.workspaces);
   const loading = useAppStore((s) => s.workspacesLoading);
   const accounts = useAppStore((s) => s.accounts);
   const currentWorkspace = useAppStore((s) => s.currentWorkspace);
-  const currentProject = useAppStore((s) => s.currentProject);
   const openWorkspace = useAppStore((s) => s.openWorkspace);
   const closeWorkspace = useAppStore((s) => s.closeWorkspace);
   const deleteWorkspace = useAppStore((s) => s.deleteWorkspace);
   const setWorkspaceArchived = useAppStore((s) => s.setWorkspaceArchived);
-  const index = useProjectIndex();
-  const tempProjects = useWorkflowTempProjects();
-  const identities = useRepoIdentities();
 
   const [menu, setMenu] = useState<{ x: number; y: number; workspace: WorkspaceSummary } | null>(null);
   // A workspace row's menu: right-click, or a long press on a touch screen
@@ -105,15 +79,6 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
   });
   const [pendingDelete, setPendingDelete] = useState<WorkspaceSummary | null>(null);
 
-  const searching = query.trim().length > 0;
-
-  // A search reaches into every workspace through the project index.
-  useEffect(() => {
-    if (searching && index === null) {
-      void ensureProjectIndex(api, useAppStore.getState().workspaces);
-    }
-  }, [api, searching, index]);
-
   // Archived workspaces live only behind the archived entry at the bottom.
   const visibleWorkspaces = workspaces.filter((w) => !w.isArchived);
 
@@ -122,29 +87,6 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
     const map = new Map(accounts.map((a) => [a.id, a.label] as const));
     return (id?: string | null) => (id ? map.get(id) ?? null : null);
   }, [accounts]);
-
-  // Searching: the index's projects that match — by name or by their repo's
-  // label, as the open workspace's repo groups match — by workspace.
-  const matchesByWorkspace = useMemo(() => {
-    const byWorkspace = new Map<string, ProjectSummary[]>();
-    if (!searching || index === null) return byWorkspace;
-    for (const project of index.visible.values()) {
-      if (!projectMatchesQuery(query, project, identities)) continue;
-      const list = byWorkspace.get(project.workspace) ?? [];
-      list.push(project);
-      byWorkspace.set(project.workspace, list);
-    }
-    for (const list of byWorkspace.values()) {
-      list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-    }
-    return byWorkspace;
-  }, [searching, index, query, identities]);
-
-  const rows = searching
-    ? visibleWorkspaces.filter(
-        (w) => matchesSidebarQuery(query, w.name) || matchesByWorkspace.has(w.name)
-      )
-    : visibleWorkspaces;
 
   const menuItems = (workspace: WorkspaceSummary): ContextMenuItem[] => [
     {
@@ -186,9 +128,39 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
         title="Workspaces"
         count={visibleWorkspaces.length > 0 ? <CountPill>{visibleWorkspaces.length}</CountPill> : null}
       >
-        <IconButton label="New workspace" onClick={onNewWorkspace}>
-          <Plus size={15} />
-        </IconButton>
+        <AdaptiveMenu
+          trigger={
+            // A span: AdaptiveMenu wraps the trigger in its own <button>.
+            <span
+              aria-label="New"
+              title="New"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+            >
+              <Plus size={15} />
+            </span>
+          }
+          align="right"
+          width="w-48"
+          title="New"
+        >
+          {currentWorkspace && (
+            <>
+              <DropdownItem icon={<Box size={14} />} onClick={() => onCreate("project", currentWorkspace)}>
+                New Project
+              </DropdownItem>
+              <DropdownItem icon={<FolderPlus size={14} />} onClick={() => onCreate("folder", currentWorkspace)}>
+                New Folder
+              </DropdownItem>
+              <DropdownItem icon={<ListTodo size={14} />} onClick={() => onCreate("todo", currentWorkspace)}>
+                New to-do list
+              </DropdownItem>
+              <DropdownSeparator />
+            </>
+          )}
+          <DropdownItem icon={<FolderPlus size={14} />} onClick={onNewWorkspace}>
+            New Workspace
+          </DropdownItem>
+        </AdaptiveMenu>
       </SectionHeader>
 
       {loading && visibleWorkspaces.length === 0 && (
@@ -204,28 +176,20 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
           Create your first workspace
         </button>
       )}
-      {searching && rows.length === 0 && visibleWorkspaces.length > 0 && (
-        <p className="px-2 py-1.5 text-xs text-neutral-600">
-          {index === null ? "Searching…" : "No matching workspaces or projects"}
-        </p>
-      )}
-
-      {rows.map((workspace) => {
+      {visibleWorkspaces.map((workspace) => {
         const label = accountLabel(workspace.gitAccountId);
         const isOpen = workspace.name === currentWorkspace;
-        const matches = matchesByWorkspace.get(workspace.name);
-        const expanded = isOpen || (searching && matches !== undefined);
         // Visible projects only — archived rows are hidden from the list this
         // count sits next to, so counting them would promise rows the user
         // cannot see.
         const count = Math.max(0, workspace.projectCount - (workspace.archivedProjectCount ?? 0));
-        const FolderIcon = expanded ? FolderOpen : Folder;
+        const FolderIcon = isOpen ? FolderOpen : Folder;
         return (
           <div
             key={workspace.path}
             className={cn(
               "rounded-xl transition-colors",
-              expanded && "bg-neutral-900/70 pb-1.5 ring-1 ring-inset ring-neutral-800"
+              isOpen && "bg-neutral-900/70 pb-1.5 ring-1 ring-inset ring-neutral-800"
             )}
           >
             <div
@@ -234,12 +198,12 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
               className={cn(
                 "group flex items-center rounded-xl transition-colors",
                 LONG_PRESS_SURFACE,
-                expanded ? "text-neutral-100" : "text-neutral-300 hover:bg-neutral-800/60 hover:text-neutral-100"
+                isOpen ? "text-neutral-100" : "text-neutral-300 hover:bg-neutral-800/60 hover:text-neutral-100"
               )}
             >
               <button
                 type="button"
-                aria-expanded={expanded}
+                aria-expanded={isOpen}
                 onClick={() => (isOpen ? closeWorkspace() : void openWorkspace(workspace.name))}
                 className="flex min-w-0 flex-1 items-center gap-2 rounded-xl px-2 py-2 text-left text-[13px] font-medium focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
               >
@@ -248,7 +212,7 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
                   aria-hidden
                   className={cn(
                     "shrink-0 text-neutral-500 transition-transform duration-150 motion-reduce:transition-none",
-                    expanded && "rotate-90"
+                    isOpen && "rotate-90"
                   )}
                 />
                 <FolderIcon size={16} aria-hidden className="shrink-0 text-neutral-400" />
@@ -266,37 +230,21 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
               />
             </div>
 
-            {isOpen ? (
+            {isOpen && (
               <WorkspaceProjects
                 workspace={workspace.name}
-                query={query}
                 creating={inlineCreate}
                 onCreatingDone={onInlineCreateDone}
                 onCloneRepo={onCloneRepo && ((preset) => onCloneRepo(workspace.name, preset))}
               />
-            ) : expanded && matches ? (
-              <div className="space-y-px pl-6 pr-1.5">
-                {matches.map((project) => (
-                  <ProjectRow
-                    key={project.path}
-                    project={project}
-                    active={project.path === currentProject?.path}
-                    tempMarker={isWorkflowTempProject(project, tempProjects)}
-                    onOpen={() => void openProjectAnywhere(project)}
-                    icon={project.repoKey ? <RepoIcon repoKey={project.repoKey} size={15} /> : undefined}
-                  />
-                ))}
-              </div>
-            ) : null}
+            )}
           </div>
         );
       })}
 
-      {!searching && (
-        <div className="pt-1">
-          <ArchivedFooter scope="workspaces" />
-        </div>
-      )}
+      <div className="pt-1">
+        <ArchivedFooter scope="workspaces" />
+      </div>
 
       {menu && (
         <ContextMenu

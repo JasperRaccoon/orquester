@@ -4,17 +4,7 @@ import type { AgentSessionEntry } from "../components/attention/agent-sessions";
 import type { ProjectIndex } from "./project-index";
 
 /**
- * The sidebar search: a case-insensitive substring match of the trimmed query
- * against any of `fields`. An empty query matches everything.
- */
-export function matchesSidebarQuery(query: string, ...fields: Array<string | null | undefined>): boolean {
-  const needle = query.trim().toLowerCase();
-  if (needle.length === 0) return true;
-  return fields.some((field) => typeof field === "string" && field.toLowerCase().includes(needle));
-}
-
-/**
- * The repo an agent's project belongs to, for its card's icon and the search:
+ * The repo an agent's project belongs to, for its card's icon:
  * its `repoKey` (only remote-backed projects have one) and the label the repo
  * shows — its custom label, else the remote's `owner/repo`.
  */
@@ -26,22 +16,6 @@ export function agentRepo(
   const project = index.visible.get(entry.session.projectPath);
   if (!project?.repoKey) return null;
   return { repoKey: project.repoKey, label: identities.get(project.repoKey)?.label ?? project.repoName };
-}
-
-/** The Opened Agents search: an agent's title, project, workspace or its repo's shown label. */
-export function matchesAgentQuery(
-  query: string,
-  entry: AgentSessionEntry,
-  index: ProjectIndex,
-  identities: ReadonlyMap<string, RepoIdentity>
-): boolean {
-  return matchesSidebarQuery(
-    query,
-    entry.session.title,
-    entry.project.name,
-    entry.project.workspace,
-    agentRepo(entry, index, identities)?.label
-  );
 }
 
 /** One "Opened Agents" group: every agent session in one git repo, across all its checkouts. */

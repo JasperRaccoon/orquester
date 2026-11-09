@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { ProjectSummary } from "@orquester/api";
 
-import { groupProjectsByRepo, projectMatchesQuery, type GroupProjectsInput } from "./repo-groups.ts";
+import { groupProjectsByRepo, type GroupProjectsInput } from "./repo-groups.ts";
 
 const ENGINE = "github.com/jasperraccoon/jasperengine";
 const EDITOR = "github.com/jasperraccoon/jaspereditor";
@@ -41,7 +41,6 @@ const group = (overrides: Partial<GroupProjectsInput> = {}) =>
   groupProjectsByRepo({
     projects: PROJECTS,
     identities: new Map(),
-    query: "",
     collapsed: new Set(),
     activePath: null,
     ...overrides
@@ -66,7 +65,6 @@ test("a repo with one clone still gets a group", () => {
   const { groups, other } = groupProjectsByRepo({
     projects: [project("solo", { key: "gitlab.com/me/solo", name: "me/solo" }), project("plain")],
     identities: new Map(),
-    query: "",
     collapsed: new Set()
   });
   assert.deepEqual(groups.map((g) => [g.repoKey, names(g.projects)]), [["gitlab.com/me/solo", ["solo"]]]);
@@ -77,14 +75,12 @@ test("the default label is the first project's repoName, else the key without it
   const { groups } = groupProjectsByRepo({
     projects: [project("b", { key: "github.com/o/r", name: "O/R" }), project("a", { key: "github.com/o/r" })],
     identities: new Map(),
-    query: "",
     collapsed: new Set()
   });
   assert.equal(groups[0]?.defaultLabel, "O/R");
   const bare = groupProjectsByRepo({
     projects: [project("x", { key: "bitbucket.org/team/sub/repo" })],
     identities: new Map(),
-    query: "",
     collapsed: new Set()
   });
   assert.equal(bare.groups[0]?.defaultLabel, "team/sub/repo");
@@ -124,38 +120,10 @@ test("equal labels fall back to the repo key", () => {
   assert.deepEqual(groups.map((g) => g.repoKey), [EDITOR, ENGINE]);
 });
 
-test("a search on the label or key shows the whole group; on project names only those", () => {
-  const byLabel = group({ query: "engine" });
-  assert.deepEqual(
-    byLabel.groups.map((g) => [g.repoKey, names(g.projects)]),
-    [[ENGINE, ["JasperEngine", "Multiplayer", "Shader optimization"]]]
-  );
-  assert.deepEqual(names(byLabel.other), []);
-
-  const byKey = group({ query: "github.com/jasperraccoon/jaspered" });
-  assert.deepEqual(byKey.groups.map((g) => g.repoKey), [EDITOR]);
-
-  const byCustom = group({ query: "raccoon tools", identities: new Map([[EDITOR, { label: "Raccoon tools" }]]) });
-  assert.deepEqual(byCustom.groups.map((g) => [g.repoKey, g.projects.length]), [[EDITOR, 2]]);
-
-  const byProject = group({ query: "multi" });
-  assert.deepEqual(byProject.groups.map((g) => [g.repoKey, names(g.projects)]), [[ENGINE, ["Multiplayer"]]]);
-
-  const otherOnly = group({ query: "crypto" });
-  assert.deepEqual(otherOnly.groups, []);
-  assert.deepEqual(names(otherOnly.other), ["CRYPTORISK"]);
-});
-
-test("a saved collapse holds until a search or the open project pins the group open", () => {
+test("a saved collapse holds until the open project pins the group open", () => {
   const collapsed = new Set([ENGINE, EDITOR]);
   const plain = group({ collapsed });
   assert.deepEqual(plain.groups.map((g) => g.collapsed), [true, true]);
-
-  const searching = group({ collapsed, query: "jasper" });
-  assert.deepEqual(searching.groups.map((g) => [g.collapsed, g.pinnedOpen]), [
-    [false, true],
-    [false, true]
-  ]);
 
   const active = group({ collapsed, activePath: "/w/ws/Multiplayer" });
   assert.deepEqual(active.groups.map((g) => [g.repoKey, g.collapsed, g.pinnedOpen]), [
@@ -180,17 +148,4 @@ test("the input list is not reordered", () => {
   const before = names(PROJECTS);
   group();
   assert.deepEqual(names(PROJECTS), before);
-});
-
-test("a project matches the search by its name or its repo's shown label, owner or key", () => {
-  const custom = new Map([[ENGINE, { label: "Engine" }]]);
-  const multiplayer = engine("Multiplayer");
-  assert.ok(projectMatchesQuery("multi", multiplayer, new Map()));
-  assert.ok(projectMatchesQuery("jasperraccoon", multiplayer, new Map()), "the owner in the default label");
-  assert.ok(projectMatchesQuery("github.com/jasperraccoon", multiplayer, new Map()), "the key");
-  assert.ok(projectMatchesQuery("engine", multiplayer, custom), "the custom label");
-  assert.ok(!projectMatchesQuery("editor", multiplayer, custom));
-  // No repoName: the key without its host stands in, as for a group's default label.
-  assert.ok(projectMatchesQuery("o/r", project("x", { key: "github.com/o/r" }), new Map()));
-  assert.ok(!projectMatchesQuery("jasperraccoon", project("CRYPTORISK"), new Map()), "no repo: the name only");
 });

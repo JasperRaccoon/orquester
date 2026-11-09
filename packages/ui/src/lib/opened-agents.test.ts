@@ -4,15 +4,8 @@ import assert from "node:assert/strict";
 import type { ProjectSummary, RepoIdentity } from "@orquester/api";
 
 import type { AgentSessionEntry } from "../components/attention/agent-sessions";
-import { agentRepo, matchesAgentQuery, matchesSidebarQuery } from "./opened-agents.ts";
+import { agentRepo } from "./opened-agents.ts";
 import type { ProjectIndex } from "./project-index";
-
-test("the sidebar search matches any field, ignoring case and outer spaces", () => {
-  assert.equal(matchesSidebarQuery("", "anything"), true);
-  assert.equal(matchesSidebarQuery("  ", undefined), true);
-  assert.equal(matchesSidebarQuery(" Orq ", "fix the bug", "orquester-4"), true);
-  assert.equal(matchesSidebarQuery("mats", "fix the bug", null, "orquester"), false);
-});
 
 const KEY = "github.com/jasperraccoon/jasperengine";
 const repoProject: ProjectSummary = {
@@ -40,14 +33,4 @@ test("an agent's repo is its project's repoKey with the label it shows", () => {
   assert.deepEqual(agentRepo(entryFor(repoProject), index, none), { repoKey: KEY, label: "JasperRaccoon/JasperEngine" });
   assert.deepEqual(agentRepo(entryFor(repoProject), index, labelled("Engine")), { repoKey: KEY, label: "Engine" });
   assert.equal(agentRepo(entryFor(plainProject), index, none), null);
-});
-
-test("the Opened Agents search also matches the repo's shown label", () => {
-  assert.equal(matchesAgentQuery("jasperengine", entryFor(repoProject), index, none), true);
-  assert.equal(matchesAgentQuery("raccoon engine", entryFor(repoProject), index, labelled("Raccoon engine")), true);
-  // The custom label replaces the default one.
-  assert.equal(matchesAgentQuery("jasperengine", entryFor(repoProject), index, labelled("Raccoon engine")), false);
-  assert.equal(matchesAgentQuery("shader", entryFor(repoProject), index, labelled("Raccoon engine")), true);
-  assert.equal(matchesAgentQuery("fix the", entryFor(plainProject), index, none), true);
-  assert.equal(matchesAgentQuery("engine", entryFor(plainProject), index, labelled("Engine")), false);
 });

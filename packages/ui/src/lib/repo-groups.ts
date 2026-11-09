@@ -2,12 +2,10 @@
  * The open workspace's projects grouped by the repo they are clones of
  * (spec 2026-10-18 §1): one group per `ProjectSummary.repoKey`, then every
  * project without one under "OTHER PROJECTS". Pure — the sidebar feeds it the
- * store's projects, the repo identities, the search and the collapsed set.
+ * store's projects, the repo identities and the collapsed set.
  */
 
 import type { ProjectSummary, RepoIdentity } from "@orquester/api";
-
-import { matchesSidebarQuery } from "./opened-agents";
 
 export interface RepoProjectGroup {
   repoKey: string;
@@ -17,11 +15,11 @@ export interface RepoProjectGroup {
   defaultLabel: string;
   /** A credential-free `origin` URL for a fresh clone; absent when no project carried one. */
   cloneUrl?: string;
-  /** The group's rows, by name — narrowed by a search that matched only some of them. */
+  /** The group's rows, by name. */
   projects: ProjectSummary[];
-  /** Rows hidden under the header (never during a search, never for the active project's group). */
+  /** Rows hidden under the header (never for the active project's group). */
   collapsed: boolean;
-  /** Shown expanded whatever its saved state: a search is on, or it holds the open project. */
+  /** Shown expanded whatever its saved state: it holds the open project. */
   pinnedOpen: boolean;
 }
 
@@ -35,7 +33,6 @@ export interface GroupProjectsInput {
   /** The workspace's visible (unarchived) projects. */
   projects: readonly ProjectSummary[];
   identities: ReadonlyMap<string, Pick<RepoIdentity, "label">>;
-  query: string;
   /** Collapsed repo keys (saved per device). */
   collapsed: ReadonlySet<string>;
   /** The open project's path, if any. */
@@ -55,43 +52,12 @@ function withoutHost(repoKey: string): string {
   return slash === -1 ? repoKey : repoKey.slice(slash + 1);
 }
 
-/**
- * The sidebar search over a repo: its shown label (the custom one, else
- * `defaultLabel`), `defaultLabel` itself, or its key.
- */
-export function repoMatchesQuery(
-  query: string,
-  repoKey: string,
-  defaultLabel: string,
-  identities: ReadonlyMap<string, Pick<RepoIdentity, "label">>
-): boolean {
-  return matchesSidebarQuery(query, identities.get(repoKey)?.label ?? defaultLabel, defaultLabel, repoKey);
-}
-
-/**
- * The sidebar search over one project: its name, or its repo (see
- * `repoMatchesQuery`) — the rule `groupProjectsByRepo` applies, so a
- * workspace kept for a match shows that match inside it.
- */
-export function projectMatchesQuery(
-  query: string,
-  project: Pick<ProjectSummary, "name" | "repoKey" | "repoName">,
-  identities: ReadonlyMap<string, Pick<RepoIdentity, "label">>
-): boolean {
-  if (matchesSidebarQuery(query, project.name)) return true;
-  const { repoKey } = project;
-  if (!repoKey) return false;
-  return repoMatchesQuery(query, repoKey, project.repoName ?? withoutHost(repoKey), identities);
-}
-
 export function groupProjectsByRepo({
   projects,
   identities,
-  query,
   collapsed,
   activePath
 }: GroupProjectsInput): RepoGrouping {
-  const searching = query.trim().length > 0;
   const byRepo = new Map<string, ProjectSummary[]>();
   const other: ProjectSummary[] = [];
   for (const project of projects) {
@@ -99,7 +65,7 @@ export function groupProjectsByRepo({
       const list = byRepo.get(project.repoKey) ?? [];
       list.push(project);
       byRepo.set(project.repoKey, list);
-    } else if (matchesSidebarQuery(query, project.name)) {
+    } else {
       other.push(project);
     }
   }
@@ -109,19 +75,15 @@ export function groupProjectsByRepo({
     members.sort(byName);
     const defaultLabel = members.find((p) => p.repoName)?.repoName ?? withoutHost(repoKey);
     const label = identities.get(repoKey)?.label ?? defaultLabel;
-    const shown = repoMatchesQuery(query, repoKey, defaultLabel, identities)
-      ? members
-      : members.filter((p) => matchesSidebarQuery(query, p.name));
-    if (shown.length === 0) continue;
     const active = activePath ? members.find((p) => p.path === activePath) : undefined;
-    const pinnedOpen = searching || active !== undefined;
+    const pinnedOpen = active !== undefined;
     const cloneUrl = active?.cloneUrl ?? members.find((p) => p.cloneUrl)?.cloneUrl;
     groups.push({
       repoKey,
       label,
       defaultLabel,
       ...(cloneUrl ? { cloneUrl } : {}),
-      projects: shown,
+      projects: members,
       collapsed: !pinnedOpen && collapsed.has(repoKey),
       pinnedOpen
     });

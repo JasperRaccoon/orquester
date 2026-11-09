@@ -20,7 +20,6 @@ import { RepoGroupSection } from "./RepoGroupSection";
 import type { NewProjectPreset } from "./NewProjectModal";
 import { useAppStore } from "../../store/app";
 import { copyText } from "../../lib/clipboard";
-import { matchesSidebarQuery } from "../../lib/opened-agents";
 import type { ProjectSummary } from "../../types";
 import type { TodoListRecord } from "@orquester/api";
 import { useApi } from "../../context/orquester-context";
@@ -52,9 +51,7 @@ export const ProjectRow: React.FC<{
   tempMarker: boolean;
   onOpen: () => void;
   onMenu?: (at: { x: number; y: number }) => void;
-  /** Stands in for the cube (a search hit's repo icon). */
-  icon?: React.ReactNode;
-}> = ({ project, active, tempMarker, onOpen, onMenu, icon }) => {
+}> = ({ project, active, tempMarker, onOpen, onMenu }) => {
   // Secret files (spec §7): a key badge only while one of its files needs attention.
   const secretsOn = useSecretFilesEnabled();
   const secrets = useProjectSecretFiles(secretsOn ? project.path : undefined);
@@ -85,7 +82,7 @@ export const ProjectRow: React.FC<{
         aria-current={active ? "page" : undefined}
         className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[13px] focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
       >
-        {icon ?? <Box size={15} className={cn("shrink-0", active ? "text-neutral-300" : "text-neutral-500")} />}
+        <Box size={15} className={cn("shrink-0", active ? "text-neutral-300" : "text-neutral-500")} />
         {/* boxes: the name keeps at least 40% of the row; the badge's detail truncates first. */}
         <span className={cn("flex-1 truncate", boxView && "min-w-[40%]", boxDestroyed && "text-neutral-500 line-through")}>
           {project.name}
@@ -116,18 +113,16 @@ export const ProjectRow: React.FC<{
 /**
  * The open workspace's contents, under its expanded row: its projects grouped
  * by repo, then "Other projects" (no remote repo), its to-do lists and its
- * archived projects. `query` narrows the rows to those whose name matches (the
- * sidebar search) — or whole groups whose repo matches; `creating` names a new
- * folder or to-do list inline, at the top of its list. A group's "+" calls
+ * archived projects. `creating` names a new folder or to-do list inline, at
+ * the top of its list. A group's "+" calls
  * `onCloneRepo` with a fresh-clone preset for the new-project modal.
  */
 export const WorkspaceProjects: React.FC<{
   workspace: string;
-  query: string;
   creating: InlineCreate;
   onCreatingDone: () => void;
   onCloneRepo?: (preset: NewProjectPreset) => void;
-}> = ({ workspace, query, creating, onCreatingDone, onCloneRepo }) => {
+}> = ({ workspace, creating, onCreatingDone, onCloneRepo }) => {
   const currentProject = useAppStore((s) => s.currentProject);
   const projects = useAppStore((s) => s.projects);
   const loading = useAppStore((s) => s.projectsLoading);
@@ -162,7 +157,6 @@ export const WorkspaceProjects: React.FC<{
   const { groups, other } = groupProjectsByRepo({
     projects: visibleProjects,
     identities,
-    query,
     collapsed: collapsedGroups,
     activePath: currentProject?.path ?? null
   });
@@ -181,10 +175,7 @@ export const WorkspaceProjects: React.FC<{
 
   const todoLists = todos
     .filter((t) => t.scope === "workspace" && t.refKey === workspace)
-    .filter((t) => matchesSidebarQuery(query, t.name))
     .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
-
-  const searching = query.trim().length > 0;
 
   const renderRow = (project: ProjectSummary) => (
     <ProjectRow
@@ -353,11 +344,9 @@ export const WorkspaceProjects: React.FC<{
         </div>
       )}
 
-      {!searching && (
-        <div className="pt-1">
-          <ArchivedFooter scope="projects" />
-        </div>
-      )}
+      <div className="pt-1">
+        <ArchivedFooter scope="projects" />
+      </div>
 
       {menu && (
         <ContextMenu
