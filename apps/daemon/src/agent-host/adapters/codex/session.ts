@@ -177,6 +177,15 @@ import {
   McpAppSessionCache,
   type McpAppSnapshotStore
 } from "../mcp-app-capture.ts";
+import {
+  IMAGE_NOT_SAVED,
+  NO_IMAGE,
+  hasImageSource,
+  storeCodexImage,
+  withImageOutcome,
+  type CodexImageGenerationItem,
+  type CodexImageOutcome
+} from "./image-generation.ts";
 
 /**
  * What a resumed session persists. Codex's cursor is just `{threadId}` (§4.1),
@@ -492,6 +501,12 @@ export class CodexSession {
   private readonly appReads = new McpAppSessionCache<McpAppReference>(MCP_APP_READ_CACHE_MS);
   /** A server's tools for an app's requests; dropped when an MCP server restarts. */
   private readonly appTools = new McpAppSessionCache<AdapterMcpTool[]>(MCP_APP_TOOLS_CACHE_MS);
+  /**
+   * Codex's own images (design 2026-11-10 §9.4) this session already stored,
+   * by provider thread + item: a completion seen again reuses the outcome
+   * rather than storing the picture twice.
+   */
+  private readonly storedImages = new Map<string, CodexImageOutcome>();
   private readonly createdAt: string;
   private updatedAt: string;
 
@@ -1990,6 +2005,11 @@ export class CodexSession {
     if (this.frames.offer(() => this.receiveNotification(method, params))) {
       return;
     }
+    const image = this.imageGenerationOf(method, params);
+    if (image !== null) {
+      this.receiveGeneratedImage(method, params, image);
+      return;
+    }
     const app = this.appCallOf(method, params);
     if (app === null) {
       this.handleNotification(method, params);
@@ -2028,6 +2048,83 @@ export class CodexSession {
           this.appReads.set(readKey, mcpApp);
         }
         this.handleNotification(method, params, mcpApp === undefined ? undefined : withMcpApp(app.itemId, mcpApp));
+      }
+    );
+  }
+
+  /**
+   * A completed `imageGeneration` item that is not a failure the provider
+   * reported (that one's row is classified whole): its picture is stored
+   * before its row is written. Any thread's — a collab child's image is a row
+   * of the child's, under its namespaced id.
+   */
+  private imageGenerationOf(
+    method: ServerNotificationMethod,
+    params: unknown
+  ): { item: CodexImageGenerationItem; providerThreadId: string } | null {
+    if (method !== "item/completed") {
+      return null;
+    }
+    const p = params as CodexProtocol.v2.ItemCompletedNotification;
+    const item = p.item;
+    if (item.type !== "imageGeneration" || item.failure !== null || item.status === "failed") {
+      return null;
+    }
+    return { item, providerThreadId: p.threadId };
+  }
+
+  /**
+   * Codex's own image (design 2026-11-10 §9.4): store the picture as a thread
+   * attachment behind the frame hold — every later frame waits, so the row
+   * keeps its place ahead of the reply and the turn's end — then write the
+   * completion with the reference (`data.imageRef`), or `failed` with the
+   * reason. The bytes never reach the event.
+   */
+  private receiveGeneratedImage(
+    method: ServerNotificationMethod,
+    params: unknown,
+    image: { item: CodexImageGenerationItem; providerThreadId: string }
+  ): void {
+    const { item, providerThreadId } = image;
+    const ids = new Set([item.id, childItemId(providerThreadId, item.id)]);
+    const key = `${providerThreadId}\u0000${item.id}`;
+    const known = this.storedImages.get(key);
+    if (known !== undefined) {
+      this.handleNotification(method, params, withImageOutcome(ids, known));
+      return;
+    }
+    if (!hasImageSource(item)) {
+      this.handleNotification(method, params, withImageOutcome(ids, { failure: NO_IMAGE }));
+      return;
+    }
+    if (!this.frames.canCapture) {
+      // The session is closing: nothing may wait, and the picture is not kept.
+      this.handleNotification(method, params, withImageOutcome(ids, { failure: IMAGE_NOT_SAVED }));
+      return;
+    }
+    this.frames.hold(
+      (signal) =>
+        storeCodexImage({
+          context: this.options.context,
+          threadId: this.threadId,
+          item,
+          // A box's CODEX_HOME is the box's path, never readable here.
+          ...(this.options.codexHome !== undefined && this.options.box === undefined
+            ? { codexHome: this.options.codexHome }
+            : {}),
+          signal
+        }),
+      (outcome) => {
+        const settled = outcome ?? { failure: IMAGE_NOT_SAVED };
+        if ("imageRef" in settled) {
+          this.storedImages.set(key, settled);
+          while (this.storedImages.size > 256) {
+            const oldest = this.storedImages.keys().next().value;
+            if (oldest === undefined) break;
+            this.storedImages.delete(oldest);
+          }
+        }
+        this.handleNotification(method, params, withImageOutcome(ids, settled));
       }
     );
   }

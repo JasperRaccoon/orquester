@@ -14,6 +14,7 @@
  */
 
 import {
+  IMAGE_GENERATION_ITEM_TYPE,
   MCP_APP_RESOURCE_SCHEME,
   boundSessionToolData,
   isSessionToolsServerName,
@@ -22,6 +23,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { CodexProtocol } from "./_generated/index.ts";
+import { imageGenerationFailureDetail } from "./image-generation.ts";
 
 export type CodexThreadItem = CodexProtocol.v2.ThreadItem;
 
@@ -219,12 +221,20 @@ export function classifyItem(item: CodexThreadItem, sessionToolsServer?: string)
         data: { durationMs: item.durationMs }
       };
 
-    case "imageGeneration":
+    case "imageGeneration": {
+      // Codex's own image tool (design 2026-11-10 §9.4): an inline image row.
+      // The picture (`result`, base64, or `savedPath`) never rides the event:
+      // the session stores a completion's image as an attachment and puts
+      // its reference on `data.imageRef` (`image-generation.ts`). Classified
+      // here alone — a start, history — the row has no image yet.
+      const failed = item.failure !== null || item.status === "failed";
       return {
-        itemType: "unknown",
+        itemType: IMAGE_GENERATION_ITEM_TYPE,
+        status: failed ? "failed" : item.status === "completed" ? "completed" : "inProgress",
         ...(item.revisedPrompt !== null ? { title: item.revisedPrompt } : {}),
-        data: { status: item.status }
+        ...(failed ? { detail: imageGenerationFailureDetail(item.failure) } : {})
       };
+    }
 
     case "enteredReviewMode":
       // Classified and then dropped: the two review types stay in the closed

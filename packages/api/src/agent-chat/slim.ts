@@ -26,6 +26,8 @@
  * - a completed MCP call whose app the adapter captured keeps `data.mcpApp`
  *   (`mcp-app.ts`) — only once it names the row's own server and tool — the
  *   same after a second slim;
+ * - a Codex `image_generation` row keeps its stored image's reference,
+ *   `data.imageRef` (`chat-images.ts`);
  * - tool text output is summarised to the first meaningful line, elided at
  *   {@link SLIM_SUMMARY_ELIDE_CHARS}, or to `"N lines"` when there is no
  *   single renderable line;
@@ -45,6 +47,7 @@
  * (goals §4.4), so they must reach it whole.
  */
 
+import { IMAGE_GENERATION_ITEM_TYPE, readImageToolReference } from "./chat-images.ts";
 import { mcpAppReferenceOfActivityPayload } from "./mcp-app.ts";
 import { projectSessionToolData } from "./session-tools.ts";
 
@@ -551,6 +554,12 @@ export function slimActivityPayload(payload: unknown): unknown {
   const mcpApp = mcpAppReferenceOfActivityPayload(record);
   if (mcpApp !== undefined) {
     projectedData.mcpApp = mcpApp;
+  }
+
+  // Codex's own image (`chat-images.ts`): the stored image's reference, kept
+  // as it is so the timeline shows the image from the slim row.
+  if (record.itemType === IMAGE_GENERATION_ITEM_TYPE && readImageToolReference(data.imageRef) !== undefined) {
+    projectedData.imageRef = data.imageRef;
   }
 
   const next: Record<string, unknown> = { ...restamped, data: projectedData };
