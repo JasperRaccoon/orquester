@@ -1578,6 +1578,112 @@ describe("agent visuals — the visual row (spec 2026-10-14 §2.5)", () => {
 
 });
 
+describe("images in the chat — the image row (design 2026-11-10 §9)", () => {
+  const FIRST = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-png";
+  const SECOND = "t1-1f8fad5b-d9cb-469f-a165-70867728950e-png";
+  const imageRef = {
+    title: "Screens",
+    images: [
+      { attachmentId: FIRST, mimeType: "image/png", width: 800, height: 600, caption: "Home" },
+      { attachmentId: SECOND, caption: "Settings" }
+    ]
+  };
+  const resultText = JSON.stringify({ imageRef, message: "Shown above your reply." });
+  const claudeData = (tool: string) => ({
+    toolName: `mcp__orquester__${tool}`,
+    input: {},
+    result: { type: "tool_result", tool_use_id: "call-1", content: [{ type: "text", text: resultText }] }
+  });
+  const marked = (tool: string) => sessionToolMarkedData(claudeData(tool), new Set([tool]));
+  const call = (
+    itemType: string,
+    data: unknown,
+    at: number,
+    status: "inProgress" | "completed" | "failed"
+  ): ThreadItem[] => [
+    activity("tool.started", { itemType, toolUseId: "call-1", status: "inProgress", data }, { turnId: "t1", createdAt: stamp(at) }),
+    ...(status === "inProgress"
+      ? []
+      : [
+          activity("tool.completed", { itemType, toolUseId: "call-1", status, data }, {
+            turnId: "t1",
+            createdAt: stamp(at + 0.5),
+            status
+          })
+        ])
+  ];
+  const running = { isWorking: true, runningTurnId: "t1", activeTurnStartedAt: stamp(1) } as const;
+  const rowsOf = (items: ThreadItem[], overrides: Partial<TimelineRowsInput> = running) =>
+    deriveTimelineRowsWithState(
+      baseInput(entriesFrom([message("user", "show me", { createdAt: stamp(0) }), ...items]), overrides)
+    ).rows;
+  const images = (rows: readonly AgentChatTimelineRow[]) => rows.flatMap((row) => (row.kind === "image" ? [row] : []));
+  const toolRows = (rows: readonly AgentChatTimelineRow[]) =>
+    rows.filter((row) => row.kind === "work" || row.kind === "work-live" || row.kind === "activity-group");
+
+  it("a completed show_image call is one image row in place of its tool row, keyed by its first image", () => {
+    for (const data of [marked("show_image"), { sessionTool: { name: "show_image", references: { imageRef } } }]) {
+      const rows = rowsOf(call("mcp_tool_call", data, 1, "completed"));
+      const [row, ...rest] = images(rows);
+      assert.ok(row, "an image row");
+      assert.equal(rest.length, 0);
+      assert.equal(row.id, `image:${FIRST}`);
+      assert.deepEqual(row.image, imageRef);
+      assert.equal(toolRows(rows).length, 0, `no tool row besides it: ${JSON.stringify(kinds(rows))}`);
+    }
+  });
+
+  it("a settled turn's fold hides its work but never its images", () => {
+    const rows = rowsOf(
+      [
+        activity("tool.completed", { itemType: "command_execution", command: "ls", status: "completed" }, { turnId: "t1", createdAt: stamp(1) }),
+        ...call("mcp_tool_call", marked("show_image"), 2, "completed"),
+        message("assistant", "Here they are.", { turnId: "t1", createdAt: stamp(3) })
+      ],
+      { latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(1), completedAt: stamp(3) } }
+    );
+    assert.ok(kinds(rows).includes("turn-fold"), "the turn folds");
+    assert.equal(images(rows).length, 1, "the images stay");
+  });
+
+  it("a running generate_image call is a placeholder in the image's place, not the live tool row", () => {
+    const rows = rowsOf(call("mcp_tool_call", marked("generate_image"), 1, "inProgress"));
+    assert.deepEqual(
+      rows.filter((row) => row.kind === "image-pending").map((row) => row.id),
+      ["image-pending:call-1"]
+    );
+    assert.equal(toolRows(rows).length, 0, JSON.stringify(kinds(rows)));
+    assert.ok(!kinds(rows).includes("thinking"), "the placeholder is the live response's activity");
+  });
+
+  it("a failed generate_image call stays an ordinary tool row", () => {
+    const rows = rowsOf(call("mcp_tool_call", marked("generate_image"), 1, "failed"), {
+      expandedTurnIds: new Set(["t1"])
+    });
+    assert.equal(images(rows).length, 0);
+    assert.ok(!kinds(rows).includes("image-pending"));
+    assert.ok(rows.some((row) => row.kind === "work"), JSON.stringify(kinds(rows)));
+  });
+
+  it("a same-named tool of a user's own server shows no image row", () => {
+    const rows = rowsOf(call("mcp_tool_call", claudeData("show_image"), 1, "completed"), {
+      expandedTurnIds: new Set(["t1"])
+    });
+    assert.equal(images(rows).length, 0);
+    assert.equal(rows.some((row) => row.kind === "image-pending"), false);
+  });
+
+  it("Codex's own image_generation item is a placeholder while it runs and its image once done", () => {
+    const pending = rowsOf(call("image_generation", { prompt: "a dog in snow" }, 1, "inProgress"));
+    assert.ok(kinds(pending).includes("image-pending"), JSON.stringify(kinds(pending)));
+
+    const done = rowsOf(call("image_generation", { imageRef: { images: [imageRef.images[0]] } }, 1, "completed"));
+    const [row] = images(done);
+    assert.equal(row?.id, `image:${FIRST}`);
+    assert.equal(toolRows(done).length, 0, JSON.stringify(kinds(done)));
+  });
+});
+
 describe("MCP Apps — the mcp-app row (spec 2026-10-14 §3)", () => {
   const APP = "t1-1f8fad5b-d9cb-469f-a165-70867728950e-html";
   const reference = { attachmentId: APP, server: "charts", tool: "show_chart", resourceUri: "ui://charts/view" };

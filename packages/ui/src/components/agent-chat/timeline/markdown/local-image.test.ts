@@ -30,6 +30,15 @@ describe("resolveMarkdownImageSource", () => {
     }
   });
 
+  it("reads attachment:<id> as an image of the chat, and never loads recent:N or a malformed id", () => {
+    const id = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-png";
+    assert.deepEqual(resolveMarkdownImageSource(`attachment:${id}`, ROOT), { kind: "attachment", attachmentId: id });
+    assert.deepEqual(resolveMarkdownImageSource(`attachment:${id}`, undefined), { kind: "attachment", attachmentId: id });
+    for (const src of ["recent:1", "attachment:../../etc/passwd", "attachment:", "recent:0"]) {
+      assert.deepEqual(resolveMarkdownImageSource(src, ROOT), { kind: "unresolved", src }, src);
+    }
+  });
+
   it("cannot place a relative path without a project, nor a home-relative one", () => {
     assert.deepEqual(resolveMarkdownImageSource("shot.png", undefined), { kind: "unresolved", src: "shot.png" });
     assert.deepEqual(resolveMarkdownImageSource("~/shot.png", ROOT), { kind: "unresolved", src: "~/shot.png" });

@@ -29,6 +29,7 @@ import {
   commandDisplayDetail,
   compactionMarkerState,
   htmlRenderReferenceOfActivityPayload,
+  imageToolReferenceOfActivityPayload,
   mcpAppReferenceOfActivityPayload,
   IDENTITY_CHANGED_ACTIVITY_KIND,
   PROFILE_CHANGED_ACTIVITY_KIND,
@@ -411,6 +412,13 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     const visual = htmlRenderReferenceOfActivityPayload(activity.payload);
     if (visual !== undefined) {
       entry.visual = visual;
+    }
+    // Images in the chat (design 2026-11-10 §9): a completed `show_image` /
+    // `generate_image` session-tool call, or a Codex `image_generation` item,
+    // is its images — read by the shared reader, the slimmed row included.
+    const image = imageToolReferenceOfActivityPayload(activity.payload);
+    if (image !== undefined) {
+      entry.image = image;
     }
     // MCP Apps (spec 2026-10-14 §3): the app the adapter captured for this
     // call, only when it names the call's own server and tool.

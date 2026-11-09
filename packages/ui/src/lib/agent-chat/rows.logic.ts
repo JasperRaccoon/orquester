@@ -37,8 +37,11 @@
  */
 
 import {
+  GENERATE_IMAGE_TOOL_NAME,
   GOAL_STATUS_ACTIVITY_KIND,
   htmlRenderReferencesEqual,
+  IMAGE_GENERATION_ITEM_TYPE,
+  imageToolReferencesEqual,
   mcpAppReferencesEqual,
   isMessageStreaming,
   isProviderInternalUserText,
@@ -242,7 +245,8 @@ function isGroupingEntry(entry: TimelineEntry): boolean {
     entry.entry.sourceActivityKind !== "thread.state.changed" &&
     entry.entry.tone !== "error" &&
     !isGoalEntry(entry) &&
-    !isVisualEntry(entry)
+    !isVisualEntry(entry) &&
+    !isImagePendingEntry(entry)
   );
 }
 
@@ -256,16 +260,32 @@ function isCompactionEntry(entry: TimelineEntry): boolean {
 
 /**
  * An agent's published page (spec 2026-10-14 §2.5) — a completed `orquester`
- * `html_render` call, its own `visual` row — or an MCP App (§3), a completed
- * call whose app the adapter captured, its own `mcp-app` row. Never grouped,
- * never folded — what it shows is part of the reply — and never the live
- * tool row.
+ * `html_render` call, its own `visual` row — an MCP App (§3), a completed
+ * call whose app the adapter captured, its own `mcp-app` row — or images in
+ * the chat (design 2026-11-10 §9), a completed `show_image` /
+ * `generate_image` call or Codex `image_generation` item, its own `image`
+ * row. Never grouped, never folded — what it shows is part of the reply —
+ * and never the live tool row.
  */
 function isVisualEntry(entry: TimelineEntry): boolean {
   return (
     entry.kind === "work" &&
-    (entry.entry.visual !== undefined || entry.entry.mcpApp !== undefined) &&
+    (entry.entry.visual !== undefined || entry.entry.mcpApp !== undefined || entry.entry.image !== undefined) &&
     entry.entry.toolLifecycleStatus === "completed"
+  );
+}
+
+/**
+ * A running `generate_image` call or Codex `image_generation` item (design
+ * 2026-11-10 §9.1): never grouped and never the live tool row — in the live
+ * response it is the `image-pending` placeholder, and a call a finished turn
+ * left running is a lone tool row.
+ */
+function isImagePendingEntry(entry: TimelineEntry): boolean {
+  return (
+    entry.kind === "work" &&
+    entry.entry.toolLifecycleStatus === "inProgress" &&
+    (entry.entry.sessionTool === GENERATE_IMAGE_TOOL_NAME || entry.entry.itemType === IMAGE_GENERATION_ITEM_TYPE)
   );
 }
 
@@ -1134,6 +1154,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       isCompactionEntry(entry) ||
       isGoalEntry(entry) ||
       isVisualEntry(entry) ||
+      isImagePendingEntry(entry) ||
       entry.entry.tone === "error"
     ) {
       break;
@@ -1233,6 +1254,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
   };
 
   let scannedActivityThrough = -1;
+  const imageRowIds = new Set<string>();
   for (let index = 0; index < entries.length; index += 1) {
     const timelineEntry = entries[index]!;
 
@@ -1370,6 +1392,48 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       continue;
     }
 
+    // ── Images in the chat (design 2026-11-10 §9) ─────────────────────────
+    if (timelineEntry.kind === "work" && isVisualEntry(timelineEntry) && timelineEntry.entry.image !== undefined) {
+      const image = timelineEntry.entry.image;
+      // Keyed by the first image: the loaded bytes survive every
+      // re-derivation, a fold toggle and a history page included. An image
+      // shown again (`show_image` of `attachment:<id>`) keeps its own row.
+      const firstId = `image:${image.images[0]!.attachmentId}`;
+      const id = imageRowIds.has(firstId) ? `${firstId}:${timelineEntry.id}` : firstId;
+      imageRowIds.add(id);
+      rows.push({
+        kind: "image",
+        id,
+        createdAt: timelineEntry.createdAt,
+        turnId: timelineEntry.entry.turnId,
+        image
+      });
+      continue;
+    }
+    if (timelineEntry.kind === "work" && isImagePendingEntry(timelineEntry)) {
+      const entry = timelineEntry.entry;
+      if (workEntryIsInActiveRun(entry)) {
+        rows.push({
+          kind: "image-pending",
+          // Keyed by the call, whose rows merge into one entry as it runs.
+          id: `image-pending:${entry.toolCallId ?? timelineEntry.id}`,
+          createdAt: timelineEntry.createdAt,
+          turnId: entry.turnId
+        });
+        // The placeholder is the live response's own activity row.
+        hasActivityRow = true;
+      } else {
+        rows.push({
+          kind: "work",
+          id: timelineEntry.id,
+          createdAt: timelineEntry.createdAt,
+          groupedEntries: [entry],
+          isExpandedToolGroup: false
+        });
+      }
+      continue;
+    }
+
     // ── MCP App (spec 2026-10-14 §3) ──────────────────────────────────────
     if (timelineEntry.kind === "work" && isVisualEntry(timelineEntry) && timelineEntry.entry.visual === undefined) {
       const mcpApp = timelineEntry.entry.mcpApp!;
@@ -1474,6 +1538,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
           isCompactionEntry(nextEntry) ||
           isGoalEntry(nextEntry) ||
           isVisualEntry(nextEntry) ||
+          isImagePendingEntry(nextEntry) ||
           nextEntry.entry.tone === "error" ||
           activeWorkEntryIds.has(nextEntry.id) ||
           collapsedEntryIds.has(nextEntry.id) ||
@@ -2081,6 +2146,18 @@ function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow): boole
         a.turnId === other.turnId &&
         htmlRenderReferencesEqual(a.htmlRender, other.htmlRender)
       );
+    }
+    case "image": {
+      const other = b as typeof a;
+      return (
+        a.createdAt === other.createdAt &&
+        a.turnId === other.turnId &&
+        imageToolReferencesEqual(a.image, other.image)
+      );
+    }
+    case "image-pending": {
+      const other = b as typeof a;
+      return a.createdAt === other.createdAt && a.turnId === other.turnId;
     }
     case "mcp-app": {
       const other = b as typeof a;
