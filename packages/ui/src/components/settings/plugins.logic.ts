@@ -5,7 +5,9 @@
  */
 
 import {
+  GPT_IMAGE_PLUGIN_ID,
   type PluginEngineInfo,
+  type PluginId,
   type PluginInfo,
   type SecretVaultSummary,
   TS_RUST_PLUGIN_ID,
@@ -16,9 +18,21 @@ import { BOX_KIND_LABELS, type BoxSummary } from "@orquester/api";
 
 import { boxOwner } from "../boxes/settings/boxes-list.logic";
 
-/** Shown before Better TS Typecheck is turned on (spec §6, first-enable confirmation). */
-export const FIRST_ENABLE_MESSAGE =
-  "Both engines, tsrs and tsc-rs, run TypeScript 7. Projects whose tsconfig or code isn't TS 7-ready will fail their typecheck while this is on. Tabs, chats and workflow runs already open keep the normal tsc until reopened.";
+/**
+ * What turning a plugin on asks the user to confirm first (spec §6, first-enable confirmation), for
+ * the plugins that have something to warn about: Better TS Typecheck, and GPT Image (its spec §8).
+ */
+const FIRST_ENABLE_MESSAGES: Partial<Record<PluginId, string>> = {
+  [TS_RUST_PLUGIN_ID]:
+    "Both engines, tsrs and tsc-rs, run TypeScript 7. Projects whose tsconfig or code isn't TS 7-ready will fail their typecheck while this is on. Tabs, chats and workflow runs already open keep the normal tsc until reopened.",
+  [GPT_IMAGE_PLUGIN_ID]:
+    "GPT Image uses an unofficial ChatGPT endpoint, the one the Codex CLI uses, which OpenAI may change or restrict at any time. Each image counts toward the Codex limits of the ChatGPT account that makes it, faster than a message does. It only uses your subscription and never charges money."
+};
+
+/** The confirmation shown before `plugin` is turned on, or null when it turns on without one. */
+export function firstEnableMessage(plugin: Pick<PluginInfo, "id">): string | null {
+  return FIRST_ENABLE_MESSAGES[plugin.id] ?? null;
+}
 
 /** Plugins whose name or description contains the query (case-insensitive). */
 export function filterPlugins(plugins: readonly PluginInfo[], query: string): PluginInfo[] {
@@ -35,7 +49,7 @@ export function selectedPlugin(listed: readonly PluginInfo[], selectedId: string
 /**
  * What flipping a plugin's toggle to `enable` does: nothing (`blocked`:
  * turning it on where the server has no build of it), ask first (`confirm`:
- * turning Better TS Typecheck on while it is off), or go ahead (`apply`). Turning a plugin
+ * turning a plugin with a {@link firstEnableMessage} on while it is off), or go ahead (`apply`). Turning a plugin
  * off is always allowed.
  */
 export type PluginToggleDecision = "blocked" | "confirm" | "apply";
@@ -43,7 +57,7 @@ export type PluginToggleDecision = "blocked" | "confirm" | "apply";
 export function pluginToggleDecision(plugin: PluginInfo, enable: boolean): PluginToggleDecision {
   if (!enable) return "apply";
   if (plugin.platform !== "supported") return "blocked";
-  if (plugin.id === TS_RUST_PLUGIN_ID && !plugin.enabled) return "confirm";
+  if (!plugin.enabled && firstEnableMessage(plugin) !== null) return "confirm";
   return "apply";
 }
 

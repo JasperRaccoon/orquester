@@ -22,8 +22,8 @@ import { relativeTime } from "../../lib/relative-time";
 import { Button, ConfirmDialog, Switch } from "../ui";
 import { useAppStore } from "../../store/app";
 import {
-  FIRST_ENABLE_MESSAGE,
   filterPlugins,
+  firstEnableMessage,
   pluginControls,
   pluginEngineChange,
   pluginEngineLabel,
@@ -50,6 +50,9 @@ import { pluginBoxIssues, type PluginBoxIssue } from "./plugins.logic";
 // knowledge: the Knowledge Graph plugin's Activity and indexing settings.
 import { KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { KnowledgePluginSection } from "../knowledge/KnowledgePluginSection";
+// gpt-image: the GPT Image plugin's account, save location and quota.
+import { GPT_IMAGE_PLUGIN_ID } from "@orquester/api";
+import { GptImagePluginSection } from "../gpt-image/GptImagePluginSection";
 
 /** What each built-in plugin's icon tile shows. */
 const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = {
@@ -284,7 +287,7 @@ export const PluginsSettings: React.FC = () => {
       <ConfirmDialog
         open={confirmEnable !== null}
         title={confirmEnable ? `Turn on ${confirmEnable.name}?` : ""}
-        message={FIRST_ENABLE_MESSAGE}
+        message={confirmEnable ? (firstEnableMessage(confirmEnable) ?? "") : ""}
         confirmLabel="Confirm"
         danger={false}
         onCancel={() => setConfirmEnable(null)}
@@ -514,6 +517,7 @@ const PluginDetail: React.FC<{
       {plugin.id === SECRET_FILES_PLUGIN_ID && <SecretFilesPluginSection enabled={plugin.enabled} />}
       {plugin.id === EPHEMERAL_VMS_PLUGIN_ID && <BoxesPluginSection enabled={plugin.enabled} />}
       {plugin.id === KNOWLEDGE_GRAPH_PLUGIN_ID && <KnowledgePluginSection enabled={plugin.enabled} />}
+      {plugin.id === GPT_IMAGE_PLUGIN_ID && <GptImagePluginSection enabled={plugin.enabled} />}
 
       <SettingsSection title="Settings">
         <SettingRow

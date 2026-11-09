@@ -184,7 +184,11 @@ const SECTIONS: SectionDef[] = [
       "graph",
       "mykg",
       "notes",
-      "collections"
+      "collections",
+      "image",
+      "gpt image",
+      "generate image",
+      "picture"
     ],
     render: () => <PluginsSettings />
   },
