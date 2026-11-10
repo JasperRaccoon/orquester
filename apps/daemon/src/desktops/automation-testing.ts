@@ -106,9 +106,13 @@ export class FakeDesktopAutomation implements DesktopAutomation {
     return () => {};
   }
 
+  /** When set, close() resolves only once it does (a server slow to take the clean-up). */
+  closing: Promise<void> | null = null;
+
   async close(): Promise<void> {
     this.closed = true;
     this.closes += 1;
+    await this.closing;
   }
 
   /** The input calls only (no captures or waits). */

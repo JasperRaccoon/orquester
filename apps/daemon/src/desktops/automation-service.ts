@@ -116,6 +116,8 @@ interface ActionOutcome {
 }
 
 const IDLE_CLOSE_MS = 5 * 60_000;
+/** How long daemon shutdown waits for the automations' clean-up (the CLI force-exits 3 s into a stop). */
+const SHUTDOWN_CLOSE_MS = 1_000;
 /** `screenshot: true`: the screen must be still this long after the input, waited for at most this long. */
 const SETTLE_IDLE_MS = 300;
 const SETTLE_TIMEOUT_MS = 3_000;
@@ -224,22 +226,26 @@ export class DesktopAutomationService {
     }
   }
 
-  /** The desktop stopped or its display went out of reach: close its automation (control and log stay). */
-  release(desktopId: string): void {
+  /**
+   * The desktop stopped or its display went out of reach: close its automation (control and log
+   * stay). Resolves once the close is done (it never rejects); callers that need not wait ignore it.
+   */
+  release(desktopId: string): Promise<void> {
     const state = this.states.get(desktopId);
-    if (!state) return;
+    if (!state) return Promise.resolve();
     state.epoch += 1;
     if (state.idleTimer) clearTimeout(state.idleTimer);
     state.idleTimer = null;
     state.opening = null;
     const automation = state.automation;
     state.automation = null;
-    if (automation) void automation.close().catch((error) => this.logger.warn(`Desktop ${desktopId}: closing its automation failed`, error));
+    if (!automation) return Promise.resolve();
+    return automation.close().catch((error: unknown) => this.logger.warn(`Desktop ${desktopId}: closing its automation failed`, error));
   }
 
   /** The desktop closed: its automation, control, log and screenshots go. */
   async forget(desktopId: string): Promise<void> {
-    this.release(desktopId);
+    void this.release(desktopId);
     const state = this.states.get(desktopId);
     if (state?.lapseTimer) clearTimeout(state.lapseTimer);
     this.states.delete(desktopId);
@@ -247,13 +253,28 @@ export class DesktopAutomationService {
     await this.options.screenshots.remove(desktopId);
   }
 
-  /** Daemon shutdown: every automation closes, no timer stays. */
-  shutdown(): void {
+  /**
+   * Daemon shutdown: every automation closes, no timer stays. Resolves once the closes are done,
+   * so held buttons are released and borrowed keycodes restored on the X server before the daemon
+   * exits; at most {@link SHUTDOWN_CLOSE_MS} (each close gives up on a silent server by itself, but
+   * later than the daemon's own stop deadline).
+   */
+  async shutdown(): Promise<void> {
+    const closes: Promise<void>[] = [];
     for (const [desktopId, state] of this.states) {
-      this.release(desktopId);
+      closes.push(this.release(desktopId));
       if (state.lapseTimer) clearTimeout(state.lapseTimer);
       state.lapseTimer = null;
     }
+    let bound: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.all(closes),
+      new Promise<void>((resolve) => {
+        bound = setTimeout(resolve, SHUTDOWN_CLOSE_MS);
+        bound.unref?.();
+      })
+    ]);
+    clearTimeout(bound);
   }
 
   // ---------------------------------------------------------------------------

@@ -981,7 +981,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   async shutdown(): Promise<void> {
     this.stopped = true;
     this.unsubscribeBoxes();
-    this.automation.shutdown();
+    // Held buttons released and borrowed keycodes restored before the daemon exits (bounded).
+    await this.automation.shutdown();
     for (const rt of this.desktops.values()) {
       this.unwatch(rt);
       this.stopTracker(rt);

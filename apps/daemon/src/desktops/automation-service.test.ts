@@ -220,3 +220,26 @@ test("one engine per desktop: opened once, replaced after its connection drops, 
   assert.deepEqual([stopped.status, stopped.code], [409, DESKTOP_NOT_RUNNING_CODE]);
   assert.equal(h.engines.length, 3);
 });
+
+test("daemon shutdown waits for the automations to close, at most a second", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await harness(t);
+  await act(h, { action: "screenshot" });
+  let closed!: () => void;
+  h.engine().closing = new Promise<void>((resolve) => (closed = resolve));
+  let done = false;
+  const shutdown = h.service.shutdown().then(() => (done = true));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(done, false, "the close is still running");
+  closed();
+  await shutdown;
+  assert.equal(h.engine().closes, 1);
+
+  // A close that never ends holds shutdown back for a second only.
+  const other = await harness(t);
+  await act(other, { action: "screenshot" });
+  other.engine().closing = new Promise<void>(() => {});
+  const bounded = other.service.shutdown();
+  t.mock.timers.tick(1_000);
+  await bounded;
+});
