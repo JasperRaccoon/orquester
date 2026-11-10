@@ -64,6 +64,9 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   run_workflow: { required: ["workflowId", "revision"], annotations: WRITE },
   get_workflow_runs: { required: [], annotations: READ },
   cancel_workflow_run: { required: ["runId"], annotations: WRITE_IDEMPOTENT },
+  // Gates (spec 2026-11-10 §8): a repeated decision answers alreadyDecided.
+  decide_workflow_gate: { required: ["runId"], annotations: WRITE_IDEMPOTENT },
+  list_workflow_gates: { required: [], annotations: READ },
   list_workflow_secrets: { required: [], annotations: READ },
   // Deletes too (delete: true), and replacing a value loses the old one.
   set_workflow_secret: { required: ["name"], annotations: DESTROY },

@@ -46,10 +46,12 @@ import {
   type ReportWorkflowStepResponse,
   type RunWorkflowRequest,
   type RunWorkflowResponse,
+  type WorkflowRunStartedBy,
   type Workflow,
   type WorkflowBlockError,
   type WorkflowBlockRun,
   type WorkflowInputError,
+  type WorkflowGateState,
   type WorkflowNode,
   type WorkflowNodeType,
   type WorkflowRun,
@@ -62,6 +64,7 @@ import {
   type WorkflowTriggerPayload,
   type WorkflowsEventType
 } from "@orquester/api";
+import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
@@ -78,6 +81,7 @@ import type {
   PersistedBlockState,
   PersistedRun,
   ProjectContext,
+  RunCaller,
   RunStore,
   SecretStore,
   TriggerHost,
@@ -104,6 +108,10 @@ import {
   WorkflowEngineError
 } from "./run-context.ts";
 import { createSlotPool, type SlotPool } from "./scheduler-queue.ts";
+// Gates, parked runs (spec 2026-11-10 §6): their logic lives in gates/*; the hooks here are marked "gates:".
+import { overlapSkipDetail } from "./gates/engine-hooks.ts";
+import { createGateHost, type GateHost, type GateRunAccess } from "./gates/host.ts";
+import { createParking } from "./gates/parking.ts";
 import { createRedactor, type SecretRedactor } from "./sandbox/redact.ts";
 
 /** The services an executor gets, minus what the engine provides itself. */
@@ -133,6 +141,13 @@ export interface WorkflowRuntimeEngine extends WorkflowEngine, TriggerHost {
   waitForRun(runId: string): Promise<RunResult>;
   /** Ids of the runs this engine holds (queued or running). */
   activeRunIds(): string[];
+  /**
+   * gates: the engine's gate records (spec 2026-11-10 §6). Engine-internal callers (a loop edge at its
+   * limit, §7.2) open a person-decided gate with `gates.openPersonGate(runId, spec)` and wait for its
+   * decision with `gates.awaitGate(runId, gateId, signal)` (also after a restart: the deadline is
+   * re-armed from the record).
+   */
+  readonly gates: GateHost;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +204,10 @@ interface ActiveRun {
   children: Set<string>;
   /** Ending grace backstop armed. */
   graceArmed: boolean;
+  /** gates: gate ids changed since the last `workflowRun.updated` (whole states ride it). */
+  gatesDirty: Set<string>;
+  /** gates: parked, its next work waiting for the run cap (gates/parking.ts). */
+  held: boolean;
 }
 
 interface RunSpec {
@@ -210,6 +229,8 @@ interface RunSpec {
   runId?: string;
   /** A child run: the attempt of the parent's block that started it. */
   parentAttempt?: number;
+  /** gates: who started the run (a child run carries its top-level run's). */
+  startedBy?: WorkflowRunStartedBy;
 }
 
 interface PreparedOutput {
@@ -229,7 +250,9 @@ const SAFE_TO_RERUN: ReadonlySet<WorkflowNodeType> = new Set<WorkflowNodeType>([
   "merge",
   "stop",
   "wait",
-  "http"
+  "http",
+  // gates: nothing happens before its WaitingOn (the record is saved with it).
+  "gate"
 ]);
 
 /**
@@ -247,7 +270,7 @@ function childRunIdFor(parentRunId: string, nodeId: string, attempt: number): st
 /** `report_step_result` from any chat that is not a reporting step's (spec 2026-11-10 §5.2), in the spec's words. */
 const NOT_A_REPORTING_STEP = "This chat is not a workflow step that reports a result.";
 
-const NOT_RETRIED: ReadonlySet<WorkflowBlockError["kind"]> = new Set<WorkflowBlockError["kind"]>(["all_burnt", "limit_exceeded"]);
+const NOT_RETRIED: ReadonlySet<WorkflowBlockError["kind"]> = new Set<WorkflowBlockError["kind"]>(["all_burnt", "limit_exceeded", "gate_expired"]);
 
 function isRetryable(error: WorkflowBlockError): boolean {
   if (isRecordLike(error.detail) && error.detail.childRunUnknown === true) return false;
@@ -262,7 +285,8 @@ const isRecordLike = (value: unknown): value is Record<string, unknown> => value
  * A waiting block holds no global slot.
  */
 function isWaitState(waitingOn: WaitingOn): boolean {
-  return waitingOn.kind === "timer" || (waitingOn.kind === "agent" && waitingOn.phase === "waiting-reset");
+  // gates: a gate's wait (either phase, its reviewer agent included) holds no slot (spec 2026-11-10 §6.2).
+  return waitingOn.kind === "timer" || waitingOn.kind === "gate" || (waitingOn.kind === "agent" && waitingOn.phase === "waiting-reset");
 }
 
 const MAX_BLOCK_WARNINGS = 50;
@@ -394,13 +418,18 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       const block = a.run.blocks[id];
       if (block) blocks.push(publicBlock(block));
     }
-    const payload: { run: WorkflowRunSummary; blocks: WorkflowBlockRun[]; takenEdges?: string[]; deadEdges?: string[] } = {
+    const payload: { run: WorkflowRunSummary; blocks: WorkflowBlockRun[]; takenEdges?: string[]; deadEdges?: string[]; gates?: WorkflowGateState[] } = {
       run: toRunSummary(a.run),
       blocks
     };
     if (a.edgesDirty) {
       payload.takenEdges = [...a.run.takenEdges];
       payload.deadEdges = [...a.run.deadEdges];
+    }
+    // gates: whole states of the gates opened, decided, escalated or cancelled since the last event.
+    if (a.gatesDirty.size > 0) {
+      payload.gates = [...a.gatesDirty].flatMap((id) => (a.run.gates && Object.hasOwn(a.run.gates, id) ? [structuredClone(a.run.gates[id]!)] : []));
+      a.gatesDirty.clear();
     }
     a.dirty.clear();
     a.summaryDirty = false;
@@ -649,6 +678,105 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     }
   };
 
+  // -------------------------------------------------------------------------
+  // gates: the gate records and parked runs (spec 2026-11-10 §6; gates/host.ts, gates/parking.ts)
+  // -------------------------------------------------------------------------
+
+  const gateAccess = (a: ActiveRun): GateRunAccess => ({
+    get run() {
+      return a.run;
+    },
+    get workflow() {
+      return a.def;
+    },
+    alive: () => alive(a),
+    redact: (value) => a.redactor.value(value),
+    save: () => save(a),
+    touched: (gateId) => {
+      if (gateId !== undefined) a.gatesDirty.add(gateId);
+      markDirty(a);
+      void save(a);
+    },
+    parent: () => {
+      const parent = a.run.parentRunId !== undefined ? active.get(a.run.parentRunId) : undefined;
+      return parent ? gateAccess(parent) : null;
+    },
+    children: () => [...a.children].flatMap((id) => {
+      const child = active.get(id);
+      return child && !child.finished ? [gateAccess(child)] : [];
+    })
+  });
+
+  /** Retained runs a gate list with `includeDecided` reads: the newest, across workflows, bounded. */
+  const retainedRuns = async (): Promise<PersistedRun[]> => {
+    const ids = new Set<string>([...store.list().map((workflow) => workflow.id), ...(runStore.workflowIds?.() ?? [])]);
+    const summaries: WorkflowRunSummary[] = [];
+    for (const id of ids) {
+      const page = await runStore.listForWorkflow(id, { limit: 20 }).catch(() => null);
+      for (const summary of page?.runs ?? []) if (!isRunActive(summary.status) && summary.status !== "skipped") summaries.push(summary);
+    }
+    summaries.sort((x, y) => (x.queuedAt < y.queuedAt ? 1 : x.queuedAt > y.queuedAt ? -1 : 0));
+    const runs: PersistedRun[] = [];
+    for (const summary of summaries.slice(0, 200)) {
+      const run = await runStore.load(summary.id).catch(() => null);
+      if (run?.gates && Object.keys(run.gates).length > 0) runs.push(run);
+    }
+    return runs;
+  };
+
+  const gateHost: GateHost = createGateHost({
+    clock,
+    mintId: opts.mintId,
+    logger,
+    access: (runId) => {
+      const a = active.get(runId);
+      return a ? gateAccess(a) : null;
+    },
+    activeRuns: () => [...active.values()].map(gateAccess),
+    loadRun: (runId) => runStore.load(runId),
+    retainedRuns,
+    notifier: () => opts.notifier,
+    stopped: () => stopped || stopping
+  });
+
+  let pumpQueued = false;
+  const parking = createParking({
+    clock,
+    logger,
+    maxConcurrentRuns: () => limits.maxConcurrentRuns,
+    get: (runId) => active.get(runId),
+    all: () => [...active.values()],
+    nodeType: (r, nodeId) => (r as ActiveRun).nodes.get(nodeId)?.type,
+    walking: (r) => {
+      const a = r as ActiveRun;
+      return !stopped && !a.finished && a.phase === "walking" && a.ending === null;
+    },
+    counts: (r) => countsTowardCap(r as ActiveRun),
+    timeoutMinutes: (r) => (r as ActiveRun).def.settings.runTimeoutMinutes,
+    lifetime: (r) => (r as ActiveRun).lifetime.signal,
+    changed: (r) => {
+      const a = r as ActiveRun;
+      markDirty(a);
+      void save(a);
+    },
+    onTimeout: (r, minutes) => {
+      const a = r as ActiveRun;
+      if (!alive(a) || a.ending !== null) return;
+      const parked = a.run.parkedMs !== undefined && a.run.parkedMs > 0 ? " (time waiting on gates and timers not counted)" : "";
+      failRun(a, { status: "failed", error: `The run timed out after ${minutes} minute${minutes === 1 ? "" : "s"}${parked}.` });
+      step(a);
+    },
+    resume: (r) => step(r as ActiveRun),
+    wake: () => {
+      if (pumpQueued) return;
+      pumpQueued = true;
+      queueMicrotask(() => {
+        pumpQueued = false;
+        pump();
+      });
+    }
+  });
+
   const services: EngineServices = {
     ...opts.services,
     clock,
@@ -656,7 +784,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     logger,
     store,
     runChild: (input) => runChild(input),
-    awaitRun: (runId, signal) => awaitRun(runId, signal)
+    awaitRun: (runId, signal) => awaitRun(runId, signal),
+    gates: gateHost
   };
 
   const runExecutor = async (
@@ -730,6 +859,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
           }
         }
         markDirty(a, node.id);
+        parking.refresh(a);
         await save(a);
         // The engine stopped while this state was being written: it may not have landed.
         if (!alive(a)) throw new EngineStoppedError();
@@ -775,7 +905,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     let attempt = block.attempt;
 
     if (resumeFrom?.kind === "timer" && resumeFrom.purpose === "retry-delay") {
-      const reached = await sleepUntil(clock, new Date(resumeFrom.until), signal);
+      const reached = (await sleepUntil(clock, new Date(resumeFrom.until), signal)) && (await parking.admission(a, signal));
       if (!alive(a)) return null;
       delete block.waitingOn;
       delete block.waitingUntil;
@@ -874,8 +1004,10 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         block.waitingUntil = until.toISOString();
         markDirty(a, node.id);
         appendEvent(a, { type: "block.retry", nodeId: node.id, attempt, error: block.error });
+        parking.refresh(a);
         await save(a);
-        const reached = await sleepUntil(clock, until, signal);
+        // gates: a parked run whose retry would un-park it while the run cap is full waits its turn.
+        const reached = (await sleepUntil(clock, until, signal)) && (await parking.admission(a, signal));
         if (!alive(a)) return null;
         delete block.waitingOn;
         delete block.waitingUntil;
@@ -1092,11 +1224,20 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       changed = true;
     }
     applyEdges(a, readiness.edgeStates);
-    for (const id of readiness.ready) if (isPending(a, id)) startBlock(a, id);
+    const toStart = readiness.ready.filter((id) => isPending(a, id));
+    // gates: a parked run about to work again while the run cap is full is held (still parked)
+    // until the queue admits it — `pump` releases it and walks it again.
+    if (toStart.length > 0 && (a.held || parking.mustHold(a, toStart.map((id) => a.nodes.get(id)?.type)))) {
+      if (!a.held) parking.hold(a);
+      if (changed) void save(a);
+      return;
+    }
+    for (const id of toStart) startBlock(a, id);
     if (a.inFlight.size === 0) {
       void finalize(a);
       return;
     }
+    parking.refresh(a);
     if (changed) void save(a);
   };
 
@@ -1263,17 +1404,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     await save(a);
   };
 
-  const armRunTimeout = (a: ActiveRun): void => {
-    const minutes = a.def.settings.runTimeoutMinutes;
-    if (typeof minutes !== "number" || !(minutes > 0)) return;
-    const startedAt = Date.parse(a.run.startedAt ?? a.run.queuedAt);
-    const deadline = new Date(startedAt + minutes * 60_000);
-    void sleepUntil(clock, deadline, a.lifetime.signal).then((reached) => {
-      if (!reached || !alive(a) || a.ending !== null) return;
-      failRun(a, { status: "failed", error: `The run timed out after ${minutes} minute${minutes === 1 ? "" : "s"}.` });
-      step(a);
-    });
-  };
+  /** gates: the run timeout, parked time excluded (gates/parking.ts arms and re-arms it). */
+  const armRunTimeout = (a: ActiveRun): void => parking.start(a);
 
   const resumeBlocks = (a: ActiveRun): void => {
     const now = nowIso();
@@ -1373,6 +1505,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     }
     for (const release of a.slots.values()) release();
     a.slots.clear();
+    // gates: its waiting gates end with it (cancelled), its parked stretch closes.
+    gateHost.cancelAll(a.run.id);
+    parking.finish(a);
 
     // The final output: the Stop's value, else the last succeeded block's in topological order.
     let finalNodeId = a.ending?.finalOutputNodeId;
@@ -1462,6 +1597,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       a.run.status = "running";
       a.run.startedAt = nowIso();
       delete a.run.queuedFor;
+      delete a.run.skipDetail;
       appendEvent(a, { type: "run.started" });
       markDirty(a);
       void save(a);
@@ -1470,12 +1606,17 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     void startWalk(a, resuming);
   };
 
+  /** gates: a top-level run the global cap counts: started, not finished, not parked (spec 2026-11-10 §6.2). */
+  const countsTowardCap = (a: ActiveRun): boolean => a.run.depth === 0 && a.phase !== "queued" && !a.finished && a.run.parked !== true;
+
   const pump = (): void => {
     if (stopped) return;
+    // gates: held (parked) runs were admitted before: they go first.
+    parking.releaseHeld();
     const queued = [...active.values()]
       .filter((a) => a.phase === "queued" && !a.finished)
       .sort((x, y) => (x.run.queuedAt < y.run.queuedAt ? -1 : x.run.queuedAt > y.run.queuedAt ? 1 : x.run.id < y.run.id ? -1 : 1));
-    let running = [...active.values()].filter((a) => a.phase !== "queued" && !a.finished && a.run.depth === 0).length;
+    let running = [...active.values()].filter(countsTowardCap).length;
     for (const a of queued) {
       if (a.run.depth > 0) {
         begin(a, false);
@@ -1530,7 +1671,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       saveRequested: false,
       noPersist: false,
       children: new Set(),
-      graceArmed: false
+      graceArmed: false,
+      gatesDirty: new Set(),
+      held: false
     };
   };
 
@@ -1581,6 +1724,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     if (spec.fromNodeId !== undefined) run.fromNodeId = spec.fromNodeId;
     if (spec.testNodeOnly) run.testNodeOnly = true;
     if (spec.usePinned) run.usePinned = true;
+    if (spec.startedBy !== undefined) run.startedBy = structuredClone(spec.startedBy);
     return run;
   };
 
@@ -1588,7 +1732,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     workflow: Workflow,
     spec: RunSpec,
     status: "skipped" | "failed",
-    detail: { skipReason?: "overlap" | "missed"; error?: string },
+    detail: { skipReason?: "overlap" | "missed"; error?: string; skipDetail?: string },
     runId = opts.mintId()
   ): Promise<string> => {
     const now = nowIso();
@@ -1599,6 +1743,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     run.endedAt = now;
     run.durationMs = 0;
     if (detail.skipReason !== undefined) run.skipReason = detail.skipReason;
+    if (detail.skipDetail !== undefined) run.skipDetail = redactor.text(detail.skipDetail);
     if (detail.error !== undefined) run.error = redactor.text(detail.error);
     if (!stopped) {
       try {
@@ -1651,6 +1796,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         const block = source.blocks[id];
         const node = byId.get(id);
         if (!node || !block || block.status !== "succeeded" || block.type !== node.type) continue;
+        // gates: a retry asks every gate again (its decision is never reused, spec 2026-11-10 §7.5).
+        if (node.type === "gate") continue;
         const preds = workflow.edges.filter((edge) => edge.target === id && byId.has(edge.source)).map((edge) => edge.source);
         if (preds.every((pred) => seedable.has(pred))) seedable.add(id);
       }
@@ -1792,17 +1939,24 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
 
     // From here to `active.set` nothing awaits: the overlap decision and the registration are atomic.
     let queuedFor: "overlap" | undefined;
+    let skipDetail: string | undefined;
     if (!spec.force && spec.depth === 0) {
       const decision = overlapDecision(workflow);
+      if (decision !== "start") {
+        // gates: a run held back by one that waits on a gate says so (never a silent skip).
+        const waiting = [...active.values()].filter((o) => !o.finished && o.run.workflowId === workflow.id).map((o) => gateHost.waitingGateOf(o.run.id)).find((gate) => gate !== undefined);
+        skipDetail = overlapSkipDetail(waiting);
+      }
       if (decision === "skip") {
-        await recordStub(workflow, spec, "skipped", { skipReason: "overlap" }, runId);
-        return { response: { runId: null, skipped: "overlap" } };
+        await recordStub(workflow, spec, "skipped", { skipReason: "overlap", ...(skipDetail !== undefined ? { skipDetail } : {}) }, runId);
+        return { response: { runId: null, skipped: "overlap", ...(skipDetail !== undefined ? { skipDetail } : {}) } };
       }
       if (decision === "queue") queuedFor = "overlap";
     }
     const now = nowIso();
     const run = baseRun(workflow, runId, spec, now, redactor);
     if (queuedFor !== undefined) run.queuedFor = queuedFor;
+    if (queuedFor !== undefined && skipDetail !== undefined) run.skipDetail = redactor.text(skipDetail);
     // Sub-workflows are frozen when the top-level run starts; a child run carries that map on.
     const subWorkflows = spec.subWorkflows ?? (spec.parentRunId === undefined ? freezeSubWorkflows(workflow) : undefined);
     if (subWorkflows !== undefined) run.subWorkflows = subWorkflows;
@@ -1844,7 +1998,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     emit("workflowRun.started", { run: toRunSummary(run) });
     emitUpserted(workflow.id);
     pump();
-    return { response: { runId }, run: a };
+    return { response: { runId, ...(run.skipDetail !== undefined ? { skipDetail: run.skipDetail } : {}) }, run: a };
   };
 
   const validationErrors = (workflow: Workflow): ReturnType<typeof validateWorkflow>["problems"] | null => {
@@ -1970,6 +2124,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       force: true,
       depth,
       parentRunId: input.parentRunId,
+      // gates: a child asks its top-level run's launcher (spec 2026-11-10 §6.3).
+      ...(parent?.run.startedBy !== undefined ? { startedBy: parent.run.startedBy } : {}),
       ...(boundId !== undefined ? { runId: boundId, parentAttempt: input.attempt } : {}),
       // The child carries only its own subtree of the frozen map.
       ...(frozen !== undefined ? { subWorkflows: subtreeOf(input.workflowId, frozen) } : {})
@@ -2156,7 +2312,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
   // -------------------------------------------------------------------------
 
   const engine: WorkflowRuntimeEngine = {
-    async run(workflowId: string, request: RunWorkflowRequest): Promise<RunWorkflowResponse> {
+    async run(workflowId: string, request: RunWorkflowRequest, caller?: RunCaller): Promise<RunWorkflowResponse> {
       const workflow = store.get(workflowId);
       if (!workflow) throw new WorkflowEngineError(404, "WORKFLOW_NOT_FOUND", `No workflow with id "${workflowId}".`);
       // The definition read here is the one the run freezes (`launch(workflow, …)`): checking its
@@ -2217,7 +2373,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         payload,
         test,
         force: request.force === true,
-        depth: 0
+        depth: 0,
+        // gates: the daemon's word for who asked (the route's principal), never the request body's.
+        startedBy: caller?.startedBy !== undefined ? structuredClone(caller.startedBy) : { kind: "human" }
       };
       if (request.retryOf !== undefined) spec.retryOf = request.retryOf;
       if (freshRetry) spec.freshRetry = true;
@@ -2245,7 +2403,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
           depth: 0,
           fromNodeId: nodeId,
           testNodeOnly: true,
-          usePinned: true
+          usePinned: true,
+          startedBy: { kind: "human" }
         })
       ).response;
     },
@@ -2382,7 +2541,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         payload: request.payload,
         test: false,
         force: false,
-        depth: 0
+        depth: 0,
+        startedBy: { kind: "trigger" }
       };
       if (request.triggerNodeId !== undefined) spec.trigger.nodeId = request.triggerNodeId;
       if (request.text !== undefined) spec.trigger.text = request.text;
@@ -2397,7 +2557,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     async recordSkipped(request: FireRequest, reason: "missed" | "overlap"): Promise<void> {
       const workflow = store.get(request.workflowId);
       if (!workflow) return;
-      const spec: RunSpec = { trigger: { kind: request.kind }, payload: request.payload, test: false, force: false, depth: 0 };
+      const spec: RunSpec = { trigger: { kind: request.kind }, payload: request.payload, test: false, force: false, depth: 0, startedBy: { kind: "trigger" } };
       if (request.triggerNodeId !== undefined) spec.trigger.nodeId = request.triggerNodeId;
       if (request.text !== undefined) spec.trigger.text = request.text;
       await recordStub(workflow, spec, "skipped", { skipReason: reason });
@@ -2412,7 +2572,12 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
 
     waitForRun,
 
-    activeRunIds: () => [...active.keys()]
+    activeRunIds: () => [...active.keys()],
+
+    // gates (spec 2026-11-10 §6.2, §8)
+    decideGate: (runId: string, gateId: string, request, principal: CallerPrincipal) => gateHost.decideRequest(runId, gateId, request, principal),
+    listGates: (query) => gateHost.list(query),
+    gates: gateHost
   };
   return engine;
 }

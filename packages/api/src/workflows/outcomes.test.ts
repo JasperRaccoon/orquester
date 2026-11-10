@@ -96,4 +96,13 @@ describe("disabled and pinned blocks with outcomes (§7.5)", () => {
     assert.equal(pinnedOutcomeProblem(plain, {}), null);
     assert.match(pinnedOutcomeProblem(withOutcomes, 5)!, /must include "outcome"/);
   });
+
+  it("a disabled gate takes its first choice; a pinned gate the choice its pin names (§7.5)", () => {
+    const gate = testNode("Gate", "gate", { question: "Ship?", choices: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }] });
+    assert.equal(passThroughHandle(gate), "choice:approve");
+    assert.equal(pinnedHandle(gate, { choice: "reject" }), "choice:reject");
+    assert.equal(pinnedHandle(gate, { choice: "nope" }), null);
+    assert.equal(pinnedHandle(gate, { outcome: "approve" }), null);
+    assert.equal(pinnedOutcomeProblem(gate, {}), null);
+  });
 });

@@ -17,7 +17,7 @@ import {
 import { UNSET_SUBWORKFLOW_ID } from "./block-types.ts";
 import { parseTemplate, templateReferences, hasTemplate, type TemplateReference } from "./expressions.ts";
 import { nodeTemplateFields } from "./fields.ts";
-import { acceptsInput, agentOutcomeIds, findCycles, outputHandles, reachableFromTriggers, upstreamOf } from "./graph.ts";
+import { acceptsInput, agentOutcomeIds, findCycles, gateChoiceIds, outputHandles, reachableFromTriggers, upstreamOf } from "./graph.ts";
 import { createUndeclaredInputCheck, inputDeclarationProblems } from "./inputs.ts";
 import { pinnedOutcomeProblem } from "./outcomes.ts";
 import { presetToCron, scheduleIntervalProblem, validateCron, isValidTimeZone } from "./schedule.ts";
@@ -381,6 +381,91 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
     }
   };
 
+  /** An agent chain (an agent block's, a gate's reviewer agent's): its length and the host's catalogue. */
+  const checkChain = (node: WorkflowNode, chain: readonly { agent: string; model: string }[], base: string): void => {
+    if (chain.length > WORKFLOW_LIMITS.maxAgentChain) {
+      push({
+        severity: "error",
+        code: "chain_too_long",
+        message: `${node.name}: at most ${WORKFLOW_LIMITS.maxAgentChain} agents in a fallback chain`,
+        nodeId: node.id,
+        field: base
+      });
+    }
+    if (!opts.catalog) return;
+    const known = new Map(opts.catalog.agents.map((agent) => [agent.id, agent]));
+    chain.forEach((entry, index) => {
+      const where = `${base}.${index}`;
+      const agent = known.get(entry.agent);
+      if (agent === undefined) {
+        const valid = opts.catalog!.agents.map((a) => a.id);
+        push({
+          severity: "error",
+          code: "unknown_agent",
+          message: `${node.name}: "${entry.agent.slice(0, 60)}" is not a chat agent on this host${valid.length ? ` (known: ${valid.slice(0, 20).join(", ")})` : ""}`,
+          nodeId: node.id,
+          field: `${where}.agent`
+        });
+        return;
+      }
+      if (agent.enabled === false) {
+        push({
+          severity: "warning",
+          code: "unknown_agent",
+          message: `${node.name}: ${entry.agent} is not available on this host right now — the chain passes over it`,
+          nodeId: node.id,
+          field: `${where}.agent`
+        });
+      }
+      const models = agent.models ?? [];
+      if (models.includes(entry.model)) return;
+      if (models.length === 0) {
+        push({
+          severity: "warning",
+          code: "unknown_model",
+          message: `${node.name}: ${entry.agent}'s models are not known yet — "${entry.model.slice(0, 80)}" could not be checked`,
+          nodeId: node.id,
+          field: `${where}.model`
+        });
+        return;
+      }
+      push({
+        severity: "error",
+        code: "unknown_model",
+        message: `${node.name}: ${entry.agent} has no model "${entry.model.slice(0, 80)}" (it has ${models.slice(0, 20).join(", ")}${models.length > 20 ? ", …" : ""})`,
+        nodeId: node.id,
+        field: `${where}.model`
+      });
+    });
+  };
+  /** An agent prompt: not empty; a saved prompt that still exists. */
+  const checkPrompt = (node: WorkflowNode, prompt: { kind: "text"; text: string } | { kind: "saved"; promptId: string }, base: string): void => {
+    if (prompt.kind === "text" && prompt.text.trim().length === 0) {
+      push({ severity: "error", code: "empty_prompt", message: `${node.name}: the prompt is empty`, nodeId: node.id, field: `${base}.text` });
+    }
+    if (prompt.kind === "saved" && opts.savedPromptIds && !opts.savedPromptIds.includes(prompt.promptId)) {
+      push({
+        severity: "warning",
+        code: "unknown_saved_prompt",
+        message: `${node.name}: the saved prompt it uses no longer exists`,
+        nodeId: node.id,
+        field: `${base}.promptId`
+      });
+    }
+  };
+  /** An Agent Profile id that still exists. */
+  const checkProfile = (node: WorkflowNode, profileId: string | undefined, field: string): void => {
+    if (profileId !== undefined && opts.sessionProfileIds && !opts.sessionProfileIds.includes(profileId)) {
+      push({
+        severity: "warning",
+        code: "unknown_profile",
+        message: `${node.name}: the Agent Profile it launches with no longer exists — its runs fail until another is picked`,
+        nodeId: node.id,
+        field
+      });
+    }
+  };
+
   /** A reference's path within a git event, when it reads one; null when it reads something else. */
   const triggerPathOf = (node: WorkflowNode, ref: TemplateReference): (string | number)[] | null => {
     if (ref.root === "trigger") return ref.path;
@@ -563,82 +648,9 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
       }
       case "agent": {
         const config = node.config;
-        if (config.chain.length > WORKFLOW_LIMITS.maxAgentChain) {
-          push({
-            severity: "error",
-            code: "chain_too_long",
-            message: `${node.name}: at most ${WORKFLOW_LIMITS.maxAgentChain} agents in a fallback chain`,
-            nodeId: node.id,
-            field: "config.chain"
-          });
-        }
-        if (opts.catalog) {
-          const known = new Map(opts.catalog.agents.map((agent) => [agent.id, agent]));
-          config.chain.forEach((entry, index) => {
-            const where = `config.chain.${index}`;
-            const agent = known.get(entry.agent);
-            if (agent === undefined) {
-              const valid = opts.catalog!.agents.map((a) => a.id);
-              push({
-                severity: "error",
-                code: "unknown_agent",
-                message: `${node.name}: "${entry.agent.slice(0, 60)}" is not a chat agent on this host${valid.length ? ` (known: ${valid.slice(0, 20).join(", ")})` : ""}`,
-                nodeId: node.id,
-                field: `${where}.agent`
-              });
-              return;
-            }
-            if (agent.enabled === false) {
-              push({
-                severity: "warning",
-                code: "unknown_agent",
-                message: `${node.name}: ${entry.agent} is not available on this host right now — the chain passes over it`,
-                nodeId: node.id,
-                field: `${where}.agent`
-              });
-            }
-            const models = agent.models ?? [];
-            if (models.includes(entry.model)) return;
-            if (models.length === 0) {
-              push({
-                severity: "warning",
-                code: "unknown_model",
-                message: `${node.name}: ${entry.agent}'s models are not known yet — "${entry.model.slice(0, 80)}" could not be checked`,
-                nodeId: node.id,
-                field: `${where}.model`
-              });
-              return;
-            }
-            push({
-              severity: "error",
-              code: "unknown_model",
-              message: `${node.name}: ${entry.agent} has no model "${entry.model.slice(0, 80)}" (it has ${models.slice(0, 20).join(", ")}${models.length > 20 ? ", …" : ""})`,
-              nodeId: node.id,
-              field: `${where}.model`
-            });
-          });
-        }
-        if (config.prompt.kind === "text" && config.prompt.text.trim().length === 0) {
-          push({ severity: "error", code: "empty_prompt", message: `${node.name}: the prompt is empty`, nodeId: node.id, field: "config.prompt.text" });
-        }
-        if (config.prompt.kind === "saved" && opts.savedPromptIds && !opts.savedPromptIds.includes(config.prompt.promptId)) {
-          push({
-            severity: "warning",
-            code: "unknown_saved_prompt",
-            message: `${node.name}: the saved prompt it uses no longer exists`,
-            nodeId: node.id,
-            field: "config.prompt.promptId"
-          });
-        }
-        if (config.profileId !== undefined && opts.sessionProfileIds && !opts.sessionProfileIds.includes(config.profileId)) {
-          push({
-            severity: "warning",
-            code: "unknown_profile",
-            message: `${node.name}: the Agent Profile it launches with no longer exists — its runs fail until another is picked`,
-            nodeId: node.id,
-            field: "config.profileId"
-          });
-        }
+        checkChain(node, config.chain, "config.chain");
+        checkPrompt(node, config.prompt, "config.prompt");
+        checkProfile(node, config.profileId, "config.profileId");
         if (config.session.kind === "continue") {
           const from = nameToNode.get(config.session.fromNode);
           const reason =
@@ -750,6 +762,78 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         }
         break;
       }
+      case "gate": {
+        // Spec 2026-11-10 §6.1: 2–8 unique choices, a question, a bounded person phase, a valid
+        // reviewer agent. Edges leave `choice:<id>` / `error` only (`outputHandles`, checked above).
+        const config = node.config;
+        const { min, max } = WORKFLOW_LIMITS.gateChoices;
+        if (config.choices.length < min || config.choices.length > max) {
+          push({ severity: "error", code: "gate_choices", message: `${node.name}: a gate has ${min}–${max} choices`, nodeId: node.id, field: "config.choices" });
+        }
+        const choiceIds = new Set<string>();
+        config.choices.forEach((choice, index) => {
+          if (choiceIds.has(choice.id)) {
+            push({ severity: "error", code: "gate_choice_duplicate", message: `${node.name}: two choices share the id "${choice.id}"`, nodeId: node.id, field: `config.choices.${index}.id` });
+          }
+          choiceIds.add(choice.id);
+          if (choice.label.trim().length === 0) {
+            push({ severity: "error", code: "gate_choice_label", message: `${node.name}: the choice "${choice.id}" has no label`, nodeId: node.id, field: `config.choices.${index}.label` });
+          }
+        });
+        if (config.question.trim().length === 0) {
+          push({ severity: "error", code: "gate_question_empty", message: `${node.name}: the question is empty`, nodeId: node.id, field: "config.question" });
+        } else if (config.question.length > WORKFLOW_LIMITS.gateQuestionChars) {
+          push({
+            severity: "error",
+            code: "gate_question_too_long",
+            message: `${node.name}: the question is at most ${WORKFLOW_LIMITS.gateQuestionChars} characters (put the rest in details)`,
+            nodeId: node.id,
+            field: "config.question"
+          });
+        }
+        if (config.details !== undefined && utf8ByteLength(config.details) > WORKFLOW_LIMITS.gateDetailsBytes) {
+          push({
+            severity: "error",
+            code: "gate_details_too_large",
+            message: `${node.name}: the details are at most ${WORKFLOW_LIMITS.gateDetailsBytes / 1024} KB`,
+            nodeId: node.id,
+            field: "config.details"
+          });
+        }
+        if (config.timeout !== undefined) {
+          if (config.timeout.minutes > WORKFLOW_LIMITS.gatePersonPhaseMaxMinutes) {
+            push({ severity: "error", code: "timeout_too_long", message: `${node.name}: a gate's timeout is at most 7 days`, nodeId: node.id, field: "config.timeout.minutes" });
+          }
+          const then = config.timeout.then;
+          if (then.kind === "choice" && !choiceIds.has(then.choice)) {
+            push({
+              severity: "error",
+              code: "gate_timeout_choice",
+              message: `${node.name}: the timeout takes "${then.choice.slice(0, 60)}", which is not one of its choices (${[...choiceIds].join(", ") || "none"})`,
+              nodeId: node.id,
+              field: "config.timeout.then.choice"
+            });
+          }
+        }
+        const decider = config.decider;
+        if (decider.kind === "agent") {
+          checkChain(node, decider.chain, "config.decider.chain");
+          checkPrompt(node, decider.prompt, "config.decider.prompt");
+          checkProfile(node, decider.profileId, "config.decider.profileId");
+        }
+        if (decider.kind === "agent" || decider.kind === "launcher") {
+          timeoutMax(decider.maxMinutes, WORKFLOW_LIMITS.agentMaxMinutes.max, node, "config.decider.maxMinutes", "the agent's time to decide");
+        }
+        if (node.disabled === true && config.choices.length > 0) {
+          push({
+            severity: "warning",
+            code: "gate_disabled",
+            message: `${node.name} is disabled: it asks nobody and takes its first choice (${config.choices[0]!.label.slice(0, 60)})`,
+            nodeId: node.id
+          });
+        }
+        break;
+      }
       case "workflow": {
         const target = node.config.workflowId;
         if (target === UNSET_SUBWORKFLOW_ID) {
@@ -792,6 +876,20 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
       const outcomeProblem = pinnedNode ? pinnedOutcomeProblem(pinnedNode, value) : null;
       if (outcomeProblem !== null) {
         push({ severity: "error", code: "pinned_outcome_missing", message: `${label(nodeId)}: ${outcomeProblem}`, nodeId, field: `pinned.${nodeId}` });
+      }
+      if (pinnedNode?.type === "gate") {
+        // A pinned gate takes the choice its pin names (§7.5): one of its own.
+        const choice = isRecord(value) ? value.choice : undefined;
+        const ids = gateChoiceIds(pinnedNode);
+        if (typeof choice !== "string" || !ids.includes(choice)) {
+          push({
+            severity: "error",
+            code: "pinned_gate_choice",
+            message: `${pinnedNode.name}: pinned data for a gate needs a "choice" — one of ${ids.join(", ") || "its choices"}`,
+            nodeId,
+            field: `pinned.${nodeId}`
+          });
+        }
       }
       const size = sizeOf(value);
       if (size === null || size > WORKFLOW_LIMITS.maxPinnedBytes) {

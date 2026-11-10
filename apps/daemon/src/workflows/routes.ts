@@ -30,6 +30,10 @@ import {
   type AgentChainEntry,
   type AccountPreviewResponse,
   type CreateWorkflowRequest,
+  type DecideWorkflowGateRequest,
+  type DecideWorkflowGateResponse,
+  type ListWorkflowGatesResponse,
+  type WorkflowRunStartedBy,
   type GetWorkflowNodeOutputResponse,
   type GetWorkflowResponse,
   type GetWorkflowRunResponse,
@@ -78,11 +82,13 @@ import {
   WORKFLOW_NODE_TYPES,
   WORKFLOW_SECRET_NAME_PATTERN
 } from "@orquester/config";
+import { USER_PRINCIPAL, type CallerPrincipal } from "@orquester/api/agent-chat";
 import type { ZodTypeAny } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { ProjectOps, WorkflowEngine } from "./contracts.ts";
 import { previewExpressions, type ExpressionPreviewRun } from "./expression-preview.ts";
 import { isFinishedBlockStatus, WorkflowEngineError } from "./run-context.ts";
+import { GateRefusal, isWaiting } from "./gates/state.ts";
 import {
   engineUnavailable,
   excerpt,
@@ -295,6 +301,11 @@ function sendError(reply: FastifyReply, error: unknown): FastifyReply {
   }
   reply.log.error({ err: error }, "workflow route failed");
   return reply.code(500).send({ error: { code: "INTERNAL", message: "The workflow request failed; see the daemon log." } });
+}
+
+/** Who starts a run, from the request's principal (spec 2026-11-10 §6.3): a chat, else the person. */
+function startedByOf(principal: CallerPrincipal | undefined): WorkflowRunStartedBy {
+  return principal?.kind === "agent" ? { kind: "thread", sessionId: principal.threadId } : { kind: "human" };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -672,7 +683,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
       service.require(request.params.id);
       const body = request.body ?? {};
       if (!isRecord(body)) throw invalidRequest("The body must be a JSON object.");
-      return engine.run(request.params.id, body as RunWorkflowRequest);
+      // Who started the run is the daemon's word (spec 2026-11-10 §6.3): the request's principal —
+      // an in-chat agent's minted in-process, never a field a client can send (one is dropped).
+      const { startedBy: _ignored, ...rest } = body;
+      return engine.run(request.params.id, rest as RunWorkflowRequest, { startedBy: startedByOf(request.principal) });
     })
   );
 
@@ -866,6 +880,60 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
         ...(body.outputs !== undefined ? { outputs: body.outputs as Record<string, unknown> } : {})
       };
       return engine.reportStepResult(principal.threadId, report);
+    })
+  );
+
+  // ---- Gates (spec 2026-11-10 §6, §8) ---------------------------------------------------------------
+
+  app.get(
+    workflowRoutes.gates,
+    guarded(async (request): Promise<ListWorkflowGatesResponse> => {
+      const raw = optionalString(request.query.projectPath);
+      const includeDecided = request.query.includeDecided === "1" || request.query.includeDecided === "true";
+      let projectPath: string | undefined;
+      if (raw !== undefined) {
+        const target = (deps.projectPathFilter ?? defaultProjectFilter)(raw);
+        if (target === null) throw invalidRequest("projectPath must be a project directory, <workspaces>/<workspace>/<project>.");
+        projectPath = resolve(target.path);
+      }
+      const query = { ...(projectPath !== undefined ? { projectPath } : {}), ...(includeDecided ? { includeDecided: true } : {}) };
+      const engine = deps.engine();
+      if (engine?.listGates) return engine.listGates(query);
+      // No engine yet (boot): the waiting gates the unfinished runs on disk recorded.
+      const gates = (await runStore.listUnfinished())
+        .filter((run) => projectPath === undefined || (run.projectPath !== undefined && resolve(run.projectPath) === projectPath))
+        .flatMap((run) => Object.values(run.gates ?? {}).filter((gate) => includeDecided || isWaiting(gate)).map((gate) => ({ ...gate, workflowName: run.workflowName, ...(run.projectPath !== undefined ? { projectPath: run.projectPath } : {}) })))
+        .sort((x, y) => (x.openedAt < y.openedAt ? -1 : x.openedAt > y.openedAt ? 1 : 0));
+      return { gates };
+    })
+  );
+
+  app.post(
+    "/api/workflow-runs/:runId/gates/:gateId/decide",
+    guarded(async (request): Promise<DecideWorkflowGateResponse> => {
+      const engine = requireEngine();
+      if (!engine.decideGate) throw engineUnavailable();
+      const body = request.body ?? {};
+      if (!isRecord(body)) throw invalidRequest("The body must be a JSON object.");
+      if (body.choice !== undefined && typeof body.choice !== "string") throw invalidRequest("choice must be a string.");
+      if (body.comment !== undefined && body.comment !== null && typeof body.comment !== "string") throw invalidRequest("comment must be a string.");
+      if (body.escalate !== undefined && typeof body.escalate !== "boolean") throw invalidRequest("escalate must be a boolean.");
+      if (body.escalate !== true && body.choice === undefined) throw invalidRequest("Pass choice (one of the gate's choice ids), or escalate (agent deciders).");
+      const decide: DecideWorkflowGateRequest = {
+        ...(typeof body.choice === "string" ? { choice: body.choice } : {}),
+        ...(typeof body.comment === "string" ? { comment: body.comment } : {}),
+        ...(body.escalate === true ? { escalate: true } : {})
+      };
+      try {
+        // Who decides is the principal (the daemon's), checked against the gate's record.
+        return await engine.decideGate(request.params.runId, request.params.gateId, decide, request.principal ?? USER_PRINCIPAL);
+      } catch (error) {
+        if (error instanceof GateRefusal) {
+          if (error.code === "ENGINE_UNAVAILABLE") throw engineUnavailable();
+          throw new WorkflowError(error.statusCode as 400 | 403 | 404 | 409, error.code, error.message);
+        }
+        throw error;
+      }
     })
   );
 

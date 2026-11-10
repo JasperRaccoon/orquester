@@ -3,7 +3,7 @@
 // handle a disabled or pinned block with outcomes takes (§7.5). Pure; shared by the daemon (the
 // engine and the tool), the validator and the editor.
 
-import { agentOutcomeIds, outcomeHandle, outputHandles } from "./graph.ts";
+import { agentOutcomeIds, choiceHandle, gateChoiceIds, outcomeHandle, outputHandles } from "./graph.ts";
 import { WORKFLOW_LIMITS, type WorkflowNode, type WorkflowOutcomeDecl, type WorkflowOutputDecl } from "./types.ts";
 
 type NodeLike = Pick<WorkflowNode, "id" | "type"> & { config?: unknown };
@@ -160,20 +160,28 @@ export function checkStepReport(decl: StepReportDecl, args: StepReportArgs): Ste
 }
 
 /**
- * The handle a disabled block passes through on (§7.5): an agent block with outcomes takes its
- * first outcome; every other block `success` (a trigger's only handle).
+ * The handle a disabled block passes through on (§7.5): a gate takes its first choice, an agent
+ * block with outcomes its first outcome; every other block `success` (a trigger's only handle).
  */
 export function passThroughHandle(node: NodeLike): string {
+  // A disabled gate takes its first choice (spec 2026-11-10 §7.5).
+  const choices = gateChoiceIds(node);
+  if (choices.length > 0) return choiceHandle(choices[0]!);
   const outcomes = agentOutcomeIds(node);
   return outcomes.length > 0 ? outcomeHandle(outcomes[0]!) : "success";
 }
 
 /**
  * The handle a pinned output takes (§7.5): `success` for a block that has one; for an agent block
- * with outcomes, the pin's `outcome` (which must be a declared id). Null when the pin cannot stand
+ * with outcomes, the pin's `outcome`, and for a gate its `choice` (each must be a declared id). Null when the pin cannot stand
  * in for the block (no `success` handle, or an agent pin without a valid `outcome`).
  */
 export function pinnedHandle(node: NodeLike, value: unknown): string | null {
+  // A pinned gate takes the choice its pin names (§7.5); a pin without a valid one is not used.
+  if (node.type === "gate") {
+    const choice = isRecord(value) ? value.choice : undefined;
+    return typeof choice === "string" && gateChoiceIds(node).includes(choice) ? choiceHandle(choice) : null;
+  }
   const outcomes = agentOutcomeIds(node);
   if (outcomes.length > 0) {
     const outcome = isRecord(value) ? value.outcome : undefined;

@@ -61,6 +61,8 @@ export interface HarnessOptions {
   sandbox?: FakeSandbox;
   mintId?: () => string;
   notifier?: WorkflowNotifier;
+  /** The engine's DaemonApi (default: one that answers HOST_UNAVAILABLE). */
+  chatApi?: DaemonApi;
 }
 
 export interface Harness {
@@ -109,7 +111,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     secrets,
     executors,
     services: {
-      chat: { api: nullDaemonApi },
+      chat: { api: options.chatApi ?? nullDaemonApi },
       usage: { snapshot: () => ({}) as UsageResponse },
       accounts: { list: () => ({ accounts: [] }) as never },
       cooldowns: { get: () => null, set: async () => undefined, list: () => ({}) },

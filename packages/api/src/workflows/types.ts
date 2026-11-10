@@ -562,17 +562,24 @@ export interface WorkflowGateState {
   decision?: WorkflowGateDecision;
   /** Cancelled with its run before a decision. */
   cancelled?: boolean;
+  /**
+   * The person phase passed with no decision and `timeout.then: fail` (or the 7-day maximum): the
+   * block failed `gate_expired`. The gate no longer waits.
+   */
+  expired?: boolean;
+  /** Why the gate went to the person (escalation): the agent's comment, its failure, its silence or the agent phase's end. */
+  escalationReason?: string;
   /** A test run's gate: answered in the editor's run view only — no push, attention row or agent decider (§7.5). */
   test?: boolean;
 }
 
-/** Waiting = neither decided nor cancelled. */
-export function isGateWaiting(gate: Pick<WorkflowGateState, "decision" | "cancelled">): boolean {
-  return gate.decision === undefined && gate.cancelled !== true;
+/** Waiting = neither decided, cancelled nor expired. */
+export function isGateWaiting(gate: Pick<WorkflowGateState, "decision" | "cancelled" | "expired">): boolean {
+  return gate.decision === undefined && gate.cancelled !== true && gate.expired !== true;
 }
 
 /** Waiting for the PERSON (attention rows, push, badges): waiting and in the person phase. */
-export function isGateWaitingForPerson(gate: Pick<WorkflowGateState, "decision" | "cancelled" | "phase">): boolean {
+export function isGateWaitingForPerson(gate: Pick<WorkflowGateState, "decision" | "cancelled" | "expired" | "phase">): boolean {
   return isGateWaiting(gate) && gate.phase === "person";
 }
 

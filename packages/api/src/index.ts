@@ -1227,7 +1227,7 @@ export interface PushNotificationEvent {
   /** The workflow run to open on click (`kind: "workflow"`). */
   workflowId?: string;
   runId?: string;
-  /** A gate of that run waiting for the user (spec 2026-11-10 §6.4): the run opens with it selected. */
+  /** A gate waiting for the person (`kind: "workflow"`, spec 2026-11-10 §6.4): the run opens with this gate selected. */
   gateId?: string;
 }
 

@@ -68,7 +68,9 @@ const ERROR_HINTS: Record<string, string> = {
   RUN_NOT_ACTIVE: " The run already ended: get_workflow_runs {runId} shows how.",
   SECRET_INVALID: " A secret name is A-Z, 0-9 and _, starting with a letter; a value is at most 64 KiB.",
   INVALID_REPORT: " Fix what is listed and call report_step_result again.",
-  INVALID_INPUT: " Fix every input listed and call again: get_workflow shows the declared inputs (name, type, required, values, default)."
+  INVALID_INPUT: " Fix every input listed and call again: get_workflow shows the declared inputs (name, type, required, values, default).",
+  GATE_NOT_FOUND: " list_workflow_gates lists the waiting gates with their runId and gateId.",
+  GATE_NOT_DECIDER: " Do not retry: the person (or the assigned agent) decides this gate."
 };
 
 /** At most this many input errors in an error's detail (a workflow declares at most 30 inputs). */
