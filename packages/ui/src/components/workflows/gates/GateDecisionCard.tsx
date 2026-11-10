@@ -173,6 +173,8 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
     .join(" · ");
   const Icon = gate.source === "loop_limit" ? RotateCcw : ShieldCheck;
   const details = gate.details?.trim() ?? "";
+  // Why the agent handed it over (its comment, its failure, its silence), in the daemon's words.
+  const escalationReason = gate.escalationReason?.trim() ?? "";
   const rule = selectedChoice ? commentRule(selectedChoice, comment) : null;
   const busy = sending !== null;
 
@@ -202,7 +204,9 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
           ) : gate.escalated && !node ? (
             <p className="flex items-start gap-1.5 text-[12px] leading-4 text-neutral-400">
               <UserRound size={12} aria-hidden className="mt-0.5 shrink-0" />
-              <span className="min-w-0">{gate.decider.label} handed this to you.</span>
+              <span className="min-w-0 break-words">
+                {gate.decider.label} handed this to you{escalationReason ? `: ${escalationReason}` : "."}
+              </span>
             </p>
           ) : null}
 

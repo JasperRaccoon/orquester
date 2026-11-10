@@ -220,6 +220,13 @@ describe("the gate decision card", () => {
     assert.match(mount.textContent ?? "", /Reviewer \(claude\) is deciding; you can decide first\./);
   });
 
+  it("says why an agent handed the decision over", () => {
+    render(gate({ escalated: true, decider: { kind: "agent", label: "Reviewer" }, escalationReason: "The agent did not answer in 10 minutes." }));
+    assert.match(mount.textContent ?? "", /Reviewer handed this to you: The agent did not answer in 10 minutes\.(?!\.)/);
+    render(gate({ escalated: true, decider: { kind: "agent", label: "Reviewer" } }));
+    assert.match(mount.textContent ?? "", /Reviewer handed this to you\./);
+  });
+
   it("on a phone, every target is finger-sized", () => {
     render(gate(), "sheet");
     assert.match(button(/^Approve/).className, /min-h-11/);
