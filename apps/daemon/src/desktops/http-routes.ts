@@ -78,6 +78,17 @@ const ACTION_BODY_LIMIT = DESKTOP_CLIPBOARD_MAX_BYTES * 6 + 64 * 1024;
 /** Screenshot ids never change what they name. */
 const SCREENSHOT_CACHE_CONTROL = "private, max-age=31536000, immutable";
 
+/** `GET desktopRoutes.screenshot` as registered. */
+export const DESKTOP_SCREENSHOT_ROUTE_PATTERN = "/api/desktops/:id/screenshots/:screenshotId";
+
+/**
+ * Whether a request may authenticate with `?token=` (as `deviceQueryTokenAllowed`): a GET/HEAD of
+ * a kept screenshot, which a chat row's `<img>` loads without a header. Nothing else here.
+ */
+export function desktopQueryTokenAllowed(method: string, routePath: string | undefined): boolean {
+  return (method === "GET" || method === "HEAD") && routePath === DESKTOP_SCREENSHOT_ROUTE_PATTERN;
+}
+
 // Launch values may be credentials: no message below ever echoes a value (and
 // the request logger only logs method + redacted URL, never bodies).
 const launchSchema = z.object({
@@ -470,7 +481,7 @@ function registerDesktopAutomationRoutes(app: FastifyInstance, desktops: Desktop
   );
 
   app.get<{ Params: { id: string; screenshotId: string } }>(
-    "/api/desktops/:id/screenshots/:screenshotId",
+    DESKTOP_SCREENSHOT_ROUTE_PATTERN,
     async (request, reply): Promise<FastifyReply> => {
       try {
         const image = await desktops.screenshot(request.params.id, request.params.screenshotId);
