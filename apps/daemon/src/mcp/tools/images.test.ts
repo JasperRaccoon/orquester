@@ -102,17 +102,15 @@ describe("generate_image", () => {
     assert.equal(body.account, "Work Plus");
   });
 
-  it("a reference image in another project is that project's card, as read_file's path is: nothing is sent", async (t) => {
+  it("a reference image in another project needs no approval card, in a workflow's chat too", async (t) => {
     const s = await setup(t, made);
     await mkdir(join(s.ws, "acme", "other"), { recursive: true });
     await writeFile(join(s.ws, "acme", "other", "logo.png"), png(64, 64));
     for (const as of [s.inProject, { ...s.inProject, workflowOwned: true }]) {
       const result = await call(s.api, { prompt: "restyle", images: ["../other/logo.png"] }, as);
-      assert.equal(result.isError, true);
-      assert.equal((result.structuredContent as { code: string }).code, "PERMISSION_DENIED");
+      assert.equal(result.isError, undefined, JSON.stringify(result).slice(0, 300));
     }
-    assert.equal(s.sent.length, 0);
-    assert.equal(s.api.uploads.length, 0);
+    assert.deepEqual(s.sent.map((input) => input.images.length), [1, 1]);
   });
 
   it("a long prompt, revised prompt and project path still make an image row", async (t) => {

@@ -36,7 +36,7 @@ import {
   type ThreadItem
 } from "@orquester/api/agent-chat";
 
-import { callerHostPath, realPathInSandbox } from "./addressing.ts";
+import { callerHostPath } from "./addressing.ts";
 import type { ThreadCaller, ToolCaller } from "./catalog/contract.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { daemonError, ToolError } from "./errors.ts";
@@ -174,29 +174,6 @@ async function readHostPath(api: DaemonApi, caller: ThreadCaller, raw: string): 
   if (!own && roots.guarded.some((dir) => inside(dir, real))) throw NOT_ALLOWED();
   const inSandbox = roots.sandbox !== null && inside(roots.sandbox, real);
   return readImageFile(real, basename(real), inSandbox ? { path: real } : {});
-}
-
-/**
- * The workspace paths `inputs` read, for the caller's scope claim (`ScopeClaim.paths`, as `read_file` claims its path):
- * every host path that resolves inside the sandbox, so the gate classifies its project — another project's file is
- * its card, a workflow's chat is refused. Not claimed, being no project's content: this chat's own attachments, the
- * temp folders, a `ref` (this chat's own images) and a box chat's paths (the box's own files). A path that resolves
- * nowhere readable is left to the call, which refuses it.
- */
-export async function chatImageScopePaths(api: DaemonApi, caller: ToolCaller, inputs: readonly ChatImageInput[]): Promise<string[]> {
-  if (caller.kind !== "thread" || caller.projectBoxId !== undefined) return [];
-  const raws = inputs.flatMap((input) => (typeof input.path === "string" && input.path.trim() !== "" && !input.path.includes("\0") ? [input.path] : []));
-  if (raws.length === 0) return [];
-  const roots = await hostRoots(api, caller.threadId);
-  const notProject = [roots.attachments, ...roots.temp].filter((root): root is string => root !== null);
-  const paths: string[] = [];
-  for (const raw of raws) {
-    const target = resolve(callerHostPath(caller, raw, caller.cwd || "/"));
-    const real = await realPathInSandbox(api, target);
-    if (real === null || notProject.some((root) => inside(root, real))) continue;
-    if (!paths.includes(target)) paths.push(target);
-  }
-  return paths;
 }
 
 async function readBoxPath(api: DaemonApi, raw: string): Promise<ResolvedChatImage> {

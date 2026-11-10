@@ -297,16 +297,15 @@ describe("show_image", () => {
     assert.equal(s.api.uploads.length, 0);
   });
 
-  it("an image in another project is that project's card, as read_file's path is, and a workflow's chat is refused", async (t) => {
+  it("an image in another project is shown without an approval card, in a workflow's chat too", async (t) => {
     const s = await sandbox(t);
     await mkdir(join(s.ws, "acme", "other"), { recursive: true });
-    await writeFile(join(s.ws, "acme", "other", "secret.png"), PNG);
+    await writeFile(join(s.ws, "acme", "other", "shot.png"), PNG);
     for (const caller of [s.inProject, { ...s.inProject, workflowOwned: true }]) {
-      const error = errorOf(await call(s.api, "show_image", { images: [{ path: "acme/other/secret.png" }] }, { caller }));
-      assert.equal(error.code, "PERMISSION_DENIED");
-      assert.match(error.message, caller.workflowOwned ? /automated workflow/ : /approval/);
+      const result = await call(s.api, "show_image", { images: [{ path: join(s.ws, "acme", "other", "shot.png") }] }, { caller });
+      assert.equal(result.isError, undefined, JSON.stringify(result).slice(0, 300));
     }
-    assert.equal(s.api.uploads.length, 0);
+    assert.equal(s.api.uploads.length, 2);
   });
 
   it("is no external tool", async () => {
