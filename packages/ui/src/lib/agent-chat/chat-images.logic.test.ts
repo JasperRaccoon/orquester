@@ -8,13 +8,18 @@ import {
   type ExclusiveWriteResult
 } from "./chat-images.logic.ts";
 
-/** A project holding `taken`: a write claims a free name and refuses a taken one, as the upload route does. */
+/**
+ * A project holding the files `taken`: a write claims a free name and refuses
+ * a taken one, or one under a file, as the upload route does.
+ */
 function project(taken: string[]) {
   const files = new Set(taken);
   const asked: string[] = [];
   const write = async (path: string): Promise<ExclusiveWriteResult> => {
     asked.push(path);
-    if (files.has(path)) return { conflict: true };
+    const parents = path.split("/").slice(0, -1).map((_, index, all) => all.slice(0, index + 1).join("/"));
+    if (parents.some((parent) => files.has(parent))) return { conflict: true, conflictKind: "parent", path: "" };
+    if (files.has(path)) return { conflict: true, conflictKind: "file", path: "" };
     files.add(path);
     return { conflict: false, path: `/w/ws/app/${path}` };
   };
@@ -40,6 +45,12 @@ describe("Save to project: never overwrite", () => {
     const { write, asked } = project(["a.png", "a-v2.png", "a-v3.png"]);
     await assert.rejects(writeWithoutOverwrite("a.png", write, 3));
     assert.deepEqual(asked, ["a.png", "a-v2.png", "a-v3.png"]);
+  });
+
+  it("stops at once when a file is where a folder on the way should be", async () => {
+    const { write, asked } = project(["assets"]);
+    await assert.rejects(writeWithoutOverwrite("assets/generated/dog.png", write));
+    assert.deepEqual(asked, ["assets/generated/dog.png"]);
   });
 });
 

@@ -12,8 +12,11 @@ import type { ChatImageMimeType } from "@orquester/api/agent-chat";
 /** Where "Save to project…" proposes to put an image, relative to the project. */
 export const SAVED_IMAGE_DIRECTORY = "assets/generated";
 
-/** How many names "Save to project…" tries (`name.png`, `name-v2.png`, …) before it gives up. */
-export const SAVE_IMAGE_MAX_ATTEMPTS = 100;
+/**
+ * How many names "Save to project…" tries (`name.png`, `name-v2.png`, …)
+ * before it gives up. Each try uploads the whole image, so it stays small.
+ */
+export const SAVE_IMAGE_MAX_ATTEMPTS = 20;
 
 const EXTENSIONS: Readonly<Record<ChatImageMimeType, string>> = {
   "image/png": "png",
@@ -97,14 +100,37 @@ export function versionedFilePath(path: string, version: number): string {
   return hasExtension ? `${path.slice(0, dot)}-v${version}${path.slice(dot)}` : `${path}-v${version}`;
 }
 
-/** What one exclusive write answers: written at `path`, or refused because something is there. */
-export type ExclusiveWriteResult = { conflict: true } | { conflict: false; path: string };
+/**
+ * What one exclusive write answers, as the file browser's upload route
+ * (`POST /api/fs/upload` with `onConflict: "error"`) does: written at
+ * `path`, or refused (`conflict`) because of what was in the way
+ * (`conflictKind`) — `"file"` when a file already holds the name, anything
+ * else (a folder there, a file where a folder on the way should be, or not
+ * said) when no other name would help.
+ */
+export interface ExclusiveWriteResult {
+  conflict?: boolean;
+  conflictKind?: string;
+  path: string;
+}
+
+/** Why no name could be written: one sentence for the user. */
+function blockedWriteMessage(path: string, conflictKind: string | undefined): string {
+  if (conflictKind === "dir") return `${path} is a folder. Choose another name.`;
+  const slash = path.lastIndexOf("/");
+  if (conflictKind === "parent" && slash > 0) {
+    return `A file is in the way: ${path.slice(0, slash)} is not a folder.`;
+  }
+  return `${path} could not be saved: something is in the way.`;
+}
 
 /**
  * Write a file without ever replacing one: `write` is asked for the path,
- * then `-v2`, `-v3`, … while it answers that something is already there, up
- * to {@link SAVE_IMAGE_MAX_ATTEMPTS} names. Answers where it landed; rejects
- * when every name was taken, or with `write`'s own failure.
+ * then `-v2`, `-v3`, … while it answers that a file already holds the name,
+ * up to {@link SAVE_IMAGE_MAX_ATTEMPTS} names. Any other refusal stops at
+ * once, since no other name gets past it. Answers where it landed; rejects
+ * when every name was taken, when something else is in the way, or with
+ * `write`'s own failure.
  */
 export async function writeWithoutOverwrite(
   path: string,
@@ -113,7 +139,8 @@ export async function writeWithoutOverwrite(
 ): Promise<string> {
   for (let version = 1; version <= maxAttempts; version += 1) {
     const result = await write(versionedFilePath(path, version));
-    if (!result.conflict) return result.path;
+    if (result.conflict !== true) return result.path;
+    if (result.conflictKind !== "file") throw new Error(blockedWriteMessage(path, result.conflictKind));
   }
   throw new Error(`${path} and its next ${maxAttempts - 1} versions already exist.`);
 }

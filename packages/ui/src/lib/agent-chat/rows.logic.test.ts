@@ -4,6 +4,7 @@ import { beforeEach,describe,it } from "node:test";
 import {
 messageStreamingContext,
 sessionToolMarkedData,
+type ImageToolReference,
 type MessageStreamingContext,
 type ThreadItem,
 type ThreadMessageItem,
@@ -24,6 +25,8 @@ EMPTY_STABLE_ROWS,
 type TimelineRowsInput,
 type TimelineRowsProjection
 } from "./rows.logic";
+import { EMPTY_HISTORY_ROWS,mergeTimelineRows } from "./history.logic";
+import { workEntryDisplayLabel } from "./presentation.logic";
 import { activity,message,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
@@ -1621,13 +1624,12 @@ describe("images in the chat — the image row (design 2026-11-10 §9)", () => {
   const toolRows = (rows: readonly AgentChatTimelineRow[]) =>
     rows.filter((row) => row.kind === "work" || row.kind === "work-live" || row.kind === "activity-group");
 
-  it("a completed show_image call is one image row in place of its tool row, keyed by its first image", () => {
+  it("a completed show_image call is one image row in place of its tool row", () => {
     for (const data of [marked("show_image"), { sessionTool: { name: "show_image", references: { imageRef } } }]) {
       const rows = rowsOf(call("mcp_tool_call", data, 1, "completed"));
       const [row, ...rest] = images(rows);
       assert.ok(row, "an image row");
       assert.equal(rest.length, 0);
-      assert.equal(row.id, `image:${FIRST}`);
       assert.deepEqual(row.image, imageRef);
       assert.equal(toolRows(rows).length, 0, `no tool row besides it: ${JSON.stringify(kinds(rows))}`);
     }
@@ -1656,6 +1658,28 @@ describe("images in the chat — the image row (design 2026-11-10 §9)", () => {
     assert.ok(!kinds(rows).includes("thinking"), "the placeholder is the live response's activity");
   });
 
+  it("a placeholder with the reply continuing below it leaves the working row at the bottom", () => {
+    const rows = rowsOf([
+      ...call("mcp_tool_call", marked("generate_image"), 1, "inProgress"),
+      message("assistant", "While that renders, a note.", { turnId: "t1", createdAt: stamp(2) })
+    ]);
+    assert.ok(kinds(rows).includes("image-pending"), JSON.stringify(kinds(rows)));
+    assert.equal(kinds(rows).at(-1), "thinking", JSON.stringify(kinds(rows)));
+  });
+
+  it("a generate_image call its turn left running no longer reads as generating", () => {
+    const rows = rowsOf(call("mcp_tool_call", marked("generate_image"), 1, "inProgress"), {
+      latestTurn: { turnId: "t1", state: "interrupted", startedAt: stamp(1), completedAt: stamp(2) },
+      expandedTurnIds: new Set(["t1"])
+    });
+    assert.ok(!kinds(rows).includes("image-pending"), JSON.stringify(kinds(rows)));
+    const row = rows.find((candidate) => candidate.kind === "work");
+    assert.ok(row?.kind === "work", JSON.stringify(kinds(rows)));
+    const entry = row.groupedEntries[0]!;
+    // What the row renders (`ToolEntryRow`): its own label, else its entry's.
+    assert.notEqual(row.displayLabel ?? workEntryDisplayLabel(entry), workEntryDisplayLabel(entry));
+  });
+
   it("a failed generate_image call stays an ordinary tool row", () => {
     const rows = rowsOf(call("mcp_tool_call", marked("generate_image"), 1, "failed"), {
       expandedTurnIds: new Set(["t1"])
@@ -1679,8 +1703,44 @@ describe("images in the chat — the image row (design 2026-11-10 §9)", () => {
 
     const done = rowsOf(call("image_generation", { imageRef: { images: [imageRef.images[0]] } }, 1, "completed"));
     const [row] = images(done);
-    assert.equal(row?.id, `image:${FIRST}`);
+    assert.deepEqual(row?.image.images.map((image) => image.attachmentId), [FIRST]);
     assert.equal(toolRows(done).length, 0, JSON.stringify(kinds(done)));
+  });
+
+  it("an image shown again in a later turn keeps both rows through the history and live merge", () => {
+    const shown = (turnId: string, callId: string, ref: ImageToolReference, at: number): ThreadItem =>
+      activity(
+        "tool.completed",
+        {
+          itemType: "mcp_tool_call",
+          toolUseId: callId,
+          status: "completed",
+          data: { sessionTool: { name: "show_image", references: { imageRef: ref } } }
+        },
+        { turnId, createdAt: stamp(at), status: "completed" }
+      );
+    const three = {
+      images: [{ attachmentId: FIRST }, { attachmentId: SECOND }, { attachmentId: "t1-2f8fad5b-d9cb-469f-a165-70867728950e-png" }]
+    };
+    const again = { images: [{ attachmentId: FIRST }] };
+    const historyRows = deriveTimelineRowsWithState(
+      baseInput(
+        entriesFrom([message("user", "show me", { createdAt: stamp(0) }), shown("t1", "call-1", three, 1)]),
+        { latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(0), completedAt: stamp(2) } }
+      )
+    ).rows;
+    const liveRows = rowsOf(
+      [message("user", "the first one again", { createdAt: stamp(3) }), shown("t2", "call-2", again, 4)],
+      { isWorking: true, runningTurnId: "t2", activeTurnStartedAt: stamp(3) }
+    );
+    const merged = mergeTimelineRows(
+      { ...EMPTY_HISTORY_ROWS, rows: historyRows, rowIds: new Set(historyRows.map((row) => row.id)) },
+      liveRows
+    );
+    assert.deepEqual(
+      images(merged).map((row) => row.image.images.length),
+      [3, 1]
+    );
   });
 });
 

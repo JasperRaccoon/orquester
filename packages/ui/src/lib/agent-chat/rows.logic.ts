@@ -64,6 +64,7 @@ import { agentPromptOf } from "./agent-prompt.logic";
 import { delegateCallOf, mergeDelegateRefs } from "./delegates.logic";
 import { isStreamingMessageTextUpdate, type TimelineEntry } from "./entries.logic";
 import {
+  IMAGE_GENERATION_STOPPED_LABEL,
   omitSupersededLifecycleMarkers,
   singleToolCallLabel,
   summarizeToolGroup,
@@ -1254,7 +1255,6 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
   };
 
   let scannedActivityThrough = -1;
-  const imageRowIds = new Set<string>();
   for (let index = 0; index < entries.length; index += 1) {
     const timelineEntry = entries[index]!;
 
@@ -1395,15 +1395,14 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     // ── Images in the chat (design 2026-11-10 §9) ─────────────────────────
     if (timelineEntry.kind === "work" && isVisualEntry(timelineEntry) && timelineEntry.entry.image !== undefined) {
       const image = timelineEntry.entry.image;
-      // Keyed by the first image: the loaded bytes survive every
-      // re-derivation, a fold toggle and a history page included. An image
-      // shown again (`show_image` of `attachment:<id>`) keeps its own row.
-      const firstId = `image:${image.images[0]!.attachmentId}`;
-      const id = imageRowIds.has(firstId) ? `${firstId}:${timelineEntry.id}` : firstId;
-      imageRowIds.add(id);
+      // Keyed by the call that produced it: the loaded bytes survive every
+      // re-derivation, a fold toggle and a history page included, and an
+      // image shown again (`show_image` of `attachment:<id>` or `recent:N`)
+      // is its own row in every derivation — the history's and the live
+      // one's merge by id.
       rows.push({
         kind: "image",
-        id,
+        id: `image:${workGroupIdentity(timelineEntry.id, timelineEntry.entry)}`,
         createdAt: timelineEntry.createdAt,
         turnId: timelineEntry.entry.turnId,
         image
@@ -1420,15 +1419,19 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
           createdAt: timelineEntry.createdAt,
           turnId: entry.turnId
         });
-        // The placeholder is the live response's own activity row.
-        hasActivityRow = true;
+        // The placeholder is the live response's own activity row only at
+        // the timeline's end, as the live tool row is: with anything below
+        // it the response still shows it is working there.
+        hasActivityRow ||= tailHere && index === entries.length - 1;
       } else {
         rows.push({
           kind: "work",
           id: timelineEntry.id,
           createdAt: timelineEntry.createdAt,
           groupedEntries: [entry],
-          isExpandedToolGroup: false
+          isExpandedToolGroup: false,
+          // Its turn is over: no image is coming.
+          displayLabel: IMAGE_GENERATION_STOPPED_LABEL
         });
       }
       continue;

@@ -722,6 +722,13 @@ function imageRowLabel(entry: WorkLogEntry): string | null {
   return null;
 }
 
+/**
+ * The label of a `generate_image` call or Codex `image_generation` item that
+ * a turn left running and is over (design 2026-11-10 §9.1): no image is
+ * coming, so it must not read as one being made.
+ */
+export const IMAGE_GENERATION_STOPPED_LABEL = "Image generation stopped";
+
 /** The label of a session tool's row. */
 export function sessionToolLabel(name: string): string {
   return SESSION_TOOL_LABELS[name] ?? `Orquester: ${humanizeToolName(name)}`;

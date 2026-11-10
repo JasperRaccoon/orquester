@@ -59,18 +59,39 @@ export const GptImagePluginSection: React.FC<{ enabled: boolean }> = ({ enabled 
   const [justSaved, setJustSaved] = useState(false);
   /** The form has edits a re-read must not throw away. */
   const edited = useRef(false);
+  /**
+   * Bumped by every read and by a save, before and after it lands: only the
+   * latest read applies, and a read that started before a save finished
+   * never puts back what the save replaced.
+   */
+  const generation = useRef(0);
+
+  // Another connection's settings: nothing read or edited for the last one
+  // carries over. Declared before the read below, so it runs first.
+  useEffect(() => {
+    generation.current += 1;
+    edited.current = false;
+    setSaved(null);
+    setForm(null);
+    setLoadError(null);
+    setSaveError(null);
+    setJustSaved(false);
+  }, [api]);
 
   const load = useCallback(() => {
     if (!api) return;
+    const at = (generation.current += 1);
     setLoadError(null);
     api.getGptImageSettings().then(
       (answer) => {
-        if (useAppStore.getState().api !== api) return;
+        if (generation.current !== at || useAppStore.getState().api !== api) return;
         setSaved(answer);
         if (!edited.current) setForm(gptImageSettingsForm(answer.settings));
       },
       (err: unknown) => {
-        if (useAppStore.getState().api === api) setLoadError(gptImageErrorText(err, "Could not read the settings."));
+        if (generation.current === at && useAppStore.getState().api === api) {
+          setLoadError(gptImageErrorText(err, "Could not read the settings."));
+        }
       }
     );
   }, [api]);
@@ -131,9 +152,11 @@ export const GptImagePluginSection: React.FC<{ enabled: boolean }> = ({ enabled 
     if (Object.keys(result.patch).length === 0) return;
     setSaving(true);
     setSaveError(null);
+    generation.current += 1;
     try {
       const answer = await api.updateGptImageSettings(result.patch);
       if (useAppStore.getState().api !== api) return;
+      generation.current += 1;
       edited.current = false;
       setSaved(answer);
       setForm(gptImageSettingsForm(answer.settings));

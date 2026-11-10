@@ -6,7 +6,7 @@ import { parseForgeLink, parseKnowledgeCitationHref } from "@orquester/api";
 import { parseChatImageSource } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../../lib/cn";
-import type { ChatImageItem } from "../../images/chat-image";
+import { useChatImageUrl, type ChatImageItem } from "../../images/chat-image";
 import { ChatImageLightbox } from "../../images/ChatImageLightbox";
 import { ChatImageView } from "../../images/ChatImageView";
 import { isUrlText } from "../../../../lib/github-links/text-links";
@@ -174,9 +174,23 @@ function MarkdownLink({
   const { onOpenFile } = React.useContext(MarkdownConfigCtx);
   const target = href ?? "";
   const citation = parseKnowledgeCitationHref(target);
-  if (citation) return <KnowledgeCitation entryId={citation.id}>{children}</KnowledgeCitation>;
-  return <MarkdownAnchor target={target} onOpenFile={onOpenFile}>{children}</MarkdownAnchor>;
+  return (
+    <InsideLinkCtx.Provider value={true}>
+      {citation ? (
+        <KnowledgeCitation entryId={citation.id}>{children}</KnowledgeCitation>
+      ) : (
+        <MarkdownAnchor target={target} onOpenFile={onOpenFile}>{children}</MarkdownAnchor>
+      )}
+    </InsideLinkCtx.Provider>
+  );
 }
+
+/**
+ * Inside a link's content: an image there is the link's, so it is a plain
+ * image — no enlarge button and no actions, which would nest buttons in the
+ * link, and one click would both open the lightbox and follow the link.
+ */
+const InsideLinkCtx = React.createContext(false);
 
 function MarkdownAnchor({
   target,
@@ -226,12 +240,21 @@ function MissingImage({ label }: { label: string }): React.ReactElement {
  */
 function ChatMarkdownImage({ item }: { item: ChatImageItem }): React.ReactElement {
   const [open, setOpen] = React.useState(false);
+  if (React.useContext(InsideLinkCtx)) return <LinkedChatMarkdownImage item={item} />;
   return (
     <>
       <ChatImageView item={item} layout="inline" onOpen={() => setOpen(true)} />
       {open ? <ChatImageLightbox items={[item]} index={0} onIndexChange={() => {}} onClose={() => setOpen(false)} /> : null}
     </>
   );
+}
+
+/** A file or chat image inside a link: the link's own plain image, as it was before images enlarged. */
+function LinkedChatMarkdownImage({ item }: { item: ChatImageItem }): React.ReactElement {
+  const { url, error } = useChatImageUrl(item);
+  if (error) return <MissingImage label={item.alt} />;
+  if (!url) return <span className="text-xs text-neutral-600">Loading image…</span>;
+  return <img src={url} alt={item.alt} title={item.path} className={IMAGE_CLASS} />;
 }
 
 /** A remote image held back until clicked (`remoteImages: "click"`): nothing is requested before. */

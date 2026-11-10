@@ -1,6 +1,8 @@
 import React from "react";
+import { GENERATE_IMAGE_TOOL_NAME } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
+import { toolApprovalsFor, toolApprovalsStore } from "../../../../lib/agent-tools/store";
 import { cn } from "../../../../lib/cn";
 import type { ChatImageItem } from "../../images/chat-image";
 import { ChatImageLightbox } from "../../images/ChatImageLightbox";
@@ -14,7 +16,7 @@ import { useTimelineRowContext } from "../context";
  * produced them, left-aligned with the reply text and always visible: the
  * title above, one image sized to the chat column (or several in a grid),
  * each with its caption, and a generated image's revised prompt. Keyed by
- * its first image, so the loaded bytes survive re-derivation.
+ * its call, so the loaded bytes survive re-derivation.
  */
 export function ImageRow({
   row
@@ -86,18 +88,36 @@ export function ImageRow({
 /**
  * The place an image is coming in (design 2026-11-10 §9.1): a running
  * `generate_image` call or Codex `image_generation` item, as a quiet,
- * square placeholder where the image will be.
+ * square placeholder where the image will be. While an Orquester approval
+ * card for `generate_image` is open in this chat (unified MCP §7; a card
+ * names its tool, not its call), nothing is being made yet, so it says it
+ * waits instead.
  */
 export function ImagePendingRow(): React.ReactElement {
+  const { sessionId } = useTimelineRowContext();
+  const awaitingApproval = React.useSyncExternalStore(toolApprovalsStore.subscribe, () =>
+    sessionId === undefined
+      ? false
+      : toolApprovalsFor(toolApprovalsStore.getState(), sessionId).some(
+          (approval) => approval.tool === GENERATE_IMAGE_TOOL_NAME
+        )
+  );
   return (
     <div className="px-1">
       <div
         role="status"
-        className="flex aspect-square w-full max-w-64 items-center justify-center rounded-md border border-neutral-800 bg-neutral-900/60 motion-safe:animate-pulse"
+        className={cn(
+          "flex aspect-square w-full max-w-64 items-center justify-center rounded-md border border-neutral-800 bg-neutral-900/60",
+          !awaitingApproval && "motion-safe:animate-pulse"
+        )}
       >
-        <ShimmerText live className="text-xs">
-          Generating image…
-        </ShimmerText>
+        {awaitingApproval ? (
+          <span className="text-xs text-neutral-400">Waiting for approval…</span>
+        ) : (
+          <ShimmerText live className="text-xs">
+            Generating image…
+          </ShimmerText>
+        )}
       </div>
     </div>
   );
