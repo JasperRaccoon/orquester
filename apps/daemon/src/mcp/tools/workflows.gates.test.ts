@@ -83,11 +83,16 @@ test("run_workflow {wait} returns at once when a gate of its run (or a child's) 
   const workflow = definition(own);
   api.on("GET", "/api/workflows/wf-1", { status: 200, body: { workflow, problems: [] } });
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
-  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(workflow) } });
+  // The run's first read is the signal: the tap listens from before the start, so events after it count.
+  let firstRead!: () => void;
+  const read = new Promise<void>((resolve) => (firstRead = resolve));
+  api.on("GET", "/api/workflow-runs/run-1", () => {
+    firstRead();
+    return { status: 200, body: { run: runRecord(workflow) } };
+  });
   const port = new FakeApprovalPort();
   const pending = call(api, "run_workflow", { workflowId: "wf-1", revision: 3, wait: true }, chat(own), port);
-  // Until the run is started and its first read done (the tap listens from before the start).
-  for (let i = 0; i < 500 && api.calls.filter((c) => c.path === "/api/workflow-runs/run-1").length < 1; i += 1) await tick();
+  await read;
   await tick();
   // Another chat's launcher gate does not end this wait; this chat's child-run gate does.
   api.emit(busEvent("workflowRun.updated", { run: { id: "run-9", status: "running" }, blocks: [], gates: [gate({ runId: "run-9", gateId: "x", decider: { kind: "launcher", label: "other", sessionId: "other" } })] }, "workflows"));
