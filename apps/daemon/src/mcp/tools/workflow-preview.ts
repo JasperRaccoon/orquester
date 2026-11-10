@@ -785,7 +785,15 @@ export function triggerSection(workflow: Pick<Workflow, "nodes">): ApprovalPrevi
 /** Every edge in block names: "HasTickets (true) → FixTickets" — `(success)` left implicit. */
 export function connectionsOf(workflow: Pick<Workflow, "nodes" | "edges">): string[] {
   const names = new Map(workflow.nodes.map((n) => [n.id, n.name]));
-  return workflow.edges.map((e) => `${names.get(e.source) ?? e.source}${e.sourceHandle === "success" ? "" : ` (${e.sourceHandle})`} → ${names.get(e.target) ?? e.target}`);
+  return workflow.edges.map((e) => connectionText(names, e));
+}
+
+/** One edge in block names; a loop edge says so with its settings: "Review (outcome:changes) ↺ Fix (loop: at most 3, same chat)". */
+export function connectionText(names: ReadonlyMap<string, string>, e: Workflow["edges"][number]): string {
+  const from = `${names.get(e.source) ?? e.source}${e.sourceHandle === "success" ? "" : ` (${e.sourceHandle})`}`;
+  const to = names.get(e.target) ?? e.target;
+  if (!e.loop) return `${from} → ${to}`;
+  return `${from} ↺ ${to} (loop: at most ${e.loop.maxLoops}, ${e.loop.session === "new" ? "new chat" : "same chat"})`;
 }
 
 function settingsRows(workflow: Pick<Workflow, "settings" | "enabled" | "description">): { label: string; value: string; state?: "flagged" }[] {
@@ -940,13 +948,23 @@ export function graphDiff(before: Workflow, after: Workflow, workspacesDir: stri
     const labels = connectionsOf(workflow);
     return new Map(workflow.edges.map((e, i) => [`${e.source}|${e.sourceHandle}|${e.target}`, labels[i]!]));
   };
+  const loopOf = (workflow: Workflow) => new Map(workflow.edges.map((e) => [`${e.source}|${e.sourceHandle}|${e.target}`, JSON.stringify(e.loop ?? null)]));
   const [edgesBefore, edgesAfter] = [edgeKeys(before), edgeKeys(after)];
+  const [loopsBefore, loopsAfter] = [loopOf(before), loopOf(after)];
   for (const [key, label] of edgesAfter) {
     if (edgesBefore.has(key)) continue;
     items.push({ label: `connection ${label}`, change: "added" });
     withDownstream(key.split("|")[2]!);
   }
-  for (const [key, label] of edgesBefore) if (!edgesAfter.has(key)) items.push({ label: `connection ${label}`, change: "removed" });
+  for (const [key, label] of edgesBefore) {
+    const now = edgesAfter.get(key);
+    if (now === undefined) items.push({ label: `connection ${label}`, change: "removed" });
+    // Same blocks and output, other loop settings (set_loop): what the loop runs again is part of the change.
+    else if (loopsBefore.get(key) !== loopsAfter.get(key)) {
+      items.push({ label: `connection ${now}`, change: "changed", detail: `was ${label}` });
+      withDownstream(key.split("|")[2]!);
+    }
+  }
   if (!same(before.project, after.project)) {
     items.push({ label: "project", change: "changed", detail: `${workflowProjectLabel(before.project, workspacesDir)} → ${workflowProjectLabel(after.project, workspacesDir)}` });
   }
