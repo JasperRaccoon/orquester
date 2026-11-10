@@ -349,4 +349,12 @@ describe("Run now held back by a gate", () => {
     await runWorkflowNow(api, "wf-1");
     assert.equal(workflowsStore.getState().notice?.text, "“the workflow” is queued: previous run is waiting on gate “Deploy?”.");
   });
+
+  it("a quiet run (the Run now form) leaves an overlap skip to the form: no second Run anyway", async () => {
+    const api = new GateApi();
+    api.runAnswer = { runId: null, skipped: "overlap", skipDetail: "previous run is waiting on gate “Deploy?”" };
+    const result = await runWorkflowNow(api, "wf-1", { input: { v: 1 } }, { quiet: true });
+    assert.equal(result.ok && result.value.skipDetail, "previous run is waiting on gate “Deploy?”", "the form gets the why");
+    assert.equal(workflowsStore.getState().notice, null);
+  });
 });

@@ -240,7 +240,13 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
               { quiet: true }
             );
             if (!result.ok) return { ok: false, error: result.error, ...(result.inputErrors ? { inputErrors: result.inputErrors } : {}) };
-            return { ok: true, runId: result.value.runId, ...(result.value.skipped ? { skipped: result.value.skipped } : {}) };
+            const skipDetail = typeof result.value.skipDetail === "string" ? result.value.skipDetail.trim() : "";
+            return {
+              ok: true,
+              runId: result.value.runId,
+              ...(result.value.skipped ? { skipped: result.value.skipped } : {}),
+              ...(skipDetail ? { skipDetail } : {})
+            };
           }}
         />
       ) : null}

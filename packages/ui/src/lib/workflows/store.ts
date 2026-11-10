@@ -1214,9 +1214,10 @@ export async function setWorkflowEnabled(
 
 /**
  * Run now. An overlap skip is not a failure: it becomes the panel's notice
- * with "Run anyway", which calls this again with `force`.
+ * with "Run anyway", which calls this again with `force`. `quiet` leaves a
+ * refusal and an overlap skip to the caller (the Run now form shows input
+ * errors beside their fields, and the skip with its own "Run anyway").
  */
-/** Run now. `quiet` leaves a refusal to the caller (the Run now form shows input errors beside their fields). */
 export async function runWorkflowNow(
   api: WorkflowsApi,
   id: string,
@@ -1230,6 +1231,7 @@ export async function runWorkflowNow(
   // Why it did not start, in the daemon's words (e.g. "previous run is waiting on gate “Deploy?”").
   const detail = isRecord(answer) && typeof answer.skipDetail === "string" ? answer.skipDetail.trim() : "";
   if (isRecord(answer) && answer.skipped === "overlap") {
+    if (options.quiet) return result;
     setWorkflowsNotice({
       tone: "info",
       workflowId: id,
