@@ -18,6 +18,8 @@ import {
   type DesktopController
 } from "@orquester/api";
 
+import type { DesktopInputSink } from "../../components/desktop/stream/types";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -162,6 +164,73 @@ export function inputTakesOver(control: DesktopControl | null | undefined, tookF
   return control?.controller === "agent" && control.since !== tookFrom;
 }
 
+/**
+ * One view's implicit takeover (R2.2): call the returned function on every input that reaches the
+ * desktop. It asks `take` once per agent stint; `take` settles `true` once the daemon gave the user
+ * control, `false` when the call failed or did not run (another one was in flight), and then the
+ * next input asks again.
+ */
+export function implicitTakeover(take: (control: DesktopControl) => Promise<boolean>): (control: DesktopControl | null) => void {
+  let tookFrom: string | null = null;
+  return (control) => {
+    if (!control || !inputTakesOver(control, tookFrom)) return;
+    const since = control.since;
+    tookFrom = since;
+    const retry = () => {
+      if (tookFrom === since) tookFrom = null;
+    };
+    take(control).then((took) => {
+      if (!took) retry();
+    }, retry);
+  };
+}
+
+/** A DOM input event the view saw, as the implicit takeover weighs it. */
+export interface DesktopViewInput {
+  kind: "pointerdown" | "wheel" | "keydown";
+  /** `PointerEvent.pointerType`. */
+  pointerType?: string;
+  /** `KeyboardEvent.repeat`. */
+  repeat?: boolean;
+  /** Over the display itself (the viewport or the zoomed stage), not a control or notice above it. */
+  onDisplay: boolean;
+  /** In a control that acts locally only: the toolbar, the handoff UI, the key bar, a notice. */
+  local: boolean;
+}
+
+/**
+ * Whether a DOM input reaches the desktop, and so takes control from an agent (R2.2). A hardware
+ * key does, unless it repeats or goes to a local control. A mouse or pen press, and a wheel, do over
+ * the display only. A touch never does here: the gesture layer may keep it local (a pinch, a pan while zoomed),
+ * so a touch takes over through {@link takeoverSink} once a gesture sends something.
+ */
+export function viewInputReachesDesktop(input: DesktopViewInput): boolean {
+  if (input.local) return false;
+  if (input.kind === "keydown") return input.repeat !== true;
+  return input.pointerType !== "touch" && input.onDisplay;
+}
+
+/**
+ * The input sink the gesture layer, the key bar and the soft keyboard send through: `target()` (the
+ * client connected at the time), with `onInput` called first whenever something goes to the desktop
+ * — never for `releaseAll` (letting go is not input), never with no client to send it to.
+ */
+export function takeoverSink(target: () => DesktopInputSink | null, onInput: () => void): DesktopInputSink {
+  const input = () => {
+    const sink = target();
+    if (sink) onInput();
+    return sink;
+  };
+  return {
+    pointerMove: (x, y) => input()?.pointerMove(x, y),
+    pointerButton: (button, down) => input()?.pointerButton(button, down),
+    scroll: (dx, dy) => input()?.scroll(dx, dy),
+    key: (keysym, down, code) => input()?.key(keysym, down, code),
+    setClipboard: (text) => input()?.setClipboard(text),
+    releaseAll: () => target()?.releaseAll()
+  };
+}
+
 // ---------------------------------------------------------------------------
 // The per-desktop ring of recent actions
 // ---------------------------------------------------------------------------
@@ -171,7 +240,7 @@ export interface DesktopActionRing {
   readonly entries: readonly DesktopActionEntry[];
   /** Live actions since the log was last looked at (the Activity badge). */
   readonly unseen: number;
-  /** The daemon's log was loaded once on this connection. */
+  /** The daemon's log was loaded since the event stream last opened. */
   readonly loaded: boolean;
   /** Ids of the entries that arrived as events (the overlay draws only those, never history). */
   readonly liveIds: readonly string[];
@@ -200,6 +269,20 @@ export function mergeDesktopActionLog(ring: DesktopActionRing, loaded: readonly 
   const fresh = loaded.filter((entry) => !ids.has(entry.id));
   const entries = fresh.length === 0 ? ring.entries : [...ring.entries, ...fresh].sort(byTime).slice(-DESKTOP_ACTION_LOG_LIMIT);
   return { ...ring, entries, loaded: true };
+}
+
+/**
+ * The daemon's log in place of the ring's history: entries the ring held when the request went out
+ * (`asked`) are the daemon's to keep or drop (a restarted daemon has none), and only what arrived
+ * since — newer than the answer — stays besides it.
+ */
+export function replaceDesktopActionLog(ring: DesktopActionRing, loaded: readonly DesktopActionEntry[], asked: ReadonlySet<string>): DesktopActionRing {
+  const ids = new Set(loaded.map((entry) => entry.id));
+  const newer = ring.entries.filter((entry) => !asked.has(entry.id) && !ids.has(entry.id));
+  const entries = [...loaded, ...newer].sort(byTime).slice(-DESKTOP_ACTION_LOG_LIMIT);
+  const kept = new Set(entries.map((entry) => entry.id));
+  const liveIds = ring.liveIds.filter((id) => kept.has(id));
+  return { entries, liveIds, unseen: Math.min(ring.unseen, liveIds.length), loaded: true };
 }
 
 /** The entries that arrived live, oldest first: what the overlay may draw. */

@@ -8,6 +8,7 @@ import {
   desktopActionsStore,
   dropDesktopActions,
   loadDesktopActionLog,
+  reloadDesktopActionLogs,
   resetDesktopActions,
   setDesktopActionsViewing
 } from "./actions-store.ts";
@@ -61,6 +62,33 @@ describe("desktop actions store", () => {
     await assert.rejects(loadDesktopActionLog(missing as never, "d2"));
     assert.equal(ring("d2")?.loaded, true);
     assert.deepEqual(ring("d2")?.entries, []);
+  });
+
+  it("replaces history with the daemon's log, keeping live actions newer than its answer, and reloads when the stream reopens", async () => {
+    let answer: (value: { entries: DesktopActionEntry[] }) => void = () => undefined;
+    let calls = 0;
+    const api = {
+      desktopActionLog: () => {
+        calls += 1;
+        return new Promise<{ entries: DesktopActionEntry[] }>((resolve) => (answer = resolve));
+      }
+    };
+    applyDesktopActionEvent({ desktopId: "d1", entry: entry("before", 1) });
+    let pending = loadDesktopActionLog(api as never, "d1", true);
+    applyDesktopActionEvent({ desktopId: "d1", entry: entry("during", 3) });
+    // The daemon restarted since "before": its log does not have it.
+    answer({ entries: [entry("logged", 2)] });
+    await pending;
+    assert.deepEqual(ring()?.entries.map((e) => e.id), ["logged", "during"]);
+
+    // The event stream reopened (a restarted daemon, whose log is memory-only): the next view asks again.
+    reloadDesktopActionLogs();
+    pending = loadDesktopActionLog(api as never, "d1");
+    assert.equal(calls, 2);
+    answer({ entries: [] });
+    await pending;
+    assert.deepEqual(ring()?.entries, []);
+    assert.equal(ring()?.loaded, true);
   });
 
   it("drops an answer that arrives after a connection switch", async () => {

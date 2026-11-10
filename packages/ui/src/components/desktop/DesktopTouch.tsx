@@ -48,6 +48,8 @@ export interface DesktopTouchOptions {
   /** The element around the client's container that the local zoom transforms. */
   stageRef: React.RefObject<HTMLElement | null>;
   client: () => DesktopStreamClient | null;
+  /** Where gestures send their input (the connected client, through the view's takeover sink). */
+  sink: DesktopInputSink;
   /** The display's size as the client reports it. */
   displaySize: DesktopSize | null;
   connected: boolean;
@@ -145,14 +147,14 @@ export function useDesktopTouch(options: DesktopTouchOptions): DesktopTouchStore
 
   const recognizerRef = useRef<DesktopGestureRecognizer | null>(null);
   if (!recognizerRef.current) {
-    // Every sink call goes to whichever client is connected at the time.
+    // Every sink call goes to the sink of the latest render.
     const sink: DesktopInputSink = {
-      pointerMove: (x, y) => opts.current.client()?.pointerMove(x, y),
-      pointerButton: (button, down) => opts.current.client()?.pointerButton(button, down),
-      scroll: (dx, dy) => opts.current.client()?.scroll(dx, dy),
-      key: (keysym, down, code) => opts.current.client()?.key(keysym, down, code),
-      releaseAll: () => opts.current.client()?.releaseAll(),
-      setClipboard: (text) => opts.current.client()?.setClipboard(text)
+      pointerMove: (x, y) => opts.current.sink.pointerMove(x, y),
+      pointerButton: (button, down) => opts.current.sink.pointerButton(button, down),
+      scroll: (dx, dy) => opts.current.sink.scroll(dx, dy),
+      key: (keysym, down, code) => opts.current.sink.key(keysym, down, code),
+      releaseAll: () => opts.current.sink.releaseAll(),
+      setClipboard: (text) => opts.current.sink.setClipboard(text)
     };
     recognizerRef.current = new DesktopGestureRecognizer(
       {

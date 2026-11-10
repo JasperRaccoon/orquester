@@ -32,6 +32,20 @@ export interface Rect {
 }
 
 /**
+ * A point in client (CSS) pixels → pixels from the top-left of `container` (the overlay box), or null
+ * outside it (scrolled, panned or zoomed out of view). The stream's `displayToClient` measures its
+ * surface's on-screen rectangle, so its points already include the view's local zoom.
+ */
+export function clientToBox(point: ViewPoint, container: Rect): ViewPoint | null {
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+  const x = point.x - container.left;
+  const y = point.y - container.top;
+  const slack = 1;
+  if (x < -slack || y < -slack || x > container.width + slack || y > container.height + slack) return null;
+  return { x, y };
+}
+
+/**
  * Where display point `point` shows, in pixels from the top-left of `container` (the overlay box),
  * when `surface` (screen rectangle) shows the whole `display` scaled to fit (letterboxed, centred).
  * Null for an unknown size or a point outside the container (scrolled or zoomed out of view).
@@ -42,11 +56,7 @@ export function mapDisplayPoint(point: ViewPoint, display: DesktopSize, surface:
   const scale = Math.min(surface.width / display.width, surface.height / display.height);
   const left = surface.left + (surface.width - display.width * scale) / 2;
   const top = surface.top + (surface.height - display.height * scale) / 2;
-  const x = left + point.x * scale - container.left;
-  const y = top + point.y * scale - container.top;
-  const slack = 1;
-  if (x < -slack || y < -slack || x > container.width + slack || y > container.height + slack) return null;
-  return { x, y };
+  return clientToBox({ x: left + point.x * scale, y: top + point.y * scale }, container);
 }
 
 /** The smallest rectangle around `rects` (a striped video), or null with none of any size. */

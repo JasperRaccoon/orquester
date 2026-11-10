@@ -3,7 +3,8 @@ import { describe, it } from "node:test";
 
 import type { DesktopActionEntry } from "@orquester/api";
 
-import { canvasShowsWholeDisplay, desktopOverlayMark, mapDisplayPoint, unionRect, type MapDisplayPoint } from "./overlay.logic.ts";
+import { displayToViewport, viewTransform } from "../desktop-viewport.logic.ts";
+import { canvasShowsWholeDisplay, clientToBox, desktopOverlayMark, mapDisplayPoint, unionRect, type MapDisplayPoint } from "./overlay.logic.ts";
 
 const display = { width: 1920, height: 1080 };
 const container = { left: 100, top: 50, width: 960, height: 700 };
@@ -23,6 +24,20 @@ describe("display → view mapping", () => {
     const box = { left: 100, top: 50, width: 960, height: 1080 };
     assert.deepEqual(mapDisplayPoint({ x: 600, y: 10 }, display, zoomed, box), { x: 300, y: 10 });
     assert.equal(mapDisplayPoint({ x: 100, y: 10 }, display, zoomed, box), null);
+  });
+
+  it("places the stream's on-screen point where the zoomed view shows it, and nothing zoomed out of view", () => {
+    // The overlay covers the untransformed viewport; the stage under it is zoomed 2×, panned 400 px left.
+    const viewport = { left: 100, top: 50, width: 960, height: 540 };
+    const geo = { ...viewport, visibleHeight: 540, display, devicePixelRatio: 1, sharp: false };
+    const zoomed = viewTransform(geo, { zoom: 2, x: -400, y: 0 });
+    // The stream measures its surface's client rect, which the stage's transform already moved.
+    const onScreen = (p: { x: number; y: number }) => {
+      const at = displayToViewport(geo, zoomed, p);
+      return { x: viewport.left + at.x, y: viewport.top + at.y };
+    };
+    assert.deepEqual(clientToBox(onScreen({ x: 960, y: 270 }), viewport), displayToViewport(geo, zoomed, { x: 960, y: 270 }));
+    assert.equal(clientToBox(onScreen({ x: 100, y: 270 }), viewport), null);
   });
 
   it("cannot place points without a size, or on a canvas that clips the display", () => {

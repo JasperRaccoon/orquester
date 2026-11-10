@@ -9,13 +9,16 @@ import {
   desktopControlPill,
   desktopHasHandoff,
   EMPTY_DESKTOP_RING,
+  implicitTakeover,
   inputTakesOver,
   liveDesktopActions,
   mergeDesktopActionLog,
   parseDesktopActionEvent,
   parseDesktopControl,
   sizeLockNotice,
-  unseenBadge
+  takeoverSink,
+  unseenBadge,
+  viewInputReachesDesktop
 } from "./handoff.logic.ts";
 
 const claude = { kind: "chat", threadId: "t1", label: "Claude" } as const;
@@ -64,6 +67,61 @@ describe("implicit takeover", () => {
     assert.equal(inputTakesOver(agent("a"), "a"), false);
     // The agent took the desktop back later: a new stint, so input takes over again.
     assert.equal(inputTakesOver(agent("b"), "a"), true);
+  });
+
+  it("asks once per agent stint, and again on the next input after a call that did not take control", async () => {
+    const calls: Array<(took: boolean) => void> = [];
+    const asked: Promise<boolean>[] = [];
+    const takeover = implicitTakeover(() => {
+      const call = new Promise<boolean>((resolve) => calls.push(resolve));
+      asked.push(call);
+      return call;
+    });
+    takeover(agent("a"));
+    takeover(agent("a"));
+    assert.equal(calls.length, 1, "one call in flight");
+    calls[0]!(false); // failed, or skipped while another call ran
+    await asked[0];
+    takeover(agent("a"));
+    assert.equal(calls.length, 2, "the next input retries");
+    calls[1]!(true);
+    await asked[1];
+    takeover(agent("a"));
+    assert.equal(calls.length, 2, "taken: not asked again for this stint");
+    takeover(agent("b"));
+    assert.equal(calls.length, 3);
+  });
+
+  it("counts only input that reaches the desktop: a touch takes over once a gesture sends something", () => {
+    const press = (pointerType: string, onDisplay: boolean, local = false) =>
+      viewInputReachesDesktop({ kind: "pointerdown", pointerType, onDisplay, local });
+    assert.equal(press("mouse", true), true);
+    assert.equal(press("pen", true), true);
+    // A pinch or a pan while zoomed may stay local: the press alone decides nothing.
+    assert.equal(press("touch", true), false);
+    // A notice's Dismiss, the key bar's Fn or a modifier latch.
+    assert.equal(press("mouse", false), false);
+    assert.equal(press("mouse", true, true), false);
+    assert.equal(viewInputReachesDesktop({ kind: "wheel", onDisplay: true, local: false }), true);
+    assert.equal(viewInputReachesDesktop({ kind: "wheel", onDisplay: false, local: false }), false);
+    assert.equal(viewInputReachesDesktop({ kind: "keydown", onDisplay: false, local: false }), true);
+    assert.equal(viewInputReachesDesktop({ kind: "keydown", repeat: true, onDisplay: false, local: false }), false);
+
+    const sent: string[] = [];
+    let inputs = 0;
+    let client: { pointerMove(): void; releaseAll(): void } | null = null;
+    const sink = takeoverSink(
+      () => client as never,
+      () => (inputs += 1)
+    );
+    sink.pointerMove(1, 2);
+    assert.equal(inputs, 0, "nothing reaches a desktop with no client");
+    client = { pointerMove: () => sent.push("move"), releaseAll: () => sent.push("release") };
+    sink.releaseAll();
+    assert.equal(inputs, 0, "letting go is not input");
+    sink.pointerMove(1, 2);
+    assert.equal(inputs, 1);
+    assert.deepEqual(sent, ["release", "move"]);
   });
 });
 

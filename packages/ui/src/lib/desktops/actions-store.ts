@@ -3,8 +3,9 @@
  * the last 50 entries for the agent overlay and the Activity popover, with the badge's unseen count.
  *
  * Fed by `desktop.action` events (the app store's `applyEvent` routes them here) and by the daemon's
- * log, loaded once per desktop and connection (`loadDesktopActionLog`). Everything is validated
- * first; a malformed payload is ignored. `resetDesktopActions()` runs on a connection switch.
+ * log, loaded once per desktop and event stream (`loadDesktopActionLog`); a load replaces the
+ * history. Everything is validated first; a malformed payload is ignored. `resetDesktopActions()`
+ * runs on a connection switch, `reloadDesktopActionLogs()` when the event stream (re)opens.
  */
 
 import { createStore } from "zustand/vanilla";
@@ -17,6 +18,7 @@ import {
   mergeDesktopActionLog,
   parseDesktopActionEvent,
   parseDesktopActionLog,
+  replaceDesktopActionLog,
   type DesktopActionRing
 } from "./handoff.logic";
 
@@ -27,9 +29,11 @@ export interface DesktopActionsApi {
 
 export interface DesktopActionsState {
   rings: Readonly<Record<string, DesktopActionRing>>;
+  /** Bumped whenever every ring must load the daemon's log again (views load on a change). */
+  epoch: number;
 }
 
-export const desktopActionsStore = createStore<DesktopActionsState>(() => ({ rings: {} }));
+export const desktopActionsStore = createStore<DesktopActionsState>(() => ({ rings: {}, epoch: 0 }));
 
 /** Desktops whose Activity popover is open: what arrives then is seen. */
 const viewing = new Map<string, number>();
@@ -54,19 +58,21 @@ export function applyDesktopActionEvent(payload: unknown): void {
 }
 
 /**
- * Load the daemon's log into the ring. Once per desktop and connection unless `force` (the popover
- * opening asks again); a daemon without the route (404) reads as an empty log.
+ * Load the daemon's log in place of the ring's history (live actions newer than the answer stay).
+ * Once per desktop and event stream unless `force` (the popover opening asks again); a daemon
+ * without the route (404) reads as an empty log.
  */
 export function loadDesktopActionLog(api: DesktopActionsApi, desktopId: string, force = false): Promise<void> {
   if (!force && ringOf(desktopId).loaded) return Promise.resolve();
   const pending = loading.get(desktopId);
   if (pending) return pending;
   const taken = generation;
+  const asked = new Set(ringOf(desktopId).entries.map((entry) => entry.id));
   const run = api
     .desktopActionLog(desktopId)
     .then(
       (response) => {
-        if (taken === generation) writeRing(desktopId, mergeDesktopActionLog(ringOf(desktopId), parseDesktopActionLog(response)));
+        if (taken === generation) writeRing(desktopId, replaceDesktopActionLog(ringOf(desktopId), parseDesktopActionLog(response), asked));
       },
       (err: unknown) => {
         if (taken !== generation) return;
@@ -98,10 +104,23 @@ export function dropDesktopActions(desktopId: string): void {
   desktopActionsStore.setState({ rings: rest });
 }
 
+/**
+ * The event stream (re)opened, maybe to a restarted daemon (its log lives in memory) and with any
+ * actions in between missed: every ring loads the daemon's log again. Answers still in flight are
+ * dropped.
+ */
+export function reloadDesktopActionLogs(): void {
+  generation += 1;
+  loading.clear();
+  const { rings, epoch } = desktopActionsStore.getState();
+  const stale = Object.fromEntries(Object.entries(rings).map(([id, ring]) => [id, { ...ring, loaded: false }]));
+  desktopActionsStore.setState({ rings: stale, epoch: epoch + 1 });
+}
+
 /** A connection switch: another daemon's desktops mean nothing here. */
 export function resetDesktopActions(): void {
   generation += 1;
   viewing.clear();
   loading.clear();
-  desktopActionsStore.setState({ rings: {} }, true);
+  desktopActionsStore.setState({ rings: {}, epoch: desktopActionsStore.getState().epoch + 1 }, true);
 }

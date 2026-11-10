@@ -4,8 +4,10 @@
  * - {@link useDesktopHandoff}: the desktop's control state and recent actions, the handoff calls,
  *   and the **implicit takeover** — the user's first pointer or key input in the view while an
  *   agent controls the desktop takes control once (`PUT control {controller: "user"}`) and raises a
- *   toast with **Give back**. It listens in the capture phase on the view's container, so it sees
- *   input whatever renders the stream.
+ *   toast with **Give back**. Hardware keys, and mouse or pen presses and wheels over the display,
+ *   are seen in the capture phase on the view, whatever renders the stream; touch, the key bar and
+ *   the soft keyboard take over through `inputReachedDesktop` once they send something (a pinch or a pan
+ *   while zoomed stays local, and so does a key bar's Fn or a modifier latch).
  * - {@link DesktopHandoffControls}: the toolbar's control pill, the Activity popover's button and
  *   the size-lock notice.
  * - {@link DesktopHandoffLayer}: over the stream — the agent overlay and the takeover toast.
@@ -25,20 +27,21 @@ import {
   desktopControlPill,
   desktopHasHandoff,
   EMPTY_DESKTOP_RING,
-  inputTakesOver,
+  implicitTakeover,
   liveDesktopActions,
   sizeLockNotice,
   takeoverToastText,
   unseenBadge,
+  viewInputReachesDesktop,
   type DesktopActionRing
 } from "../../../lib/desktops/handoff.logic";
 import { useAppStore } from "../../../store/app";
 import { Dropdown } from "../../ui/dropdown";
 import { DesktopActionLogPanel } from "./DesktopActionLog";
 import { DesktopAgentOverlay } from "./DesktopAgentOverlay";
-import { canvasShowsWholeDisplay, mapDisplayPoint, unionRect, type Rect, type ViewPoint } from "./overlay.logic";
+import { canvasShowsWholeDisplay, clientToBox, mapDisplayPoint, unionRect, type Rect, type ViewPoint } from "./overlay.logic";
 
-/** Elements whose input is not desktop input (the toolbar, this UI's own controls). */
+/** Elements whose input is not desktop input (the toolbar, this UI's own controls, local-only controls). */
 const NOT_DESKTOP_INPUT = "[data-desktop-toolbar], [data-desktop-handoff]";
 const TOAST_MS = 6000;
 
@@ -75,13 +78,24 @@ export interface DesktopHandoff {
   dismissToast: () => void;
   /** The view shows the stream (marks draw only then). */
   live: boolean;
+  /** Input went to the desktop through the view's sink (touch, key bar, soft keyboard): the implicit takeover. */
+  inputReachedDesktop: () => void;
+}
+
+/** The view's elements the implicit takeover listens on. */
+export interface DesktopHandoffTargets {
+  /** The view's root: hardware keys anywhere in it. */
+  root: React.RefObject<HTMLElement | null>;
+  /** The view's (untransformed) box and the stage inside it: what counts as "over the display". */
+  viewport: React.RefObject<HTMLElement | null>;
+  stage: React.RefObject<HTMLElement | null>;
 }
 
 /**
- * The handoff state and calls for one desktop view, and the implicit takeover on `containerRef`
- * (the view's root). `live`: the stream is connected, so input reaches the desktop.
+ * The handoff state and calls for one desktop view, and the implicit takeover on `targets`.
+ * `live`: the stream is connected, so input reaches the desktop.
  */
-export function useDesktopHandoff(containerRef: React.RefObject<HTMLElement | null>, desktop: DesktopSummary, live: boolean): DesktopHandoff {
+export function useDesktopHandoff(targets: DesktopHandoffTargets, desktop: DesktopSummary, live: boolean): DesktopHandoff {
   const api = useAppStore((s) => s.api);
   const upsertDesktop = useAppStore((s) => s.upsertDesktop);
   const control = desktop.control ?? null;
@@ -90,25 +104,31 @@ export function useDesktopHandoff(containerRef: React.RefObject<HTMLElement | nu
   const [toast, setToast] = React.useState<DesktopToast | null>(null);
   const busyRef = React.useRef(false);
 
-  // The daemon's log, once per desktop and connection, so a desktop agents used shows its Activity.
+  // The daemon's log, once per desktop and event stream, so a desktop agents used shows its Activity.
+  const epoch = React.useSyncExternalStore(desktopActionsStore.subscribe, () => desktopActionsStore.getState().epoch, () => 0);
   React.useEffect(() => {
     if (!api || !live) return;
     loadDesktopActionLog(api, desktop.id).catch(() => undefined);
-  }, [api, desktop.id, live]);
+  }, [api, desktop.id, live, epoch]);
 
+  /** Settles `true` once the daemon applied the change, `false` when it failed or did not run (busy). */
   const apply = React.useCallback(
-    (controller: DesktopController, why: "button" | "input", from: DesktopActor | undefined) => {
-      if (!api || busyRef.current) return;
+    (controller: DesktopController, why: "button" | "input", from: DesktopActor | undefined): Promise<boolean> => {
+      if (!api || busyRef.current) return Promise.resolve(false);
       busyRef.current = true;
       setBusy(true);
-      api
+      return api
         .setDesktopControl(desktop.id, controller)
         .then((summary) => {
           const parsed = parseDesktopSummary(summary);
           if (parsed) upsertDesktop(parsed);
           setToast(why === "input" ? { text: takeoverToastText(from), tone: "info", giveBack: true } : null);
+          return true;
         })
-        .catch((err: unknown) => setToast({ text: errorText(err), tone: "danger", giveBack: false }))
+        .catch((err: unknown) => {
+          setToast({ text: errorText(err), tone: "danger", giveBack: false });
+          return false;
+        })
         .finally(() => {
           busyRef.current = false;
           setBusy(false);
@@ -118,34 +138,42 @@ export function useDesktopHandoff(containerRef: React.RefObject<HTMLElement | nu
   );
 
   const changeControl = React.useCallback(
-    (controller: DesktopController) => apply(controller, "button", desktop.control?.actor),
+    (controller: DesktopController) => void apply(controller, "button", desktop.control?.actor),
     [apply, desktop.control?.actor]
   );
 
   // --- Implicit takeover ---------------------------------------------------------------------
   const latest = React.useRef({ control, live, apply });
   latest.current = { control, live, apply };
-  /** The `since` of the agent control this view already took over. */
-  const tookFrom = React.useRef<string | null>(null);
+  const [takeover] = React.useState(() => implicitTakeover((now) => latest.current.apply("user", "input", now.actor)));
+  const inputReachedDesktop = React.useCallback(() => {
+    if (latest.current.live) takeover(latest.current.control);
+  }, [takeover]);
+  const { root: rootRef, viewport: viewportRef, stage: stageRef } = targets;
   React.useEffect(() => {
-    const root = containerRef.current;
+    const root = rootRef.current;
     if (!root) return;
     const onInput = (event: Event) => {
-      const { control: now, live: streaming, apply: take } = latest.current;
-      if (!streaming || !inputTakesOver(now, tookFrom.current)) return;
-      if (event instanceof KeyboardEvent && event.repeat) return;
-      const target = event.target as Element | null;
-      if (typeof target?.closest === "function" && target.closest(NOT_DESKTOP_INPUT)) return;
-      tookFrom.current = now!.since;
-      take("user", "input", now!.actor);
+      const target = event.target instanceof Element ? event.target : null;
+      const viewport = viewportRef.current;
+      const reaches = viewInputReachesDesktop({
+        kind: event.type === "keydown" || event.type === "wheel" ? event.type : "pointerdown",
+        pointerType: (event as Partial<PointerEvent>).pointerType,
+        repeat: (event as Partial<KeyboardEvent>).repeat,
+        onDisplay: target !== null && (target === viewport || stageRef.current?.contains(target) === true),
+        local: target?.closest(NOT_DESKTOP_INPUT) != null
+      });
+      if (reaches) inputReachedDesktop();
     };
     root.addEventListener("pointerdown", onInput, true);
+    root.addEventListener("wheel", onInput, { capture: true, passive: true });
     root.addEventListener("keydown", onInput, true);
     return () => {
       root.removeEventListener("pointerdown", onInput, true);
+      root.removeEventListener("wheel", onInput, true);
       root.removeEventListener("keydown", onInput, true);
     };
-  }, [containerRef]);
+  }, [rootRef, viewportRef, stageRef, inputReachedDesktop]);
 
   // The toast lasts a while, and never past the user's control.
   React.useEffect(() => {
@@ -158,7 +186,7 @@ export function useDesktopHandoff(containerRef: React.RefObject<HTMLElement | nu
   }, [control?.controller]);
 
   const dismissToast = React.useCallback(() => setToast(null), []);
-  return { desktop, control, ring, busy, changeControl, toast, dismissToast, live };
+  return { desktop, control, ring, busy, changeControl, toast, dismissToast, live, inputReachedDesktop };
 }
 
 // ---------------------------------------------------------------------------
@@ -324,21 +352,34 @@ function TakeoverToast({ handoff }: { handoff: DesktopHandoff }) {
 
 /**
  * Over the stream (a sibling of its element, covering the same box): the agent's marks and the
- * takeover toast. `streamRoot` holds the rendered surface; `display` is the desktop's size.
+ * takeover toast. Marks are placed with `displayToClient` (the stream client's, which knows its
+ * pan and includes the local zoom); while it cannot place a point, from the surface rendered in
+ * `streamRoot`. `display` is the display's size as the stream reports it.
  */
 export function DesktopHandoffLayer({
   handoff,
   streamRoot,
-  display
+  display,
+  displayToClient
 }: {
   handoff: DesktopHandoff;
   streamRoot: React.RefObject<HTMLElement | null>;
   display: DesktopSize;
+  displayToClient: (x: number, y: number) => ViewPoint | null;
 }): React.ReactElement {
   const box = React.useRef<HTMLDivElement | null>(null);
-  const displayRef = React.useRef(display);
-  displayRef.current = display;
-  const mapPoint = React.useCallback((x: number, y: number) => mapStreamPoint(streamRoot.current, box.current, displayRef.current, { x, y }), [streamRoot]);
+  const latest = React.useRef({ display, displayToClient });
+  latest.current = { display, displayToClient };
+  const mapPoint = React.useCallback(
+    (x: number, y: number) => {
+      const container = box.current;
+      if (!container) return null;
+      const onScreen = latest.current.displayToClient(x, y);
+      if (onScreen) return clientToBox(onScreen, rectOf(container));
+      return mapStreamPoint(streamRoot.current, container, latest.current.display, { x, y });
+    },
+    [streamRoot]
+  );
   // History the log load brings never animates: only what arrived as events.
   const live = React.useMemo(() => liveDesktopActions(handoff.ring), [handoff.ring]);
   return (

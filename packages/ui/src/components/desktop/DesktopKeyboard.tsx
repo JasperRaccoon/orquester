@@ -138,7 +138,7 @@ export const DesktopKeyBar: React.FC<{
   const [fnOpen, setFnOpen] = useState(false);
   const key = (k: BarKey) => <KeyBarButton key={k.aria} label={k.label} ariaLabel={k.aria} onPress={() => onKey(k.keysym)} />;
   return (
-    <div className="flex shrink-0 items-stretch gap-1 overflow-x-auto border-t border-neutral-800 bg-neutral-900 px-2 py-1.5" role="toolbar" aria-label="Desktop keys">
+    <div className="flex shrink-0 items-stretch gap-1 overflow-x-auto border-t border-neutral-800 bg-neutral-900 px-2 py-1.5" role="toolbar" aria-label="Desktop keys" data-desktop-handoff="">
       {EDIT_KEYS.map(key)}
       <Divider />
       {LATCH_MODIFIERS.map((m) => (
