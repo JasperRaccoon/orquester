@@ -170,6 +170,129 @@ describe("edges", () => {
     );
     const cycle = only(problemsOf(wf), "cycle");
     assert.equal(cycle.length, 1);
+    // An ordinary edge back to an earlier block is named, with the fix.
+    assert.equal(cycle[0]!.edgeId, "b-success-a");
+    assert.match(cycle[0]!.message, /^B → A goes back to an earlier block \(.*\): make it a loop edge with a limit/);
+  });
+});
+
+describe("loop edges (spec 2026-11-10 §7.1)", () => {
+  const loop = (source: string, target: string, handle: string, maxLoops = 2, id?: string) => ({
+    ...testEdge(source, target, handle, id),
+    loop: { maxLoops, session: "continue" as const }
+  });
+  const reviewer = () =>
+    testNode("review", "agent", { prompt: { kind: "text", text: "Review" }, outcomes: [{ id: "approved" }, { id: "changes" }] }, { name: "Review" });
+  const fixer = () => agent("Fix", "Fix it. {{ loop.feedback | default(\"\") }} (pass {{ loop.pass }})");
+  const base = (extra: ReturnType<typeof testEdge>[] = []) =>
+    testWorkflow(
+      [manual(), fixer(), reviewer(), testNode("done", "stop", { as: "success" }, { name: "Done" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), testEdge("review", "done", "outcome:approved"), ...extra]
+    );
+
+  it("a loop edge back to an ancestor is valid, and the forward graph has no cycle", () => {
+    const problems = problemsOf(base([loop("review", "Fix", "outcome:changes")]));
+    assert.deepEqual(problems.filter((problem) => problem.severity === "error"), []);
+    assert.deepEqual(only(problems, "cycle"), []);
+    assert.deepEqual(only(problems, "unknown_reference"), [], "loop is an expression root");
+  });
+
+  it("an if/switch branch and a plain success output may loop too", () => {
+    const wf = testWorkflow(
+      [manual(), testNode("a", "code", {}, { name: "A" }), testNode("chk", "if", { combine: "all", rules: [{ left: "{{ input }}", op: "isTrue" }] }, { name: "Check" }), testNode("b", "code", {}, { name: "B" })],
+      [testEdge("t", "a"), testEdge("a", "chk"), loop("chk", "a", "false"), testEdge("chk", "b", "true"), loop("b", "a", "success")]
+    );
+    assert.deepEqual(problemsOf(wf).filter((problem) => problem.severity === "error"), []);
+  });
+
+  it("a loop edge may not leave the error output", () => {
+    const problems = problemsOf(base([loop("review", "Fix", "error")]));
+    assert.deepEqual(only(problems, "loop_from_error").map((problem) => problem.edgeId), ["review-error-Fix"]);
+  });
+
+  it("a loop edge must go back to an ancestor of its source", () => {
+    // Forward, to a block after the source.
+    let problems = problemsOf(
+      testWorkflow(
+        [manual(), fixer(), reviewer(), testNode("done", "code", {}, { name: "Done" })],
+        [testEdge("t", "Fix"), testEdge("Fix", "review"), loop("review", "done", "outcome:approved")]
+      )
+    );
+    assert.deepEqual(only(problems, "loop_not_ancestor").map((problem) => problem.edgeId), ["review-outcome:approved-done"]);
+    // Sideways, to a parallel branch.
+    problems = problemsOf(
+      testWorkflow(
+        [manual(), fixer(), reviewer(), testNode("side", "code", {}, { name: "Side" })],
+        [testEdge("t", "Fix"), testEdge("t", "side"), testEdge("Fix", "review"), loop("review", "side", "outcome:changes")]
+      )
+    );
+    assert.deepEqual(only(problems, "loop_not_ancestor").map((problem) => problem.edgeId), ["review-outcome:changes-side"]);
+  });
+
+  it("a loop edge cannot go back to a trigger", () => {
+    const problems = problemsOf(base([loop("review", "t", "outcome:changes")]));
+    const refused = only(problems, "edge_target_no_input");
+    assert.equal(refused.length, 1);
+    assert.match(refused[0]!.message, /loop edge cannot go back to a trigger/);
+  });
+
+  it("a handle with a loop edge carries nothing else", () => {
+    const problems = problemsOf(base([loop("review", "Fix", "outcome:changes"), testEdge("review", "done", "outcome:changes")]));
+    assert.deepEqual(only(problems, "loop_handle_shared").map((problem) => problem.edgeId), ["review-outcome:changes-Fix"]);
+    const twoLoops = problemsOf(
+      testWorkflow(
+        [manual(), testNode("a", "code", {}, { name: "A" }), fixer(), reviewer()],
+        [testEdge("t", "a"), testEdge("a", "Fix"), testEdge("Fix", "review"), loop("review", "Fix", "outcome:changes"), loop("review", "a", "outcome:changes")]
+      )
+    );
+    assert.equal(only(twoLoops, "loop_handle_shared").length, 2);
+  });
+
+  it("maxLoops is a whole number from 1 to 20", () => {
+    for (const maxLoops of [0, 21, 1.5, "2"]) {
+      const wf = base([loop("review", "Fix", "outcome:changes")]);
+      const raw = { ...wf, edges: wf.edges.map((edge) => (edge.loop ? { ...edge, loop: { maxLoops, session: "new" } } : edge)) };
+      const problems = only(problemsOf(raw), "loop_limit_range");
+      assert.equal(problems.length, 1, String(maxLoops));
+      assert.equal(problems[0]!.edgeId, "review-outcome:changes-Fix");
+    }
+    const wf = base([loop("review", "Fix", "outcome:changes")]);
+    const badSession = { ...wf, edges: wf.edges.map((edge) => (edge.loop ? { ...edge, loop: { maxLoops: 2, session: "sometimes" } } : edge)) };
+    assert.equal(only(problemsOf(badSession), "schema").length, 1);
+  });
+
+  it("an ordinary edge back next to a loop edge is still a cycle naming the edge", () => {
+    const problems = problemsOf(base([loop("review", "Fix", "outcome:changes"), testEdge("done", "Fix", "success")]));
+    // `done` is a Stop (no outputs): the back edge fails on its handle first.
+    assert.equal(only(problems, "edge_invalid_handle").length, 1);
+    const wf = testWorkflow(
+      [manual(), fixer(), reviewer(), testNode("after", "code", {}, { name: "After" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), loop("review", "Fix", "outcome:changes"), testEdge("review", "after", "outcome:approved"), testEdge("after", "Fix")]
+    );
+    const cycle = only(problemsOf(wf), "cycle");
+    assert.equal(cycle.length, 1);
+    assert.equal(cycle[0]!.edgeId, "after-success-Fix");
+  });
+
+  it("{{ loop.* }}: only pass and feedback; outside a loop, or feedback off the target, warns", () => {
+    const wf = testWorkflow(
+      [manual(), agent("Pre", "{{ loop.pass }}"), fixer(), reviewer(), agent("Done", "{{ loop.feedback }} {{ loop.count }}")],
+      [testEdge("t", "Pre"), testEdge("Pre", "Fix"), testEdge("Fix", "review"), testEdge("review", "Done", "outcome:approved"), loop("review", "Fix", "outcome:changes")]
+    );
+    const problems = problemsOf(wf);
+    assert.deepEqual(only(problems, "loop_outside_loop").map((problem) => problem.nodeId), ["Pre"]);
+    assert.deepEqual(only(problems, "loop_feedback_not_target").map((problem) => problem.nodeId), ["Done"]);
+    assert.deepEqual(only(problems, "unknown_reference").map((problem) => problem.nodeId), ["Done"]);
+  });
+
+  it("a block reading a later block of its loop is told it reads the previous pass", () => {
+    const wf = testWorkflow(
+      [manual(), agent("Fix", "Fix: {{ nodes.Review.output.summary }}"), reviewer(), testNode("done", "stop", { as: "success" }, { name: "Done" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), testEdge("review", "done", "outcome:approved"), loop("review", "Fix", "outcome:changes")]
+    );
+    const warned = only(problemsOf(wf), "reference_not_upstream");
+    assert.equal(warned.length, 1);
+    assert.match(warned[0]!.message, /previous loop pass/);
   });
 });
 

@@ -17,7 +17,16 @@ import {
 import { UNSET_SUBWORKFLOW_ID } from "./block-types.ts";
 import { parseTemplate, templateReferences, hasTemplate, type TemplateReference } from "./expressions.ts";
 import { nodeTemplateFields } from "./fields.ts";
-import { acceptsInput, findCycles, outputHandles, reachableFromTriggers, upstreamOf } from "./graph.ts";
+import {
+  acceptsInput,
+  findCycles,
+  isLoopEdge,
+  loopResetSet,
+  outputHandles,
+  reachableFromTriggers,
+  upstreamOf,
+  withoutLoopEdges
+} from "./graph.ts";
 import { presetToCron, scheduleIntervalProblem, validateCron, isValidTimeZone } from "./schedule.ts";
 import {
   isTriggerType,
@@ -137,6 +146,42 @@ function sizeOf(value: unknown): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The edges a depth-first walk (from the triggers, then every other block, in definition order) finds
+ * pointing back to a block still on its path: in a cycle, the connection that goes "back".
+ */
+function forwardBackEdges(graph: { nodes: readonly WorkflowNode[]; edges: readonly WorkflowEdge[] }): WorkflowEdge[] {
+  const outs = new Map<string, WorkflowEdge[]>(graph.nodes.map((node) => [node.id, []]));
+  for (const edge of graph.edges) if (outs.has(edge.source) && outs.has(edge.target)) outs.get(edge.source)!.push(edge);
+  const state = new Map<string, "open" | "done">();
+  const back: WorkflowEdge[] = [];
+  const roots = [...graph.nodes.filter((node) => isTriggerType(node.type)), ...graph.nodes.filter((node) => !isTriggerType(node.type))];
+  for (const root of roots) {
+    if (state.has(root.id)) continue;
+    // Iterative: no recursion depth limit on hostile input.
+    const stack: { id: string; next: number }[] = [{ id: root.id, next: 0 }];
+    state.set(root.id, "open");
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]!;
+      const list = outs.get(frame.id)!;
+      if (frame.next >= list.length) {
+        state.set(frame.id, "done");
+        stack.pop();
+        continue;
+      }
+      const edge = list[frame.next]!;
+      frame.next += 1;
+      const seen = state.get(edge.target);
+      if (seen === "open") back.push(edge);
+      else if (seen === undefined) {
+        state.set(edge.target, "open");
+        stack.push({ id: edge.target, next: 0 });
+      }
+    }
+  }
+  return back;
 }
 
 /** Validate a definition. Never throws. */
@@ -265,6 +310,21 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
   rawEdges.forEach((raw, index) => {
     const parsed = workflowEdgeSchema.safeParse(raw);
     const rawId = isRecord(raw) && typeof raw.id === "string" ? raw.id : undefined;
+    const rawLoop = isRecord(raw) ? raw.loop : undefined;
+    if (isRecord(rawLoop)) {
+      const { min, max } = WORKFLOW_LIMITS.loops;
+      const limit = rawLoop.maxLoops;
+      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < min || limit > max) {
+        push({
+          severity: "error",
+          code: "loop_limit_range",
+          message: `Connection ${rawId ?? `#${index + 1}`}: a loop edge's maxLoops is a whole number from ${min} to ${max}`,
+          edgeId: rawId,
+          field: "loop.maxLoops"
+        });
+        return;
+      }
+    }
     if (!parsed.success) {
       for (const issue of parsed.error.issues) {
         push({
@@ -312,9 +372,22 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
       push({
         severity: "error",
         code: "edge_target_no_input",
-        message: `${target.name} takes no input (${isTriggerType(target.type) ? "a trigger starts the run" : "a note never runs"})`,
+        message:
+          isLoopEdge(edge) && isTriggerType(target.type)
+            ? `A loop edge cannot go back to a trigger (${target.name}): point it at the first block after it`
+            : `${target.name} takes no input (${isTriggerType(target.type) ? "a trigger starts the run" : "a note never runs"})`,
         edgeId: edge.id,
         nodeId: target.id
+      });
+      valid = false;
+    }
+    if (isLoopEdge(edge) && edge.sourceHandle === "error") {
+      push({
+        severity: "error",
+        code: "loop_from_error",
+        message: `${label(edge.source)} → ${label(edge.target)}: a loop edge cannot leave the error output — loop from an outcome, a choice or an If/Switch branch, and let retry handle failures`,
+        edgeId: edge.id,
+        nodeId: edge.source
       });
       valid = false;
     }
@@ -337,16 +410,61 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
   });
 
   const graph = { nodes, edges };
+  // The forward graph: what every order, readiness and reachability helper reads (§7.1).
+  const forward = withoutLoopEdges(graph);
 
-  // -- Cycles --------------------------------------------------------------------------------------
-  for (const cycle of findCycles(graph)) {
-    push({
-      severity: "error",
-      code: "cycle",
-      message: `These blocks form a loop: ${[...cycle, cycle[0]!].map(label).join(" → ")} — use a sub-workflow or an agent that loops itself`,
-      nodeId: cycle[0]
-    });
+  // -- Cycles (of the forward graph) and loop edges ------------------------------------------------
+  const backEdges = forwardBackEdges(forward);
+  for (const cycle of findCycles(forward)) {
+    const members = new Set(cycle);
+    const back = backEdges.find((edge) => members.has(edge.source) && members.has(edge.target));
+    const path = [...cycle, cycle[0]!].map(label).join(" → ");
+    push(
+      back
+        ? {
+            severity: "error",
+            code: "cycle",
+            message: `${label(back.source)} → ${label(back.target)} goes back to an earlier block (${path}): make it a loop edge with a limit (\`loop: { maxLoops: 1–${WORKFLOW_LIMITS.loops.max} }\`), or remove it`,
+            nodeId: back.target,
+            edgeId: back.id
+          }
+        : {
+            severity: "error",
+            code: "cycle",
+            message: `These blocks form a loop: ${path} — connections run one way; to repeat steps, make the connection back to the earlier block a loop edge with a limit`,
+            nodeId: cycle[0]
+          }
+    );
   }
+  const handleEdgeCount = new Map<string, number>();
+  for (const edge of edges) {
+    const key = `${edge.source}\u0000${edge.sourceHandle}`;
+    handleEdgeCount.set(key, (handleEdgeCount.get(key) ?? 0) + 1);
+  }
+  const loops = edges.filter(isLoopEdge);
+  for (const loop of loops) {
+    if (!upstreamOf(forward, loop.source).has(loop.target)) {
+      push({
+        severity: "error",
+        code: "loop_not_ancestor",
+        message: `${label(loop.source)} → ${label(loop.target)}: a loop edge goes back to a block that runs before its source, and ${label(loop.target)} does not`,
+        edgeId: loop.id,
+        nodeId: loop.source
+      });
+    }
+    if ((handleEdgeCount.get(`${loop.source}\u0000${loop.sourceHandle}`) ?? 0) > 1) {
+      push({
+        severity: "error",
+        code: "loop_handle_shared",
+        message: `${label(loop.source)}: its "${loop.sourceHandle}" output has a loop edge, so it can carry no other connection (a block there would be reset at once)`,
+        edgeId: loop.id,
+        nodeId: loop.source
+      });
+    }
+  }
+  /** Whether `reader` and `read` run again together in some loop: `read`'s previous pass is then readable. */
+  const resetSets = loops.map((loop) => loopResetSet(forward, loop));
+  const loopsBack = (reader: string, read: string): boolean => resetSets.some((set) => set.has(reader) && set.has(read));
 
   // -- Per block -----------------------------------------------------------------------------------
   const nameToNode = new Map(nodes.map((node) => [node.name, node]));
@@ -428,7 +546,36 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
             push({
               severity: "warning",
               code: "reference_not_upstream",
-              message: `${node.name}: "${name}" does not run before this block, so {{ ${ref.source} }} may be empty`,
+              message: loopsBack(node.id, referenced.id)
+                ? `${node.name}: "${name}" runs after this block, so {{ ${ref.source} }} reads its previous loop pass and is empty on the first pass`
+                : `${node.name}: "${name}" does not run before this block, so {{ ${ref.source} }} may be empty`,
+              nodeId: node.id,
+              field: field.field
+            });
+          }
+        } else if (ref.root === "loop") {
+          const key = ref.path[0];
+          if (key !== undefined && key !== "pass" && key !== "feedback") {
+            push({
+              severity: "error",
+              code: "unknown_reference",
+              message: `${node.name}: {{ ${ref.source} }} reads nothing — loop has \`pass\` and \`feedback\``,
+              nodeId: node.id,
+              field: field.field
+            });
+          } else if (!resetSets.some((set) => set.has(node.id))) {
+            push({
+              severity: "warning",
+              code: "loop_outside_loop",
+              message: `${node.name}: no loop edge runs this block again, so {{ ${ref.source} }} is always ${key === "pass" ? "1" : "empty"}`,
+              nodeId: node.id,
+              field: field.field
+            });
+          } else if (key === "feedback" && !loops.some((loop) => loop.target === node.id)) {
+            push({
+              severity: "warning",
+              code: "loop_feedback_not_target",
+              message: `${node.name}: only the block a loop edge points back to receives feedback, so {{ ${ref.source} }} is always empty here`,
               nodeId: node.id,
               field: field.field
             });
