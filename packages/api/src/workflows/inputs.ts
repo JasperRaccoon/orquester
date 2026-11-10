@@ -4,9 +4,10 @@
 // and the check that turns a run's raw input into the validated, defaulted one.
 //
 // The check applies defaults, refuses a missing required input, a wrong type, an enum value not
-// among its values and an unknown key, and coerces only "42" → 42 (numbers) and "true"/"false"
-// (booleans) — agents often send every value as a string. Every problem is returned at once, each
-// naming the input and the fix.
+// among its values and an unknown key, and coerces only a plain decimal numeral → its number
+// ("42", "-1.5") and "true"/"false" → booleans — agents often send every value as a string. Every
+// problem is returned at once, each naming the input and the fix. Agent outputs (§5.2) use the
+// same coercion (`coerceTypedValue`).
 
 import type { WorkflowEdge, WorkflowInputDecl, WorkflowNode, WorkflowNodeOf } from "@orquester/config";
 
@@ -21,8 +22,11 @@ export interface WorkflowTypedValueSpec {
 
 export type WorkflowCoercion = { ok: true; value: unknown } | { ok: false; expected: string };
 
-/** A JSON number as text: digits with an optional sign, fraction and exponent (no hex, no Infinity). */
-const NUMBER_TEXT = /^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/;
+/**
+ * A plain decimal numeral: an optional leading `-`, digits, an optional `.` and fraction digits —
+ * no `+`, no leading or trailing `.`, no exponent, no hex / binary / octal, no Infinity.
+ */
+const NUMBER_TEXT = /^-?\d+(?:\.\d+)?$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -53,9 +57,9 @@ export function typedValueExpectation(spec: WorkflowTypedValueSpec): string {
 }
 
 /**
- * One value against its type: the value to store, or what was expected. Only "42" → 42 for a
- * number and "true" / "false" for a boolean are coerced; an enum value must be one of `values`
- * exactly; `json` takes any JSON value.
+ * One value against its type: the value to store, or what was expected. Only a plain decimal
+ * numeral (surrounding whitespace ignored: "42", " -1.5 ") for a number and "true" / "false" for a
+ * boolean are coerced; an enum value must be one of `values` exactly; `json` takes any JSON value.
  */
 export function coerceTypedValue(spec: WorkflowTypedValueSpec, raw: unknown): WorkflowCoercion {
   const fail = (): WorkflowCoercion => ({ ok: false, expected: typedValueExpectation(spec) });
@@ -146,8 +150,9 @@ const MAX_UNKNOWN_NAMED = 10;
 
 /**
  * A run's input against its trigger's declared inputs (§4.2). Without declarations the input
- * passes through untouched. With them it must be an object (`null` / absent counts as `{}`);
- * `null` for one key counts as absent.
+ * passes through untouched. With them it must be an object (`null` / absent counts as `{}`).
+ * `null` for an optional input counts as absent (its default applies); for a required one it is a
+ * wrong type, like any other value that does not fit.
  */
 export function validateWorkflowInput(
   inputs: readonly WorkflowInputDecl[] | undefined | null,
@@ -176,7 +181,7 @@ export function validateWorkflowInput(
   const value: Record<string, unknown> = {};
   for (const decl of declared) {
     const given = Object.hasOwn(raw, decl.name) ? raw[decl.name] : undefined;
-    if (given === undefined || given === null) {
+    if (given === undefined || (given === null && decl.required !== true)) {
       if (decl.default !== undefined) {
         const fallback = coerceTypedValue(decl, decl.default);
         if (fallback.ok) value[decl.name] = fallback.value;

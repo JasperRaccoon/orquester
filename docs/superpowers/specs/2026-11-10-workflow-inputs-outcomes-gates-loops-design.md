@@ -98,10 +98,14 @@ inputs?: Array<{
 
 When `inputs` is declared, the run's input must be an object. The daemon:
 
-- applies defaults for absent keys;
+- applies defaults for absent keys; an explicit `null` counts as absent for an optional input and
+  is a wrong type for a required one (with or without a default, also in a test run);
 - rejects a missing required input, a wrong type, an enum value not in `values`, and unknown keys;
-- coerces `"42"` → 42 for numbers and `"true"`/`"false"` for booleans (agents send strings), and
-  nothing else.
+- coerces, and nothing else: for numbers, text that is a plain decimal numeral after trimming
+  surrounding whitespace — an optional leading `-`, digits, an optional `.` followed by digits
+  (`/^-?\d+(\.\d+)?$/`: `"42"` → 42, `"-1.5"` → -1.5; never `+`, a leading or trailing `.`, an
+  exponent, hex/binary/octal or `Infinity`); for booleans, exactly `"true"`/`"false"` (agents send
+  strings). An enum value must match one of `values` exactly.
 
 Errors name the input and the fix, e.g. ``input `env` must be one of: stg, prd``. Every error is
 returned at once, not the first only. The same check runs for the REST run route, MCP `run_workflow`,

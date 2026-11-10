@@ -4,6 +4,7 @@
 // engine and the tool), the validator and the editor.
 
 import { agentOutcomeIds, choiceHandle, gateChoiceIds, outcomeHandle, outputHandles } from "./graph.ts";
+import { coerceTypedValue } from "./inputs.ts";
 import { WORKFLOW_LIMITS, type WorkflowNode, type WorkflowOutcomeDecl, type WorkflowOutputDecl } from "./types.ts";
 
 type NodeLike = Pick<WorkflowNode, "id" | "type"> & { config?: unknown };
@@ -46,33 +47,6 @@ export function outputTypeText(output: Pick<WorkflowOutputDecl, "type" | "values
   if (output.type === "enum") return `one of ${oneOf(output.values ?? [])}`;
   if (output.type === "json") return "any JSON value";
   return `a ${output.type}`;
-}
-
-/**
- * One value against its declared type: numbers and booleans may come as their text (`"42"`,
- * `"true"`/`"false"` — agents send strings), nothing else is coerced (§4.2). `json` takes anything.
- */
-export function coerceOutputValue(output: Pick<WorkflowOutputDecl, "type" | "values">, value: unknown): { ok: true; value: unknown } | { ok: false } {
-  switch (output.type) {
-    case "string":
-      return typeof value === "string" ? { ok: true, value } : { ok: false };
-    case "number": {
-      if (typeof value === "number" && Number.isFinite(value)) return { ok: true, value };
-      if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value.trim()))) return { ok: true, value: Number(value.trim()) };
-      return { ok: false };
-    }
-    case "boolean":
-      if (typeof value === "boolean") return { ok: true, value };
-      if (value === "true") return { ok: true, value: true };
-      if (value === "false") return { ok: true, value: false };
-      return { ok: false };
-    case "enum":
-      return typeof value === "string" && (output.values ?? []).includes(value) ? { ok: true, value } : { ok: false };
-    case "json":
-      return value === undefined ? { ok: false } : { ok: true, value };
-    default:
-      return { ok: false };
-  }
 }
 
 /** A `report_step_result` call's arguments, as the agent sent them. */
@@ -142,7 +116,8 @@ export function checkStepReport(decl: StepReportDecl, args: StepReportArgs): Ste
         if (outputRequired(output)) problems.push(`outputs.${output.name} is required: ${outputTypeText(output)}.`);
         continue;
       }
-      const coerced = coerceOutputValue(output, given[output.name]);
+      // The run inputs' coercion (§4.2): numbers and booleans may come as their text.
+      const coerced = coerceTypedValue(output, given[output.name]);
       if (!coerced.ok) problems.push(`outputs.${output.name} must be ${outputTypeText(output)}.`);
       else outputs[output.name] = coerced.value;
     }

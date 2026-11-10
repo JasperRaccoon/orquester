@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { checkStepReport, coerceOutputValue, passThroughHandle, pinnedHandle, pinnedOutcomeProblem, reportRequired, stepReportDecl, type StepReportDecl } from "./outcomes.ts";
+import { checkStepReport, passThroughHandle, pinnedHandle, pinnedOutcomeProblem, reportRequired, stepReportDecl, type StepReportDecl } from "./outcomes.ts";
 import { testNode } from "./testing.ts";
 
 const decl: StepReportDecl = {
@@ -68,12 +68,23 @@ describe("checkStepReport (spec 2026-11-10 §5.2)", () => {
     assert.ok(!check.ok && check.problems[0]!.startsWith("outputs must be an object with `pr_url`"));
   });
 
-  it("coerces only the documented strings", () => {
-    assert.deepEqual(coerceOutputValue({ type: "number" }, " 3.5 "), { ok: true, value: 3.5 });
-    assert.deepEqual(coerceOutputValue({ type: "number" }, ""), { ok: false });
-    assert.deepEqual(coerceOutputValue({ type: "string" }, 5), { ok: false });
-    assert.deepEqual(coerceOutputValue({ type: "boolean" }, "True"), { ok: false });
-    assert.deepEqual(coerceOutputValue({ type: "json" }, null), { ok: true, value: null });
+  it("coerces outputs exactly as run inputs are coerced (§4.2): plain decimal numerals, true/false", () => {
+    const typed: StepReportDecl = {
+      outputs: [
+        { name: "n", type: "number", required: false },
+        { name: "b", type: "boolean", required: false },
+        { name: "s", type: "string", required: false }
+      ]
+    };
+    const outputsOf = (outputs: Record<string, unknown>) => {
+      const check = checkStepReport(typed, { summary: "x", outputs });
+      return check.ok ? check.report.outputs : null;
+    };
+    assert.deepEqual(outputsOf({ n: " 3.5 ", b: "true", s: "t" }), { n: 3.5, b: true, s: "t" });
+    assert.deepEqual(outputsOf({ n: "-42" }), { n: -42 });
+    for (const bad of ["", "0x1f", "0b11", "0o7", "1e3", "+1", ".5", "1.", "Infinity"]) assert.equal(outputsOf({ n: bad }), null, `rejects ${JSON.stringify(bad)}`);
+    assert.equal(outputsOf({ s: 5 }), null);
+    assert.equal(outputsOf({ b: "True" }), null);
   });
 });
 
