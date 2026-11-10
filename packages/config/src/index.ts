@@ -652,6 +652,11 @@ export function agentChatThreadsDir(baseDir: string): string {
   return joinPath(agentChatDir(baseDir), "threads");
 }
 
+/** Chat uploads made before their thread existed (the agent host's store sweeps them after 24 h). */
+export function agentChatPendingAttachmentsDir(baseDir: string): string {
+  return joinPath(agentChatDir(baseDir), "pending-attachments");
+}
+
 /** One thread's directory. `threadId` equals the session id. */
 export function agentChatThreadDir(baseDir: string, threadId: string): string {
   return joinPath(agentChatThreadsDir(baseDir), threadId);
