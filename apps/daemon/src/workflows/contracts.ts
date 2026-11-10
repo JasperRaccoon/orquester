@@ -548,7 +548,10 @@ export interface GateChange {
 export interface GateServices {
   /** The gate's live record (a copy), or undefined. */
   get(runId: string, gateId: string): WorkflowGateState | undefined;
-  /** Store (or replace) a record, redacted — persisted with the run's next save, published. */
+  /**
+   * Store (or replace) a record, redacted — in memory only: persisted with the caller's next save
+   * (a Gate block's `setWaitingOn`), published. Ignored once the engine is stopping or the run ended.
+   */
   put(runId: string, gate: WorkflowGateState): void;
   /** Resolves on the gate's next change, or null once `signal` aborts. */
   nextChange(runId: string, gateId: string, signal: AbortSignal): Promise<GateChange | null>;

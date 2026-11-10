@@ -12,7 +12,7 @@ import { agentChatCommandPath, agentChatRoutes, type CallerPrincipal } from "@or
 
 import { chatSummary, snapshot } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
-import type { NodeExecutionContext, NodeExecutorRegistry, NodeResult, WorkflowNotifier } from "./contracts.ts";
+import type { NodeExecutionContext, NodeExecutorRegistry, NodeResult, PersistedRun, WorkflowNotifier } from "./contracts.ts";
 import { GateRefusal } from "./gates/state.ts";
 import { createGateExecutor } from "./nodes/gate.ts";
 import {
@@ -321,6 +321,146 @@ describe("gate: the person decides", () => {
     assert.equal(run.pendingGates, undefined);
     await refusal(h.engine.decideGate!(runId!, gate.gateId, { choice: "approve" }, USER), "RUN_NOT_ACTIVE");
     assert.ok(h.eventsOf("workflowRun.updated").some((payload) => (payload.gates as WorkflowGateState[] | undefined)?.some((g) => g.cancelled === true)));
+  });
+});
+
+/** Waiting Gate-block gates no block (nor a loop's interrupted pass) waits on. */
+function orphanGates(run: PersistedRun): string[] {
+  const referenced = new Set<string>();
+  for (const block of Object.values(run.blocks)) {
+    if (block.waitingOn?.kind === "gate") referenced.add(block.waitingOn.gateId);
+    for (const pass of block.passes ?? []) if (pass.interruptedFrom?.kind === "gate") referenced.add(pass.interruptedFrom.gateId);
+  }
+  return Object.values(run.gates ?? {})
+    .filter((gate) => gate.source === "gate" && gate.decision === undefined && gate.cancelled !== true && gate.expired !== true && !referenced.has(gate.gateId))
+    .map((gate) => gate.gateId);
+}
+
+describe("gate: the record and its wait reach disk together", () => {
+  /** Every snapshot the engine writes. */
+  class RecordingRunStore extends InMemoryRunStore {
+    readonly saves: PersistedRun[] = [];
+    held: Promise<void> | null = null;
+    release: () => void = () => undefined;
+    hold(): void {
+      this.held = new Promise((resolve) => {
+        this.release = () => {
+          this.held = null;
+          resolve();
+        };
+      });
+    }
+    override async save(run: PersistedRun): Promise<void> {
+      this.saves.push(structuredClone(run));
+      if (this.held) await this.held;
+      return super.save(run);
+    }
+  }
+
+  /** `currentBranch` can be held (the await before an executor starts). */
+  class HeldBranchProjects extends FakeProjects {
+    holding = false;
+    private releases: (() => void)[] = [];
+    override async currentBranch(): Promise<string | undefined> {
+      if (this.holding) await new Promise<void>((resolve) => this.releases.push(resolve));
+      return this.branch;
+    }
+    releaseBranch(): void {
+      this.holding = false;
+      for (const release of this.releases.splice(0)) release();
+    }
+  }
+
+  /** T → C → G: C arms the hold, so G's executor starts once every earlier save has landed. */
+  function heldFlow(projects: HeldBranchProjects): { flow: Workflow; code: ReturnType<typeof scripted<"code">> } {
+    const flow = workflow(
+      "w1",
+      [T(), node("C", "code"), node("G", "gate", { question: "Ship?" }), node("Yes", "code"), node("No", "code")],
+      [edge("T", "C"), edge("C", "G"), edge("G", "Yes", "choice:approve"), edge("G", "No", "choice:reject")]
+    );
+    const code = scripted("code", {
+      C: () => {
+        projects.holding = true;
+        return { status: "succeeded", output: 1 };
+      }
+    });
+    return { flow, code };
+  }
+
+  test("no save holds a waiting gate its block does not wait on", async () => {
+    const projects = new HeldBranchProjects();
+    const { flow, code } = heldFlow(projects);
+    const e = env([flow]);
+    const runStore = new RecordingRunStore();
+    e.shared.runStore = runStore;
+    e.shared.projects = projects;
+    const h = e.boot({ executors: { code } });
+    const { runId } = await h.engine.run("w1", {});
+    await flush();
+    assert.equal((await h.engine.getRun(runId!))!.blocks.G!.status, "running", "G waits on currentBranch");
+    projects.releaseBranch();
+    await flush();
+    assert.ok(runStore.saves.some((run) => Object.keys(run.gates ?? {}).length > 0), "the gate was saved");
+    for (const run of runStore.saves) assert.deepEqual(orphanGates(run), [], "a gate record never reaches disk before its WaitingOn");
+    await h.engine.cancel(runId!);
+  });
+
+  test("a stop while a gate block starts leaves no orphan gate: the restarted engine asks once", async () => {
+    const projects = new HeldBranchProjects();
+    const { flow, code } = heldFlow(projects);
+    const e = env([flow]);
+    const runStore = new RecordingRunStore();
+    e.shared.runStore = runStore;
+    e.shared.projects = projects;
+    const first = e.boot({ executors: { code } });
+    const { runId } = await first.engine.run("w1", {});
+    await flush();
+    assert.equal((await first.engine.getRun(runId!))!.blocks.G!.status, "running", "G waits on currentBranch");
+    // The stop's last save is in flight while G's executor goes on to open its gate.
+    runStore.hold();
+    const stopping = first.engine.stop();
+    await flush();
+    projects.releaseBranch();
+    await flush();
+    runStore.release();
+    await stopping;
+    assert.deepEqual(orphanGates((await runStore.load(runId!))!), [], "no gate record without its wait on disk");
+
+    const second = e.boot();
+    await second.engine.resume();
+    await flush();
+    const gates = await gatesOf(second, runId!);
+    assert.equal(gates.filter((gate) => gate.decision === undefined && gate.cancelled !== true).length, 1, "one gate asks");
+    await e.shared.clock.advance(1_000);
+    assert.equal((await second.engine.getRun(runId!))!.pendingGates, 1);
+    await second.engine.cancel(runId!);
+  });
+
+  test("a waiting gate on disk no block waits on (an older daemon's crash) is cancelled on resume", async () => {
+    const e = env([gateFlow()]);
+    const first = e.boot();
+    const { runId } = await first.engine.run("w1", { input: { v: "1" } });
+    await flush();
+    const real = await onlyGate(first, runId!);
+    await first.engine.stop();
+    const stored = (await e.shared.runStore.load(runId!))!;
+    stored.gates!["orphan"] = { ...structuredClone(real), gateId: "orphan" };
+    stored.pendingGates = 2;
+    stored.pendingPersonGates = 2;
+    await e.shared.runStore.save(stored);
+
+    const code = scripted("code");
+    const second = e.boot({ executors: { code } });
+    await second.engine.resume();
+    await flush();
+    const run = (await second.engine.getRun(runId!))!;
+    assert.equal(run.gates!["orphan"]!.cancelled, true, "the orphan is cancelled");
+    assert.equal(run.pendingGates, 1);
+    assert.equal(run.pendingPersonGates, 1);
+    await refusal(second.engine.decideGate!(runId!, "orphan", { choice: "reject" }, USER), "RUN_NOT_ACTIVE");
+    await second.engine.decideGate!(runId!, real.gateId, { choice: "approve" }, USER);
+    assert.equal((await second.engine.waitForRun(runId!)).status, "succeeded");
+    assert.deepEqual(code.seen, ["Yes"]);
   });
 });
 

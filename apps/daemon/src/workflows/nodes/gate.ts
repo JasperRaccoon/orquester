@@ -200,9 +200,12 @@ class GateRun {
     if (root !== ctx.runId) gate.rootRunId = root;
     this.gateId = gateId;
     host.put(ctx.runId, gate);
-    ctx.update({ gateId, ...(warnings.length > 0 ? { warnings } : {}) });
-    // The record and the wait reach disk together, before anybody is told.
+    // Not stored: the engine is stopping (nothing more is recorded; the block re-runs after the restart).
+    if (!host.get(ctx.runId, gateId)) throw new EngineStoppedError();
+    // The record and the wait reach disk together, before anybody is told (an update first would
+    // save the record alone).
     await ctx.setWaitingOn(waitingOnFor(gate, this.extras));
+    ctx.update({ gateId, ...(warnings.length > 0 ? { warnings } : {}) });
   }
 
   /** The launcher chat's label, or null when it is gone. Unreadable: asked anyway (a closed chat escalates). */

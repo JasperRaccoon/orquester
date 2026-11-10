@@ -46,8 +46,11 @@ export interface GateRunAccess {
   redact<T>(value: T): T;
   /** Persist the run (coalesced); resolves once the state asked for is written. */
   save(): Promise<void>;
-  /** A gate (or, without an id, only the run's summary) changed: publish it. */
-  touched(gateId?: string): void;
+  /**
+   * A gate (or, without an id, only the run's summary) changed: publish it, and persist it unless
+   * `persist` is false (the caller's own next save writes it).
+   */
+  touched(gateId?: string, persist?: boolean): void;
   parent(): GateRunAccess | null;
   children(): GateRunAccess[];
 }
@@ -146,7 +149,7 @@ export function createGateHost(deps: GateHostDeps): GateHost {
     block.waitingOn = waitingOnFor(gate, extrasOf(block.waitingOn));
   };
 
-  const refreshCounts = (a: GateRunAccess): void => {
+  const refreshCounts = (a: GateRunAccess, persist = true): void => {
     const own = ownGateCounts(a.run.gates);
     let pending = own.pending;
     let person = own.person;
@@ -159,15 +162,16 @@ export function createGateHost(deps: GateHostDeps): GateHost {
     else delete a.run.pendingGates;
     if (person > 0) a.run.pendingPersonGates = person;
     else delete a.run.pendingPersonGates;
-    a.touched();
+    a.touched(undefined, persist);
+    // A parent's counts are its own record: always saved (its child's record is the child's save).
     const parent = a.parent();
     if (parent) refreshCounts(parent);
   };
 
-  const changed = (a: GateRunAccess, gate: WorkflowGateState): void => {
+  const changed = (a: GateRunAccess, gate: WorkflowGateState, persist = true): void => {
     syncWaitingOn(a, gate);
-    a.touched(gate.gateId);
-    refreshCounts(a);
+    a.touched(gate.gateId, persist);
+    refreshCounts(a, persist);
   };
 
   const rootOf = (a: GateRunAccess): GateRunAccess => {
@@ -308,11 +312,14 @@ export function createGateHost(deps: GateHostDeps): GateHost {
 
     put(runId, gate) {
       const a = deps.access(runId);
-      if (!a || !a.alive()) return;
+      // A stopping engine's last saves must not write a record whose wait can no longer be recorded.
+      if (!a || !a.alive() || deps.stopped()) return;
       a.run.gates ??= Object.create(null) as Record<string, WorkflowGateState>;
       const kept = a.redact(structuredClone(gate));
       a.run.gates[gate.gateId] = kept;
-      changed(a, kept);
+      // Memory only: the caller's next save writes it (a Gate block's WaitingOn, a person gate's
+      // own save) — a record never reaches disk before the wait that names it.
+      changed(a, kept, false);
     },
 
     nextChange,
