@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { tmpdir } from "node:os";
 import type { Readable } from "node:stream";
 import { agentChatThreadAttachmentsDir, appTmpDir } from "@orquester/config";
-import type { BoxSummary, DeviceActionInput, DeviceLeaseSummary, DevicePlatform, EventMessage } from "@orquester/api";
+import { desktopRoutes, type BoxSummary, type DesktopActionRequest, type DesktopActionResponse, type DeviceActionInput, type DeviceLeaseSummary, type DevicePlatform, type EventMessage } from "@orquester/api";
 import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal, type HtmlRenderAppearance, type HtmlRenderReference } from "@orquester/api/agent-chat";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
@@ -30,6 +30,8 @@ import {
   type DeviceToolOpenResult,
   type DeviceToolsPort
 } from "../devices/tools-port.ts";
+// Desktops: desktop_action's operation (desktop agents spec 2026-11-10 §2.5) and its refusals.
+import { DesktopError } from "../desktops/errors.ts";
 // GPT Image: generate_image's operation (GPT Image design 2026-11-10 §6), types and the outcome adapter.
 import { runGptImageTool, type GptImageCallOptions, type GptImageToolInput, type GptImageToolPort, type GptImageToolResult } from "../gpt-image/tool-port.ts";
 
@@ -79,6 +81,17 @@ export type { HtmlPreview };
 export interface DaemonBoxCallOptions {
   principal?: CallerPrincipal;
   signal?: AbortSignal;
+}
+
+/** `desktop_action`'s options: who acts (forced by `withPrincipal`, as for `request`) and the call's abort. */
+export interface DaemonDesktopCallOptions {
+  principal?: CallerPrincipal;
+  signal?: AbortSignal;
+}
+
+/** What `desktopAction` runs an action on (the desktop manager). */
+export interface DesktopActionPort {
+  runAction(desktopId: string, request: unknown, signal?: AbortSignal): Promise<DesktopActionResponse>;
 }
 
 /** A box a chat's account reaches, and whether it has an account already (`boxUsesAccount`, what `token.get` answers by). */
@@ -167,6 +180,12 @@ export interface DaemonApi {
   /** Release one of the chat's devices. */
   deviceClose?(input: DeviceToolCloseInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<{ lease: DeviceLeaseSummary }>>;
 
+  // Desktops (desktop agents spec 2026-11-10 §2.5): one desktop_action, answered as its route
+  // (`desktopRoutes.actions`) answers, but abortable: the call going away ends a wait and stops a
+  // long type or drag. Optional so the many test doubles of this seam need not grow it; the tool
+  // posts to the route (not abortable) without it.
+  desktopAction?(desktopId: string, request: DesktopActionRequest, opts?: DaemonDesktopCallOptions): Promise<DaemonResponse>;
+
   // GPT Image (GPT Image design 2026-11-10 §6): one generation for an agent principal's chat.
   // Optional like the device operations; generate_image answers GPT_IMAGE_DISABLED without it.
   /** Generate or edit one image with the plugin's ChatGPT account; writes the project copy when asked. */
@@ -229,6 +248,8 @@ export class InjectDaemonApi implements DaemonApi {
       devices?: () => DeviceToolsPort | null;
       // GPT Image: the image service (null while the plugin is off; absent: not wired here).
       gptImage?: () => GptImageToolPort | null;
+      // Desktops: the desktop manager behind desktop_action (absent: the action route, not abortable).
+      desktops?: () => DesktopActionPort;
     }
   ) {}
 
@@ -420,6 +441,22 @@ export class InjectDaemonApi implements DaemonApi {
     return runDeviceTool(this.devices(), opts, (port, threadId) => port.toolClose(threadId, input));
   }
 
+  /**
+   * The action route's own handler (`desktopRoutes.actions`: the manager's `runAction`, which
+   * validates the body) with the call's signal, its refusals as that route sends them. Through the
+   * route when no manager is wired here.
+   */
+  async desktopAction(desktopId: string, request: DesktopActionRequest, opts?: DaemonDesktopCallOptions): Promise<DaemonResponse> {
+    const desktops = this.opts.desktops?.();
+    if (!desktops) return this.request("POST", desktopRoutes.actions(desktopId), { body: request, ...(opts?.principal ? { principal: opts.principal } : {}) });
+    try {
+      return { status: 200, body: await desktops.runAction(desktopId, request, opts?.signal) };
+    } catch (error) {
+      if (error instanceof DesktopError) return { status: error.status, body: { code: error.code, message: error.message } };
+      return { status: 500, body: { code: "DESKTOP_ERROR", message: error instanceof Error ? error.message : "Desktop operation failed." } };
+    }
+  }
+
   // GPT Image: acts for the principal's chat (`runGptImageTool`).
   generateImage(input: GptImageToolInput, opts?: GptImageCallOptions): Promise<DaemonOutcome<GptImageToolResult>> {
     return runGptImageTool(this.opts.gptImage?.() ?? null, input, opts);
@@ -469,6 +506,10 @@ export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): Daemo
       : {}),
     ...(api.deviceInstall ? { deviceInstall: (input: DeviceToolInstallInput, opts?: DeviceCallOptions) => api.deviceInstall!(input, { ...opts, principal }) } : {}),
     ...(api.deviceClose ? { deviceClose: (input: DeviceToolCloseInput, opts?: DeviceCallOptions) => api.deviceClose!(input, { ...opts, principal }) } : {}),
+    // Desktops: the action acts for the bound principal too.
+    ...(api.desktopAction
+      ? { desktopAction: (desktopId: string, request: DesktopActionRequest, opts?: DaemonDesktopCallOptions) => api.desktopAction!(desktopId, request, { ...opts, principal }) }
+      : {}),
     // GPT Image: the generation acts for the bound principal's chat too.
     ...(api.generateImage ? { generateImage: (input: GptImageToolInput, opts?: GptImageCallOptions) => api.generateImage!(input, { ...opts, principal }) } : {}),
     get fsRoot() { return api.fsRoot; },

@@ -1817,7 +1817,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Devices: the device MCP tools' operations (null while the plugin is off).
     devices: () => devices.service(),
     // GPT Image: generate_image's operation (it refuses while the plugin is off).
-    gptImage: () => gptImage
+    gptImage: () => gptImage,
+    // Desktops: desktop_action, abortable by the call.
+    desktops: () => desktops
   });
 
   lineage.attachApi(services.internalApi);
@@ -5558,7 +5560,9 @@ export function createServer(
           fsRoot: resolved.fsRoot,
           workspacesDir: resolved.workspacesDir,
           // boxes: read_file / directory reads of box projects go to the box.
-          boxRegistry: () => services.boxRegistry
+          boxRegistry: () => services.boxRegistry,
+          // Desktops: desktop_action, abortable by the call (the /mcp request is authenticated already).
+          desktops: () => services.desktops
         }),
       credentialId: () => externalCredentialId(config.transports.http.username)
     });

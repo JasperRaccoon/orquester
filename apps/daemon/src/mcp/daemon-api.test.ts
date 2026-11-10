@@ -10,6 +10,7 @@ import { HostUnavailableError } from "../agent-chat/host-client.ts";
 import { HtmlRenderPublishError } from "../agent-chat/html-render-publish.ts";
 import { HtmlPreviewError } from "../html-preview/index.ts";
 import { Broadcaster } from "../broadcaster.ts";
+import { DesktopError } from "../desktops/errors.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
 import { uploadInlineAttachments } from "./attachments.ts";
 import { InjectDaemonApi, withPrincipal } from "./daemon-api.ts";
@@ -224,4 +225,27 @@ test("boxesOfChat: a chat's project box and the temporary boxes it owns, gone on
   // No session source: nothing is in use, so a card opens.
   const blind = new InjectDaemonApi({ app: Fastify(), authorization: undefined, agentChat: null, broadcaster: new Broadcaster(), fsRoot: "/r", workspacesDir: "/r", boxRegistry: () => registry as never });
   assert.equal(blind.boxesOfChat({ projectPath: "/w/boxed" })[0]!.usesAccount("in-use"), false);
+});
+
+test("desktopAction runs the action with the call's signal and answers a refusal as the action route does", async () => {
+  let given: AbortSignal | undefined;
+  const api = new InjectDaemonApi({
+    app: Fastify(),
+    authorization: undefined,
+    agentChat: null,
+    broadcaster: new Broadcaster(),
+    fsRoot: "/r",
+    workspacesDir: "/r",
+    desktops: () => ({
+      runAction: async (_desktopId, _request, signal) => {
+        given = signal;
+        throw new DesktopError(409, "DESKTOP_CONTROLLED_BY_USER", "The user has control of this desktop.");
+      }
+    })
+  });
+  const call = new AbortController();
+  const bound = withPrincipal(api, { kind: "external" });
+  const answer = await bound.desktopAction!("dt-1", { action: "type", text: "hi", actor: { kind: "external", label: "MCP client" } }, { signal: call.signal });
+  assert.deepEqual(answer, { status: 409, body: { code: "DESKTOP_CONTROLLED_BY_USER", message: "The user has control of this desktop." } });
+  assert.equal(given, call.signal);
 });
