@@ -110,6 +110,9 @@ export function blockTimeoutMs(node: WorkflowNode): number {
       return WORKFLOW_LIMITS.waitMaxMinutes * MINUTE;
     case "workflow":
       return nodeMinutes !== undefined ? nodeMinutes * MINUTE : Number.POSITIVE_INFINITY;
+    case "gate":
+      // Exempt from the 5-minute default (spec 2026-11-10 §6.1): its phases carry their own deadlines.
+      return Number.POSITIVE_INFINITY;
     default:
       return (nodeMinutes ?? 5) * MINUTE;
   }
@@ -238,6 +241,11 @@ export function toRunSummary(run: PersistedRun): WorkflowRunSummary {
   if (run.tempProject !== undefined) summary.tempProject = structuredClone(run.tempProject);
   if (run.parentRunId !== undefined) summary.parentRunId = run.parentRunId;
   if (run.retryOf !== undefined) summary.retryOf = run.retryOf;
+  // gates (spec 2026-11-10 §6.2, §6.4)
+  if (typeof run.pendingGates === "number" && run.pendingGates > 0) summary.pendingGates = run.pendingGates;
+  if (typeof run.pendingPersonGates === "number" && run.pendingPersonGates > 0) summary.pendingPersonGates = run.pendingPersonGates;
+  if (run.parked === true) summary.parked = true;
+  if (typeof run.skipDetail === "string") summary.skipDetail = run.skipDetail;
   return summary;
 }
 
@@ -259,6 +267,11 @@ export function publicRun(run: PersistedRun): WorkflowRun {
     deadEdges: [...run.deadEdges]
   };
   if (run.finalOutput !== undefined) out.finalOutput = structuredClone(run.finalOutput);
+  // gates (spec 2026-11-10 §6)
+  if (run.startedBy !== undefined) out.startedBy = structuredClone(run.startedBy);
+  if (run.gates !== undefined) out.gates = structuredClone(run.gates);
+  if (run.parkedMs !== undefined) out.parkedMs = run.parkedMs;
+  if (run.parkedSince !== undefined) out.parkedSince = run.parkedSince;
   const revisions = subWorkflowRevisionsOf(run);
   if (revisions !== undefined) out.subWorkflowRevisions = revisions;
   return out;

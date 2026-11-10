@@ -28,8 +28,8 @@ export function createNodeExecutors(options: NodeExecutorsOptions = {}): NodeExe
     merge: createMergeExecutor(),
     stop: createStopExecutor(),
     wait: createWaitExecutor(),
-    // Placeholder (nodes/gate.ts): replaced by the gate executor.
-    gate: createGateExecutor(),
+    // The reviewer agent decider runs on the agent block's executor.
+    gate: createGateExecutor(options.agent ? { agent: options.agent } : {}),
     workflow: createSubWorkflowExecutor()
   };
   if (options.agent) registry.agent = options.agent;

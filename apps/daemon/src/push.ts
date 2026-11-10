@@ -343,6 +343,19 @@ export class PushService {
     }
   }
 
+  /**
+   * A workflow gate waiting for the person (spec 2026-11-10 §6.4). The engine sends it once per
+   * person phase; this only delivers. `workflowId`/`runId`/`gateId` ride the payload for the deep
+   * link (the run, with the gate selected). Never throws.
+   */
+  async notifyWorkflowGate(payload: { title: string; body: string; tag: string; workflowId: string; runId: string; gateId: string }): Promise<void> {
+    try {
+      await this.send({ kind: "workflow", ...payload });
+    } catch (error) {
+      this.logger.error("workflow gate push failed", error);
+    }
+  }
+
   /** Send a fixed test payload to every subscription; returns the count delivered. */
   async sendTest(): Promise<number> {
     const payload = JSON.stringify({

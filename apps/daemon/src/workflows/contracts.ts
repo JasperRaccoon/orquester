@@ -12,8 +12,14 @@ import type {
   Workflow,
   WorkflowBlockError,
   WorkflowBlockRun,
+  DecideWorkflowGateRequest,
+  DecideWorkflowGateResponse,
+  ListWorkflowGatesResponse,
+  WorkflowGateDecision,
   WorkflowGateDeciderKind,
   WorkflowGatePhase,
+  WorkflowGateState,
+  WorkflowRunStartedBy,
   WorkflowNode,
   WorkflowNodeType,
   WorkflowRun,
@@ -22,6 +28,7 @@ import type {
   WorkflowSummary,
   WorkflowTriggerPayload
 } from "@orquester/api";
+import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import type { AccountCooldown } from "@orquester/config";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 
@@ -124,6 +131,13 @@ export type WaitingOn =
       escalatedAt?: string;
       /** The decider agent's resume state (agent decider; same vocabulary as the agent block's). */
       agent?: Omit<Extract<WaitingOn, { kind: "agent" }>, "kind">;
+      /** Reminders the reviewer agent got after a turn that settled without a decision (at most one). */
+      reminders?: number;
+      /**
+       * The launcher's queued message: its command id is minted and persisted BEFORE the first post
+       * (the host's receipt dedupes a re-post after a restart); `delivered` once the chat took it.
+       */
+      launcher?: { commandId: string; delivered?: true };
     };
 
 export interface PersistedBlockState extends WorkflowBlockRun {
@@ -167,6 +181,11 @@ export interface PersistedRun extends Omit<WorkflowRun, "blocks"> {
    * from parent run, block and attempt). Absent on a child recorded by an older build.
    */
   parentAttempt?: number;
+  /**
+   * Gates whose person-phase push went out, by gate id → that phase's start (spec 2026-11-10 §6.4):
+   * a restart never pushes the same phase twice. Engine bookkeeping, never on the wire.
+   */
+  gateNotices?: Record<string, string>;
 }
 
 export interface RunStore {
@@ -210,9 +229,23 @@ export interface FireRequest {
   text?: string;
 }
 
+/** Who asks for a run, as the DAEMON knows it (the route's principal) — never a request field. */
+export interface RunCaller {
+  /** Absent: `{kind: "human"}`. */
+  startedBy?: WorkflowRunStartedBy;
+}
+
 export interface WorkflowEngine {
   /** Manual / test / retry runs (routes, MCP). Applies the overlap policy unless `force`. */
-  run(workflowId: string, request: RunWorkflowRequest): Promise<RunWorkflowResponse>;
+  run(workflowId: string, request: RunWorkflowRequest, caller?: RunCaller): Promise<RunWorkflowResponse>;
+  /**
+   * Decide (or, for an agent decider, escalate) a waiting gate (spec 2026-11-10 §6.2, §6.3): the
+   * first decision wins and is persisted before the run moves on. `principal` is the route's —
+   * who decides is the daemon's record, never an argument.
+   */
+  decideGate?(runId: string, gateId: string, request: DecideWorkflowGateRequest, principal: CallerPrincipal): Promise<DecideWorkflowGateResponse>;
+  /** Gates across runs: waiting ones (active runs), and with `includeDecided` the retained runs' too. */
+  listGates?(query: { projectPath?: string; includeDecided?: boolean }): Promise<ListWorkflowGatesResponse>;
   /** Test one block (upstream from pins, else the last run). */
   testNode(workflowId: string, nodeId: string): Promise<RunWorkflowResponse>;
   cancel(runId: string): Promise<boolean>;
@@ -427,6 +460,46 @@ export interface ProjectOps {
 
 export interface WorkflowNotifier {
   runFinished(run: WorkflowRunSummary, workflow: Workflow): void;
+  /** A gate now waits for the person (decider human, or escalated; never a test run's): its push. */
+  gateWaiting?(gate: WorkflowGateState, workflow: Workflow): void;
+}
+
+// ---------------------------------------------------------------------------
+// Gates (spec 2026-11-10 §6; gates/host.ts implements this for the gate executor)
+// ---------------------------------------------------------------------------
+
+/** What changed a waiting gate. `byDecider`: the assigned agent decider did it itself. */
+export interface GateChange {
+  kind: "decided" | "escalated" | "expired" | "cancelled";
+  byDecider: boolean;
+}
+
+/** The engine's gate records as the gate executor (nodes/gate.ts) reads and changes them. */
+export interface GateServices {
+  /** The gate's live record (a copy), or undefined. */
+  get(runId: string, gateId: string): WorkflowGateState | undefined;
+  /** Store (or replace) a record, redacted — persisted with the run's next save, published. */
+  put(runId: string, gate: WorkflowGateState): void;
+  /** Resolves on the gate's next change, or null once `signal` aborts. */
+  nextChange(runId: string, gateId: string, signal: AbortSignal): Promise<GateChange | null>;
+  /** Hand the gate to the person (persisted; the block's WaitingOn follows); null when it no longer waits. */
+  escalate(runId: string, gateId: string, reason: string, opts: { byDecider: boolean }): Promise<WorkflowGateState | null>;
+  /** Persist a decision (first wins). */
+  decide(runId: string, gateId: string, decision: WorkflowGateDecision, opts: { byDecider: boolean }): Promise<{ decision: WorkflowGateDecision; alreadyDecided: boolean }>;
+  /** The person phase passed: `timeout.then` (a choice, decided by "timeout") or expired. Persisted. */
+  expire(runId: string, gateId: string, then: { kind: "choice"; choice: string } | { kind: "fail" }): Promise<WorkflowGateState | null>;
+  /** Mark it cancelled (its run is ending). */
+  cancel(runId: string, gateId: string): void;
+  /** Push to the person once per person phase (none for a test run's gate); after the gate is on disk. */
+  notifyPerson(runId: string, gateId: string): Promise<void>;
+  /** The top-level run's `startedBy` (a child run asks its top-level run's launcher). */
+  startedBy(runId: string): WorkflowRunStartedBy | undefined;
+  /** The top-level run's id (the run itself at depth 0). */
+  rootRunId(runId: string): string;
+  /** A test run (its gates are answered by the person in the editor only, §7.5). */
+  isTest(runId: string): boolean;
+  /** The top-level run's workflow name (a sub-workflow's gate names it to the launcher). */
+  rootWorkflowName(runId: string): string | undefined;
 }
 
 /** Renders saved-prompt `{variables}` daemon-side (packages/api prompt-variables + GitService). */
@@ -465,5 +538,7 @@ export interface EngineServices {
   runChild(input: { workflowId: string; input: unknown; parentRunId: string; parentNodeId: string; depth: number; signal: AbortSignal; attempt?: number; untrusted?: boolean }): Promise<{ runId: string; wait: Promise<WorkflowRunSummary & { finalOutput?: unknown }> }>;
   /** Re-attach to a child run after a restart. */
   awaitRun(runId: string, signal: AbortSignal): Promise<WorkflowRunSummary & { finalOutput?: unknown }>;
+  /** The run's gates (the engine's; absent in hand-built test contexts). */
+  gates?: GateServices;
   logger: WorkflowLogger;
 }

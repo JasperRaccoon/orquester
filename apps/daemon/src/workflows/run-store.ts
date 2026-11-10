@@ -63,7 +63,7 @@ function previewOutput(output: unknown): { output: unknown; truncated: boolean }
  * `waitingOn` and `outputFile`) is dropped and every block output is cut to the inline preview.
  */
 export function persistedRunToWire(run: PersistedRun): WorkflowRun {
-  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, subWorkflows: _frozen, parentAttempt: _attempt, blocks, ...rest } = run;
+  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, subWorkflows: _frozen, parentAttempt: _attempt, gateNotices: _notices, blocks, ...rest } = run;
   const wireBlocks: Record<string, WorkflowBlockRun> = {};
   for (const [nodeId, block] of Object.entries(blocks)) {
     const { waitingOn: _waitingOn, outputFile, ...wire } = block;
