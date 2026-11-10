@@ -1227,6 +1227,8 @@ export interface PushNotificationEvent {
   /** The workflow run to open on click (`kind: "workflow"`). */
   workflowId?: string;
   runId?: string;
+  /** A gate waiting for the person (`kind: "workflow"`, spec 2026-11-10 §6.4): the run opens with this gate selected. */
+  gateId?: string;
 }
 
 // Daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): MCP servers in an agent

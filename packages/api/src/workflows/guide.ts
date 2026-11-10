@@ -408,8 +408,44 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
       ]
     }
   ],
-  // The gate's contract (phases, deciders, timeout, output) is written with the gate executor.
-  gate: [],
+  gate: [
+    {
+      title: "Deciding",
+      items: [
+        {
+          term: "choices",
+          text: `${WORKFLOW_LIMITS.gateChoices.min}–${WORKFLOW_LIMITS.gateChoices.max} \`{ id, label, color?, comment? }\`; each is an output handle \`choice:<id>\` (plus \`error\`). \`comment\`: \`"none"\` (default), \`"optional"\` or \`"required"\` — a required one refuses a decision without a comment.`
+        },
+        {
+          term: "question",
+          text: `A template (at most ${WORKFLOW_LIMITS.gateQuestionChars} characters rendered); \`details\` a Markdown template (at most ${WORKFLOW_LIMITS.gateDetailsBytes / 1024} KB) the decider reads first.`
+        },
+        {
+          term: "decider",
+          text: "`{ kind: \"human\" }` (default): the person decides in Orquester (push, a Needs-you row, a decision card), or with `decide_workflow_gate` from their own MCP client. `{ kind: \"agent\", prompt, chain, profileId?, maxMinutes? }`: a new reviewer chat (same chain, accounts and profile rules as an agent block) gets the prompt plus the question, details and choices, and must call `decide_workflow_gate` with a comment. `{ kind: \"launcher\", maxMinutes? }`: the chat that started the run with `run_workflow` is asked (a queued message; `run_workflow` with `wait` returns at once with the gate); a run started otherwise asks the person."
+        }
+      ]
+    },
+    {
+      title: "Phases and time",
+      items: [
+        {
+          text: `An agent or launcher decider has an agent phase of \`maxMinutes\` (default ${WORKFLOW_LIMITS.gateAgentPhaseDefaultMinutes}). It ends with a decision; anything else — the agent escalates (\`escalate: true\`), fails, is closed, ends its turn twice without deciding (it gets one reminder), or runs out of time — hands the gate to the person (escalated). The person may decide first in either phase; the first decision wins.`
+        },
+        {
+          term: "timeout",
+          text: "`{ minutes, then }` bounds the person phase only, counted from its start (at most 7 days): `then: { kind: \"choice\", choice }` takes that choice (`decidedBy.kind: \"timeout\"`), `{ kind: \"fail\" }` fails the block `gate_expired` (never retried). Without it the person has 7 days, then `gate_expired`. Gates survive restarts, hold no concurrency slot, and time spent waiting on them does not count toward `runTimeoutMinutes`."
+        },
+        {
+          term: "output",
+          text: "`{ choice, comment?, decidedBy: { kind: \"human\"|\"external\"|\"agent\"|\"launcher\"|\"timeout\", label, sessionId? }, decidedAt, escalated }`. Downstream follows `choice:<id>`; the other choices' edges are dead."
+        },
+        {
+          text: "A disabled gate asks nobody and takes its first choice; a pinned gate needs a `choice`. A retry asks every gate again. A test run's gate is answered by the person in the editor only (no push, no agent)."
+        }
+      ]
+    }
+  ],
   workflow: [
     {
       title: "Child run",
