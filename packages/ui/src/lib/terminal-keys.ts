@@ -4,46 +4,23 @@
  * could not be typed at all).
  *
  * A modifier tap arms it for the next key only; a second tap within
- * `DOUBLE_TAP_MS` locks it until it is tapped again. The armed or locked
+ * `LATCH_DOUBLE_TAP_MS` locks it until it is tapped again (the latch machine in
+ * `modifier-latch.ts`, shared with the desktop key bar). The armed or locked
  * modifiers apply to the next key from the key bar (`encodeKey`) or from the
  * on-screen keyboard (`applyLatchedModifiers` on xterm's `onData`), encoded the
  * way xterm itself encodes a real modified key press.
  */
 import React from "react";
+import { LATCH_OFF, consumeLatch, tapLatch, type ModifierLatch } from "./modifier-latch";
 
 const ESC = "\x1b";
 
-export type LatchState = "off" | "armed" | "locked";
+export type { LatchState, ModifierLatch } from "./modifier-latch";
 export type ModifierName = "ctrl" | "alt";
-
-/** One modifier's latch; `armedAt` dates the first tap so a second can lock it. */
-export interface ModifierLatch {
-  state: LatchState;
-  armedAt: number | null;
-}
 
 export interface Modifiers {
   ctrl: boolean;
   alt: boolean;
-}
-
-/** The window in which a second tap locks an armed modifier instead of releasing it. */
-const DOUBLE_TAP_MS = 350;
-
-const LATCH_OFF: ModifierLatch = { state: "off", armedAt: null };
-
-/** off → armed; armed → locked on a quick second tap, else off; locked → off. */
-function tapLatch(latch: ModifierLatch, now: number): ModifierLatch {
-  if (latch.state === "off") return { state: "armed", armedAt: now };
-  if (latch.state === "armed" && latch.armedAt !== null && now - latch.armedAt <= DOUBLE_TAP_MS) {
-    return { state: "locked", armedAt: null };
-  }
-  return LATCH_OFF;
-}
-
-/** After a key went out: a one-shot (armed) modifier is spent, a locked one stays. */
-function consumeLatch(latch: ModifierLatch): ModifierLatch {
-  return latch.state === "armed" ? LATCH_OFF : latch;
 }
 
 export type SpecialKey =
