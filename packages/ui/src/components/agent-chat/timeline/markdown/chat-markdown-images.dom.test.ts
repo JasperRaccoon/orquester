@@ -126,4 +126,14 @@ describe("Markdown images in a chat", () => {
     const path = document.querySelector<HTMLInputElement>('[role="dialog"] input');
     assert.match(path?.value ?? "", /\.jpg$/);
   });
+
+  it("leaves an image inside a link to the link: a click opens no lightbox", async () => {
+    await render("[![shot](/w/ws/app/shot.png)](https://example.com/page)");
+    const image = mount.querySelector("img");
+    assert.ok(image && image.closest("a"), "the image is inside its link");
+    // jsdom does not navigate; keep it from trying.
+    document.addEventListener("click", (event) => event.preventDefault(), { once: true });
+    await act(async () => image.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })));
+    assert.equal(document.querySelector('[role="dialog"]') === null, true, "no lightbox opened");
+  });
 });
