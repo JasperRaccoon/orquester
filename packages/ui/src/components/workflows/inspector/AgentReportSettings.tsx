@@ -9,7 +9,7 @@
  * field.
  */
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
 
 import { WORKFLOW_LIMITS, type AgentBlockConfig, type WorkflowOutcomeDecl, type WorkflowOutputDecl, type WorkflowOutputType } from "@orquester/api";
@@ -49,6 +49,32 @@ function useRowButtonClass(): string | undefined {
   return usePhoneLayout() ? "h-10 w-10" : undefined;
 }
 
+/**
+ * A stable key per row, so a row's drafts follow its entry when entries move or
+ * go (as the inputs and gate choices do). Rows added or removed elsewhere (undo,
+ * another client) keep the first keys and mint the rest.
+ */
+function useRowKeys(count: number): { keys: readonly number[]; move: (index: number, delta: number) => void; remove: (index: number) => void } {
+  const nextKey = useRef(count);
+  const [keys, setKeys] = useState<number[]>(() => Array.from({ length: count }, (_, index) => index));
+  if (keys.length !== count) {
+    const fitted = keys.slice(0, count);
+    while (fitted.length < count) fitted.push((nextKey.current += 1));
+    setKeys(fitted);
+  }
+  return {
+    keys,
+    move: (index, delta) => {
+      const target = index + delta;
+      if (target < 0 || target >= keys.length) return;
+      const moved = [...keys];
+      [moved[index], moved[target]] = [moved[target]!, moved[index]!];
+      setKeys(moved);
+    },
+    remove: (index) => setKeys(keys.filter((_, i) => i !== index))
+  };
+}
+
 /** A name/id field that keeps what is typed while it cannot be applied, and says why. */
 const DraftNameInput: React.FC<{
   value: string;
@@ -79,7 +105,21 @@ const DraftNameInput: React.FC<{
   );
 };
 
-const OutcomeRow: React.FC<{ outcome: WorkflowOutcomeDecl; index: number; count: number; outcomes: readonly WorkflowOutcomeDecl[] }> = ({ outcome, index, count, outcomes }) => {
+type RowMoves = {
+  /** The row moved by `delta` (its key follows it). */
+  onMoved: (delta: -1 | 1) => void;
+  /** The row was removed (its key goes with it). */
+  onRemoved: () => void;
+};
+
+const OutcomeRow: React.FC<{ outcome: WorkflowOutcomeDecl; index: number; count: number; outcomes: readonly WorkflowOutcomeDecl[] } & RowMoves> = ({
+  outcome,
+  index,
+  count,
+  outcomes,
+  onMoved,
+  onRemoved
+}) => {
   const { editor, node, readOnly, workflow } = useInspector();
   const setConfig = useConfigSetter<AgentBlockConfig>();
   const buttonClass = useRowButtonClass();
@@ -110,10 +150,28 @@ const OutcomeRow: React.FC<{ outcome: WorkflowOutcomeDecl; index: number; count:
             onValue={(label) => strip({ label }, "outcome-label")}
             className="min-w-0 flex-1 font-medium"
           />
-          <IconButton size="sm" className={buttonClass} label={`Move outcome ${index + 1} up`} disabled={readOnly || index === 0} onClick={() => editor.change((draft) => moveOutcome(draft, node.id, index, -1), { coalesce: null })}>
+          <IconButton
+            size="sm"
+            className={buttonClass}
+            label={`Move outcome ${index + 1} up`}
+            disabled={readOnly || index === 0}
+            onClick={() => {
+              onMoved(-1);
+              editor.change((draft) => moveOutcome(draft, node.id, index, -1), { coalesce: null });
+            }}
+          >
             <ArrowUp size={12} />
           </IconButton>
-          <IconButton size="sm" className={buttonClass} label={`Move outcome ${index + 1} down`} disabled={readOnly || index === count - 1} onClick={() => editor.change((draft) => moveOutcome(draft, node.id, index, 1), { coalesce: null })}>
+          <IconButton
+            size="sm"
+            className={buttonClass}
+            label={`Move outcome ${index + 1} down`}
+            disabled={readOnly || index === count - 1}
+            onClick={() => {
+              onMoved(1);
+              editor.change((draft) => moveOutcome(draft, node.id, index, 1), { coalesce: null });
+            }}
+          >
             <ArrowDown size={12} />
           </IconButton>
           <IconButton
@@ -122,7 +180,10 @@ const OutcomeRow: React.FC<{ outcome: WorkflowOutcomeDecl; index: number; count:
             tone="danger"
             label={`Remove outcome ${index + 1}${connections > 0 ? ` and its ${connections === 1 ? "connection" : `${connections} connections`}` : ""}`}
             disabled={readOnly || !canRemoveOutcome(outcomes)}
-            onClick={() => editor.change((draft) => removeOutcome(draft, node.id, index), { coalesce: null })}
+            onClick={() => {
+              onRemoved();
+              editor.change((draft) => removeOutcome(draft, node.id, index), { coalesce: null });
+            }}
           >
             <Trash2 size={12} />
           </IconButton>
@@ -164,7 +225,7 @@ const OutcomeRow: React.FC<{ outcome: WorkflowOutcomeDecl; index: number; count:
   );
 };
 
-const OutputRow: React.FC<{ output: WorkflowOutputDecl; index: number; count: number }> = ({ output, index, count }) => {
+const OutputRow: React.FC<{ output: WorkflowOutputDecl; index: number; count: number } & RowMoves> = ({ output, index, count, onMoved, onRemoved }) => {
   const { readOnly } = useInspector();
   const setConfig = useConfigSetter<AgentBlockConfig>();
   const buttonClass = useRowButtonClass();
@@ -186,20 +247,24 @@ const OutputRow: React.FC<{ output: WorkflowOutputDecl; index: number; count: nu
     }, `${key}-${index}`);
     return applied;
   };
-  const move = (delta: -1 | 1): void =>
-    void setConfig((current) => {
+  const move = (delta: -1 | 1): void => {
+    onMoved(delta);
+    setConfig((current) => {
       const all = [...(current.outputs ?? [])];
       const target = index + delta;
       if (target < 0 || target >= all.length) return current;
       [all[index], all[target]] = [all[target]!, all[index]!];
       return { ...current, outputs: all };
     }, `output-move-${index}`);
-  const remove = (): void =>
+  };
+  const remove = (): void => {
+    onRemoved();
     setConfig((current) => {
       const all = (current.outputs ?? []).filter((_, i) => i !== index);
       const { outputs: _outputs, ...rest } = current;
       return all.length > 0 ? { ...current, outputs: all } : (rest as AgentBlockConfig);
     }, `output-remove-${index}`);
+  };
   return (
     <FieldAnchor field={field}>
       <div className="space-y-2 rounded-xl border border-neutral-800 bg-neutral-900/60 p-2.5">
@@ -300,6 +365,8 @@ export const AgentReportSection: React.FC<{ config: AgentBlockConfig }> = ({ con
   const outcomesMessages = useFieldMessages("config.outcomes");
   const outputsMessages = useFieldMessages("config.outputs");
   const hasOutcomes = config.outcomes !== undefined;
+  const outcomeKeys = useRowKeys(outcomes.length);
+  const outputKeys = useRowKeys(outputs.length);
   const addClass = usePhoneLayout() ? "h-10 px-3.5" : undefined;
   return (
     <InspectorSection
@@ -324,7 +391,15 @@ export const AgentReportSection: React.FC<{ config: AgentBlockConfig }> = ({ con
         <FieldAnchor field="config.outcomes" className="space-y-2">
           {outcomesMessages.error ? <p className="text-[11px] leading-4 text-danger">{outcomesMessages.error}</p> : null}
           {outcomes.map((outcome, index) => (
-            <OutcomeRow key={`${index}-${outcomes.length}`} outcome={outcome} index={index} count={outcomes.length} outcomes={outcomes} />
+            <OutcomeRow
+              key={outcomeKeys.keys[index] ?? `extra-${index}`}
+              outcome={outcome}
+              index={index}
+              count={outcomes.length}
+              outcomes={outcomes}
+              onMoved={(delta) => outcomeKeys.move(index, delta)}
+              onRemoved={() => outcomeKeys.remove(index)}
+            />
           ))}
           <SmallButton
             icon={<Plus size={13} />}
@@ -341,7 +416,14 @@ export const AgentReportSection: React.FC<{ config: AgentBlockConfig }> = ({ con
         {outputsMessages.error ? <p className="text-[11px] leading-4 text-danger">{outputsMessages.error}</p> : null}
         {outputs.length === 0 ? <p className="text-[11px] leading-4 text-neutral-500">None. Read them later as nodes.{node.name}.output.outputs.&lt;name&gt;.</p> : null}
         {outputs.map((output, index) => (
-          <OutputRow key={`${index}-${outputs.length}`} output={output} index={index} count={outputs.length} />
+          <OutputRow
+            key={outputKeys.keys[index] ?? `extra-${index}`}
+            output={output}
+            index={index}
+            count={outputs.length}
+            onMoved={(delta) => outputKeys.move(index, delta)}
+            onRemoved={() => outputKeys.remove(index)}
+          />
         ))}
         <SmallButton
           icon={<Plus size={13} />}
