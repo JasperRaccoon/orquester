@@ -32,7 +32,7 @@ export interface DesktopTouchSnapshot {
   transform: ViewTransform;
   /** The view's geometry when the stage was last laid out, or null with no display. */
   geometry: DesktopViewportGeometry | null;
-  /** The gesture layer's pointer in viewport px, or null before it moved one. */
+  /** Where the gesture layer's pointer is (Trackpad: where a tap clicks), in viewport px; null with no display. */
   cursor: Point | null;
   zoomed: boolean;
 }
@@ -123,7 +123,9 @@ export function useDesktopTouch(options: DesktopTouchOptions): DesktopTouchStore
       stage.style.transform = transformCss(transform);
     }
     const prev = store.getSnapshot();
-    const at = geo && cursor ? displayToViewport(geo, transform, cursor) : null;
+    // Before any gesture, Trackpad mode's first click goes to the display's center (the recogniser's default).
+    const pointer = cursor ?? (geo ? { x: Math.floor(geo.display.width / 2), y: Math.floor(geo.display.height / 2) } : null);
+    const at = geo && pointer ? displayToViewport(geo, transform, pointer) : null;
     const next: DesktopTouchSnapshot = { transform, geometry: geo, cursor: at, zoomed: zoom.zoom > 1 };
     const same =
       prev.transform.scale === next.transform.scale &&
@@ -336,7 +338,7 @@ export const DesktopTouchCursor: React.FC<{ store: DesktopTouchStore }> = ({ sto
       width={18}
       height={26}
       viewBox="0 0 18 26"
-      className="pointer-events-none absolute left-0 top-0 z-10 drop-shadow"
+      className="pointer-events-none absolute left-0 top-0 drop-shadow"
       // The arrow's tip is at (1, 1).
       style={{ transform: `translate(${cursor.x - 1}px, ${cursor.y - 1}px)` }}
     >
