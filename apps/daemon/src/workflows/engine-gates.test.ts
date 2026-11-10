@@ -175,7 +175,7 @@ describe("gate: the person decides", () => {
     await refusal(h.engine.decideGate!(runId!, gate.gateId, { escalate: true, comment: "x" }, USER), "INVALID_REQUEST", /agent decider/);
     await refusal(h.engine.decideGate!(runId!, "nope", { choice: "approve" }, USER), "GATE_NOT_FOUND");
     // An in-chat agent is never the decider of a person's gate.
-    await refusal(h.engine.decideGate!(runId!, gate.gateId, { choice: "approve", comment: "ok" }, agentPrincipal("chat-x")), "GATE_NOT_DECIDER", /Only the person/);
+    await refusal(h.engine.decideGate!(runId!, gate.gateId, { choice: "approve", comment: "ok" }, agentPrincipal("chat-x")), "GATE_NOT_DECIDER", /^This chat is not assigned to decide this gate\./);
     const ok = await h.engine.decideGate!(runId!, gate.gateId, { choice: "reject", comment: "broken" }, USER);
     assert.equal(ok.decision?.comment, "broken");
     assert.equal((await h.engine.waitForRun(runId!)).status, "succeeded");
@@ -573,7 +573,7 @@ describe("gate: the launching chat decides", () => {
     const waiting = run.blocks.G!.waitingOn;
     assert.ok(waiting?.kind === "gate" && waiting.launcher?.commandId === turn.commandId, "the command id was persisted");
 
-    await refusal(h.engine.decideGate!(runId!, gate.gateId, { choice: "approve", comment: "ok" }, agentPrincipal("chat-2")), "GATE_NOT_DECIDER", /Only the launching chat “Lead”/);
+    await refusal(h.engine.decideGate!(runId!, gate.gateId, { choice: "approve", comment: "ok" }, agentPrincipal("chat-2")), "GATE_NOT_DECIDER", /^This chat is not assigned to decide this gate\.[^“]*$/);
     await refusal(h.engine.decideGate!(runId!, gate.gateId, { choice: "approve" }, agentPrincipal("chat-1")), "INVALID_REQUEST", /explain/);
     const decided = await h.engine.decideGate!(runId!, gate.gateId, { choice: "approve", comment: "tests pass" }, agentPrincipal("chat-1"));
     assert.deepEqual(decided.decision?.decidedBy, { kind: "launcher", label: "the launching chat “Lead”", sessionId: "chat-1" });

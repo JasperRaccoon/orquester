@@ -135,7 +135,8 @@ describe("e2e: gates over the real routes", () => {
     const intruder = await tool(chat("intruder"), "decide_workflow_gate", { runId, gateId: gate.gateId, choice: "approve", comment: "mine now" });
     assert.equal(intruder.isError, true);
     assert.equal(intruder.result.code, "GATE_NOT_DECIDER");
-    assert.match(String(intruder.result.message), /Only the launching chat “Lead” may decide this gate/);
+    assert.match(String(intruder.result.message), /^This chat is not assigned to decide this gate\./);
+    assert.doesNotMatch(String(intruder.result.message), /Lead/, "never another chat's title");
     // … a planning launcher gets the planning refusal …
     const planning = await tool(chat("lead", { planning: true }), "decide_workflow_gate", { runId, gateId: gate.gateId, choice: "approve", comment: "ok" });
     assert.equal(planning.result.code, "PERMISSION_DENIED");

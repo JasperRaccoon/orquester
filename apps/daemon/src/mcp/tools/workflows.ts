@@ -23,6 +23,7 @@ import {
   TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
   createWorkflowFromRequest,
   EXPRESSION_PREVIEW_LIMITS,
+  GATE_NOT_DECIDER_MESSAGE,
   isGateWaiting,
   isRunActive,
   validateWorkflowInput,
@@ -1726,16 +1727,34 @@ const getWorkflowRuns = defineTool({
 // Gates (spec 2026-11-10 §6.3, §8)
 // ---------------------------------------------------------------------------
 
-/** The gate a decide call names: `gateId`, else the gate block `nodeName`'s (its waiting gate, else its latest). */
-async function gateIdFor(api: DaemonApi, runId: string, gateId: string | undefined, nodeName: string | undefined): Promise<string> {
+/** The route's refusal for a gate the calling chat is not assigned to, word for word. */
+const notThisChatsGate = (): ToolError => workflowError({ status: 403, body: { error: { code: "GATE_NOT_DECIDER", message: GATE_NOT_DECIDER_MESSAGE } } });
+
+/**
+ * The gate a decide call names: `gateId`, else the gate block `nodeName`'s (its waiting gate, else its
+ * latest). A chat's `nodeName` finds only a gate assigned to that chat (the claim names no project, so
+ * no card ever covers reading another run's gates): any other outcome — no such run, block or gate,
+ * or another decider's — is the one not-the-decider refusal, so the call reveals nothing.
+ */
+async function gateIdFor(api: DaemonApi, runId: string, gateId: string | undefined, nodeName: string | undefined, threadId: string | null): Promise<string> {
   if (gateId !== undefined) return gateId;
   if (nodeName === undefined) throw new ToolError("INVALID_ARGUMENT", "Pass gateId (from the message, run_workflow or list_workflow_gates), or nodeName (the gate block's name).");
-  const run = await readRun(api, runId);
+  let run: WorkflowRun;
+  try {
+    run = await readRun(api, runId);
+  } catch (error) {
+    if (threadId !== null && error instanceof ToolError) throw notThisChatsGate();
+    throw error;
+  }
   const gates = Object.values(run.gates ?? {})
     .filter((gate) => gate.nodeName === nodeName || gate.nodeId === nodeName)
+    .filter((gate) => threadId === null || ((gate.decider.kind === "agent" || gate.decider.kind === "launcher") && gate.decider.sessionId === threadId))
     .sort((x, y) => (x.openedAt < y.openedAt ? -1 : 1));
   const pick = gates.filter(isGateWaiting).at(-1) ?? gates.at(-1);
-  if (!pick) throw new ToolError("GATE_NOT_FOUND", `Run ${clipText(runId, MAX_ECHO_CHARS)} has no gate at "${clipText(nodeName, MAX_ECHO_CHARS)}". list_workflow_gates lists the waiting gates.`);
+  if (!pick) {
+    if (threadId !== null) throw notThisChatsGate();
+    throw new ToolError("GATE_NOT_FOUND", `Run ${clipText(runId, MAX_ECHO_CHARS)} has no gate at "${clipText(nodeName, MAX_ECHO_CHARS)}". list_workflow_gates lists the waiting gates.`);
+  }
   return pick.gateId;
 }
 
@@ -1772,7 +1791,7 @@ const decideGate = defineTool({
     const { api } = ctx;
     if (args.escalate !== true && args.choice === undefined) throw new ToolError("INVALID_ARGUMENT", "Pass choice (one of the gate's choice ids), or escalate: true with a comment.");
     if (args.escalate === true && args.choice !== undefined) throw new ToolError("INVALID_ARGUMENT", "Pass either choice or escalate, not both.");
-    const gateId = await gateIdFor(api, args.runId, args.gateId, args.nodeName);
+    const gateId = await gateIdFor(api, args.runId, args.gateId, args.nodeName, ctx.caller.kind === "thread" ? ctx.caller.threadId : null);
     const body = {
       ...(args.choice !== undefined ? { choice: args.choice } : {}),
       ...(args.comment !== undefined ? { comment: args.comment } : {}),

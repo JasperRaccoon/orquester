@@ -575,6 +575,12 @@ export interface WorkflowGateState {
   test?: boolean;
 }
 
+/**
+ * The one refusal a chat gets for a gate it is not assigned to (spec 2026-11-10 §6.3) — the same
+ * whether that gate, its block or its run exists, and never naming its decider (another chat's title).
+ */
+export const GATE_NOT_DECIDER_MESSAGE = "This chat is not assigned to decide this gate. Only the chat the gate asks may decide it; the person decides in Orquester.";
+
 /** Waiting = neither decided, cancelled nor expired. */
 export function isGateWaiting(gate: Pick<WorkflowGateState, "decision" | "cancelled" | "expired">): boolean {
   return gate.decision === undefined && gate.cancelled !== true && gate.expired !== true;
