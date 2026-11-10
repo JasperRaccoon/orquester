@@ -376,11 +376,21 @@ daemon copies the host's voxl binary into the VM through the content-hashed desk
 and installs the runtime libraries with the box GUI installer; when it does not run there (probe:
 `voxl --version`), that VM's desktops use RFB.
 
-R4.9 voxl process lifecycle: started by `desktop-host.sh` after Xvnc is ready when the desktop's
-`video` is `voxl` and a voxl binary is given; it runs in the same process group (torn down with the
-desktop). Readiness is the daemon dialing `/healthz` once voxl's log prints its listen line (watched
-with `fs.watch` on its log file, no polling loop); if voxl exits, the host script does **not** take
-the desktop down — the daemon marks the stream unavailable and viewers fall back to RFB.
+R4.9 voxl process lifecycle: voxl costs CPU whenever the screen changes, viewers or not (0.3–0.6 of a
+core with none on a busy screen), so it runs **on demand**: the first relay viewer of a running `voxl`
+desktop starts it as the `voxl` window of the desktop's tmux service session (`voxl-run.sh`; torn down
+with the session), and it stops 30 s after the last viewer left (a reconnect within that is instant).
+The daemon allocates the port (voxl's `--port 0` logs `:0`); a taken port makes voxl panic and the start
+retries once with another. The relay waits for readiness — voxl's listen line in its log (watched with
+`fs.watch`, no polling loop), then one `/healthz` — before dialing upstream. If voxl fails to start or
+exits on its own, the desktop is not touched: the stream turns `unavailable` with the reason and viewers
+fall back to RFB (the next viewer may try again). `DesktopSummary.voxl.state` stays simple: `ready` =
+viewers may connect (voxl may or may not run right now), `unavailable` = use RFB. A voxl still running
+across a daemon restart is adopted (its port and password are in the desktop dir's 0600 `voxl.env`),
+else stopped. The relay clamps a viewer's `sz,w,h` to the desktop size limits (voxl accepts up to
+32768×32768). Keymap: voxl reads the keymap only at its start and binds onto a fixed list of spare
+keycodes; the automation engine re-reads it on MappingNotify and binds outside voxl's list while it can,
+and there is at most one voxl per desktop.
 
 R4.10 Agent tools are backend-independent: Phase 1 automation is used for both `rfb` and `voxl`
 desktops.
