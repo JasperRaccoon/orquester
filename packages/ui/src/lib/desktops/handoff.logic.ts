@@ -166,7 +166,7 @@ export function inputTakesOver(control: DesktopControl | null | undefined, tookF
 
 /** A DOM input event the view saw, as the implicit takeover weighs it. */
 export interface DesktopViewInput {
-  kind: "pointerdown" | "keydown";
+  kind: "pointerdown" | "wheel" | "keydown";
   /** `PointerEvent.pointerType`. */
   pointerType?: string;
   /** `KeyboardEvent.repeat`. */
@@ -179,8 +179,8 @@ export interface DesktopViewInput {
 
 /**
  * Whether a DOM input reaches the desktop, and so takes control from an agent (R2.2). A hardware
- * key does, unless it repeats or goes to a local control. A mouse or pen press does over the display
- * only. A touch never does here: the gesture layer may keep it local (a pinch, a pan while zoomed),
+ * key does, unless it repeats or goes to a local control. A mouse or pen press, and a wheel, do over
+ * the display only. A touch never does here: the gesture layer may keep it local (a pinch, a pan while zoomed),
  * so a touch takes over through {@link takeoverSink} once a gesture sends something.
  */
 export function viewInputReachesDesktop(input: DesktopViewInput): boolean {

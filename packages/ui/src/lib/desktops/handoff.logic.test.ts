@@ -78,6 +78,8 @@ describe("implicit takeover", () => {
     // A notice's Dismiss, the key bar's Fn or a modifier latch.
     assert.equal(press("mouse", false), false);
     assert.equal(press("mouse", true, true), false);
+    assert.equal(viewInputReachesDesktop({ kind: "wheel", onDisplay: true, local: false }), true);
+    assert.equal(viewInputReachesDesktop({ kind: "wheel", onDisplay: false, local: false }), false);
     assert.equal(viewInputReachesDesktop({ kind: "keydown", onDisplay: false, local: false }), true);
     assert.equal(viewInputReachesDesktop({ kind: "keydown", repeat: true, onDisplay: false, local: false }), false);
 

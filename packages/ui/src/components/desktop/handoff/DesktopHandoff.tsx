@@ -4,9 +4,9 @@
  * - {@link useDesktopHandoff}: the desktop's control state and recent actions, the handoff calls,
  *   and the **implicit takeover** — the user's first pointer or key input in the view while an
  *   agent controls the desktop takes control once (`PUT control {controller: "user"}`) and raises a
- *   toast with **Give back**. Hardware keys and mouse or pen presses over the display are seen in
- *   the capture phase on the view, whatever renders the stream; touch, the key bar and the soft
- *   keyboard take over through `inputReachedDesktop` once they send something (a pinch or a pan
+ *   toast with **Give back**. Hardware keys, and mouse or pen presses and wheels over the display,
+ *   are seen in the capture phase on the view, whatever renders the stream; touch, the key bar and
+ *   the soft keyboard take over through `inputReachedDesktop` once they send something (a pinch or a pan
  *   while zoomed stays local, and so does a key bar's Fn or a modifier latch).
  * - {@link DesktopHandoffControls}: the toolbar's control pill, the Activity popover's button and
  *   the size-lock notice.
@@ -155,7 +155,7 @@ export function useDesktopHandoff(targets: DesktopHandoffTargets, desktop: Deskt
       const target = event.target instanceof Element ? event.target : null;
       const viewport = viewportRef.current;
       const reaches = viewInputReachesDesktop({
-        kind: event.type === "keydown" ? "keydown" : "pointerdown",
+        kind: event.type === "keydown" || event.type === "wheel" ? event.type : "pointerdown",
         pointerType: (event as Partial<PointerEvent>).pointerType,
         repeat: (event as Partial<KeyboardEvent>).repeat,
         onDisplay: target !== null && (target === viewport || stageRef.current?.contains(target) === true),
@@ -164,9 +164,11 @@ export function useDesktopHandoff(targets: DesktopHandoffTargets, desktop: Deskt
       if (reaches) inputReachedDesktop();
     };
     root.addEventListener("pointerdown", onInput, true);
+    root.addEventListener("wheel", onInput, { capture: true, passive: true });
     root.addEventListener("keydown", onInput, true);
     return () => {
       root.removeEventListener("pointerdown", onInput, true);
+      root.removeEventListener("wheel", onInput, true);
       root.removeEventListener("keydown", onInput, true);
     };
   }, [rootRef, viewportRef, stageRef, inputReachedDesktop]);
