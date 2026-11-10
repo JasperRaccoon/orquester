@@ -6,7 +6,9 @@ import type { WorkflowBlockStatus } from "./types.ts";
 import { isTriggerType, type Workflow, type WorkflowEdge, type WorkflowNode } from "./types.ts";
 
 type NodeLike = Pick<WorkflowNode, "id" | "type"> & { config?: unknown };
-type GraphLike = { nodes: readonly NodeLike[]; edges: readonly Pick<WorkflowEdge, "id" | "source" | "sourceHandle" | "target">[] };
+/** An edge as the helpers read it; `loop` marks a loop edge (spec 2026-11-10 §7.1), which every order, readiness and reachability helper leaves out. */
+type EdgeLike = Pick<WorkflowEdge, "id" | "source" | "sourceHandle" | "target"> & { loop?: unknown };
+type GraphLike = { nodes: readonly NodeLike[]; edges: readonly EdgeLike[] };
 
 /** The ids of a config list's entries (`outcomes`, `choices`) that are strings, in order; malformed ones are left out. */
 function declaredIds(list: unknown, key: "id"): string[] {
@@ -114,8 +116,8 @@ export function isLoopEdge(edge: { loop?: unknown }): boolean {
 }
 
 /**
- * The graph without its loop edges: the forward graph every order, readiness and reachability
- * helper is meant to read (§7.1). The helpers here do not apply it yet; callers pass this graph.
+ * The graph without its loop edges: the forward graph (§7.1). Every order, readiness and
+ * reachability helper here already reads only it; this is for callers that walk `edges` themselves.
  */
 export function withoutLoopEdges<G extends { edges: readonly { loop?: unknown }[] }>(graph: G): G {
   if (!graph.edges.some(isLoopEdge)) return graph;
@@ -144,14 +146,18 @@ interface Adjacency {
   inc: Map<string, string[]>;
 }
 
-/** Adjacency over executable nodes; edges naming a missing or note node are ignored. */
+/**
+ * Adjacency over executable nodes, forward edges only: edges naming a missing or note node are
+ * ignored, and so are loop edges — a loop edge is followed only by the engine's loop mechanism,
+ * never by an order, a readiness step or a reachability walk (§7.1).
+ */
 function adjacency(workflow: GraphLike): Adjacency {
   const ids = executableNodes(workflow).map((node) => node.id);
   const index = new Map(ids.map((id, position) => [id, position]));
   const out = new Map<string, string[]>(ids.map((id) => [id, []]));
   const inc = new Map<string, string[]>(ids.map((id) => [id, []]));
   for (const edge of workflow.edges) {
-    if (!index.has(edge.source) || !index.has(edge.target)) continue;
+    if (isLoopEdge(edge) || !index.has(edge.source) || !index.has(edge.target)) continue;
     out.get(edge.source)!.push(edge.target);
     inc.get(edge.target)!.push(edge.source);
   }
@@ -160,7 +166,7 @@ function adjacency(workflow: GraphLike): Adjacency {
 
 /**
  * Executable node ids in a topological order (ties in definition order), or null when the graph has
- * a cycle. Notes are left out.
+ * a cycle. Notes and loop edges are left out.
  */
 export function topologicalOrder(workflow: GraphLike): string[] | null {
   const { ids, index, out, inc } = adjacency(workflow);
@@ -182,7 +188,7 @@ export function topologicalOrder(workflow: GraphLike): string[] | null {
   return order.length === ids.length ? order : null;
 }
 
-/** The node sets of every cycle (strongly connected components of size > 1, and self-loops). */
+/** The node sets of every cycle of the forward graph (strongly connected components of size > 1, and self-loops); loop edges never form one. */
 export function findCycles(workflow: GraphLike): string[][] {
   const { ids, out } = adjacency(workflow);
   // Tarjan, iterative (no recursion depth limit on hostile input).
@@ -250,17 +256,39 @@ function walk(start: string, next: Map<string, string[]>): Set<string> {
   return seen;
 }
 
-/** Every node that can reach `nodeId` (its transitive inputs), excluding itself. */
+/** Every node that can reach `nodeId` through forward edges (its transitive inputs), excluding itself. */
 export function upstreamOf(workflow: GraphLike, nodeId: string): Set<string> {
   return walk(nodeId, adjacency(workflow).inc);
 }
 
-/** Every node `nodeId` can reach, excluding itself. */
+/** Every node `nodeId` can reach through forward edges, excluding itself (a loop's reset set is its target plus these). */
 export function downstreamOf(workflow: GraphLike, nodeId: string): Set<string> {
   return walk(nodeId, adjacency(workflow).out);
 }
 
-/** Nodes reachable from any trigger (triggers included). */
+/**
+ * The loop edge leaving `nodeId` on `handle`, when there is one (a handle with a loop edge carries
+ * exactly that edge, §7.1 — the first one is returned if a definition breaks that rule).
+ */
+export function loopEdgeFrom<E extends Pick<WorkflowEdge, "source" | "sourceHandle"> & { loop?: unknown }>(
+  workflow: { edges: readonly E[] },
+  nodeId: string,
+  handle: string
+): E | undefined {
+  return workflow.edges.find((edge) => edge.source === nodeId && edge.sourceHandle === handle && isLoopEdge(edge));
+}
+
+/**
+ * A loop edge's reset set (§3, §7.2): the blocks taking it runs again — its target and every block
+ * downstream of the target through forward edges (the loop's source among them). Notes never are.
+ */
+export function loopResetSet(workflow: GraphLike, edge: Pick<WorkflowEdge, "target">): Set<string> {
+  const set = downstreamOf(workflow, edge.target);
+  if (executableNodes(workflow).some((node) => node.id === edge.target)) set.add(edge.target);
+  return set;
+}
+
+/** Nodes reachable from any trigger through forward edges (triggers included). */
 export function reachableFromTriggers(workflow: GraphLike): Set<string> {
   const { out } = adjacency(workflow);
   const seen = new Set<string>();
@@ -310,7 +338,8 @@ function isPendingStatus(status: WorkflowBlockStatus | undefined): boolean {
  * skipped, and its own edges die with it (the propagation happens here, in one call). A Merge in
  * `first` mode runs on its first live input without waiting for the rest. A block with no input
  * edge at all never runs (skipped). Triggers and notes are never in either list: the engine sets
- * the trigger that fired and skips the others.
+ * the trigger that fired and skips the others. A loop edge is never an incoming edge here (its
+ * target waits only for its forward inputs); its own state is still reported in `edgeStates`.
  */
 export function computeReadiness(workflow: Workflow | GraphLike, state: ReadinessState): Readiness {
   const nodes = new Map(workflow.nodes.map((node) => [node.id, node]));
@@ -320,7 +349,7 @@ export function computeReadiness(workflow: Workflow | GraphLike, state: Readines
   );
   const incoming = new Map<string, GraphLike["edges"][number][]>();
   for (const edge of workflow.edges) {
-    if (!nodes.has(edge.source) || !nodes.has(edge.target)) continue;
+    if (isLoopEdge(edge) || !nodes.has(edge.source) || !nodes.has(edge.target)) continue;
     const list = incoming.get(edge.target) ?? [];
     list.push(edge);
     incoming.set(edge.target, list);

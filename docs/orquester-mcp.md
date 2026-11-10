@@ -1877,7 +1877,7 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 | `delete_workflow` | `workflowId`, `confirm: true` | `{deleted: true, workflowId}` |
 | `preview_expression` | `workflowId`, `template?` or `templates?`, `node?`, `runId?`, `usePinned? = false`, `mode? = "text"` | each rendered text (or raw value), warnings, parse errors, `available` |
 | `run_workflow` | `workflowId`, `revision`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}`; an input its declared inputs refuse: `INVALID_INPUT` with `detail.inputErrors` |
-| `get_workflow_runs` | `workflowId` (`before?`, `limit? = 20`), or `runId` (`waitSeconds?`), or `runId` + `nodeId` (`outputOffset?`, `log?`) | runs, newest first, `before`; one run's `{run, blocks, outputNote?}`; one block's `output` or a window `{outputText, offset, totalBytes, nextOffset?}`, or its stdout/stderr log |
+| `get_workflow_runs` | `workflowId` (`before?`, `limit? = 20`), or `runId` (`waitSeconds?`), or `runId` + `nodeId` (`outputOffset?`, `log?`) | runs, newest first, `before`; one run's `{run, blocks, gates?, loops?, outputNote?}`; one block's `output` or a window `{outputText, offset, totalBytes, nextOffset?}`, or its stdout/stderr log |
 | `cancel_workflow_run` | `runId` | `{cancelRequested: true, runId, run?}` |
 | `decide_workflow_gate` | `runId`, `gateId` (or `nodeName`), `choice`, `comment?`; or `escalate: true` + `comment` (agent deciders) | `{decided: true, runId, gateId, choice, next}`; `{escalated: true, …}`; a later call `{alreadyDecided: true, choice, decidedBy, decidedAt, comment?, next}` |
 | `list_workflow_gates` | `project?`, `includeDecided? = false` | `{gates: [{gateId, runId, rootRunId?, workflow, workflowId, projectPath?, block, question, details?, choices, decider, state, deadlineAt?, waitingFor?, decision?, escalated?, yours?, call?}], next}` |
@@ -1907,7 +1907,7 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   without saving.
 - **`problems`** come back on every read and write: `{severity: "error" | "warning" | "info", code,
   message, nodeId?, edgeId?, field?}`, errors first, at most 100 (`problemsOmitted` counts the
-  rest). Errors (a cycle, a reference to an unknown block, `{{ }}` in a shell script…) block
+  rest). Errors (a cycle — an edge back to an earlier block that is not a loop edge —, a reference to an unknown block, `{{ }}` in a shell script…) block
   enabling; warnings (a secret in an agent prompt, an unknown secret name…) do not.
 - **`revision`** moves by one on every save. `update_workflow` and `run_workflow` must send the
   revision they last read (`get_workflow`, or the previous write's answer): a run is refused when
@@ -1917,7 +1917,7 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 
 - Blocks read earlier outputs through expressions: `{{ nodes.<Name>.output… }}`, `{{ input }}`
   (the output of the block feeding this one), `{{ trigger… }}`, `{{ run… }}`, `{{ project… }}`,
-  `{{ secrets.NAME }}`, with filters (`| json`, `| compact`, `| default("x")`, `| length`, …). The
+  `{{ secrets.NAME }}`, `{{ loop.pass }}` / `{{ loop.feedback }}` (loop edges), with filters (`| json`, `| compact`, `| default("x")`, `| length`, …). The
   `expressionGuide` has the full grammar.
 - Output handles: triggers `success`; agent, code, shell, http, merge, wait and workflow `success`
   and `error`; an agent block with `outcomes` one `outcome:<id>` per outcome (in declared order) and
@@ -1961,6 +1961,43 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 - **Edit with `update_workflow` ops, never by recreating a workflow**, and call `get_workflow` first
   for the current revision.
 
+### Loop edges
+
+Connections run one way, except a **loop edge**: an edge with `loop: {maxLoops, session?}` from a
+block's output back to an earlier block, to repeat steps until a check passes (never once per item
+of a list). A `create_workflow` edge or a `connect` op takes `loop`; `set_loop {edgeId, loop}`
+changes an edge's settings in place (`loop: null` makes it ordinary again). `connections` show a
+loop edge as `Review (outcome:changes) ↺ Fix (loop: at most 3, same chat)`.
+
+- **Where it may go.** The target must run before the source through ordinary edges and is never a
+  trigger (`loop_not_ancestor`, `edge_target_no_input`); it may leave any output but `error`
+  (`loop_from_error`): an agent's outcome, a gate's choice, an If or Switch branch, a plain
+  `success`. That output carries the loop edge and nothing else (`loop_handle_shared`). `maxLoops`
+  is 1–20 (`loop_limit_range`). An ordinary edge back to an earlier block is a `cycle` error naming
+  that edge: make it a loop edge with a limit.
+- **Taking it.** When the source finishes on that output, its target and every block after the
+  target (the source included) — the *reset set* — run again as a new *pass*; blocks of the set
+  still running are stopped first (after a restart too), blocks before the target keep their
+  results, and a loop nested in the set gets a fresh budget. Taken once more than `maxLoops`, the
+  source's pass fails with `loop_limit` (never retried): its `error` edge runs, else the run fails.
+- **Sessions.** `session` (default `continue`) applies to every agent block of the reset set:
+  `continue` sends a follow-up turn into that block's chat from its previous pass, headed
+  "Workflow loop: pass N of up to M", with its prompt rendered again (the target also gets the
+  feedback; other blocks are told to re-check their earlier findings); `new` starts a new chat
+  whose prompt adds the feedback and the previous pass's report or answer. A chat that cannot
+  continue (closed, its agent unavailable, still busy) starts a new one and the pass records
+  `sessionNote: "new chat: previous session unavailable (<reason>)"`. A block whose own
+  `session` continues an upstream block's chat (`fromNode`) keeps doing so.
+- **Feedback** is what the source sent back: an agent's report summary, or a gate decision's choice
+  label and comment (an If or Switch sends none). The target reads it as `{{ loop.feedback }}`
+  (untrusted text: framed in prompts); `{{ loop.pass }}` is any block's pass, from 1.
+  `nodes.<Name>.output` is a block's latest pass.
+- **Runs.** `get_workflow_runs {runId}` lists the run's `loops` (`{edgeId, from, handle, to, used,
+  max, session}`), and each block run again its `pass`, `loopFeedback`, `sessionNote` and earlier
+  `passes` (status, handle, error, session, report summary; at most the last 10). A retry starts
+  every loop at 0 and reuses the latest pass of the blocks it keeps; a run failed with `loop_limit`
+  retried gets a fresh budget.
+
 ### Patch ops (`update_workflow`)
 
 Ops apply in order to a copy; if one fails, **nothing is saved** and the error names it:
@@ -1973,7 +2010,8 @@ named by id or name everywhere.
 | `update_node` | `node`, `set: {name?, config?, position?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?}` | `set.config` merges **one level deep**: each top-level config key sent replaces that key whole (send the whole `prompt` object, the whole `rules` list), `null` removes it. `null` clears an optional field. A block's `id` and `type` never change. |
 | `remove_node` | `node` | Removes its edges (and pinned output) too. |
 | `rename_node` | `node`, `to` | Rewrites every `{{ nodes.<old>… }}` reference. |
-| `connect` | `source`, `sourceHandle?` (= `success`), `target` | The handle must be one the source has. |
+| `connect` | `source`, `sourceHandle?` (= `success`), `target`, `loop?: {maxLoops, session?}` | The handle must be one the source has. With `loop`, a loop edge back to an earlier block (see "Loop edges"). |
+| `set_loop` | `edgeId`, `loop: {maxLoops, session?}` or `null` | An edge's loop settings, in place (same id); `null` makes it an ordinary edge. |
 | `disconnect` | `edgeId`, or `source`, `sourceHandle?`, `target` | Without `sourceHandle`, every edge between the two goes. |
 | `set_settings` | `settings` | Merged; `notify` merged one level deeper. |
 | `set_project` | `project` | The same shape as `create_workflow`'s. |

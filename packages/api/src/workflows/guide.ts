@@ -10,7 +10,7 @@ import { RULE_OPERATORS, type RuleOperator, type WorkflowNodeType } from "@orque
 
 import { PROMPT_VARIABLES } from "../saved-prompts.ts";
 import { EXPRESSION_FILTERS, type ExpressionFilterName, type ExpressionRoot } from "./expressions.ts";
-import { WORKFLOW_LIMITS, type WorkflowPatchNodeInput } from "./types.ts";
+import { WORKFLOW_LIMITS, type WorkflowEdgeLoopInput, type WorkflowPatchNodeInput } from "./types.ts";
 
 /** One fact: an optional term (an argument, an operator, a field) and what it means. */
 export interface WorkflowGuideItem {
@@ -190,9 +190,47 @@ export const WORKFLOW_FAILURE_GUIDE: readonly WorkflowGuideItem[] = [
   },
   {
     term: "never retried",
-    text: "`all_burnt` (every agent account out of usage) and `limit_exceeded` (an output or body too large, sub-workflows nested too deep); nor a Stop block, `stop()` or a cancelled run."
+    text: "`all_burnt` (every agent account out of usage), `limit_exceeded` (an output or body too large, sub-workflows nested too deep) and `loop_limit` (a loop edge taken more often than its `maxLoops`); nor a Stop block, `stop()` or a cancelled run."
   }
 ];
+
+// ---------------------------------------------------------------------------
+// Loop edges (spec 2026-11-10 §7)
+// ---------------------------------------------------------------------------
+
+/** What happens when a loop edge is taken at its limit, in words (one place: an integration may replace it with a gate). */
+export const WORKFLOW_LOOP_LIMIT_TEXT =
+  "Taken once more than `maxLoops`, the loop edge is not followed: its source block fails with `loop_limit` (never retried), so its `error` connection runs, else the run fails.";
+
+/** How loop edges behave: the facts the MCP's authoring guide and the editor's help share. */
+export const WORKFLOW_LOOP_GUIDE: readonly WorkflowGuideItem[] = [
+  {
+    term: "loop edge",
+    text: `A connection with \`loop: { maxLoops: ${WORKFLOW_LIMITS.loops.min}–${WORKFLOW_LIMITS.loops.max}, session: "continue" | "new" }\` that goes from a block's output back to an earlier block (one that runs before it through ordinary connections; not a trigger). Every other connection runs one way: a connection back without \`loop\` is a \`cycle\` error.`
+  },
+  {
+    term: "outputs",
+    text: "A loop edge may leave any output but `error`: an agent's outcome, a gate's choice, an If or Switch branch, or a plain `success`. That output carries the loop edge and nothing else."
+  },
+  {
+    term: "taking it",
+    text: "When the source finishes on that output, its target and every block after the target (the source included) run again as a new pass; blocks of that set still running are stopped first. Blocks before the target keep their results. A loop inside the repeated part gets a fresh budget on each outer pass."
+  },
+  { term: "limit", text: WORKFLOW_LOOP_LIMIT_TEXT },
+  {
+    term: "session",
+    text: "Applies to every agent block the loop runs again. `continue` (default): a follow-up turn in that block's chat from the previous pass, headed \"Workflow loop: pass N of up to M\", with its prompt rendered again; `new`: a new chat whose prompt adds the previous pass's report. A chat that cannot continue starts a new one (noted on the pass). A block with `session: { kind: \"continue\", fromNode }` keeps continuing that block's chat."
+  },
+  {
+    term: "feedback",
+    text: "The target's next pass receives the source's feedback: an agent's report summary, or a gate decision's choice and comment (an If or Switch gives none). An agent target gets it as a feedback block; any block reads it as `{{ loop.feedback }}` (untrusted text, framed in prompts)."
+  },
+  {
+    term: "passes",
+    text: "`nodes.<Name>.output` is a block's latest pass; `{{ loop.pass }}` is the current block's pass, from 1. Earlier passes stay on the run (get_workflow_runs lists them with the loop counters)."
+  }
+];
+
 
 // ---------------------------------------------------------------------------
 // Per block type
@@ -516,7 +554,7 @@ export const WORKFLOW_EXPRESSION_ROOT_GUIDE: readonly { root: ExpressionRoot; pa
   {
     root: "nodes",
     path: "nodes.<Name>.output",
-    text: "Any block's output by its unique name (`nodes.FetchTickets.output.tickets`), once it has finished in this run — wired to this block or not."
+    text: "Any block's output by its unique name (`nodes.FetchTickets.output.tickets`), once it has finished in this run — wired to this block or not. A block a loop ran again reads as its latest pass."
   },
   { root: "nodes", path: "nodes.<Name>.status", text: "`succeeded`, `failed`, `skipped` or `cancelled`." },
   { root: "nodes", path: "nodes.<Name>.error", text: "`{ kind, message }` of a failed block." },
@@ -528,7 +566,13 @@ export const WORKFLOW_EXPRESSION_ROOT_GUIDE: readonly { root: ExpressionRoot; pa
   { root: "run", path: "run", text: "`{ id, startedAt, workflowId, workflowName, attempt }` (`attempt`: this block's try, from 1)." },
   { root: "project", path: "project", text: "`{ path, name, workspace, branch }`." },
   { root: "secrets", path: "secrets.<NAME>", text: "One workflow secret (never the whole set), redacted wherever it is stored." },
-  { root: "workflow", path: "workflow", text: "`{ id, name }` of this workflow." }
+  { root: "workflow", path: "workflow", text: "`{ id, name }` of this workflow." },
+  { root: "loop", path: "loop.pass", text: "This block's pass, from 1: a loop edge running the block again starts its next pass." },
+  {
+    root: "loop",
+    path: "loop.feedback",
+    text: "On a loop's target, from its second pass: what the loop's source sent back (an agent's report summary, a gate's choice and comment). Empty otherwise: write `{{ loop.feedback | default(\"\") }}`."
+  }
 ];
 
 /** What each filter does; `usage` is how it is written after `|`. */
@@ -640,7 +684,7 @@ export interface WorkflowRecipe {
   /** Sentences: what the pattern shows and the pitfalls it avoids. */
   notes: readonly string[];
   nodes: readonly WorkflowPatchNodeInput[];
-  edges: readonly { source: string; sourceHandle?: string; target: string }[];
+  edges: readonly { source: string; sourceHandle?: string; target: string; loop?: WorkflowEdgeLoopInput }[];
 }
 
 const CLAUDE = [{ agent: "claude", model: "default" }];
@@ -809,7 +853,7 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
     id: "each-item",
     title: "Process a list of items",
     notes: [
-      "There is no loop or for-each block, and connections cannot form a loop (`cycle`). Iterate inside one block: a Code block's `for … of` (as here; `Promise.all` for parallel calls), or one agent given the whole list (`{{ input.body.issues | json }}`).",
+      "There is no for-each block, and a loop edge repeats steps until a check passes, never once per item. Iterate inside one block: a Code block's `for … of` (as here; `Promise.all` for parallel calls), or one agent given the whole list (`{{ input.body.issues | json }}`).",
       "A Run workflow block starts exactly one child run, so it cannot fan out per item."
     ],
     nodes: [
@@ -828,6 +872,37 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
     edges: [
       { source: "Start", target: "ListOpen" },
       { source: "ListOpen", target: "CloseEach" }
+    ]
+  },
+  {
+    id: "loop-until-approved",
+    title: "Fix until a review approves (a loop edge)",
+    notes: [
+      "Review's `changes_requested` outcome carries only the loop edge back to Fix (`loop: { maxLoops: 3 }`): taking it runs Fix and Review again, Fix in its previous chat (`session: \"continue\"`) with Review's report summary as feedback.",
+      `Review's other outcome goes on. ${WORKFLOW_LOOP_LIMIT_TEXT}`
+    ],
+    nodes: [
+      { type: "trigger.manual", name: "Start", config: { inputExample: "{ \"task\": \"Add a --json flag to the CLI\" }" } },
+      { type: "agent", name: "Fix", config: { prompt: { kind: "text", text: "Implement in {project}: {{ trigger.input.task }}. Do not commit." }, chain: CLAUDE } },
+      {
+        type: "agent",
+        name: "Review",
+        config: {
+          prompt: { kind: "text", text: "Review the uncommitted changes for: {{ trigger.input.task }}. Approve them, or request changes and say which." },
+          chain: CLAUDE,
+          outcomes: [
+            { id: "approved", label: "Approved" },
+            { id: "changes_requested", label: "Changes requested", description: "Something must change first; the summary says what." }
+          ]
+        }
+      },
+      { type: "agent", name: "Commit", config: { prompt: { kind: "text", text: "Commit the changes with a short message." }, chain: CLAUDE } }
+    ],
+    edges: [
+      { source: "Start", target: "Fix" },
+      { source: "Fix", target: "Review" },
+      { source: "Review", sourceHandle: "outcome:approved", target: "Commit" },
+      { source: "Review", sourceHandle: "outcome:changes_requested", target: "Fix", loop: { maxLoops: 3, session: "continue" } }
     ]
   },
   {

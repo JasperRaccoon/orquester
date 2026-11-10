@@ -21,6 +21,7 @@ import { basename, dirname } from "node:path";
 import {
   downstreamOf,
   EXPRESSION_PREVIEW_LIMITS,
+  isLoopEdge,
   isTriggerType,
   outputHandles,
   parseTemplate,
@@ -38,6 +39,7 @@ import {
   type WorkflowRun
 } from "@orquester/api";
 import type { NodeExecutionContext } from "./contracts.ts";
+import { loopNamespace } from "./loops/state.ts";
 import { isFinishedBlockStatus, truncateUtf8 } from "./run-context.ts";
 import { createRedactor, redactContextValue, secretPlaceholder, type SecretRedactor } from "./sandbox/redact.ts";
 
@@ -136,6 +138,11 @@ function nodeReferences(templates: readonly string[]): { all: boolean; names: Se
   return { all, names, roots, branch };
 }
 
+/** The run's record of a block (its `pass` / `loopFeedback`), when a run is read. */
+function previewBlockOf(run: WorkflowRun | undefined, nodeId: string): WorkflowBlockRun | undefined {
+  return run?.blocks[nodeId];
+}
+
 /** engine.ts `handleOf`: the handle a finished block left by. */
 function handleOf(state: Pick<BlockState, "handle" | "status">): string | undefined {
   return state.handle ?? (state.status === "succeeded" ? "success" : state.status === "failed" ? "error" : undefined);
@@ -145,7 +152,7 @@ function handleOf(state: Pick<BlockState, "handle" | "status">): string | undefi
 function liveInputs(workflow: Workflow, states: ReadonlyMap<string, BlockState>, nodeId: string): string[] {
   const out: string[] = [];
   for (const edge of workflow.edges) {
-    if (edge.target !== nodeId || out.includes(edge.source)) continue;
+    if (edge.target !== nodeId || out.includes(edge.source) || isLoopEdge(edge)) continue;
     const state = states.get(edge.source);
     if (!state || (state.status !== "succeeded" && state.status !== "failed")) continue;
     if (handleOf(state) !== edge.sourceHandle) continue;
@@ -162,7 +169,7 @@ function isForcedWithRunInput(workflow: Workflow, node: WorkflowNode): boolean {
   const executable = workflow.nodes.filter((candidate) => candidate.type !== "note");
   if (node.type === "note" || executable.some((candidate) => isTriggerType(candidate.type))) return false;
   const ids = new Set(executable.map((candidate) => candidate.id));
-  return !workflow.edges.some((edge) => edge.target === node.id && ids.has(edge.source));
+  return !workflow.edges.some((edge) => edge.target === node.id && ids.has(edge.source) && !isLoopEdge(edge));
 }
 
 /** The render budget in UTF-16 units: at most 3 UTF-8 bytes each, cut to the byte cap after. */
@@ -272,8 +279,11 @@ export async function previewExpressions(input: ExpressionPreviewInput): Promise
       { path: projectPath, name: projectPath ? basename(projectPath) : "", workspace: projectPath ? basename(dirname(projectPath)) : "" },
       redactor
     ) as ReturnType<NodeExecutionContext["expressionContext"]>["project"],
-    workflow: redactValues({ id: workflow.id, name: workflow.name }, redactor) as ReturnType<NodeExecutionContext["expressionContext"]>["workflow"]
+    workflow: redactValues({ id: workflow.id, name: workflow.name }, redactor) as ReturnType<NodeExecutionContext["expressionContext"]>["workflow"],
+    // engine.ts loopNamespace: the block's pass in the run read, and the feedback that pass got.
+    loop: loopNamespace(node ? previewBlockOf(run, node.id) : undefined)
   };
+  if (redacted.loop?.feedback !== undefined) redacted.loop.feedback = redactor.text(redacted.loop.feedback);
   const context: ExpressionContext = { ...redacted, secrets: placeholders };
 
   const hiddenNames = new Map(workflow.nodes.filter((n) => hidden.has(n.id)).map((n) => [n.name, n]));
@@ -339,7 +349,8 @@ export async function previewExpressions(input: ExpressionPreviewInput): Promise
     run: { ...redacted.run },
     project: { ...redacted.project },
     workflow: { ...redacted.workflow },
-    secrets: Object.keys(input.secrets).sort()
+    secrets: Object.keys(input.secrets).sort(),
+    loop: { pass: redacted.loop?.pass ?? 1, ...(redacted.loop?.feedback !== undefined ? { feedback: shapeOf(redacted.loop.feedback)! } : {}) }
   };
 
   if (!run) {

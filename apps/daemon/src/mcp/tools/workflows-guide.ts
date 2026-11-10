@@ -11,6 +11,7 @@ import {
   WORKFLOW_BLOCK_GUIDES,
   WORKFLOW_CODE_SIGNATURE,
   WORKFLOW_FAILURE_GUIDE,
+  WORKFLOW_LOOP_GUIDE,
   WORKFLOW_RECIPES
 } from "@orquester/api";
 import { WORKFLOW_NODE_TYPES } from "@orquester/config";
@@ -121,7 +122,8 @@ export const WORKFLOW_AUTHORING_GUIDE = `# Authoring workflows through the MCP
 1. A workflow is a directed acyclic graph of blocks (nodes). An edge goes from one block's output
    handle to the next block. A run starts at a trigger (trigger.manual, trigger.schedule,
    trigger.git); run_workflow starts one by hand, from any trigger, even while the workflow is
-   disabled. There are no loops: see the recipe "Process a list of items".
+   disabled. Edges run one way; a loop edge (point 4b) is the only way back to an earlier block,
+   and it repeats steps until a check passes, never once per item (see "Process a list of items").
 2. Every block has a unique name ([A-Za-z][A-Za-z0-9_]*, at most 40). Edges and patch ops name
    blocks by name (or id). A block reads an earlier block's output with
    {{ nodes.<Name>.output… }} (e.g. {{ nodes.FetchTickets.output.tickets | json }}); {{ input }}
@@ -138,6 +140,10 @@ export const WORKFLOW_AUTHORING_GUIDE = `# Authoring workflows through the MCP
    incoming edges are all dead (an if's other branch) is skipped.
 4. Failures and retries:
 ${bullets(WORKFLOW_FAILURE_GUIDE)}
+4b. Loop edges: connect {source, sourceHandle, target, loop: {maxLoops, session}} (or a
+   create_workflow edge with \`loop\`); set_loop {edgeId, loop} changes one's settings in place
+   (null: an ordinary edge again).
+${bullets(WORKFLOW_LOOP_GUIDE)}
 5. Shell: NEVER put {{ }} in \`script\` (validation refuses it). Map values to environment
    variables in \`env\`, e.g. [{"name":"TICKETS","value":"{{ nodes.Fetch.output.tickets | compact }}"}],
    and read "$TICKETS" in the script.

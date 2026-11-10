@@ -8,8 +8,11 @@ import {
   computeReadiness,
   downstreamOf,
   gateChoiceIds,
+  findCycles,
   isLoopEdge,
+  loopEdgeFrom,
   loopEdges,
+  loopResetSet,
   outcomeHandle,
   outputHandles,
   reachableFromTriggers,
@@ -405,7 +408,67 @@ describe("loop edges (spec 2026-11-10 §7.1)", () => {
     assert.notEqual(topologicalOrder(forward), null);
   });
 
-  it("the existing helpers still read every edge as a forward edge (unchanged until the loop engine)", () => {
-    assert.equal(topologicalOrder(g), null);
+  it("order, cycles and up/downstream read the forward graph only", () => {
+    assert.deepEqual(topologicalOrder(g), ["t", "fix", "review"]);
+    assert.deepEqual(findCycles(g), []);
+    assert.deepEqual([...upstreamOf(g, "fix")], ["t"], "the loop source is not an input of its target");
+    assert.deepEqual([...downstreamOf(g, "review")], [], "the loop target is not after its source");
+    assert.deepEqual([...downstreamOf(g, "fix")], ["review"]);
+    assert.deepEqual([...reachableFromTriggers(g)].sort(), ["fix", "review", "t"]);
+  });
+
+  it("a loop edge is never a pending incoming edge; its own state is still reported", () => {
+    // Pass 1: the target is ready as soon as its forward input finished, though the loop's source is pending.
+    let r = computeReadiness(g, state({ t: "succeeded" }));
+    assert.deepEqual(r.ready, ["fix"]);
+    assert.equal(r.edgeStates.back, "pending");
+    // The source finishing on another handle kills the loop edge and skips nothing.
+    r = computeReadiness(g, state({ t: "succeeded", fix: "succeeded", review: "succeeded" }, { review: "outcome:approved" }));
+    assert.deepEqual(r.ready, []);
+    assert.deepEqual(r.skip, []);
+    assert.equal(r.edgeStates.back, "dead");
+    // A reset pass: the target is ready again from its forward inputs alone.
+    r = computeReadiness(g, state({ t: "succeeded", fix: "pending", review: "pending" }));
+    assert.deepEqual(r.ready, ["fix"]);
+  });
+
+  it("a loop target with no forward input is skipped like any unconnected block (the engine forces roots)", () => {
+    const rootless = { nodes: g.nodes.slice(1), edges: g.edges.slice(1) };
+    assert.deepEqual(computeReadiness(rootless, state({})).skip, ["fix", "review"]);
+  });
+
+  it("loopEdgeFrom finds the loop edge of a handle; loopResetSet is the target and its forward downstream", () => {
+    assert.equal(loopEdgeFrom(g, "review", "outcome:changes")?.id, "back");
+    assert.equal(loopEdgeFrom(g, "review", "outcome:approved"), undefined);
+    assert.equal(loopEdgeFrom(g, "fix", "success"), undefined, "an ordinary edge is not a loop edge");
+    assert.deepEqual([...loopResetSet(g, g.edges[2]!)].sort(), ["fix", "review"]);
+  });
+
+  it("reset sets cover parallel branches and merges, never what comes before the target", () => {
+    const wide = {
+      nodes: [
+        { id: "t", type: "trigger.manual" as const, config: {} },
+        { id: "prep", type: "code" as const, config: {} },
+        { id: "a", type: "agent" as const, config: {} },
+        { id: "b", type: "shell" as const, config: {} },
+        { id: "m", type: "merge" as const, config: {} },
+        { id: "check", type: "if" as const, config: {} },
+        { id: "side", type: "http" as const, config: {} },
+        { id: "note", type: "note" as const, config: {} }
+      ],
+      edges: [
+        { id: "1", source: "t", sourceHandle: "success", target: "prep" },
+        { id: "2", source: "prep", sourceHandle: "success", target: "a" },
+        { id: "3", source: "prep", sourceHandle: "success", target: "b" },
+        { id: "4", source: "a", sourceHandle: "success", target: "m" },
+        { id: "5", source: "b", sourceHandle: "success", target: "m" },
+        { id: "6", source: "m", sourceHandle: "success", target: "check" },
+        { id: "7", source: "a", sourceHandle: "success", target: "side" },
+        { id: "back", source: "check", sourceHandle: "false", target: "a", loop: { maxLoops: 2, session: "new" as const } }
+      ]
+    };
+    assert.deepEqual([...loopResetSet(wide, { target: "a" })].sort(), ["a", "check", "m", "side"], "b is not after a: it keeps its result");
+    assert.deepEqual([...loopResetSet(wide, { target: "prep" })].sort(), ["a", "b", "check", "m", "prep", "side"]);
+    assert.deepEqual([...loopResetSet(wide, { target: "note" })], [], "a note is never in a reset set");
   });
 });

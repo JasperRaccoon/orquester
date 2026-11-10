@@ -80,6 +80,7 @@ import { clipText, fitJsonBytes, jsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, re
 import {
   agentLabel,
   connectionsOf,
+  connectionText,
   definitionSections,
   expectWorkflowOk,
   graphDiff,
@@ -378,7 +379,53 @@ function blockView(b: WorkflowBlockRun): Record<string, unknown> {
   if (b.waitingUntil) view.waitingUntil = b.waitingUntil;
   if (b.childRunId) view.childRunId = b.childRunId;
   if (b.pinned) view.pinned = true;
+  Object.assign(view, loopPassesView(b));
   return view;
+}
+
+/** Earlier passes kept on a run (spec 2026-11-10 §7.2), newest last; their outputs are not repeated. */
+const MAX_PASSES_SHOWN = 10;
+
+/** A block's loop fields: its pass, the feedback it got, a session note, and its earlier passes (compact). */
+function loopPassesView(b: WorkflowBlockRun): Record<string, unknown> {
+  const view: Record<string, unknown> = {};
+  if (b.pass !== undefined && b.pass > 1) view.pass = b.pass;
+  if (b.loopFeedback) view.loopFeedback = clipText(b.loopFeedback, 1_000);
+  if (b.sessionNote) view.sessionNote = clipText(b.sessionNote, 300);
+  const passes = b.passes ?? [];
+  if (passes.length === 0) return view;
+  view.passes = passes.slice(-MAX_PASSES_SHOWN).map((p) => ({
+    pass: p.pass,
+    status: p.status,
+    ...(p.handle ? { handle: p.handle } : {}),
+    ...(p.error ? { error: { kind: p.error.kind, message: clipText(p.error.message, 300) } } : {}),
+    ...(p.sessionId ? { sessionId: p.sessionId } : {}),
+    ...(p.report?.outcome ? { outcome: p.report.outcome } : {}),
+    ...(p.report?.summary ? { summary: clipText(p.report.summary, 500) } : {}),
+    ...(p.loopFeedback ? { loopFeedback: clipText(p.loopFeedback, 300) } : {}),
+    ...(p.sessionNote ? { sessionNote: clipText(p.sessionNote, 200) } : {}),
+    ...(p.startedAt ? { startedAt: p.startedAt } : {}),
+    ...(p.endedAt ? { endedAt: p.endedAt } : {})
+  }));
+  if (passes.length > MAX_PASSES_SHOWN) view.passesOmitted = passes.length - MAX_PASSES_SHOWN;
+  return view;
+}
+
+/** The run's loop edges with how often each was taken and its limit (raised ones included). */
+function loopsView(run: WorkflowRun): Record<string, unknown>[] {
+  const names = new Map((run.definition?.nodes ?? []).map((n) => [n.id, n.name]));
+  return (run.definition?.edges ?? []).flatMap((e) => {
+    if (!e.loop) return [];
+    return [{
+      edgeId: e.id,
+      from: names.get(e.source) ?? e.source,
+      handle: e.sourceHandle,
+      to: names.get(e.target) ?? e.target,
+      used: run.loopCounters?.[e.id] ?? 0,
+      max: run.loopLimits?.[e.id] ?? e.loop.maxLoops,
+      session: e.loop.session ?? "continue"
+    }];
+  });
 }
 
 /** The run's blocks in the definition's order (triggers first as authored), then any the definition no longer names. */
@@ -453,6 +500,8 @@ function runView(run: WorkflowRun, opts: { includeOutputs: boolean; extra?: Reco
   // Gates (spec 2026-11-10 §8): waiting ones and the decisions, opened order.
   const gates = Object.values(run.gates ?? {});
   if (gates.length > 0) result.gates = gates.sort((x, y) => (x.openedAt < y.openedAt ? -1 : 1)).map((gate) => gateView(gate));
+  const loops = loopsView(run);
+  if (loops.length > 0) result.loops = loops;
   if (!opts.includeOutputs) return result;
   const slots: OutputSlot[] = blocks.map((b, i) => ({ holder: views[i]!, value: b.output, daemonTruncated: b.outputTruncated === true, key: "output" }));
   const runHolder = result.run as Record<string, unknown>;
@@ -673,12 +722,23 @@ const settingsSchema = z.object({
   keepFailedTempDays: z.number().int().min(0).max(30).optional()
 }).strict();
 
+/**
+ * A loop edge's settings (spec 2026-11-10 §7.1). A fresh schema per use, like `nodeRef`: one shared
+ * instance would be emitted as a `$ref` between ops, which the tool schemas must not contain.
+ */
+const loopArg = () =>
+  z.object({
+    maxLoops: z.number().int().min(WORKFLOW_LIMITS.loops.min).max(WORKFLOW_LIMITS.loops.max),
+    session: z.enum(["continue", "new"]).optional()
+  }).strict();
+
 const opSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("add_node"), node: nodeInputSchema }).strict(),
   z.object({ op: z.literal("update_node"), node: nodeRef(), set: z.record(z.unknown()) }).strict(),
   z.object({ op: z.literal("remove_node"), node: nodeRef() }).strict(),
   z.object({ op: z.literal("rename_node"), node: nodeRef(), to: nodeName() }).strict(),
-  z.object({ op: z.literal("connect"), source: nodeRef(), sourceHandle: z.string().min(1).optional(), target: nodeRef() }).strict(),
+  z.object({ op: z.literal("connect"), source: nodeRef(), sourceHandle: z.string().min(1).optional(), target: nodeRef(), loop: loopArg().optional().describe("A loop edge back to an earlier block (session default continue).") }).strict(),
+  z.object({ op: z.literal("set_loop"), edgeId: z.string().min(1), loop: loopArg().nullable().describe("null: an ordinary edge again.") }).strict(),
   z.object({ op: z.literal("disconnect"), edgeId: z.string().min(1).optional(), source: nodeRef().optional(), sourceHandle: z.string().min(1).optional(), target: nodeRef().optional() }).strict(),
   z.object({ op: z.literal("set_settings"), settings: settingsSchema }).strict(),
   z.object({ op: z.literal("set_project"), project: projectArgSchema }).strict(),
@@ -738,7 +798,7 @@ interface CreateArgs {
   project: ProjectArg;
   settings?: z.infer<typeof settingsSchema>;
   nodes: NodeInput[];
-  edges: { source: string; sourceHandle?: string; target: string }[];
+  edges: { source: string; sourceHandle?: string; target: string; loop?: { maxLoops: number; session?: "continue" | "new" } }[];
   enabled: boolean;
 }
 
@@ -988,7 +1048,7 @@ const getWorkflow = defineTool({
       const own = problems.filter((p) => p.nodeId === node.id);
       const names = new Map(workflow.nodes.map((n) => [n.id, n.name]));
       const edges = workflow.edges.filter((e) => e.source === node.id || e.target === node.id)
-        .map((e) => ({ edgeId: e.id, text: `${names.get(e.source) ?? e.source}${e.sourceHandle === "success" ? "" : ` (${e.sourceHandle})`} → ${names.get(e.target) ?? e.target}` }));
+        .map((e) => ({ edgeId: e.id, text: connectionText(names, e) }));
       const frame = (v: unknown) => ({ ...head, node: v, connections: edges, ...problemsView(own), truncatedFields: [], truncationNote: TRUNCATION_NOTE });
       const { value, cut } = fitLongStrings(node, "node", WORKFLOW_RESULT_BUDGET, frame);
       const result: Record<string, unknown> = { ...head, node: value, connections: edges, ...problemsView(own) };
@@ -1022,7 +1082,7 @@ const createInput = {
   project: projectArgSchema.describe("Where it runs: an existing project (\"<workspace>/<project>\"), or temp: a fresh project per run."),
   settings: settingsSchema.optional().describe("Defaults: overlap skip, maxConcurrent 2, timezone the host's (IANA)."),
   nodes: z.array(nodeInputSchema).max(WORKFLOW_LIMITS.maxNodes),
-  edges: z.array(z.object({ source: nodeRef(), sourceHandle: z.string().min(1).optional(), target: nodeRef() }).strict()).max(WORKFLOW_LIMITS.maxEdges).default([]).describe("By block name or id; sourceHandle defaults to success."),
+  edges: z.array(z.object({ source: nodeRef(), sourceHandle: z.string().min(1).optional(), target: nodeRef(), loop: loopArg().optional() }).strict()).max(WORKFLOW_LIMITS.maxEdges).default([]).describe("By block name or id; sourceHandle defaults to success; loop makes a loop edge back to an earlier block."),
   enabled: z.boolean().default(false).describe("Enable its triggers at once (refused while it has errors)."),
   dryRun: dryRunArg,
   reason: reasonArg
@@ -1585,7 +1645,7 @@ async function logWindow(api: DaemonApi, run: WorkflowRun, block: WorkflowBlockR
 const getWorkflowRuns = defineTool({
   name: "get_workflow_runs",
   title: "Watch a workflow's runs",
-  description: "Watch/debug runs. {workflowId}: runs, newest first. {runId}: each block's status, error, session and output (capped); waitSeconds waits for the end. {runId, nodeId}: a block's whole output (outputOffset pages), or its stdout/stderr log (default: the tail). Secrets read «secret:NAME».",
+  description: "Watch/debug runs. {workflowId}: runs, newest first. {runId}: each block's status, error, session and output (capped); waitSeconds waits for the end. {runId, nodeId}: a block's whole output (outputOffset pages), or its stdout/stderr log (default: the tail). Loops: passes per block, loops used/max. Secrets read «secret:NAME».",
   input: {
     workflowId: z.string().min(1).optional().describe("List its runs."),
     runId: z.string().min(1).optional().describe("One run."),

@@ -251,10 +251,14 @@ export function toRunSummary(run: PersistedRun): WorkflowRunSummary {
   return summary;
 }
 
-/** A block as it crosses the wire: no `waitingOn`, no output file path. */
+/** A block as it crosses the wire: no `waitingOn`, no output file paths, no loop bookkeeping. */
 export function publicBlock(block: PersistedBlockState): WorkflowBlockRun {
-  const { waitingOn: _waitingOn, outputFile: _outputFile, ...rest } = block;
-  return structuredClone(rest);
+  const { waitingOn: _waitingOn, outputFile: _outputFile, passes, passAttemptBase: _base, loopEdgeId: _edge, ...rest } = block;
+  const out: WorkflowBlockRun = structuredClone(rest);
+  if (passes !== undefined) {
+    out.passes = passes.map(({ outputFile: _file, interruptedFrom: _interrupted, ...pass }) => structuredClone(pass));
+  }
+  return out;
 }
 
 export function publicRun(run: PersistedRun): WorkflowRun {
@@ -274,6 +278,8 @@ export function publicRun(run: PersistedRun): WorkflowRun {
   if (run.gates !== undefined) out.gates = structuredClone(run.gates);
   if (run.parkedMs !== undefined) out.parkedMs = run.parkedMs;
   if (run.parkedSince !== undefined) out.parkedSince = run.parkedSince;
+  if (run.loopCounters !== undefined) out.loopCounters = { ...run.loopCounters };
+  if (run.loopLimits !== undefined) out.loopLimits = { ...run.loopLimits };
   const revisions = subWorkflowRevisionsOf(run);
   if (revisions !== undefined) out.subWorkflowRevisions = revisions;
   return out;

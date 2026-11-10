@@ -1322,3 +1322,57 @@ test("workflowsReferencingPrompt (for Task 12): every workflow whose agent block
   api.on("GET", "/api/workflow-references/prompts/*", { status: 503, body: { error: { code: "WORKFLOWS_UNAVAILABLE", message: "x" } } });
   assert.equal(await workflowsReferencingPrompt(api, "p1"), null, "an unreadable index: unknown");
 });
+
+test("loop edges: connect and create edges take loop, set_loop edits one, connections and run views show them", async (t) => {
+  const api = await sandbox(t);
+  api.on("POST", "/api/workflows/wf-1/patch", { status: 200, body: { workflow: definition(api), problems: [] } });
+  for (const ops of [
+    [{ op: "connect", source: "Finish", target: "Work", loop: { maxLoops: 0 } }],
+    [{ op: "connect", source: "Finish", target: "Work", loop: { maxLoops: 2, session: "sometimes" } }],
+    [{ op: "set_loop", edgeId: "ab" }]
+  ]) {
+    await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops }), "INVALID_ARGUMENT");
+  }
+  await call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "connect", source: "Finish", target: "Work", loop: { maxLoops: 3, session: "new" } }, { op: "set_loop", edgeId: "ab", loop: null }] });
+  assert.deepEqual(api.calls.at(-1)!.body, { revision: 7, ops: [{ op: "connect", source: "Finish", target: "Work", loop: { maxLoops: 3, session: "new" } }, { op: "set_loop", edgeId: "ab", loop: null }] });
+
+  const looped = definition(api, { edges: [...definition(api).edges, { id: "back", source: "b", sourceHandle: "success", target: "a", loop: { maxLoops: 3, session: "new" } }] });
+  serveDefinition(api, looped);
+  const read = await call(api, "get_workflow", { workflowId: "wf-1" });
+  assert.deepEqual(read.connections, ["Start → Work", "Work → Finish", "Finish ↺ Work (loop: at most 3, new chat)"]);
+
+  const run = runRecord(looped, "running");
+  run.loopCounters = { back: 2 };
+  run.blocks = {
+    a: {
+      nodeId: "a", name: "Work", type: "code", status: "running", attempt: 1, pass: 3, loopFeedback: "again",
+      passes: [
+        { pass: 1, status: "succeeded", attempt: 1, handle: "success", output: { big: "x".repeat(1_000) } },
+        { pass: 2, status: "cancelled", attempt: 1, error: { kind: "interrupted", message: "A loop ran this block again before it finished." } }
+      ]
+    }
+  };
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run } });
+  const view = await call(api, "get_workflow_runs", { runId: "run-1" });
+  assert.deepEqual(view.loops, [{ edgeId: "back", from: "Finish", handle: "success", to: "Work", used: 2, max: 3, session: "new" }]);
+  const work = (view.blocks as Record<string, unknown>[]).find((block) => block.name === "Work")!;
+  assert.equal(work.pass, 3);
+  assert.equal(work.loopFeedback, "again");
+  assert.deepEqual(work.passes, [
+    { pass: 1, status: "succeeded", handle: "success" },
+    { pass: 2, status: "cancelled", error: { kind: "interrupted", message: "A loop ran this block again before it finished." } }
+  ], "earlier passes without their outputs");
+});
+
+test("an update card lists a loop edge's added and changed settings as connection changes", async (t) => {
+  const api = await sandbox(t);
+  const looped = definition(api, { edges: [...definition(api).edges, { id: "back", source: "b", sourceHandle: "success", target: "a", loop: { maxLoops: 2, session: "continue" } }] });
+  serveDefinition(api, looped);
+  api.on("POST", "/api/workflows/wf-1/patch", { status: 200, body: { workflow: definition(api, { revision: 8 }), problems: [] } });
+  const port = new FakeApprovalPort();
+  await call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_loop", edgeId: "back", loop: { maxLoops: 5, session: "new" } }] }, { who: chat(api), port });
+  const changes = port.cards[0]!.sections.find((s) => s.kind === "changes") as { items: { label: string; change: string; detail?: string }[] };
+  assert.deepEqual(changes.items, [
+    { label: "connection Finish ↺ Work (loop: at most 5, new chat)", change: "changed", detail: "was Finish ↺ Work (loop: at most 2, same chat)" }
+  ]);
+});

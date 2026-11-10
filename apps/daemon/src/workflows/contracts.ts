@@ -13,6 +13,7 @@ import type {
   RunWorkflowResponse,
   Workflow,
   WorkflowBlockError,
+  WorkflowBlockPass,
   WorkflowBlockRun,
   DecideWorkflowGateRequest,
   DecideWorkflowGateResponse,
@@ -22,6 +23,7 @@ import type {
   WorkflowGatePhase,
   WorkflowGateState,
   WorkflowRunStartedBy,
+  WorkflowLoopSessionMode,
   WorkflowNode,
   WorkflowNodeType,
   WorkflowRun,
@@ -147,6 +149,50 @@ export interface PersistedBlockState extends WorkflowBlockRun {
   waitingOn?: WaitingOn;
   /** The whole output, when it is bigger than the inline preview (the file under the attempt dir). */
   outputFile?: string;
+  // Loops (spec 2026-11-10 §7.2; engine-internal, never on the wire)
+  /** Earlier passes, as persisted (their output files; an interruption still to settle). */
+  passes?: PersistedBlockPass[];
+  /**
+   * Attempts the block's earlier passes used. `attempt` counts within the pass (the retry policy
+   * and `{{ run.attempt }}` read it); storage — attempt directories, output files, a Run workflow
+   * block's child-run id — is keyed by `passAttemptBase + attempt`, unique across passes.
+   */
+  passAttemptBase?: number;
+  /** The loop edge whose reset started this pass. */
+  loopEdgeId?: string;
+}
+
+/** One earlier pass of a block, as `run.json` keeps it. */
+export type PersistedBlockPass = WorkflowBlockPass & {
+  outputFile?: string;
+  /**
+   * The pass was running when a loop reset it: what it waited on (an agent turn, a process, a child
+   * run…). Cleared once its executor has been stopped; a restart before that stops it then.
+   */
+  interruptedFrom?: WaitingOn;
+};
+
+/**
+ * What an executor knows of the loop that ran its block again (spec 2026-11-10 §7.3): set on
+ * `NodeExecutionContext.loop` from a block's second pass on.
+ */
+export interface NodeLoopContext {
+  /** This block's pass (≥ 2). */
+  pass: number;
+  /** The loop edge whose reset started this pass. */
+  edgeId: string;
+  /** "Workflow loop: pass `loopPass` of up to `maxPasses`" — the edge's count + 1, its limit + 1. */
+  loopPass: number;
+  maxPasses: number;
+  /** The edge's session option: it applies to every agent block of the reset set. */
+  session: WorkflowLoopSessionMode;
+  /** This block is the loop edge's target (only the target receives the feedback). */
+  target: boolean;
+  sourceName: string;
+  targetName: string;
+  feedback?: string;
+  /** This block's previous pass (its session, report and output preview), when it ran one. */
+  previous?: WorkflowBlockPass;
 }
 
 /** `run.json`. */
@@ -341,6 +387,8 @@ export interface NodeExecutionContext<T extends WorkflowNodeType = WorkflowNodeT
   secrets: Record<string, string>;
   /** Present when resuming after a restart. */
   resumeFrom?: WaitingOn;
+  /** Set from a block's second pass on: the loop that ran it again (spec 2026-11-10 §7.3). */
+  loop?: NodeLoopContext;
   /** Persist what the block waits on BEFORE the side effect. `undefined` clears. */
   setWaitingOn(waitingOn: WaitingOn | undefined): Promise<void>;
   /** Live fields for the run view (throttled broadcast; persisted). */

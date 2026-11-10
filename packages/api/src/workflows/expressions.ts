@@ -21,7 +21,7 @@
 // Types
 // ---------------------------------------------------------------------------
 
-export const EXPRESSION_ROOTS = ["nodes", "input", "trigger", "run", "project", "secrets", "workflow"] as const;
+export const EXPRESSION_ROOTS = ["nodes", "input", "trigger", "run", "project", "secrets", "workflow", "loop"] as const;
 export type ExpressionRoot = (typeof EXPRESSION_ROOTS)[number];
 
 export const EXPRESSION_FILTERS = [
@@ -123,7 +123,7 @@ export interface ExpressionContext {
   workflow?: unknown;
   /**
    * The `loop` namespace (spec 2026-11-10 §7.2): the current block's pass and the feedback the loop
-   * edge carried. Typed here only — `loop` is not yet an expression root (`EXPRESSION_ROOTS`).
+   * edge carried into it. The engine always sets it (`{ pass: 1 }` outside loops).
    */
   loop?: ExpressionLoopContext;
 }

@@ -24,6 +24,7 @@ import {
   downstreamOf,
   executableNodes,
   hasWorkflowErrors,
+  isLoopEdge,
   isRunActive,
   isTriggerType,
   passThroughHandle,
@@ -59,6 +60,7 @@ import {
   type WorkflowRunStatus,
   type WorkflowRunSummary,
   type WorkflowStepReport,
+  type WorkflowRunUpdatedPayload,
   type WorkflowSummary,
   type WorkflowTriggerKind,
   type WorkflowTriggerPayload,
@@ -107,6 +109,20 @@ import {
   EngineStoppedError,
   WorkflowEngineError
 } from "./run-context.ts";
+import { onLoopLimitReached } from "./loops/limit.ts";
+import {
+  applyLoopReset,
+  latestPass,
+  loopCount,
+  loopEdgeTaken,
+  loopFeedbackOf,
+  loopLimit,
+  loopNamespace,
+  nodeLoopContext,
+  pendingInterruptions,
+  settleInterruptedPass,
+  storageAttempt
+} from "./loops/state.ts";
 import { createSlotPool, type SlotPool } from "./scheduler-queue.ts";
 // Gates, parked runs (spec 2026-11-10 §6): their logic lives in gates/*; the hooks here are marked "gates:".
 import { overlapSkipDetail } from "./gates/engine-hooks.ts";
@@ -181,6 +197,8 @@ interface ActiveRun {
   lifetime: AbortController;
   slots: Map<string, () => void>;
   inFlight: Set<string>;
+  /** Loops: each executing block's own abort, so a loop reset can stop just that block. */
+  blockAborts: Map<string, AbortController>;
   /** Blocks started regardless of readiness (the fired triggers, a test's first block, trigger-less roots). */
   forced: Set<string>;
   /** Trigger-less manual runs: what their root blocks read as `input`. */
@@ -194,6 +212,8 @@ interface ActiveRun {
   dirty: Set<string>;
   summaryDirty: boolean;
   edgesDirty: boolean;
+  /** Loops: the loop counters changed since the last event. */
+  loopsDirty: boolean;
   lastPublishAt: number;
   publishTimer: { cancel(): void } | null;
   publishQueued: boolean;
@@ -266,11 +286,14 @@ function childRunIdFor(parentRunId: string, nodeId: string, attempt: number): st
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
-/** Failures a retry cannot fix: every account of the chain is burnt, or a hard limit was hit. */
 /** `report_step_result` from any chat that is not a reporting step's (spec 2026-11-10 §5.2), in the spec's words. */
 const NOT_A_REPORTING_STEP = "This chat is not a workflow step that reports a result.";
 
-const NOT_RETRIED: ReadonlySet<WorkflowBlockError["kind"]> = new Set<WorkflowBlockError["kind"]>(["all_burnt", "limit_exceeded", "gate_expired"]);
+/**
+ * Failures a retry cannot fix: every account of the chain is burnt, a hard limit was hit, a loop
+ * edge reached its limit (a retry would only take it again), or a gate expired.
+ */
+const NOT_RETRIED: ReadonlySet<WorkflowBlockError["kind"]> = new Set<WorkflowBlockError["kind"]>(["all_burnt", "limit_exceeded", "loop_limit", "gate_expired"]);
 
 function isRetryable(error: WorkflowBlockError): boolean {
   if (isRecordLike(error.detail) && error.detail.childRunUnknown === true) return false;
@@ -412,13 +435,13 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       a.publishTimer.cancel();
       a.publishTimer = null;
     }
-    if (a.dirty.size === 0 && !a.summaryDirty && !a.edgesDirty) return;
+    if (a.dirty.size === 0 && !a.summaryDirty && !a.edgesDirty && !a.loopsDirty && a.gatesDirty.size === 0) return;
     const blocks: WorkflowBlockRun[] = [];
     for (const id of a.dirty) {
       const block = a.run.blocks[id];
       if (block) blocks.push(publicBlock(block));
     }
-    const payload: { run: WorkflowRunSummary; blocks: WorkflowBlockRun[]; takenEdges?: string[]; deadEdges?: string[]; gates?: WorkflowGateState[] } = {
+    const payload: WorkflowRunUpdatedPayload = {
       run: toRunSummary(a.run),
       blocks
     };
@@ -431,9 +454,14 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       payload.gates = [...a.gatesDirty].flatMap((id) => (a.run.gates && Object.hasOwn(a.run.gates, id) ? [structuredClone(a.run.gates[id]!)] : []));
       a.gatesDirty.clear();
     }
+    if (a.loopsDirty) {
+      payload.loopCounters = { ...(a.run.loopCounters ?? {}) };
+      if (a.run.loopLimits !== undefined) payload.loopLimits = { ...a.run.loopLimits };
+    }
     a.dirty.clear();
     a.summaryDirty = false;
     a.edgesDirty = false;
+    a.loopsDirty = false;
     a.lastPublishAt = clock.now().getTime();
     emit("workflowRun.updated", payload);
   };
@@ -537,7 +565,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     if (prepared.outputFile !== undefined) block.outputFile = prepared.outputFile;
   };
 
-  const readWholeOutput = async (block: PersistedBlockState): Promise<unknown> => {
+  const readWholeOutput = async (block: Pick<PersistedBlockState, "output" | "outputFile">): Promise<unknown> => {
     if (block.outputFile !== undefined) {
       try {
         return await runStore.readOutputFile(block.outputFile);
@@ -569,7 +597,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     const out: { nodeId: string; name: string; output: unknown }[] = [];
     const seen = new Set<string>();
     for (const edge of a.def.edges) {
-      if (edge.target !== nodeId || seen.has(edge.source)) continue;
+      // Loops: a loop edge is never an input (its target reads its forward inputs on every pass).
+      if (edge.target !== nodeId || seen.has(edge.source) || isLoopEdge(edge)) continue;
       const block = a.run.blocks[edge.source];
       if (!block || (block.status !== "succeeded" && block.status !== "failed")) continue;
       if (handleOf(block) !== edge.sourceHandle) continue;
@@ -590,12 +619,14 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
   const baseContext = (a: ActiveRun, nodeId: string, attempt: number, branch: string | undefined): ReturnType<NodeExecutionContext["expressionContext"]> => {
     const nodes: ReturnType<NodeExecutionContext["expressionContext"]>["nodes"] = {};
     for (const [id, block] of Object.entries(a.run.blocks)) {
-      if (!isFinishedBlockStatus(block.status)) continue;
+      // Loops: a block a loop reset reads as its latest finished pass until its new one finishes.
+      const state = isFinishedBlockStatus(block.status) ? block : latestPass(block);
+      if (!state || !isFinishedBlockStatus(state.status)) continue;
       const entry: { output: unknown; status: string; error?: WorkflowBlockError } = {
-        output: a.outputs.has(id) ? a.outputs.get(id) : block.output,
-        status: block.status
+        output: a.outputs.has(id) ? a.outputs.get(id) : state.output,
+        status: state.status
       };
-      if (block.error) entry.error = block.error;
+      if (state.error) entry.error = state.error;
       nodes[block.name] = entry;
     }
     const project = a.project;
@@ -617,7 +648,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         attempt
       },
       project: projectView,
-      workflow: { id: a.def.id, name: a.def.name }
+      workflow: { id: a.def.id, name: a.def.name },
+      // Loops: `{{ loop.pass }}` / `{{ loop.feedback }}` of this block (§7.2).
+      loop: loopNamespace(a.run.blocks[nodeId])
     };
   };
 
@@ -794,13 +827,16 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     attempt: number,
     signal: AbortSignal,
     resumeFrom: WaitingOn | undefined,
-    project: ProjectContext
+    project: ProjectContext,
+    /** The block state this execution owns (loops: a pass a reset archived is no longer `a.run.blocks[id]`). */
+    block: PersistedBlockState = a.run.blocks[node.id]!
   ): Promise<NodeResult | null> => {
     const executor = opts.executors[node.type] as { execute(ctx: NodeExecutionContext): Promise<NodeResult> } | undefined;
     if (!executor) {
       return { status: "failed", error: { kind: "internal", message: `No executor is installed for "${node.type}" blocks.` } };
     }
-    const block = a.run.blocks[node.id]!;
+    // Loops: storage is keyed by the attempt counted across passes (`storageAttempt`).
+    const stored = storageAttempt(block, attempt);
     const branch = await currentBranch(project.path);
     const exprContext = (): ExpressionContext & ReturnType<NodeExecutionContext["expressionContext"]> => ({
       ...baseContext(a, node.id, attempt, branch),
@@ -816,7 +852,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       runId: a.run.id,
       workflow: a.def,
       node,
-      attempt,
+      attempt: stored,
       signal,
       project,
       render(template) {
@@ -873,7 +909,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         markDirty(a, node.id);
         void save(a);
       },
-      attemptDir: () => runStore.attemptDir(a.run.id, node.id, attempt),
+      attemptDir: () => runStore.attemptDir(a.run.id, node.id, stored),
       timeoutMs: blockTimeoutMs(node),
       depth: a.run.depth,
       startedAt: block.startedAt ?? nowIso(),
@@ -883,6 +919,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       log: nodeLog
     };
     if (resumeFrom !== undefined) ctx.resumeFrom = structuredClone(resumeFrom);
+    const loop = nodeLoopContext(a.run, a.def, block);
+    if (loop !== undefined) ctx.loop = loop;
     try {
       const result = await executor.execute(ctx);
       if (!isValidResult(result)) {
@@ -899,8 +937,13 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
   };
 
   /** The attempts of one block; null when the engine stopped or the run was finalized meanwhile. */
-  const attemptLoop = async (a: ActiveRun, node: WorkflowNode, signal: AbortSignal, resume: WaitingOn | undefined): Promise<NodeResult | null> => {
-    const block = a.run.blocks[node.id]!;
+  const attemptLoop = async (
+    a: ActiveRun,
+    node: WorkflowNode,
+    signal: AbortSignal,
+    resume: WaitingOn | undefined,
+    block: PersistedBlockState = a.run.blocks[node.id]!
+  ): Promise<NodeResult | null> => {
     let resumeFrom = resume;
     let attempt = block.attempt;
 
@@ -991,7 +1034,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       void save(a);
       if (signal.aborted) return { status: "cancelled" };
 
-      const result = await runExecutor(a, node, attempt, signal, resumeFrom, project);
+      const result = await runExecutor(a, node, attempt, signal, resumeFrom, project, block);
       resumeFrom = undefined;
       if (result === null || !alive(a)) return null;
       releaseSlot(a, node.id);
@@ -1027,16 +1070,71 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     abortRun(a);
   };
 
-  const finishBlock = async (a: ActiveRun, node: WorkflowNode, result: NodeResult): Promise<void> => {
-    if (!alive(a)) return;
-    const block = a.run.blocks[node.id]!;
+  /**
+   * Loops (spec 2026-11-10 §7.2): the loop edge a just-finished block's handle carries. Under its
+   * limit: counted, its reset set gets a new pass (`applyLoopReset`) and the blocks of the set still
+   * running are stopped (after this state is saved: the caller saves synchronously). At its limit:
+   * `onLoopLimitReached` decides (today the pass fails with `loop_limit`). Returns the run event to
+   * record, or null when no loop edge applies. Never in a single-block test, nor once the run ends.
+   */
+  const takeLoopEdge = (a: ActiveRun, node: WorkflowNode, block: PersistedBlockState): Record<string, unknown> | null => {
+    if (block.status !== "succeeded" || a.ending !== null || a.run.testNodeOnly) return null;
+    const edge = loopEdgeTaken(a.def, node.id, block.handle);
+    if (!edge || !a.nodes.has(edge.target)) return null;
+    const count = loopCount(a.run, edge.id);
+    const limit = loopLimit(a.run, edge);
+    const targetName = a.nodes.get(edge.target)!.name;
+    if (count >= limit) {
+      const decision = onLoopLimitReached({ edge, sourceName: node.name, targetName, limit });
+      block.status = "failed";
+      block.handle = "error";
+      block.error = a.redactor.value(decision.error);
+      return { type: "loop.limit", edgeId: edge.id, nodeId: node.id, count, limit };
+    }
+    const feedback = loopFeedbackOf(node, block, a.outputs.has(node.id) ? a.outputs.get(node.id) : block.output);
+    const reset = applyLoopReset({
+      run: a.run,
+      def: a.def,
+      edge,
+      sourceId: node.id,
+      inFlight: a.inFlight,
+      ...(feedback !== undefined ? { feedback: a.redactor.text(feedback) } : {}),
+      now: nowIso()
+    });
+    for (const id of reset.unfinished) a.outputs.delete(id);
+    for (const id of reset.reset) a.dirty.add(id);
+    a.loopsDirty = true;
+    a.summaryDirty = true;
+    // Stopped only once the reset is on disk: a restart before then finds the blocks as they were
+    // (the source re-finishes and takes its loop again); one after it finds each stopped pass's
+    // `interruptedFrom` and stops its wait then (`resumeInterruptions`). A stopping engine stops
+    // nothing — the next one does.
+    if (reset.interrupt.length > 0) {
+      void save(a).then(() => {
+        if (!alive(a) || stopping) return;
+        for (const id of reset.interrupt) a.blockAborts.get(id)?.abort();
+      });
+    }
+    return { type: "loop.taken", edgeId: edge.id, nodeId: node.id, target: edge.target, count: count + 1, limit, reset: reset.reset, interrupted: reset.interrupt };
+  };
+
+  const finishBlock = async (
+    a: ActiveRun,
+    node: WorkflowNode,
+    result: NodeResult,
+    block: PersistedBlockState = a.run.blocks[node.id]!
+  ): Promise<void> => {
+    // Loops: a reset (before, or during an await below) replaced this block with its next pass —
+    // this result belongs to the pass it archived, and changes nothing.
+    const superseded = (): boolean => a.run.blocks[node.id] !== block;
+    if (!alive(a) || superseded()) return;
     delete block.waitingOn;
     delete block.waitingUntil;
     if ("warnings" in result) addWarnings(a, block, result.warnings);
     switch (result.status) {
       case "succeeded": {
-        const prepared = await prepareOutput(a.run.id, node.id, block.attempt, result.output, a.redactor);
-        if (!alive(a)) return;
+        const prepared = await prepareOutput(a.run.id, node.id, storageAttempt(block), result.output, a.redactor);
+        if (!alive(a) || superseded()) return;
         if ("error" in prepared) {
           block.status = "failed";
           block.error = prepared.error;
@@ -1054,16 +1152,16 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         block.handle = "error";
         block.error = a.redactor.value(result.error);
         if (result.output !== undefined) {
-          const prepared = await prepareOutput(a.run.id, node.id, block.attempt, result.output, a.redactor);
-          if (!alive(a)) return;
+          const prepared = await prepareOutput(a.run.id, node.id, storageAttempt(block), result.output, a.redactor);
+          if (!alive(a) || superseded()) return;
           if ("error" in prepared) addWarnings(a, block, [`The output was dropped: ${prepared.error.message}`]);
           else applyOutput(a, block, prepared);
         }
         break;
       }
       case "stopped": {
-        const prepared = await prepareOutput(a.run.id, node.id, block.attempt, result.output, a.redactor);
-        if (!alive(a)) return;
+        const prepared = await prepareOutput(a.run.id, node.id, storageAttempt(block), result.output, a.redactor);
+        if (!alive(a) || superseded()) return;
         if ("error" in prepared) addWarnings(a, block, [`The Stop value was dropped: ${prepared.error.message}`]);
         else applyOutput(a, block, prepared);
         const message = result.message !== undefined ? a.redactor.text(result.message) : undefined;
@@ -1098,8 +1196,13 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         break;
     }
     block.endedAt = nowIso();
+    // Loops: the handle it finished on may carry a loop edge — taken (a new pass of the reset set)
+    // or at its limit (this pass fails). Synchronous with the save below: `run.json` never holds a
+    // source finished on a loop handle whose loop was not taken.
+    const loop = takeLoopEdge(a, node, block);
     markDirty(a, node.id);
     appendEvent(a, { type: "block.finished", nodeId: node.id, status: block.status, attempt: block.attempt, error: block.error });
+    if (loop !== null) appendEvent(a, loop);
     void save(a);
     if (block.status === "failed" && result.status !== "stopped" && !hasErrorEdge(a, node.id)) {
       failRun(a, { status: "failed", error: `${node.name}: ${block.error?.message ?? "failed"}` });
@@ -1108,7 +1211,11 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
 
   const executeBlock = async (a: ActiveRun, nodeId: string, resume?: WaitingOn): Promise<void> => {
     const node = a.nodes.get(nodeId)!;
+    // Loops: the pass this execution runs. A loop reset replaces the block object (and stops this
+    // execution): whatever it then reports belongs to the archived pass.
+    const owned = a.run.blocks[nodeId]!;
     const blockAbort = new AbortController();
+    a.blockAborts.set(nodeId, blockAbort);
     const onRunAbort = (): void => blockAbort.abort();
     if (a.abort.signal.aborted) blockAbort.abort();
     else a.abort.signal.addEventListener("abort", onRunAbort, { once: true });
@@ -1116,16 +1223,22 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     // block — it is unfinished, and resumes from run.json after the restart.
     let unfinished = false;
     try {
-      const result = await attemptLoop(a, node, blockAbort.signal, resume);
-      if (result !== null) await finishBlock(a, node, result);
+      const result = await attemptLoop(a, node, blockAbort.signal, resume, owned);
+      if (result !== null) await finishBlock(a, node, result, owned);
       else unfinished = true;
     } catch (error) {
       logger.error("workflow block crashed", { runId: a.run.id, nodeId, error: errorMessage(error) });
-      if (alive(a)) await finishBlock(a, node, { status: "failed", error: { kind: "internal", message: errorMessage(error) } });
+      if (alive(a)) await finishBlock(a, node, { status: "failed", error: { kind: "internal", message: errorMessage(error) } }, owned);
     } finally {
       a.abort.signal.removeEventListener("abort", onRunAbort);
+      if (a.blockAborts.get(nodeId) === blockAbort) a.blockAborts.delete(nodeId);
       releaseSlot(a, nodeId);
       a.inFlight.delete(nodeId);
+      // Loops: the pass a reset stopped has stopped — nothing left for a restart to stop.
+      if (!unfinished && alive(a) && a.run.blocks[nodeId] !== owned && settleInterruptedPass(a.run.blocks[nodeId])) {
+        markDirty(a, nodeId);
+        void save(a);
+      }
       if (alive(a) && !unfinished) {
         refreshCurrent(a);
         markDirty(a);
@@ -1149,6 +1262,17 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
   // -------------------------------------------------------------------------
   // The walk
   // -------------------------------------------------------------------------
+
+  /**
+   * Loops: a forced block (a fired trigger, a run's first block, a trigger-less root) starts
+   * regardless of readiness on its first pass, and again only as a loop's target — a later pass
+   * of a block downstream of the target waits for its inputs like any other.
+   */
+  const forcedThisPass = (a: ActiveRun, nodeId: string): boolean => {
+    const block = a.run.blocks[nodeId];
+    if (!block || (block.pass ?? 1) === 1 || block.loopEdgeId === undefined) return true;
+    return a.def.edges.some((edge) => edge.id === block.loopEdgeId && edge.target === nodeId);
+  };
 
   const isPending = (a: ActiveRun, nodeId: string): boolean => {
     const status = a.run.blocks[nodeId]?.status;
@@ -1204,7 +1328,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       return;
     }
     if (a.phase !== "walking") return;
-    for (const id of a.forced) if (isPending(a, id)) startBlock(a, id);
+    for (const id of a.forced) if (isPending(a, id) && forcedThisPass(a, id)) startBlock(a, id);
     if (a.run.testNodeOnly) {
       if (a.inFlight.size === 0) {
         applyEdges(a, testNodeEdgeStates(a));
@@ -1266,7 +1390,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     const triggers = a.order.filter((id) => isTriggerType(a.nodes.get(id)!.type));
     if (triggers.length === 0) {
       // A trigger-less workflow (manual only): its roots start, reading the manual input.
-      const targets = new Set(a.def.edges.filter((edge) => a.nodes.has(edge.source)).map((edge) => edge.target));
+      // (Loops: a loop edge never makes its target a non-root.)
+      const targets = new Set(a.def.edges.filter((edge) => a.nodes.has(edge.source) && !isLoopEdge(edge)).map((edge) => edge.target));
       for (const id of a.order) if (!targets.has(id)) a.forced.add(id);
       const payload = a.run.triggerPayload;
       if (payload && (payload.kind === "manual" || payload.kind === "subworkflow")) a.rootInput = payload.input;
@@ -1407,6 +1532,53 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
   /** gates: the run timeout, parked time excluded (gates/parking.ts arms and re-arms it). */
   const armRunTimeout = (a: ActiveRun): void => parking.start(a);
 
+  /**
+   * Loops: a pass a reset stopped whose stopping the restart cut short (its `interruptedFrom` still
+   * set) — its agent turn, process or child run may still be going. Its executor resumes it once
+   * more under an aborted signal, against the archived pass (never the block's new pass), which
+   * stops it the way a cancel does; the block's next pass waits until then (it is in flight).
+   */
+  const resumeInterruptions = (a: ActiveRun): void => {
+    for (const { nodeId, pass } of pendingInterruptions(a.run)) {
+      // Storage-keyed paths (an attempt dir, a child-run id) ride the wait itself, so the archived
+      // pass's attempt base is not needed to stop it.
+      const node = a.nodes.get(nodeId);
+      const waitingOn = pass.interruptedFrom!;
+      if (!node || a.inFlight.has(nodeId)) continue;
+      a.inFlight.add(nodeId);
+      const { interruptedFrom: _marker, outputFile: _file, ...archived } = structuredClone(pass);
+      const detached: PersistedBlockState = {
+        ...archived,
+        nodeId,
+        name: node.name,
+        type: node.type,
+        status: "running",
+        waitingOn: structuredClone(waitingOn),
+        passAttemptBase: 0
+      };
+      const stop = new AbortController();
+      stop.abort();
+      void (async () => {
+        try {
+          const project = a.project!;
+          await runExecutor(a, node, detached.attempt, stop.signal, waitingOn, project, detached);
+        } catch (error) {
+          logger.warn("a loop's stopped pass could not be stopped after the restart", { runId: a.run.id, nodeId, error: errorMessage(error) });
+        } finally {
+          a.inFlight.delete(nodeId);
+          releaseSlot(a, nodeId);
+          if (alive(a) && !stopping) {
+            // The block's current state (a later reset may have replaced it, passes and all).
+            settleInterruptedPass(a.run.blocks[nodeId]);
+            markDirty(a, nodeId);
+            void save(a);
+            step(a);
+          }
+        }
+      })();
+    }
+  };
+
   const resumeBlocks = (a: ActiveRun): void => {
     const now = nowIso();
     for (const id of a.order) {
@@ -1455,6 +1627,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     armRunTimeout(a);
     computeForced(a);
     applyInitialForcing(a);
+    if (resuming) resumeInterruptions(a);
     if (resuming) resumeBlocks(a);
     markDirty(a);
     void save(a);
@@ -1655,6 +1828,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       lifetime: new AbortController(),
       slots: new Map(),
       inFlight: new Set(),
+      blockAborts: new Map(),
       forced: new Set(),
       project: null,
       phase: "queued",
@@ -1664,6 +1838,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       dirty: new Set(),
       summaryDirty: false,
       edgesDirty: false,
+      loopsDirty: false,
       lastPublishAt: Number.NEGATIVE_INFINITY,
       publishTimer: null,
       publishQueued: false,
@@ -1798,7 +1973,10 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         if (!node || !block || block.status !== "succeeded" || block.type !== node.type) continue;
         // gates: a retry asks every gate again (its decision is never reused, spec 2026-11-10 §7.5).
         if (node.type === "gate") continue;
-        const preds = workflow.edges.filter((edge) => edge.target === id && byId.has(edge.source)).map((edge) => edge.source);
+        // Loops (§7.5): seeded from the latest pass, along forward edges only (the loop counters
+        // start at 0) — and never a block that ended on a loop handle: its loop decides again.
+        if (loopEdgeTaken(workflow, id, block.handle) !== undefined) continue;
+        const preds = workflow.edges.filter((edge) => edge.target === id && byId.has(edge.source) && !isLoopEdge(edge)).map((edge) => edge.source);
         if (preds.every((pred) => seedable.has(pred))) seedable.add(id);
       }
       for (const id of seedable) {
@@ -2178,7 +2356,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
    * cannot be told (the caller marks the block interrupted — never a second child).
    */
   const childRunOf = async (parentRunId: string, node: WorkflowNode, block: PersistedBlockState): Promise<string | null> => {
-    const bound = childRunIdFor(parentRunId, node.id, block.attempt);
+    const bound = childRunIdFor(parentRunId, node.id, storageAttempt(block));
     if (active.has(bound) || (await runStore.exists(bound))) return bound;
     const since = block.startedAt;
     const legacy = (run: Pick<PersistedRun, "parentRunId" | "triggerPayload" | "parentAttempt" | "queuedAt">): boolean =>
@@ -2258,8 +2436,10 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         a.run.blocks[node.id] ??= { nodeId: node.id, name: node.name, type: node.type, status: "pending", attempt: 0 };
       }
       for (const [id, block] of Object.entries(a.run.blocks)) {
-        if (block.status === "succeeded" || block.status === "failed") {
-          const whole = await readWholeOutput(block);
+        // Loops: a block waiting for its next pass reads as its latest finished one.
+        const state = block.status === "succeeded" || block.status === "failed" ? block : latestPass(block);
+        if (state && (state.status === "succeeded" || state.status === "failed")) {
+          const whole = await readWholeOutput(state);
           if (whole !== undefined) a.outputs.set(id, whole);
         }
       }
@@ -2437,7 +2617,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       const run = a?.run ?? (await runStore.load(runId));
       const block = run?.blocks[nodeId];
       if (!block || (block.type !== "code" && block.type !== "shell") || block.attempt < 1) return null;
-      const dir = await runStore.attemptDir(runId, nodeId, block.attempt);
+      const dir = await runStore.attemptDir(runId, nodeId, storageAttempt(block));
       return join(dir, `${stream}.log`);
     },
 

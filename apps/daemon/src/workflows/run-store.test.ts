@@ -268,6 +268,39 @@ test("toRunSummary / persistedRunToWire: bookkeeping stripped, outputs cut to th
   assert.ok(!("waitingOn" in wire.blocks.c!));
 });
 
+test("persistedRunToWire: loop passes cross without file paths or interruption markers; loop counters cross", () => {
+  const big = "é".repeat(40_000);
+  const persisted = run("run-l", {
+    loopCounters: { back: 1 },
+    loopLimits: { back: 3 },
+    blocks: {
+      a: {
+        nodeId: "a",
+        name: "A",
+        type: "code",
+        status: "pending",
+        attempt: 0,
+        pass: 2,
+        passAttemptBase: 1,
+        loopEdgeId: "back",
+        passes: [
+          { pass: 1, status: "cancelled", attempt: 1, output: big, outputFile: "/x/1/output.json", interruptedFrom: { kind: "child-run", runId: "c1" } }
+        ]
+      }
+    }
+  });
+  const wire = persistedRunToWire(persisted);
+  assert.deepEqual(wire.loopCounters, { back: 1 });
+  assert.deepEqual(wire.loopLimits, { back: 3 });
+  const block = wire.blocks.a!;
+  assert.ok(!("passAttemptBase" in block) && !("loopEdgeId" in block));
+  assert.equal(block.pass, 2);
+  const pass = block.passes![0]!;
+  assert.ok(!("outputFile" in pass) && !("interruptedFrom" in pass));
+  assert.equal(pass.outputTruncated, true);
+  assert.equal(pass.output, '"' + "é".repeat(32_767), "a pass's output is cut to the preview too");
+});
+
 test("exists: a recorded run (readable or not) is true; a missing one false; another I/O error throws; deleted and invalid ids are false", async () => {
   const dir = await scratch();
   const store = runStore({ dir, logger: quiet().logger });

@@ -100,6 +100,7 @@ import {
 } from "./errors.ts";
 import type { FileRunStore } from "./run-store.ts";
 import { persistedRunToWire } from "./run-store.ts";
+import { storageAttempt } from "./loops/state.ts";
 import { followLog, readLogWindow } from "./sandbox/log-reader.ts";
 import { createRedactor } from "./sandbox/redact.ts";
 import type { WorkflowSecretsService } from "./secrets.ts";
@@ -774,7 +775,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
           if (!run) throw runNotFound(runId);
           const block = run.blocks[nodeId];
           if (!block) throw nodeNotFound(nodeId);
-          path = block.attempt >= 1 ? join(runStore.attemptPath(runId, nodeId, block.attempt), `${stream}.log`) : null;
+          path = block.attempt >= 1 ? join(runStore.attemptPath(runId, nodeId, storageAttempt(block)), `${stream}.log`) : null;
         }
         const isLive = (): boolean => deps.engine()?.isNodeLogLive(runId, nodeId) ?? false;
         const redactor = createRedactor(secrets.resolve(summary.workflowId));

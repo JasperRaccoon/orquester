@@ -812,7 +812,12 @@ export type WorkflowPatchOp =
   | { op: "set_project"; project: WorkflowProject }
   | { op: "set_enabled"; enabled: boolean }
   | { op: "set_name"; name: string; description?: string | null }
-  | { op: "set_pinned"; node: WorkflowNodeRef; output: unknown | null };
+  | { op: "set_pinned"; node: WorkflowNodeRef; output: unknown | null }
+  /**
+   * An existing connection's loop settings (§7.1): `loop` makes it a loop edge or changes its
+   * settings; null makes it an ordinary edge again. The edge keeps its id.
+   */
+  | { op: "set_loop"; edgeId: string; loop: WorkflowEdgeLoopInput | null };
 
 // ---------------------------------------------------------------------------
 // REST (§8.1)
@@ -1193,6 +1198,8 @@ export interface WorkflowExpressionContextOutline {
   workflow: { id: string; name: string };
   /** Secret names (`{{ secrets.NAME }}`); values are never shown. */
   secrets: string[];
+  /** `{{ loop.pass }}` and the shape of `{{ loop.feedback }}` from the block's point of view (spec 2026-11-10 §7.2). */
+  loop?: { pass: number; feedback?: WorkflowExpressionShape };
 }
 
 export interface PreviewWorkflowExpressionResponse {

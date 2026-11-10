@@ -16,6 +16,8 @@
 // - the output of a Code, Shell or flow block (IF, Switch, Merge, Wait, Stop) when the run carries
 //   untrusted data it could have read: a git-triggered run, a child given untrusted input, or an
 //   HTTP / Run workflow block that is not after it in the graph.
+// - a loop's feedback (`loop.feedback`, spec 2026-11-10 §7.2): a reviewer's summary or a gate
+//   decision's comment, carried back into the step a loop edge runs again.
 // Agent outputs, secrets, project, run and workflow fields, a manual run's input and a schedule's
 // times are the author's own and stay as written. A number or a boolean carries no text and is
 // never framed. The editor's `untrusted_prompt_input` warning (validate.ts) still flags the direct
@@ -270,6 +272,9 @@ export function createPromptTrust(input: PromptTrustInput): PromptTrust {
         const node = entry ? byId.get(entry.nodeId) : undefined;
         return node !== undefined && outputUntrusted(node, path.slice(1));
       }
+      case "loop":
+        // `loop.pass` is a number; the feedback is text a reviewer or a gate's decider wrote.
+        return path.length === 0 || path[0] === "feedback";
       default:
         return false;
     }
