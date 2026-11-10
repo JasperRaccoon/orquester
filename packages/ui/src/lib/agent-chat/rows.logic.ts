@@ -1254,7 +1254,6 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
   };
 
   let scannedActivityThrough = -1;
-  const imageRowIds = new Set<string>();
   for (let index = 0; index < entries.length; index += 1) {
     const timelineEntry = entries[index]!;
 
@@ -1395,15 +1394,14 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     // ── Images in the chat (design 2026-11-10 §9) ─────────────────────────
     if (timelineEntry.kind === "work" && isVisualEntry(timelineEntry) && timelineEntry.entry.image !== undefined) {
       const image = timelineEntry.entry.image;
-      // Keyed by the first image: the loaded bytes survive every
-      // re-derivation, a fold toggle and a history page included. An image
-      // shown again (`show_image` of `attachment:<id>`) keeps its own row.
-      const firstId = `image:${image.images[0]!.attachmentId}`;
-      const id = imageRowIds.has(firstId) ? `${firstId}:${timelineEntry.id}` : firstId;
-      imageRowIds.add(id);
+      // Keyed by the call that produced it: the loaded bytes survive every
+      // re-derivation, a fold toggle and a history page included, and an
+      // image shown again (`show_image` of `attachment:<id>` or `recent:N`)
+      // is its own row in every derivation — the history's and the live
+      // one's merge by id.
       rows.push({
         kind: "image",
-        id,
+        id: `image:${workGroupIdentity(timelineEntry.id, timelineEntry.entry)}`,
         createdAt: timelineEntry.createdAt,
         turnId: timelineEntry.entry.turnId,
         image

@@ -659,9 +659,10 @@ export type AgentChatTimelineRow =
    * Images an agent put in the chat (design 2026-11-10 §9), in place of the
    * `show_image` / `generate_image` call or Codex `image_generation` item
    * that produced them: always visible, left-aligned with the reply text.
-   * Never grouped, never folded into a settled turn, and keyed by its first
-   * image (`image:<attachmentId>`), so it keeps its loaded bytes through
-   * every re-derivation. A failed call stays an ordinary failed tool row.
+   * Never grouped, never folded into a settled turn, and keyed by its call
+   * (`image:tool:<turnId>:<callId>`), so it keeps its loaded bytes through
+   * every re-derivation and an image shown again is a row of its own. A
+   * failed call stays an ordinary failed tool row.
    */
   | {
       kind: "image";
