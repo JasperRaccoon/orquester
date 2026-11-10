@@ -31,6 +31,7 @@ import type {
   WorkflowRunStatus,
   WorkflowRunSummary,
   WorkflowSecretName,
+  WorkflowStepReport,
   WorkflowSummary,
   WorkflowTriggerKind,
   WorkflowTriggerSummary
@@ -326,6 +327,16 @@ function sanitizeSelection(value: unknown): AccountSelectionDecision | undefined
   return decision;
 }
 
+/** An agent block's report (spec 2026-11-10 §5.2); `undefined` without a summary. */
+function sanitizeStepReport(value: unknown): WorkflowStepReport | undefined {
+  if (!isRecord(value) || typeof value.summary !== "string") return undefined;
+  const report: WorkflowStepReport = { summary: value.summary, sessionId: str(value.sessionId) ?? "", reportedAt: str(value.reportedAt) ?? "" };
+  const outcome = nonEmpty(value.outcome);
+  if (outcome !== undefined) report.outcome = outcome;
+  if (isRecord(value.outputs)) report.outputs = value.outputs;
+  return report;
+}
+
 /** One block's run state; `null` without a node id or a known status. */
 export function sanitizeBlockRun(value: unknown): WorkflowBlockRun | null {
   if (!isRecord(value)) return null;
@@ -353,6 +364,9 @@ export function sanitizeBlockRun(value: unknown): WorkflowBlockRun | null {
   if (value.pinned === true) block.pinned = true;
   const error = sanitizeBlockError(value.error);
   if (error !== undefined) block.error = error;
+  // Outcomes (spec 2026-11-10 §5): the report the run view and a pass's details show.
+  const report = sanitizeStepReport(value.report);
+  if (report !== undefined) block.report = report;
   if (Array.isArray(value.warnings)) {
     block.warnings = value.warnings.filter((warning): warning is string => typeof warning === "string");
   }

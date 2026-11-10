@@ -114,7 +114,7 @@ export function sanitizeGateState(value: unknown): WorkflowGateState | null {
   };
   const deciderSession = nonEmpty(decider.sessionId);
   if (deciderSession !== undefined) gate.decider.sessionId = deciderSession;
-  for (const key of ["workflowName", "projectPath", "details", "phaseStartedAt", "phaseDeadlineAt", "escalatedAt"] as const) {
+  for (const key of ["workflowName", "projectPath", "details", "phaseStartedAt", "phaseDeadlineAt", "escalatedAt", "escalationReason"] as const) {
     const field = str(value[key]);
     if (field !== undefined) gate[key] = field;
   }
@@ -126,6 +126,9 @@ export function sanitizeGateState(value: unknown): WorkflowGateState | null {
   const decision = sanitizeGateDecision(value.decision);
   if (decision !== null) gate.decision = decision;
   if (value.cancelled === true) gate.cancelled = true;
+  // The person phase ran out (the block failed `gate_expired`, or a loop-limit gate's `loop_limit`):
+  // it no longer waits — dropping this would show it waiting forever.
+  if (value.expired === true) gate.expired = true;
   if (value.test === true) gate.test = true;
   return gate;
 }
@@ -260,16 +263,17 @@ export function gateChoiceDestinations(
 // ---------------------------------------------------------------------------
 
 /**
- * The card's title: the rendered question; a loop-limit gate says which loop
- * reached which limit ("Fix → Review reached its limit (3)") when the run's
- * definition names the edge, else its question.
+ * The card's title: the rendered question. A loop-limit gate's question is
+ * the daemon's "Fix → Review reached its limit (3)." — the limit when it
+ * asked (a later "Allow one more loop" raises the run's limit); without one,
+ * the title is built from the run's definition and limits.
  */
 export function gateTitle(
   gate: Pick<WorkflowGateState, "source" | "edgeId" | "question" | "nodeName">,
   definition?: DefinitionLike | null,
   loopLimits?: Readonly<Record<string, number>> | null
 ): string {
-  if (gate.source === "loop_limit" && definition && gate.edgeId) {
+  if (gate.source === "loop_limit" && !gate.question.trim() && definition && gate.edgeId) {
     const edge = definition.edges.find((candidate) => candidate.id === gate.edgeId);
     if (edge) {
       const configured = isRecord(edge.loop) && typeof edge.loop.maxLoops === "number" ? edge.loop.maxLoops : null;
@@ -301,6 +305,8 @@ export function choicePastTense(label: string): string {
   const lower = word.toLowerCase();
   if (lower.endsWith("ed")) return lower;
   if (lower.endsWith("e")) return `${lower}d`;
+  // One syllable ending consonant-vowel-consonant doubles it: "Stop" → "stopped", "Ship" → "shipped".
+  if (/^[^aeiou]*[aeiou][bdgklmnprt]$/.test(lower)) return `${lower}${lower.at(-1)}ed`;
   if (/[^aeiou]y$/.test(lower)) return `${lower.slice(0, -1)}ied`;
   return `${lower}ed`;
 }
@@ -311,7 +317,7 @@ export function choicePastTense(label: string): string {
  * the run". `null` while it waits.
  */
 export function gateRecordLine(
-  gate: Pick<WorkflowGateState, "choices" | "decision" | "cancelled">,
+  gate: Pick<WorkflowGateState, "choices" | "decision" | "cancelled" | "expired">,
   clock: (iso: string) => string
 ): string | null {
   const decision = gate.decision;
@@ -323,6 +329,7 @@ export function gateRecordLine(
     return comment ? `${head}: ${comment}` : head;
   }
   if (gate.cancelled) return "Cancelled with the run";
+  if (gate.expired) return "Expired: nobody decided in time";
   return null;
 }
 
