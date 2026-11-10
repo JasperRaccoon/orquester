@@ -24,8 +24,13 @@ export interface VoxlConnectionHandle {
   close(): void;
 }
 
-/** voxl pings every 500 ms: this long without any message means the link is dead. */
+/** voxl pings every 500 ms: this long without any message after its `hello` means the link is dead. */
 const STALE_AFTER_MS = 10_000;
+/**
+ * Before voxl's `hello` the relay may legitimately be silent: the daemon checks for and starts voxl
+ * for the first viewer (up to 30 s) and dials it (up to 10 s), then answers or closes.
+ */
+const HELLO_WITHIN_MS = 45_000;
 const STATS_INTERVAL_MS = 1000;
 
 type Painter = { drawImage(image: VideoFrame, dx: number, dy: number): void };
@@ -64,6 +69,7 @@ export function openVoxlConnection(url: string, canvas: AnyCanvas, emit: (event:
   let closed = false;
   let lastMessageAt = now();
   let lastStatsAt = now();
+  let helloSeen = false;
   const socket = new WebSocket(url);
   socket.binaryType = "arraybuffer";
 
@@ -85,6 +91,7 @@ export function openVoxlConnection(url: string, canvas: AnyCanvas, emit: (event:
     },
     emit: (event) => {
       if (event.t === "hello") {
+        helloSeen = true;
         if (canvas.width !== event.hello.w || canvas.height !== event.hello.h) {
           canvas.width = event.hello.w;
           canvas.height = event.hello.h;
@@ -101,7 +108,7 @@ export function openVoxlConnection(url: string, canvas: AnyCanvas, emit: (event:
 
   const timer = setInterval(() => {
     const t = now();
-    if (socket.readyState === WebSocket.OPEN && t - lastMessageAt > STALE_AFTER_MS) {
+    if (socket.readyState === WebSocket.OPEN && t - lastMessageAt > (helloSeen ? STALE_AFTER_MS : HELLO_WITHIN_MS)) {
       finish("The stream went silent");
       return;
     }

@@ -98,6 +98,12 @@ export interface DesktopVoxlStreamsOptions {
   stopGraceMs?: number;
   /** How long voxl keeps running after its last viewer left (default 30 s). */
   idleStopMs?: number;
+  /**
+   * How long a viewer waits for voxl in all (its check, its start; default 30 s). The relay adds at
+   * most its 10 s upstream handshake; together they stay below the browser client's 45 s wait for
+   * voxl's `hello` (packages/ui …/stream/voxl/connection.ts), so the relay answers first.
+   */
+  acquireTimeoutMs?: number;
   /** How long a stream stays `unavailable` after voxl failed before the next viewer may retry (default 30 s). */
   retryAfterMs?: number;
 }
@@ -106,6 +112,8 @@ const READY_TIMEOUT_MS = 15_000;
 const STOP_GRACE_MS = 5_000;
 const IDLE_STOP_MS = 30_000;
 const RETRY_AFTER_MS = 30_000;
+const ACQUIRE_TIMEOUT_MS = 30_000;
+const EXPIRED = Symbol("expired");
 /** This many voxl failures within FAILURE_WINDOW_MS stop the automatic retries. */
 const MAX_FAILURES = 3;
 const FAILURE_WINDOW_MS = 5 * 60_000;
@@ -118,12 +126,14 @@ export class DesktopVoxlStreams {
   private readonly stopGraceMs: number;
   private readonly idleStopMs: number;
   private readonly retryAfterMs: number;
+  private readonly acquireTimeoutMs: number;
 
   constructor(private readonly options: DesktopVoxlStreamsOptions) {
     this.readyTimeoutMs = options.readyTimeoutMs ?? READY_TIMEOUT_MS;
     this.stopGraceMs = options.stopGraceMs ?? STOP_GRACE_MS;
     this.idleStopMs = options.idleStopMs ?? IDLE_STOP_MS;
     this.retryAfterMs = options.retryAfterMs ?? RETRY_AFTER_MS;
+    this.acquireTimeoutMs = options.acquireTimeoutMs ?? ACQUIRE_TIMEOUT_MS;
   }
 
   /** The stream state of a desktop the streams follow, else undefined. */
@@ -174,13 +184,36 @@ export class DesktopVoxlStreams {
 
   /**
    * A viewer wants voxl: the running one, or a new one started for it (concurrent viewers share
-   * one start); while the machine's voxl is still being looked for, it waits for that. Throws {@link VoxlUnavailableError} when voxl cannot run (the state says why).
+   * one start); while the machine's voxl is still being looked for, it waits for that. Throws
+   * {@link VoxlUnavailableError} when voxl cannot run (the state says why), or when it is not
+   * ready within the acquire budget (a start still under way goes on for the next viewer).
    */
   async acquire(desktopId: string): Promise<VoxlLease> {
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<typeof EXPIRED>((resolve) => {
+      timer = setTimeout(() => resolve(EXPIRED), this.acquireTimeoutMs);
+      timer.unref?.();
+    });
+    try {
+      return await this.lease(desktopId, expired);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Daemon shutdown: timers and watches only; a running voxl keeps running (the next boot adopts or stops it). */
+  shutdown(): void {
+    for (const id of [...this.entries.keys()]) this.dropEntry(id);
+  }
+
+  // ---------------------------------------------------------------------------
+
+  private async lease(desktopId: string, expired: Promise<typeof EXPIRED>): Promise<VoxlLease> {
+    const budget = `${Math.round(this.acquireTimeoutMs / 1000)} s`;
     let entry = this.entries.get(desktopId);
     // While the machine's voxl is being looked for (`starting`), the viewer waits for the answer.
     while (entry?.probing) {
-      await entry.probing;
+      if ((await Promise.race([entry.probing, expired])) === EXPIRED) throw new VoxlUnavailableError(`voxl was still being checked after ${budget}.`);
       entry = this.entries.get(desktopId);
     }
     if (!entry) throw new VoxlUnavailableError("This desktop does not stream with voxl.");
@@ -193,7 +226,9 @@ export class DesktopVoxlStreams {
     entry.idleTimer = null;
     let proc: VoxlProcess;
     try {
-      proc = entry.proc ?? (await (entry.starting ??= this.startProcess(entry, epoch)));
+      const started = entry.proc ?? (await Promise.race([(entry.starting ??= this.startProcess(entry, epoch)), expired]));
+      if (started === EXPIRED) throw new VoxlUnavailableError(`voxl did not become ready within ${budget}.`);
+      proc = started;
     } catch (error) {
       this.leave(entry, epoch);
       throw error instanceof VoxlUnavailableError ? error : new VoxlUnavailableError(errorMessage(error));
@@ -214,13 +249,6 @@ export class DesktopVoxlStreams {
       }
     };
   }
-
-  /** Daemon shutdown: timers and watches only; a running voxl keeps running (the next boot adopts or stops it). */
-  shutdown(): void {
-    for (const id of [...this.entries.keys()]) this.dropEntry(id);
-  }
-
-  // ---------------------------------------------------------------------------
 
   private current(entry: Entry, epoch: number): boolean {
     return this.entries.get(entry.desktop.id) === entry && entry.epoch === epoch;

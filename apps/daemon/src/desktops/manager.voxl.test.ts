@@ -166,6 +166,17 @@ test("a viewer arriving while the machine's voxl is still being looked for waits
   lease.release();
 });
 
+test("a viewer's wait for voxl is bounded below the browser's wait for hello", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await harness(t, () => new Promise<DesktopVoxlStatus>(() => {}));
+  const desktop = await h.manager.create({ projectPath: h.appdir, projectRealPath: h.appdir, video: "voxl" });
+  const leased = h.manager.voxlUpstream(desktop.id)!();
+  t.mock.timers.tick(30_000);
+  const outcome = await Promise.race([leased.then(() => "leased", (error: unknown) => error), new Promise((resolve) => setImmediate(() => resolve("waiting")))]);
+  assert.ok(outcome instanceof VoxlUnavailableError, String(outcome));
+  assert.match(outcome.message, /still being checked/);
+});
+
 test("PATCH switches the backend without restarting the desktop; it is persisted", async (t) => {
   const h = await harness(t, VOXL);
   const desktop = await h.manager.create({ projectPath: h.appdir, projectRealPath: h.appdir, video: "rfb" });
