@@ -9,10 +9,12 @@
  *   failure branch is the one indented, and labelled);
  * - a failure edge into a block shown elsewhere is no row of its own (the
  *   step's own output says where its failure goes);
- * - a join only failures lead to is labelled "failure".
+ * - a join only failures lead to is labelled "failure";
+ * - loop edges (spec 2026-11-10 §7.1) are left out: the outline is the
+ *   forward graph, and the Steps view shows a loop as a row of its source.
  */
 
-import { buildStepOutline, outputHandles, type OutlineItem, type WorkflowNode } from "@orquester/api";
+import { buildStepOutline, outputHandles, withoutLoopEdges, type OutlineItem, type WorkflowNode } from "@orquester/api";
 
 export interface DisplayOutlineItem extends OutlineItem {
   /** The depth to draw it at. */
@@ -27,10 +29,11 @@ export interface DisplayOutlineItem extends OutlineItem {
 
 type Graph = {
   nodes: readonly (Pick<WorkflowNode, "id" | "type" | "position"> & { config?: unknown })[];
-  edges: readonly { id: string; source: string; sourceHandle: string; target: string }[];
+  edges: readonly { id: string; source: string; sourceHandle: string; target: string; loop?: unknown }[];
 };
 
-export function displayOutline(workflow: Graph): DisplayOutlineItem[] {
+export function displayOutline(graph: Graph): DisplayOutlineItem[] {
+  const workflow = withoutLoopEdges(graph);
   const byId = new Map(workflow.nodes.map((node) => [node.id, node]));
   const plainSuccess = (parentId: string, handle: string): boolean => {
     const parent = byId.get(parentId);

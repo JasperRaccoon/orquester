@@ -18,6 +18,7 @@ import type {
   AgentHop,
   Workflow,
   WorkflowBlockError,
+  WorkflowBlockPass,
   WorkflowBlockRun,
   WorkflowBlockStatus,
   WorkflowNodeType,
@@ -345,7 +346,45 @@ export function sanitizeBlockRun(value: unknown): WorkflowBlockRun | null {
       stderrBytes: Math.max(0, finite(value.logs.stderrBytes) ?? 0)
     };
   }
+  // Loops (spec 2026-11-10 §7.2): the pass, the earlier passes, the feedback and the session note.
+  const pass = passNumber(value.pass);
+  if (pass !== undefined) block.pass = pass;
+  for (const key of ["loopFeedback", "sessionNote"] as const) {
+    const field = str(value[key]);
+    if (field !== undefined) block[key] = field;
+  }
+  if (Array.isArray(value.passes)) {
+    const passes = list(value.passes, (entry) => sanitizeBlockPass(entry, block)).sort((a, b) => a.pass - b.pass);
+    if (passes.length > 0) block.passes = passes;
+  }
   return block;
+}
+
+function passNumber(value: unknown): number | undefined {
+  const pass = finite(value);
+  return pass !== undefined && pass >= 1 ? Math.floor(pass) : undefined;
+}
+
+/** One earlier pass of `owner`, read like a block record (its own fields, the owner's identity); `null` without a pass number. */
+function sanitizeBlockPass(value: unknown, owner: Pick<WorkflowBlockRun, "nodeId" | "name" | "type">): WorkflowBlockPass | null {
+  if (!isRecord(value)) return null;
+  const pass = passNumber(value.pass);
+  if (pass === undefined) return null;
+  const record = sanitizeBlockRun({ ...value, nodeId: owner.nodeId, name: owner.name, type: owner.type, passes: undefined });
+  if (record === null) return null;
+  const { nodeId: _nodeId, name: _name, type: _type, passes: _passes, ...rest } = record;
+  return { ...rest, pass };
+}
+
+/** A run's per-edge counts (`loopCounters`, `loopLimits`): whole, non-negative numbers by edge id. */
+export function sanitizeEdgeCounts(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [edgeId, count] of Object.entries(value)) {
+    const number = finite(count);
+    if (edgeId.length > 0 && number !== undefined && number >= 0) out[edgeId] = Math.floor(number);
+  }
+  return out;
 }
 
 /** A list of block states (a run's `blocks` map, or an update's delta array) keyed by node id. */
@@ -388,6 +427,10 @@ export function sanitizeWorkflowRun(value: unknown): WorkflowRun | null {
     deadEdges: sanitizeEdgeIds(value.deadEdges)
   };
   if ("finalOutput" in value) run.finalOutput = value.finalOutput;
+  const loopCounters = sanitizeEdgeCounts(value.loopCounters);
+  if (loopCounters !== undefined) run.loopCounters = loopCounters;
+  const loopLimits = sanitizeEdgeCounts(value.loopLimits);
+  if (loopLimits !== undefined) run.loopLimits = loopLimits;
   return run;
 }
 

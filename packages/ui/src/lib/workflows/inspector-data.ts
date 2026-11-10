@@ -8,6 +8,7 @@
  */
 
 import {
+  isLoopEdge,
   isTriggerType,
   outputHandles,
   WORKFLOW_LIMITS,
@@ -32,7 +33,8 @@ export function blockInputOf(
   const taken = takenEdges && takenEdges.length > 0 ? new Set(takenEdges) : null;
   const live = new Map<string, unknown>();
   for (const edge of workflow.edges) {
-    if (edge.target !== nodeId) continue;
+    // A loop edge carries feedback into its target's next pass, not input (spec 2026-11-10 §7.2).
+    if (edge.target !== nodeId || isLoopEdge(edge)) continue;
     const source = blocks[edge.source];
     if (!source || (source.status !== "succeeded" && source.status !== "failed")) continue;
     if (taken ? !taken.has(edge.id) : (source.handle ?? (source.status === "succeeded" ? "success" : "error")) !== edge.sourceHandle) continue;

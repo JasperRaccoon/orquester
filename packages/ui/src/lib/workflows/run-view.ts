@@ -9,6 +9,7 @@
  */
 
 import {
+  isLoopEdge,
   isRunActive,
   isTriggerType,
   topologicalOrder,
@@ -419,7 +420,7 @@ type TimelineNode = Pick<WorkflowNode, "id" | "type" | "name" | "position"> & {
   config?: unknown;
   disabled?: boolean;
 };
-type TimelineEdge = Pick<WorkflowEdge, "id" | "source" | "sourceHandle" | "target">;
+type TimelineEdge = Pick<WorkflowEdge, "id" | "source" | "sourceHandle" | "target" | "loop">;
 
 export interface TimelineWorkflow {
   nodes: readonly TimelineNode[];
@@ -510,7 +511,8 @@ export function blockSkipReason(
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const node = byId.get(nodeId);
   if (!node) return null;
-  const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target));
+  // A loop edge never decides whether a block runs (spec 2026-11-10 §7.1).
+  const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target) && !isLoopEdge(edge));
   return skippedReasonFor(node, byId, edges, blocks);
 }
 
@@ -534,7 +536,8 @@ export function runTimeline(
 ): TimelineItem[] {
   const nodes = workflow.nodes.filter((node) => node.type !== "note");
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target));
+  // Order and outline follow the forward graph: loop edges point back (spec 2026-11-10 §7.1).
+  const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target) && !isLoopEdge(edge));
   const order = topologicalOrder({ nodes, edges });
   const stepOf = new Map((order ?? []).map((id, index) => [id, index + 1]));
   const total = nodes.length;
@@ -678,7 +681,8 @@ export function blockInput(
   }
   const taken = run.takenEdges ? new Set(run.takenEdges) : null;
   const live = workflow.edges.filter((edge) => {
-    if (edge.target !== nodeId) return false;
+    // A loop target's input is what its forward edges carry; the loop brings feedback, not input.
+    if (edge.target !== nodeId || isLoopEdge(edge)) return false;
     if (taken?.has(edge.id)) return true;
     const source = run.blocks[edge.source];
     if (!source) return false;

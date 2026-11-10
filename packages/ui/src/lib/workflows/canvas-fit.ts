@@ -6,7 +6,7 @@
  * rather than the whole graph at a size nobody can tap.
  */
 
-import { buildStepOutline, type Workflow } from "@orquester/api";
+import { buildStepOutline, withoutLoopEdges, type Workflow } from "@orquester/api";
 
 export interface CanvasFitOptions {
   padding: number;
@@ -26,7 +26,7 @@ export function canvasFitOptions(
   const blocks = workflow.nodes.filter((node) => node.type !== "note");
   const small = blocks.length <= SMALL_GRAPH_BLOCKS;
   if (options.phone) {
-    const first = buildStepOutline(workflow)
+    const first = buildStepOutline(withoutLoopEdges(workflow))
       .filter((item) => item.kind === "node" && !item.unreachable)
       .slice(0, 2)
       .map((item) => ({ id: item.nodeId }));
@@ -46,7 +46,7 @@ export function phoneOpeningViewport(
   box: { width: number; height: number },
   zoom = 0.85
 ): { x: number; y: number; zoom: number } | null {
-  const first = buildStepOutline(workflow).find((item) => item.kind === "node");
+  const first = buildStepOutline(withoutLoopEdges(workflow)).find((item) => item.kind === "node");
   const node = first ? workflow.nodes.find((candidate) => candidate.id === first.nodeId) : workflow.nodes[0];
   if (!node) return null;
   return {
