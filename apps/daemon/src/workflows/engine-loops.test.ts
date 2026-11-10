@@ -821,7 +821,7 @@ describe("engine: loops across a daemon restart", () => {
     await flush();
     const run = (await second.engine.getRun(runId!))!;
     assert.equal(run.gates![firstGateId]!.cancelled, true, "its gate is cancelled");
-    assert.equal(run.blocks.G!.passes![0]!.interruptedFrom, undefined, "settled");
+    assert.equal((await runStore.load(runId!))!.blocks.G!.passes![0]!.interruptedFrom, undefined, "settled");
     await second.engine.cancel(runId!);
   });
 });
