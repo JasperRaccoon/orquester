@@ -102,6 +102,9 @@ test("an action is checked before anything runs: a misplaced field, a bad value 
     { action: "screenshot", region: { x: 0, y: 0, width: 10, height: 10 }, windowId: "0x400001" },
     { action: "wait", since: 3 },
     { action: "key", keys: "Return", repeat: 21 },
+    // What only the engine knew: no such key, a C1 control character.
+    { action: "key", keys: "ctrl+bogus" },
+    { action: "type", text: "next\u0085line" },
     { action: "click", actor: { kind: "chat", threadId: "t1", label: "" } }
   ] as const) {
     const error = await refusal(act(h, request as never));
@@ -110,6 +113,7 @@ test("an action is checked before anything runs: a misplaced field, a bad value 
   }
   assert.equal(h.engines.length, 0);
   assert.equal(h.logged.length, 0, "a malformed request is not an action");
+  assert.deepEqual([h.service.control("d1"), h.controlChanges], [null, 0], "nor does it take control");
   // Bounds need the display: checked once the engine is open, before any input.
   const outside = await refusal(act(h, { action: "click", x: 1280, y: 10 }));
   assert.equal(outside.code, "INVALID_ARGUMENT");

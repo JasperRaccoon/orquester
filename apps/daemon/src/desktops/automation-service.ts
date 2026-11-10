@@ -36,6 +36,7 @@ import {
   type OpenDesktopAutomation,
   type XButton
 } from "./automation/types.ts";
+import { keysymsForText, parseCombo } from "./automation/keys.ts";
 import { agentInputControl, requestedControl, sameActor } from "./control.ts";
 import { ImagePoolBusyError } from "../devices/image-pool.ts";
 import { DesktopError } from "./errors.ts";
@@ -163,6 +164,7 @@ export class DesktopAutomationService {
    */
   async run(desktopId: string, body: unknown, signal?: AbortSignal): Promise<DesktopActionResponse> {
     const request = parseDesktopActionRequest(body);
+    checkKeys(request);
     const desktop = this.options.desktop(desktopId);
     if (!desktop) throw new DesktopError(404, "DESKTOP_NOT_FOUND", "No such desktop.");
     const state = this.state(desktopId);
@@ -508,6 +510,19 @@ export class DesktopAutomationService {
       this.states.set(desktopId, state);
     }
     return state;
+  }
+}
+
+/**
+ * What the engine would refuse of a key combo or a text, checked before the action claims control:
+ * an unknown key name or an untypeable character is a malformed request (400), not an action.
+ */
+function checkKeys(request: DesktopActionRequest): void {
+  try {
+    if (request.action === "key") parseCombo(request.keys!);
+    if (request.action === "type") keysymsForText(request.text!);
+  } catch (error) {
+    throw desktopErrorOf(error);
   }
 }
 
