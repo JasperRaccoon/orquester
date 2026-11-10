@@ -1,11 +1,18 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { sep } from "node:path";
 import type { Duplex } from "node:stream";
 import {
+  DESKTOP_NOT_RUNNING_CODE,
   DESKTOP_UNAVAILABLE_CODE,
+  type DesktopActionEventPayload,
+  type DesktopActionLogResponse,
+  type DesktopActionResponse,
   type DesktopAppSummary,
   type DesktopClosedPayload,
+  type DesktopController,
   type DesktopHostStatus,
   type DesktopSize,
   type DesktopStatus,
@@ -27,7 +34,15 @@ import {
   desktopRuntimeDir
 } from "@orquester/config";
 import type { DesktopAudioHub, DesktopAudioSpawn } from "./audio.ts";
+import {
+  type DesktopScreenshotEncoder,
+  DesktopAutomationService,
+  automationEngineUnavailable,
+  screenshotEncoderUnavailable
+} from "./automation-service.ts";
+import type { DesktopAutomationTarget, OpenDesktopAutomation } from "./automation/types.ts";
 import { type DesktopBoxes, type DesktopGroupOwner, type DesktopHost, type DesktopWatch, LocalDesktopHost } from "./desktop-host.ts";
+import { DesktopError } from "./errors.ts";
 import {
   CLIENT_CONF_CONTENT,
   DESKTOP_HOST_WINDOW,
@@ -43,22 +58,14 @@ import {
 } from "./host-env.ts";
 import { DesktopHostInstallError } from "./host-status.ts";
 import { type ReconciledDesktop, reconcile } from "./reconcile.ts";
+import { DesktopScreenshotStore } from "./screenshots.ts";
 import { DesktopStore } from "./store.ts";
 import { DesktopWindowNotFoundError, DesktopWindowTracker, type DesktopWindowTrackerOptions } from "./windows.ts";
+import { x11SocketPath } from "./x11/connection.ts";
 import { newXauthority } from "./x11/xauth.ts";
 
-/** A refusal the routes answer verbatim: `status` with `{ code, message, hint? }`. */
-export class DesktopError extends Error {
-  constructor(
-    readonly status: 400 | 404 | 409 | 500 | 503,
-    readonly code: string,
-    message: string,
-    readonly hint: string | null = null
-  ) {
-    super(message);
-    this.name = "DesktopError";
-  }
-}
+// (In its own module so the automation service can throw it without importing the manager.)
+export { DesktopError };
 
 /** The tmux calls the manager makes (the daemon's `Tmux`, or a fake in tests). */
 export interface DesktopTmux {
@@ -108,6 +115,15 @@ export interface DesktopManagerOptions {
   boxes?: DesktopBoxes;
   logger?: Pick<Console, "warn" | "error">;
   now?: () => Date;
+  // Automation (spec 2026-11-10 §2–§3; automation-service.ts). INTEGRATION: index.ts passes the
+  // engine (`automation/engine.ts`) and the image workers' encoder; without them every action is
+  // refused (503 DESKTOP_AUTOMATION_UNAVAILABLE).
+  /** Opens a desktop's automation engine (tests: a fake). */
+  openAutomation?: OpenDesktopAutomation;
+  /** Encodes a capture as an action's screenshot, in the image workers. */
+  encodeScreenshot?: DesktopScreenshotEncoder;
+  /** How long an unused automation stays open (default 5 min). */
+  automationIdleMs?: number;
 }
 
 export interface DesktopManagerEvents {
@@ -115,6 +131,8 @@ export interface DesktopManagerEvents {
   updated: [DesktopSummary];
   closed: [DesktopClosedPayload];
   windows: [DesktopWindowsPayload];
+  /** An automation action was logged (`desktop.action`). */
+  action: [DesktopActionEventPayload];
 }
 
 /** Validated create input: paths are realpaths inside the fs root (the routes' job). */
@@ -221,6 +239,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   /** boxes: boxes whose link dropped since their last pass (each such drop gets a reconcile). */
   private readonly boxesDropped = new Set<string>();
   private readonly unsubscribeBoxes: () => void;
+  /** Agents' eyes and hands on running desktops, who controls each, and what they did. */
+  private readonly automation: DesktopAutomationService;
 
   constructor(private readonly options: DesktopManagerOptions) {
     super();
@@ -241,6 +261,23 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       recent: this.recent
     }));
     this.unsubscribeBoxes = options.boxes?.onChange((boxId) => this.boxChanged(boxId)) ?? (() => {});
+    this.automation = new DesktopAutomationService({
+      open: options.openAutomation ?? automationEngineUnavailable,
+      encode: options.encodeScreenshot ?? screenshotEncoderUnavailable,
+      screenshots: new DesktopScreenshotStore(options.baseDir, this.logger),
+      desktop: (id) => {
+        const rt = this.desktops.get(id);
+        return rt ? { target: () => this.automationTarget(rt), windows: () => rt.windows } : undefined;
+      },
+      controlChanged: (id) => {
+        const rt = this.desktops.get(id);
+        if (rt) this.emitUpdated(rt);
+      },
+      actionLogged: (payload) => this.emit("action", payload),
+      idleCloseMs: options.automationIdleMs,
+      now: this.now,
+      logger: this.logger
+    });
   }
 
   /**
@@ -547,6 +584,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       await this.teardown(rt);
       this.desktops.delete(id);
       void this.store.persist();
+      await this.automation.forget(id);
       this.emit("closed", { id });
     });
   }
@@ -656,6 +694,55 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       }
       throw error;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Automation, control and the action log (spec 2026-11-10 §2–§3; automation-service.ts)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Run one automation action (`request`: a DesktopActionRequest, validated here) on a running
+   * desktop. 409 DESKTOP_CONTROLLED_BY_USER for input while the user controls it, DESKTOP_RESIZED,
+   * DESKTOP_NOT_RUNNING; 400 INVALID_ARGUMENT; 404 for an unknown desktop or screenshot.
+   */
+  runAction(id: string, request: unknown, signal?: AbortSignal): Promise<DesktopActionResponse> {
+    this.mustGet(id);
+    return this.automation.run(id, request, signal);
+  }
+
+  /** `user` takes over, `agent` gives back (to the last agent; none: clears), `null` clears; the summary. */
+  setControl(id: string, controller: DesktopController | null): DesktopSummary {
+    const rt = this.mustGet(id);
+    this.automation.setControl(id, controller);
+    return this.summary(rt);
+  }
+
+  /** The last automation actions, oldest first. */
+  actionLog(id: string): DesktopActionLogResponse {
+    this.mustGet(id);
+    return { entries: this.automation.entries(id) };
+  }
+
+  /** A kept automation screenshot's bytes (404 when there is no such desktop or screenshot). */
+  screenshot(id: string, screenshotId: string): Promise<{ mimeType: "image/png" | "image/jpeg"; data: Buffer }> {
+    this.mustGet(id);
+    return this.automation.screenshot(id, screenshotId);
+  }
+
+  /**
+   * How the automation engine reaches a running desktop's display, as the window tracker does:
+   * this machine's X socket and authority file, or a VM's through its box link.
+   */
+  private automationTarget(rt: Runtime): DesktopAutomationTarget {
+    const display = rt.record.display;
+    if (rt.status !== "running" || display === null || rt.linkDown) {
+      throw new DesktopError(409, DESKTOP_NOT_RUNNING_CODE, "The desktop is not running.");
+    }
+    const machine = this.reachable(rt);
+    const xauthorityPath = this.layout(rt.record).xauthority;
+    const remote = machine.trackerOptions({ display, xauthorityPath, appForPgid: () => null }).remote;
+    if (remote) return { display, connect: () => remote.connect(), readAuthority: () => remote.readAuthority() };
+    return { display, connect: async () => createConnection(x11SocketPath(display)), readAuthority: () => readFile(xauthorityPath) };
   }
 
   // ---------------------------------------------------------------------------
@@ -894,6 +981,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   async shutdown(): Promise<void> {
     this.stopped = true;
     this.unsubscribeBoxes();
+    this.automation.shutdown();
     for (const rt of this.desktops.values()) {
       this.unwatch(rt);
       this.stopTracker(rt);
@@ -1276,6 +1364,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   private stopTracker(rt: Runtime): void {
     rt.tracker?.stop();
     rt.tracker = null;
+    // Its display went with the tracker's (stopped, host gone, link down): so does the automation's connection.
+    this.automation.release(rt.record.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -1497,7 +1587,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       apps: record.apps.map(appSummary),
       windows: rt.windows,
       activeWindowId: rt.activeWindowId,
-      control: null,
+      control: this.automation.control(record.id),
       video: "rfb"
     };
   }

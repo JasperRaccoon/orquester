@@ -1484,6 +1484,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   desktops.on("updated", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.updated", d));
   desktops.on("closed", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.closed", p));
   desktops.on("windows", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.windows", p));
+  desktops.on("action", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.action", p));
   await desktops.reattach().catch((error) => console.error("Desktop reattach failed", error));
 
   // Dev-server URL suggestions: fed from every session's PTY output.

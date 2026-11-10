@@ -389,6 +389,11 @@ export function desktopRuntimeDir(baseDir: string, desktopId: string): string {
   return joinPath(desktopsRuntimeDir(baseDir), desktopId);
 }
 
+/** A desktop's kept automation screenshots (`<id>.<png|jpg>` + `<id>.json`; 0700), on the daemon's host for every desktop. */
+export function desktopScreenshotsDir(baseDir: string, desktopId: string): string {
+  return joinPath(desktopRuntimeDir(baseDir, desktopId), "screenshots");
+}
+
 export function todosIndexPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "todos.json");
 }
