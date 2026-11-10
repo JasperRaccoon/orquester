@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Dot, Workflow as WorkflowIcon } from "lucide-react";
+import { Dot, ShieldCheck, Workflow as WorkflowIcon } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { LimitedMarker } from "../ui/limited-marker";
@@ -23,6 +23,7 @@ import { useRepoIdentities } from "../../lib/repo-identities/hooks";
 import { RepoIcon } from "../repo/RepoIcon";
 import { serverViewOpen, useAppStore, useThreadUnread } from "../../store/app";
 import { WorkflowAttention, useWorkflowAttention } from "../workflows/runs/WorkflowAttention";
+import { useGateAttention } from "../../lib/workflows/gate-hooks";
 import {
   attentionKey,
   focusAgentSession,
@@ -186,6 +187,8 @@ export const OpenedAgents: React.FC = () => {
   const identities = useRepoIdentities();
   // Failed workflow runs: the Attention Center's other source (workflows spec §5.11).
   const workflowFailures = useWorkflowAttention().length;
+  // Gates waiting for the user (spec 2026-11-10 §6.4).
+  const gatesWaiting = useGateAttention().length;
   const [seenKeys, setSeenKeys] = useState<ReadonlySet<string>>(() => new Set());
 
   const entries = useMemo(() => verifiedAgentSessions(derived, index), [derived, index]);
@@ -274,6 +277,15 @@ export const OpenedAgents: React.FC = () => {
               >
                 {total}
                 {flaggedCount > 0 && <span>· {flaggedCount}</span>}
+              </CountPill>
+            )}
+            {gatesWaiting > 0 && (
+              <CountPill
+                tone="warn"
+                title={`${gatesWaiting} workflow decision${gatesWaiting === 1 ? "" : "s"} waiting for you`}
+              >
+                <ShieldCheck size={11} aria-hidden />
+                {gatesWaiting}
               </CountPill>
             )}
             {workflowFailures > 0 && (
