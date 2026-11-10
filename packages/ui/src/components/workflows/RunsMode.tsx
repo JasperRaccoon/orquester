@@ -15,7 +15,7 @@
  * retry selects the run it started.
  */
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ChevronDown, History, ListTree, Network, PencilRuler } from "lucide-react";
 
 import { isRunActive } from "@orquester/api";
@@ -24,12 +24,15 @@ import { useApi } from "../../context/orquester-context";
 import { cn } from "../../lib/cn";
 import type { NodeSummaryContext } from "../../lib/workflows/catalog-ui";
 import { formatAgo } from "../../lib/workflows/format";
+import { pendingGateFocus, subscribeGateFocus, takeGateFocus } from "../../lib/workflows/gate-focus";
+import { useRunGates } from "../../lib/workflows/gate-hooks";
 import { useWorkflowRun } from "../../lib/workflows/hooks";
 import { deriveRunOverlay } from "../../lib/workflows/overlay";
 import { runStatusView, runTimeline, type RunStatusFilter } from "../../lib/workflows/run-view";
 import { pickBlockId, pickRunId, type PhoneRunPane } from "../../lib/workflows/runs-mode";
 import type { WorkflowRunEntry } from "../../lib/workflows/store";
 import { StandaloneWorkflowCanvas } from "./canvas/WorkflowCanvas";
+import { GateCanvasContext, type GateCanvasValue } from "./gates/GateNodeSlot";
 import { usePhoneLayout } from "./phone/phone-context";
 import { WorkflowSheet } from "./phone/WorkflowSheet";
 import { BlockRunDetails } from "./runs/BlockRunDetails";
@@ -85,7 +88,26 @@ function useRunsView(context: WorkflowRunsModeProps) {
     onStarted: (started) => context.selectRun(started)
   });
   const [filter, setFilter] = useState<RunStatusFilter>("all");
-  return { api, history, runId, entry, now, definition, items, overlay, blockId, setPicked, actions, filter, setFilter };
+
+  // A gate asked for (its notification, a "Needs you" row): select its block once the run knows it.
+  const gates = useRunGates(runId);
+  const focusGateId = useSyncExternalStore(subscribeGateFocus, () => pendingGateFocus(runId), () => null);
+  const [focused, setFocused] = useState<{ nodeId: string; seq: number } | null>(null);
+  useEffect(() => {
+    if (!runId || !focusGateId || !context.show) return;
+    const gate = gates[focusGateId];
+    if (!gate) return;
+    takeGateFocus(runId);
+    setPicked(gate.nodeId);
+    setFocused((current) => ({ nodeId: gate.nodeId, seq: (current?.seq ?? 0) + 1 }));
+  }, [runId, focusGateId, gates, context.show]);
+
+  const loopLimits = entry?.detail?.loopLimits;
+  const gateCanvas = useMemo<GateCanvasValue | null>(
+    () => (runId ? { runId, definition, loopLimits: loopLimits ?? null, now } : null),
+    [runId, definition, loopLimits, now]
+  );
+  return { api, history, runId, entry, now, definition, items, overlay, blockId, setPicked, actions, filter, setFilter, focused, gateCanvas };
 }
 
 // ---------------------------------------------------------------------------
@@ -135,18 +157,20 @@ const DesktopRuns: React.FC<WorkflowRunsModeProps> = (context) => {
             />
             <div className="relative min-h-0 flex-1">
               {definition && overlay ? (
-                <StandaloneWorkflowCanvas
-                  key={runId ?? "none"}
-                  workflow={definition}
-                  overlay={overlay}
-                  readOnly
-                  selection={{ nodeIds: blockId ? [blockId] : [], edgeIds: [] }}
-                  onSelectionChange={(next) => {
-                    if (next.nodeIds.length > 0) view.setPicked(next.nodeIds[next.nodeIds.length - 1]!);
-                  }}
-                  summaryContext={context.summaryContext}
-                  minimap={false}
-                />
+                <GateCanvasContext.Provider value={view.gateCanvas}>
+                  <StandaloneWorkflowCanvas
+                    key={runId ?? "none"}
+                    workflow={definition}
+                    overlay={overlay}
+                    readOnly
+                    selection={{ nodeIds: blockId ? [blockId] : [], edgeIds: [] }}
+                    onSelectionChange={(next) => {
+                      if (next.nodeIds.length > 0) view.setPicked(next.nodeIds[next.nodeIds.length - 1]!);
+                    }}
+                    summaryContext={context.summaryContext}
+                    minimap={false}
+                  />
+                </GateCanvasContext.Provider>
               ) : (
                 <RunLoading entry={entry} />
               )}
@@ -247,6 +271,18 @@ const PhoneRuns: React.FC<WorkflowRunsModeProps> = (context) => {
     setDetailsFor(nodeId);
   };
 
+  // A gate asked for opens its step's sheet, where its card is.
+  const focusedSeq = view.focused?.seq;
+  const focusedNode = view.focused?.nodeId;
+  useEffect(() => {
+    if (focusedNode && context.show) {
+      setListOpen(false);
+      setDetailsFor(focusedNode);
+    }
+    // Once per request (`seq`), not on every re-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedSeq]);
+
   /** "Open session": the sheets close first, or the step sheet would cover the chat it opens. */
   const openSession = (sessionId: string): OpenSessionResult => {
     if (!isWorkflowSessionOpen(sessionId)) return "closed";
@@ -306,20 +342,22 @@ const PhoneRuns: React.FC<WorkflowRunsModeProps> = (context) => {
       ) : pane === "canvas" ? (
         <div className="relative min-h-0 flex-1">
           {definition && overlay ? (
-            <StandaloneWorkflowCanvas
-              key={`${runId}:canvas`}
-              workflow={definition}
-              overlay={overlay}
-              readOnly
-              selection={{ nodeIds: view.blockId ? [view.blockId] : [], edgeIds: [] }}
-              onSelectionChange={(next) => {
-                const id = next.nodeIds[next.nodeIds.length - 1];
-                if (id) openStep(id);
-              }}
-              summaryContext={context.summaryContext}
-              minimap={false}
-              phone
-            />
+            <GateCanvasContext.Provider value={view.gateCanvas}>
+              <StandaloneWorkflowCanvas
+                key={`${runId}:canvas`}
+                workflow={definition}
+                overlay={overlay}
+                readOnly
+                selection={{ nodeIds: view.blockId ? [view.blockId] : [], edgeIds: [] }}
+                onSelectionChange={(next) => {
+                  const id = next.nodeIds[next.nodeIds.length - 1];
+                  if (id) openStep(id);
+                }}
+                summaryContext={context.summaryContext}
+                minimap={false}
+                phone
+              />
+            </GateCanvasContext.Provider>
           ) : (
             <RunLoading entry={entry} />
           )}

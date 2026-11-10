@@ -25,19 +25,29 @@ import {
   type LucideIcon
 } from "lucide-react";
 
-import { acceptsInput, isTriggerType, outputHandles, workflowHandleLabel } from "@orquester/api";
+import { acceptsInput, isTriggerType, outputHandles, workflowHandleLabel, type WorkflowGateChoiceColor, type WorkflowNode } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
 import { accentClass, blockAgent } from "../../../lib/workflows/catalog-ui";
 import { formatDuration } from "../../../lib/workflows/format";
 import type { OverlayNodeState } from "../../../lib/workflows/overlay";
 import { blockGlyph } from "../AddBlockMenu";
+import { GateNodeSlot } from "../gates/GateNodeSlot";
 import { HANDLE_HIT, useCanvasActions, type BlockNodeData } from "./canvas-context";
 
 export type BlockFlowNode = Node<BlockNodeData, "block">;
 
-/** The paint of an output handle's dot and label. */
-export function handleTone(handle: string): { dot: string; text: string } {
+/** A gate choice's colour as a handle's paint (spec 2026-11-10 §6.1). */
+const CHOICE_TONE: Partial<Record<WorkflowGateChoiceColor, { dot: string; text: string }>> = {
+  primary: { dot: "var(--sem-info-400)", text: "text-info" },
+  success: { dot: "var(--sem-ok-400)", text: "text-ok" },
+  warning: { dot: "var(--sem-warn-400)", text: "text-warn" },
+  danger: { dot: "var(--sem-danger-400)", text: "text-danger" }
+};
+
+/** The paint of an output handle's dot and label; a gate's choice takes its own colour. */
+export function handleTone(handle: string, color?: WorkflowGateChoiceColor): { dot: string; text: string } {
+  if (color && handle.startsWith("choice:")) return CHOICE_TONE[color] ?? { dot: "var(--n-400)", text: "text-neutral-300" };
   if (handle === "success" || handle === "true") return { dot: "var(--sem-ok-400)", text: "text-ok" };
   if (handle === "error") return { dot: "var(--sem-danger-400)", text: "text-danger" };
   if (handle === "false") return { dot: "var(--n-400)", text: "text-neutral-400" };
@@ -76,9 +86,11 @@ const OutputHandle: React.FC<{
   hint: boolean;
   /** A block's failure output: its "+" shows on hover (or selection) only. */
   quiet: boolean;
-}> = ({ nodeId, handle, label, top, connected, hint, quiet }) => {
+  /** A gate choice's colour. */
+  color?: WorkflowGateChoiceColor;
+}> = ({ nodeId, handle, label, top, connected, hint, quiet, color }) => {
   const actions = useCanvasActions();
-  const tone = handleTone(handle);
+  const tone = handleTone(handle, color);
   const showPlus = !actions.readOnly && !connected;
   return (
     // A zero-size anchor on the right edge at the handle's height.
@@ -145,6 +157,12 @@ const OutputHandle: React.FC<{
     </div>
   );
 };
+
+/** A gate's `choice:<id>` handle's colour, as configured. */
+function choiceColor(node: WorkflowNode, handle: string): WorkflowGateChoiceColor | undefined {
+  if (node.type !== "gate" || !handle.startsWith("choice:")) return undefined;
+  return node.config.choices.find((choice) => `choice:${choice.id}` === handle)?.color;
+}
 
 function OverlayLine({ overlay }: { overlay: OverlayNodeState }): React.ReactElement {
   const view = STATUS_VIEW[overlay.status];
@@ -229,6 +247,7 @@ function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.
             {summary || " "}
           </div>
           {overlay ? <OverlayLine overlay={overlay} /> : null}
+          {runView ? <GateNodeSlot nodeId={id} gateBlock={node.type === "gate"} /> : null}
           {triggerError && !overlay ? (
             <div
               className="mt-1 flex min-w-0 items-center gap-1 text-[11px] leading-4 text-warn"
@@ -266,6 +285,7 @@ function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.
           connected={connected.includes(handle)}
           hint={hint && index === 0}
           quiet={!branching && handle === "error"}
+          color={choiceColor(node, handle)}
         />
       ))}
     </div>

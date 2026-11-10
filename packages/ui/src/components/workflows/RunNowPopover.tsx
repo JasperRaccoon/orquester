@@ -11,7 +11,9 @@ import { cn } from "../../lib/cn";
 import { Popover } from "./ui/Popover";
 import { SmallButton } from "./ui/controls";
 
-export type RunNowResult = { ok: true; runId: string | null; skipped?: "overlap" | "missed" } | { ok: false; error: string };
+export type RunNowResult =
+  | { ok: true; runId: string | null; skipped?: "overlap" | "missed"; /** Why, in the daemon's words (a previous run waits on a gate). */ skipDetail?: string }
+  | { ok: false; error: string };
 
 export interface RunNowPopoverProps {
   open: boolean;
@@ -28,13 +30,13 @@ export const RunNowPopover: React.FC<RunNowPopoverProps> = ({ open, anchor, onCl
   const [text, setText] = useState(example);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [skipped, setSkipped] = useState(false);
+  const [skipped, setSkipped] = useState<{ detail?: string } | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setText(example);
     setError(null);
-    setSkipped(false);
+    setSkipped(null);
   }, [open, example]);
 
   const parse = (): { ok: true; value: unknown } | { ok: false } => {
@@ -55,7 +57,7 @@ export const RunNowPopover: React.FC<RunNowPopoverProps> = ({ open, anchor, onCl
     const result = await onRun(parsed.value, { force });
     setBusy(false);
     if (!result.ok) setError(result.error);
-    else if (result.skipped === "overlap") setSkipped(true);
+    else if (result.skipped === "overlap") setSkipped(result.skipDetail ? { detail: result.skipDetail } : {});
     else onClose();
   };
 
@@ -99,7 +101,7 @@ export const RunNowPopover: React.FC<RunNowPopoverProps> = ({ open, anchor, onCl
         ) : null}
         {skipped ? (
           <div className="rounded-lg border border-warn/40 bg-warn-soft/20 px-2.5 py-2 text-[11.5px] leading-4 text-warn">
-            It is already running, so this run was skipped (overlap: skip).
+            {skipped.detail ? `This run was skipped: ${skipped.detail}.` : "It is already running, so this run was skipped (overlap: skip)."}
             <div className="mt-2">
               <SmallButton onClick={() => void run(true)} disabled={busy}>
                 Run anyway

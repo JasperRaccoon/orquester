@@ -63,6 +63,8 @@ export interface WorkflowsPanelViewProps {
   onTemplate: (id: WorkflowTemplateId) => void;
   /** The starter being created, if any. */
   creatingTemplate: WorkflowTemplateId | "blank" | null;
+  /** A card's decisions waiting on the user (spec 2026-11-10 §6.4), drawn by the container. */
+  renderGates?: (workflow: WorkflowSummary) => React.ReactNode;
 }
 
 const TEMPLATE_ICONS: Record<WorkflowTemplateId, typeof Bot> = {
@@ -179,6 +181,7 @@ export const WorkflowsPanelView: React.FC<WorkflowsPanelViewProps> = (props) => 
               onDuplicate={() => props.actions.duplicate(workflow)}
               onDelete={() => props.actions.remove(workflow)}
               onRetryRuns={() => props.actions.retryRuns(workflow)}
+              gates={props.renderGates?.(workflow)}
             />
           ))
         )}
