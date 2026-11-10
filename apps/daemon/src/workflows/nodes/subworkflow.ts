@@ -60,6 +60,10 @@ export function createSubWorkflowExecutor(): NodeExecutor<"workflow"> {
               return { status: "failed", error: { kind: "interrupted", message, detail: { childRunUnknown: true } } };
             }
             const kind = error instanceof WorkflowEngineError && error.code === "LIMIT_EXCEEDED" ? "limit_exceeded" : "validation";
+            // The child's declared inputs refused the value: every problem, field by field (§11).
+            if (error instanceof WorkflowEngineError && error.inputErrors !== undefined) {
+              return { status: "failed", error: { kind, message, detail: { inputErrors: error.inputErrors } } };
+            }
             return { status: "failed", error: { kind, message } };
           }
           await ctx.setWaitingOn({ kind: "child-run", runId: started.runId });

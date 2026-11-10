@@ -337,8 +337,14 @@ function formatMinutes(minutes: number): string {
 /** The one line under a block's name. */
 export function nodeSummary(node: WorkflowNode, ctx: NodeSummaryContext = {}): string {
   switch (node.type) {
-    case "trigger.manual":
+    case "trigger.manual": {
+      const inputs = node.config.inputs ?? [];
+      if (inputs.length > 0) {
+        const names = inputs.slice(0, 3).map((decl) => decl.name).join(", ");
+        return `Run now · ${inputs.length === 1 ? "1 input" : `${inputs.length} inputs`}: ${names}${inputs.length > 3 ? ", …" : ""}`;
+      }
       return node.config.inputExample?.trim() ? "Run now · with input" : "Run now";
+    }
     case "trigger.schedule":
       return describeSchedule(node.config.preset, node.config.cron);
     case "trigger.git":

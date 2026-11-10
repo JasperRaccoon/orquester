@@ -612,3 +612,53 @@ describe("agent outcomes and outputs (spec 2026-11-10 §5.1, §7.5)", () => {
     assert.deepEqual(problemsOf(testWorkflow(nodes, edges, { pinned: { Review: { outcome: "approved", text: "ok" } } })), []);
   });
 });
+
+describe("manual-trigger inputs (spec 2026-11-10 §4)", () => {
+  const typed = (inputs: unknown[]) => testNode("t", "trigger.manual", { inputs }, { name: "Manual" });
+  const ENV = { name: "env", type: "enum", values: ["stg", "prd"], required: true };
+
+  it("reports the declaration rules with their fields", () => {
+    const wf = testWorkflow([typed([ENV, { ...ENV }, { name: "n", type: "number", default: "x" }]), agent("A", "Deploy {{ trigger.input.env }}")], [testEdge("t", "A")]);
+    const problems = problemsOf(wf);
+    assert.deepEqual(only(problems, "duplicate_input").map((p) => p.field), ["config.inputs.1.name"]);
+    assert.deepEqual(only(problems, "input_default").map((p) => p.field), ["config.inputs.2.default"]);
+    assert.equal(only(problems, "duplicate_input")[0]!.nodeId, "t");
+    assert.equal(hasWorkflowErrors(problems), true);
+  });
+
+  it("warns when an expression reads an input the trigger does not declare", () => {
+    const wf = testWorkflow(
+      [
+        typed([ENV]),
+        agent("A", "{{ trigger.input.env }} {{ trigger.input.target }} {{ input.input.region }} {{ input.input.env }}"),
+        agent("B", "{{ nodes.Manual.output.input.envv }} {{ nodes.Manual.output.input.env }} {{ trigger.input }}")
+      ],
+      [testEdge("t", "A"), testEdge("A", "B")]
+    );
+    const warned = only(problemsOf(wf), "undeclared_input");
+    assert.deepEqual(
+      warned.map((p) => [p.nodeId, p.severity, p.field]),
+      [
+        ["A", "warning", "config.prompt.text"],
+        ["A", "warning", "config.prompt.text"],
+        ["B", "warning", "config.prompt.text"]
+      ]
+    );
+    assert.match(warned[0]!.message, /\{\{ trigger\.input\.target \}\} reads the input "target", which the manual trigger does not declare \(it declares env\)/);
+    assert.match(warned[1]!.message, /input\.input\.region/);
+    assert.match(warned[2]!.message, /envv/);
+  });
+
+  it("no declared inputs: any input reference is fine", () => {
+    const wf = testWorkflow([manual(), agent("A", "{{ trigger.input.anything }} {{ input.input.x }}")], [testEdge("t", "A")]);
+    assert.deepEqual(only(problemsOf(wf), "undeclared_input"), []);
+  });
+
+  it("`input.input.x` is checked only in a block wired straight from a typed trigger", () => {
+    const wf = testWorkflow(
+      [typed([ENV]), agent("A", "x"), agent("B", "{{ input.input.other }}")],
+      [testEdge("t", "A"), testEdge("A", "B")]
+    );
+    assert.deepEqual(only(problemsOf(wf), "undeclared_input"), []);
+  });
+});

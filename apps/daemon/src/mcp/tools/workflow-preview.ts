@@ -36,6 +36,8 @@ import {
   type PromptReferencesResponse,
   type SavedPrompt,
   type Workflow,
+  type WorkflowInputDecl,
+  type WorkflowInputError,
   type WorkflowNode,
   type WorkflowProblem,
   type WorkflowProject,
@@ -65,8 +67,47 @@ const ERROR_HINTS: Record<string, string> = {
   INVALID_WORKFLOW: " Fix the problems listed; list_workflow_block_types shows each block's config.",
   RUN_NOT_ACTIVE: " The run already ended: get_workflow_runs {runId} shows how.",
   SECRET_INVALID: " A secret name is A-Z, 0-9 and _, starting with a letter; a value is at most 64 KiB.",
-  INVALID_REPORT: " Fix what is listed and call report_step_result again."
+  INVALID_REPORT: " Fix what is listed and call report_step_result again.",
+  INVALID_INPUT: " Fix every input listed and call again: get_workflow shows the declared inputs (name, type, required, values, default)."
 };
+
+/** At most this many input errors in an error's detail (a workflow declares at most 30 inputs). */
+const MAX_INPUT_ERRORS = 50;
+
+/** Input errors from a daemon body, kept only when they have the shape. */
+export function sanitizeInputErrors(raw: unknown): WorkflowInputError[] {
+  if (!Array.isArray(raw)) return [];
+  const errors: WorkflowInputError[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry) || typeof entry.message !== "string") continue;
+    const error: WorkflowInputError = { message: clipText(entry.message, 400) };
+    if (typeof entry.input === "string") error.input = clipText(entry.input, 60);
+    errors.push(error);
+    if (errors.length >= MAX_INPUT_ERRORS) break;
+  }
+  return errors;
+}
+
+/** INVALID_INPUT before anything starts (a run's card): every problem in the text and in `detail.inputErrors`. */
+export function invalidInputError(errors: readonly WorkflowInputError[]): ToolError {
+  const shown = errors.slice(0, 10).map((error) => error.message);
+  const more = errors.length > shown.length ? `; … (${errors.length - shown.length} more in detail.inputErrors)` : "";
+  return new ToolError("INVALID_INPUT", `The input does not fit the workflow's inputs: ${shown.join("; ")}${more}.${ERROR_HINTS.INVALID_INPUT}`, {
+    inputErrors: errors.slice(0, MAX_INPUT_ERRORS)
+  });
+}
+
+/** Declared inputs as an agent reads them (`get_workflow`, `list_workflows`): what to pass, compactly. */
+export function inputsView(inputs: readonly WorkflowInputDecl[]): Record<string, unknown>[] {
+  return inputs.map((decl) => {
+    const view: Record<string, unknown> = { name: decl.name, type: decl.type, required: decl.required === true };
+    if (decl.type === "enum") view.values = decl.values ?? [];
+    if (decl.default !== undefined) view.default = decl.default;
+    if (decl.description) view.description = clipText(decl.description, WORKFLOW_LIMITS.inputDescriptionChars);
+    if (decl.multiline === true && decl.type === "string") view.multiline = true;
+    return view;
+  });
+}
 
 /** Problems listed in a result / an error's detail, and quoted in an error's text. */
 const MAX_PROBLEMS = 100;
@@ -142,6 +183,8 @@ export function workflowError(res: DaemonResponse): ToolError {
   }
   const detail: Record<string, unknown> = {};
   if (problems.length > 0) Object.assign(detail, problemsView(problems));
+  const inputErrors = sanitizeInputErrors(env.inputErrors);
+  if (inputErrors.length > 0) detail.inputErrors = inputErrors;
   const opIndex = opIndexOf(env);
   if (opIndex !== undefined) detail.opIndex = opIndex;
   return new ToolError(code, message, Object.keys(detail).length > 0 ? detail : undefined);

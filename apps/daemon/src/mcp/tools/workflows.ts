@@ -24,6 +24,8 @@ import {
   createWorkflowFromRequest,
   EXPRESSION_PREVIEW_LIMITS,
   isRunActive,
+  validateWorkflowInput,
+  workflowRunInputs,
   WORKFLOW_LIMITS,
   WORKFLOW_NODE_NAME_PATTERN,
   WORKFLOWS_CHANNEL,
@@ -78,6 +80,8 @@ import {
   expectWorkflowOk,
   graphDiff,
   homeScope,
+  inputsView,
+  invalidInputError,
   isRecord,
   passedPhrase,
   previewPins,
@@ -174,6 +178,9 @@ function workflowSummaryView(w: WorkflowSummary, workspacesDir: string): Record<
   view.project = workflowProjectLabel(w.project, workspacesDir);
   if (w.project.kind === "existing") view.projectPath = w.project.projectPath;
   view.triggers = w.triggers.map((t) => clipText(`${t.text}${t.lastError ? ` · error: ${t.lastError}` : ""}`, 300));
+  // What run_workflow's input must hold (the manual trigger's declared inputs, §4).
+  const typed = w.triggers.find((t) => t.type === "trigger.manual" && Array.isArray(t.inputs) && t.inputs.length > 0);
+  if (typed?.inputs) view.inputs = inputsView(typed.inputs);
   view.nodeCount = w.nodeCount;
   view.errorCount = w.errorCount;
   if (w.lastRun) view.lastRun = { runId: w.lastRun.id, status: w.lastRun.status, ...(w.lastRun.endedAt ? { endedAt: w.lastRun.endedAt } : {}), ...(w.lastRun.error ? { error: clipText(w.lastRun.error, 200) } : {}) };
@@ -813,6 +820,8 @@ async function listProject(ctx: ScopeContext, project: string | undefined): Prom
   return (await resolveProject(ctx.api, own)).path;
 }
 
+const INPUTS_NOTE = "run_workflow's input must be an object of these inputs: required ones present, the rest optional (a default fills an absent one), no other keys.";
+
 const listWorkflows = defineTool({
   name: "list_workflows",
   title: "List automated workflows",
@@ -867,7 +876,15 @@ const getWorkflow = defineTool({
   resultKind: "json",
   async run(args, { api }) {
     const { workflow, problems } = await readWorkflow(api, args.workflowId);
-    const head = { workflowId: workflow.id, name: workflow.name, revision: workflow.revision, enabled: workflow.enabled, project: workflowProjectLabel(workflow.project, api.workspacesDir) };
+    const declared = workflowRunInputs(workflow);
+    const head = {
+      workflowId: workflow.id,
+      name: workflow.name,
+      revision: workflow.revision,
+      enabled: workflow.enabled,
+      project: workflowProjectLabel(workflow.project, api.workspacesDir),
+      ...(declared !== undefined ? { inputs: inputsView(declared), inputsNote: INPUTS_NOTE } : {})
+    };
     if (args.node !== undefined) {
       const node = findNode(workflow, args.node);
       const own = problems.filter((p) => p.nodeId === node.id);
@@ -1296,7 +1313,7 @@ function revisionConflict(current: number, asked: number): ToolError {
 const runWorkflow = defineTool({
   name: "run_workflow",
   title: "Run a workflow",
-  description: "Run the workflow now (works while disabled). Returns runId; wait:true waits up to timeoutSeconds for the end and returns each block's status, error and output (capped). The overlap policy may skip it (skipped: \"overlap\"); force:true runs anyway. Agent blocks can take hours: prefer get_workflow_runs {runId, waitSeconds} later.",
+  description: "Run the workflow now (works while disabled). input must fit its declared inputs (get_workflow). Returns runId; wait:true waits up to timeoutSeconds for the end and returns each block's status, error and output (capped). The overlap policy may skip it (skipped: \"overlap\"); force:true runs anyway. Agent blocks can take hours: prefer get_workflow_runs {runId, waitSeconds} later.",
   chatNote: ADMIN_NOTE,
   input: {
     workflowId: workflowIdArg,
@@ -1321,6 +1338,10 @@ const runWorkflow = defineTool({
     const { api } = ctx;
     const { workflow, problems } = await readWorkflow(api, args.workflowId);
     if (workflow.revision !== args.revision) throw revisionConflict(workflow.revision, args.revision);
+    // An input its declared inputs refuse never reaches the user: the daemon would refuse the run anyway.
+    const declared = workflowRunInputs(workflow);
+    const checked = declared !== undefined ? validateWorkflowInput(declared, args.input) : null;
+    if (checked !== null && checked.errors.length > 0) throw invalidInputError(checked.errors);
     const union = await workflowUnion(api, [workflow]);
     const prompts = await resolveSavedPrompts(api, savedPromptIdsOf(workflow));
     const runFields: ApprovalPreviewSection = {
@@ -1334,8 +1355,15 @@ const runWorkflow = defineTool({
         ...(args.force ? [{ label: "Overlap", value: "force: runs even if a run is active", state: "flagged" as const }] : [])
       ]
     };
-    const inputText = args.input === undefined ? "null" : JSON.stringify(args.input, null, 2);
-    const inputSection: ApprovalPreviewSection = { kind: "code", title: "Input ({{ trigger.input }})", language: "json", text: inputText };
+    // With declared inputs, the input as the run stores it (defaults applied).
+    const runInput = checked !== null ? checked.value : args.input;
+    const inputText = runInput === undefined ? "null" : JSON.stringify(runInput, null, 2);
+    const inputSection: ApprovalPreviewSection = {
+      kind: "code",
+      title: checked !== null ? "Input ({{ trigger.input }}, defaults applied)" : "Input ({{ trigger.input }})",
+      language: "json",
+      text: inputText
+    };
     const problemParts = problemSections(problems);
     const title = `${agentLabel(ctx.caller)} wants to run the workflow "${workflow.name}"`;
     // (Callers are not checked here: running a workflow another workflow calls does not change what

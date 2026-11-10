@@ -206,6 +206,10 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
       items: [
         {
           text: "Output `{ kind: \"manual\", input }`: the JSON given to Run now (`null` when none). A parent's Run workflow block starts here too, as `{ kind: \"subworkflow\", input, parentRunId, parentNodeId }` — read either as `trigger.input`."
+        },
+        {
+          term: "inputs",
+          text: `Optional typed inputs, in form order (at most ${WORKFLOW_LIMITS.maxInputs}): \`{ name, type: \"string\" | \"number\" | \"boolean\" | \"enum\", values? (enum: ${WORKFLOW_LIMITS.enumValues.min}–${WORKFLOW_LIMITS.enumValues.max}), required? (default false), default?, description? (≤ ${WORKFLOW_LIMITS.inputDescriptionChars} chars), multiline? (string only) }\`. Run now then shows a form, and every run's input (Run now, run_workflow, a parent's Run workflow block) must be an object of these names: defaults fill absent ones; a missing required input, a wrong type, a value not among an enum's values or an unknown key refuses the run (INVALID_INPUT, every problem listed). Only "42" → 42 and "true"/"false" are coerced. Read one as \`trigger.input.<name>\`. Without inputs any JSON is accepted and \`inputExample\` prefills Run now.`
         }
       ]
     }
@@ -449,7 +453,7 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
         },
         {
           term: "input",
-          text: "A template (exactly one `{{ … }}` keeps the raw value; empty, this block's input) that the child reads as `trigger.input` — give the child a Manual trigger."
+          text: "A template (exactly one `{{ … }}` keeps the raw value; empty, this block's input) that the child reads as `trigger.input` — give the child a Manual trigger. When its Manual trigger declares inputs, the value must fit them (defaults applied) or this block fails with every input problem listed."
         },
         {
           term: "output",

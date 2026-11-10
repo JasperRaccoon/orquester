@@ -2,12 +2,13 @@
  * The triggers' forms (workflows spec §6): a schedule built from presets —
  * shown back in words and as its next five fire times, computed here with
  * croner and confirmed by the daemon — a git event (which repository, which
- * event, which branches), and the manual trigger's example input.
+ * event, which branches), and the manual trigger's typed inputs (`InputsEditor`)
+ * or, without them, its example input.
  *
  * Every field validation can point at has an anchor and shows its own
  * messages: `config.preset` / `config.cron` in every schedule mode,
- * `config.repo.*` and `config.event.*` for git, `config.inputExample` for the
- * manual trigger. A problem on a group path that no field in view shows (a
+ * `config.repo.*` and `config.event.*` for git, `config.inputs.*` and
+ * `config.inputExample` for the manual trigger. A problem on a group path that no field in view shows (a
  * release on a non-GitHub host lands on `config.event` itself) shows under the
  * group ("leftover" messages), so none is lost.
  */
@@ -63,6 +64,7 @@ import {
 import { useAppStore } from "../../../store/app";
 import { usePhoneLayout } from "../phone/phone-context";
 import { RepoPicker } from "../RepoPicker";
+import { InputsSection } from "./InputsEditor";
 import {
   Callout,
   ChipGroup,
@@ -821,6 +823,18 @@ export const GitSettings: React.FC = () => {
 // ---------------------------------------------------------------------------
 
 export const ManualSettings: React.FC = () => {
+  const { node } = useInspector();
+  const typed = ((node.config as { inputs?: unknown[] }).inputs ?? []).length > 0;
+  return (
+    <>
+      <InputsSection />
+      {/* The example prefills Run now only while no inputs are declared (a form replaces it). */}
+      {typed ? null : <ExampleInputSection />}
+    </>
+  );
+};
+
+const ExampleInputSection: React.FC = () => {
   const { node } = useInspector();
   const setConfig = useConfigSetter<{ inputExample?: string }>();
   const config = node.config as { inputExample?: string };

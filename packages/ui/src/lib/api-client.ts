@@ -307,6 +307,7 @@ import type {
   ValidateWorkflowRequest,
   ValidateWorkflowResponse,
   WorkflowErrorCode,
+  WorkflowInputError,
   WorkflowProblem,
   WorkflowWriteResponse
 } from "@orquester/api";
@@ -2818,6 +2819,20 @@ export class WorkflowApiError extends ApiError {
   get code(): WorkflowErrorCode | null {
     const code = this.errorObject?.code ?? (this.body as { code?: unknown } | undefined)?.code;
     return typeof code === "string" && WORKFLOW_ERROR_CODES.has(code) ? (code as WorkflowErrorCode) : null;
+  }
+
+  /** `INVALID_INPUT`'s input errors (sanitized, field by field); `[]` otherwise. */
+  get inputErrors(): WorkflowInputError[] {
+    const raw = this.errorObject?.inputErrors;
+    if (!Array.isArray(raw)) return [];
+    const errors: WorkflowInputError[] = [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.message !== "string") continue;
+      errors.push(typeof record.input === "string" ? { input: record.input, message: record.message } : { message: record.message });
+    }
+    return errors;
   }
 
   /** `INVALID_WORKFLOW`'s problems (sanitized); `[]` otherwise. */

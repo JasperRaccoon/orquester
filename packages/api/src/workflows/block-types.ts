@@ -51,10 +51,15 @@ export const WORKFLOW_BLOCK_CATALOG: Record<WorkflowNodeType, WorkflowBlockCatal
   "trigger.manual": {
     type: "trigger.manual",
     title: "Manual trigger",
-    description: "Starts the workflow from “Run now” (the editor, the rail or the MCP), with optional JSON input.",
+    description: "Starts the workflow from “Run now” (the editor, the rail or the MCP), with optional JSON input — or typed inputs (`inputs`) that Run now shows as a form and every run is checked against.",
     category: WORKFLOW_NODE_CATEGORY["trigger.manual"],
-    output: "{ kind: \"manual\", input } — `input` is the JSON given to Run now (null when none).",
-    example: { inputExample: '{ "ticket": "PROJ-123" }' }
+    output: "{ kind: \"manual\", input } — `input` is the JSON given to Run now (null when none); with `inputs` declared, the validated object with defaults applied.",
+    example: {
+      inputs: [
+        { name: "ticket", type: "string", required: true, description: "The ticket id, e.g. PROJ-123" },
+        { name: "env", type: "enum", values: ["staging", "production"], default: "staging" }
+      ]
+    }
   },
   "trigger.schedule": {
     type: "trigger.schedule",

@@ -1236,6 +1236,70 @@ test("create_workflow's stale pins name the sub-workflow that changed", async (t
 });
 
 // ---------------------------------------------------------------------------
+// Typed inputs (spec 2026-11-10 §4, §8)
+// ---------------------------------------------------------------------------
+
+const TYPED_INPUTS = [
+  { name: "env", type: "enum", values: ["stg", "prd"], required: true, description: "Where to deploy" },
+  { name: "count", type: "number", default: 2 }
+];
+
+function typedDefinition(api: FakeDaemonApi): Workflow {
+  const plain = definition(api);
+  return { ...plain, nodes: plain.nodes.map((n) => (n.type === "trigger.manual" ? { ...n, config: { inputs: TYPED_INPUTS } } : n)) } as Workflow;
+}
+
+test("get_workflow and list_workflows show the declared inputs run_workflow takes", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api, typedDefinition(api));
+  const read = await call(api, "get_workflow", { workflowId: "wf-1" });
+  assert.deepEqual(read.inputs, [
+    { name: "env", type: "enum", required: true, values: ["stg", "prd"], description: "Where to deploy" },
+    { name: "count", type: "number", required: false, default: 2 }
+  ]);
+  assert.match(String(read.inputsNote), /object of these inputs/);
+  const plain = await sandbox(t);
+  serveDefinition(plain);
+  assert.equal("inputs" in (await call(plain, "get_workflow", { workflowId: "wf-1" })), false, "no inputs declared: no inputs key");
+  api.on("GET", "/api/workflows", { status: 200, body: { workflows: [{
+    id: "wf-1", name: "Demo", enabled: false, revision: 7, project: { kind: "existing", projectPath: api.own },
+    triggers: [{ nodeId: "t", type: "trigger.manual", text: "On demand", inputs: TYPED_INPUTS }], nodeCount: 3, errorCount: 0, activeRuns: [], updatedAt: stamp
+  }] } });
+  const listed = (await call(api, "list_workflows", { project: "acme/api" })).workflows as Result[];
+  assert.deepEqual(listed[0]!.inputs, read.inputs);
+});
+
+test("run_workflow: the daemon's INVALID_INPUT lists every input error, in the text and in detail", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api, typedDefinition(api));
+  const inputErrors = [
+    { input: "env", message: "input `env` must be one of: stg, prd (got \"dev\")" },
+    { input: "extra", message: "unknown input `extra`: remove it (this workflow takes env, count)" }
+  ];
+  api.on("POST", "/api/workflows/wf-1/run", failure(400, "INVALID_INPUT", "The input does not fit the workflow's inputs: input `env` must be one of: stg, prd (got \"dev\"); unknown input `extra`: remove it (this workflow takes env, count).", { inputErrors }));
+  const error = await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { env: "dev", extra: 1 } }), "INVALID_INPUT", /input `env` must be one of: stg, prd.*unknown input `extra`.*get_workflow shows the declared inputs/);
+  assert.deepEqual((error.detail as { inputErrors: unknown }).inputErrors, inputErrors);
+});
+
+test("run_workflow in a chat: an input the declared inputs refuse never opens a card; a good one shows its defaults", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api, typedDefinition(api));
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(typedDefinition(api)) } });
+  const port = new FakeApprovalPort();
+  const refused = await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { count: "many" } }, { who: chat(api), port }), "INVALID_INPUT", /input `env` is required: pass one of: stg, prd; input `count` must be a number \(got "many"\)/);
+  assert.deepEqual((refused.detail as { inputErrors: { input?: string }[] }).inputErrors.map((e) => e.input), ["env", "count"]);
+  assert.equal(port.cards.length, 0, "no card for a run the daemon would refuse");
+  assert.ok(!api.calls.some((c) => c.path === "/api/workflows/wf-1/run"));
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { env: "prd" } }, { who: chat(api), port });
+  const card = port.cards[0]!;
+  const input = card.sections.find((s) => s.kind === "code" && /defaults applied/.test(s.title));
+  assert.ok(input && input.kind === "code");
+  assert.equal(input.text, JSON.stringify({ env: "prd", count: 2 }, null, 2));
+  assert.deepEqual(api.calls.find((c) => c.path === "/api/workflows/wf-1/run")!.body, { expectedRevision: 7, input: { env: "prd" } }, "the daemon validates and defaults it again");
+});
+
+// ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
 

@@ -1868,13 +1868,13 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 | Tool | Input | Returns |
 |---|---|---|
 | `list_workflow_block_types` | `type?` | `{types: [{type, category, title, description, handles, output, example, configSchema}], expressionGuide, authoringGuide, configSchemasOmitted?}` — **read it first** |
-| `list_workflows` | `project?` | `{workflows: [{workflowId, name, enabled, revision, project, projectPath?, triggers: [text], nodeCount, errorCount, lastRun?, activeRuns, updatedAt}]}` |
-| `get_workflow` | `workflowId`, `node?` | `{workflowId, name, revision, enabled, project, problems, errorCount, warningCount, connections, workflow}` — or, with `node`, that one block and its connections |
+| `list_workflows` | `project?` | `{workflows: [{workflowId, name, enabled, revision, project, projectPath?, triggers: [text], inputs?, nodeCount, errorCount, lastRun?, activeRuns, updatedAt}]}` |
+| `get_workflow` | `workflowId`, `node?` | `{workflowId, name, revision, enabled, project, inputs?, inputsNote?, problems, errorCount, warningCount, connections, workflow}` — or, with `node`, that one block and its connections |
 | `create_workflow` | `name`, `description?`, `project`, `settings?`, `nodes`, `edges? = []`, `enabled? = false`, `dryRun? = false` | `{created: true, workflowId, revision, problems, …, connections, workflow, next?}`; with `dryRun`, the validation only |
 | `update_workflow` | `workflowId`, `revision`, `ops` (1–500), `dryRun? = false` | `{updated: true, workflowId, revision, problems, …, connections, workflow}`; with `dryRun`, the patched definition's validation only |
 | `delete_workflow` | `workflowId`, `confirm: true` | `{deleted: true, workflowId}` |
 | `preview_expression` | `workflowId`, `template?` or `templates?`, `node?`, `runId?`, `usePinned? = false`, `mode? = "text"` | each rendered text (or raw value), warnings, parse errors, `available` |
-| `run_workflow` | `workflowId`, `revision`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}` |
+| `run_workflow` | `workflowId`, `revision`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}`; an input its declared inputs refuse: `INVALID_INPUT` with `detail.inputErrors` |
 | `get_workflow_runs` | `workflowId` (`before?`, `limit? = 20`), or `runId` (`waitSeconds?`), or `runId` + `nodeId` (`outputOffset?`, `log?`) | runs, newest first, `before`; one run's `{run, blocks, outputNote?}`; one block's `output` or a window `{outputText, offset, totalBytes, nextOffset?}`, or its stdout/stderr log |
 | `cancel_workflow_run` | `runId` | `{cancelRequested: true, runId, run?}` |
 | `list_workflow_secrets` | `workflowId?` | `{secrets: [{name, scope, workflowId?, updatedAt, short?}]}` — names only |
@@ -1988,6 +1988,26 @@ run as it stands: `finished: true`, or `finished: false, timedOut: true` for a r
 Agent blocks can take hours: for those, start without `wait` and check back. When the overlap policy skips the run
 (`overlap: "skip"` and a run already active) the answer is `{runId: null, skipped: "overlap"}`;
 `force: true` runs anyway.
+
+**Typed inputs.** A manual trigger may declare `inputs`: an ordered list of `{name, type: "string" |
+"number" | "boolean" | "enum", values? (enum: 1–50), required? (default false), default?,
+description? (≤ 300 characters), multiline? (string only)}`, at most 30. `get_workflow` and
+`list_workflows` show them as `inputs: [{name, type, required, values?, default?, description?,
+multiline?}]`, so an agent knows what to pass. When they are declared, a run's `input` must be an
+object of exactly those names (absent or `null` counts as `{}`): a default fills an absent input; a
+missing required input (or an empty text for one), a wrong type, a value not among an enum's
+`values` and an unknown key are refused — the strings `"42"` and `"true"` / `"false"` are accepted
+for a number and a boolean, nothing else is converted. Every problem is listed at once, each naming
+the input and the fix (``input `env` must be one of: stg, prd``): `run_workflow` fails with
+`INVALID_INPUT`, its message listing them and `detail.inputErrors` holding `[{input?, message}]`. In
+a chat this happens before any approval card opens; the card then shows the input as the run will
+store it, defaults applied. The run's `{{ trigger.input }}` is that validated object. The same check
+runs for Run now in the GUI and the REST route; a retry reuses its source run's input unchanged, a
+test run applies defaults without requiring the rest, and a Run workflow block's value is checked
+against the child's declared inputs (the block fails with `validation` and `detail.inputErrors`).
+Without declared inputs any JSON is accepted, as before. Validation warns (`undeclared_input`) when
+an expression reads `trigger.input.<name>` (or the trigger's `output.input.<name>`) for a name the
+trigger does not declare.
 
 **Sub-workflows are frozen when a run starts.** A top-level run records the definition of every
 workflow its Run workflow blocks reach (recursively) as it starts, and each child run runs that

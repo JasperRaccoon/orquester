@@ -18,6 +18,7 @@ import { UNSET_SUBWORKFLOW_ID } from "./block-types.ts";
 import { parseTemplate, templateReferences, hasTemplate, type TemplateReference } from "./expressions.ts";
 import { nodeTemplateFields } from "./fields.ts";
 import { acceptsInput, agentOutcomeIds, findCycles, outputHandles, reachableFromTriggers, upstreamOf } from "./graph.ts";
+import { createUndeclaredInputCheck, inputDeclarationProblems } from "./inputs.ts";
 import { pinnedOutcomeProblem } from "./outcomes.ts";
 import { presetToCron, scheduleIntervalProblem, validateCron, isValidTimeZone } from "./schedule.ts";
 import {
@@ -367,6 +368,7 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
     node.type === "trigger.git" && (node.config.event.kind === "pull_request" || node.config.event.kind === "release");
   const triggers = nodes.filter((node) => isTriggerType(node.type));
   const reachable = reachableFromTriggers(graph);
+  const undeclaredInput = createUndeclaredInputCheck(graph);
   const timeoutMax = (minutes: number | undefined, max: number, node: WorkflowNode, field: string, what: string): void => {
     if (minutes !== undefined && minutes > max) {
       push({
@@ -406,6 +408,16 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
       const titleSecrets = new Set<string>();
       let untrustedWarned = false;
       for (const ref of templateReferences(field.value)) {
+        const undeclared = undeclaredInput(node, ref);
+        if (undeclared !== null) {
+          push({
+            severity: "warning",
+            code: "undeclared_input",
+            message: `${node.name}: {{ ${ref.source} }} reads the input "${undeclared.name.slice(0, 60)}", which the manual trigger does not declare (it declares ${undeclared.declared.join(", ")}) — declare it, or the value is always empty`,
+            nodeId: node.id,
+            field: field.field
+          });
+        }
         if (ref.root === "nodes") {
           const name = ref.path[0];
           if (typeof name !== "string") {
@@ -531,6 +543,10 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
             field: "config.cron"
           });
         }
+        break;
+      }
+      case "trigger.manual": {
+        for (const problem of inputDeclarationProblems(node)) push(problem);
         break;
       }
       case "trigger.git": {
