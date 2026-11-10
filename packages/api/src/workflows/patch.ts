@@ -7,6 +7,7 @@
 
 import {
   WORKFLOW_NODE_TYPES,
+  workflowEdgeLoopSchema,
   workflowNodeSchema,
   workflowProjectSchema,
   workflowRecordSchema,
@@ -26,6 +27,7 @@ import {
   type CreateWorkflowRequest,
   type Workflow,
   type WorkflowEdge,
+  type WorkflowEdgeLoop,
   type WorkflowNodeRef,
   type WorkflowPatchNodeInput,
   type WorkflowPatchOp
@@ -242,9 +244,43 @@ class Patcher {
     if (this.workflow.edges.length >= WORKFLOW_LIMITS.maxEdges) {
       this.fail(index, `At most ${WORKFLOW_LIMITS.maxEdges} connections per workflow`);
     }
-    const edge: WorkflowEdge = { id: this.env.mintId(), source: source.id, sourceHandle: handle, target: target.id };
+    const loop = op.loop !== undefined && op.loop !== null ? this.loopSettings(index, op.loop) : undefined;
+    const edge: WorkflowEdge = { id: this.env.mintId(), source: source.id, sourceHandle: handle, target: target.id, ...(loop ? { loop } : {}) };
     this.workflow.edges.push(edge);
     return edge;
+  }
+
+  /**
+   * A loop edge's settings as sent (`session` defaults to "continue"). Whether the edge may loop —
+   * back to an ancestor, not from `error`, alone on its handle — is the whole graph's question:
+   * `validateWorkflow` answers it before the daemon saves.
+   */
+  loopSettings(index: number, value: unknown): WorkflowEdgeLoop {
+    const { min, max } = WORKFLOW_LIMITS.loops;
+    if (!isRecord(value)) this.fail(index, `loop must be { maxLoops: ${min}–${max}, session?: "continue" | "new" }`);
+    const parsed = workflowEdgeLoopSchema.safeParse(value);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]!;
+      this.fail(
+        index,
+        issue.path[0] === "maxLoops"
+          ? `loop.maxLoops must be a whole number from ${min} to ${max}`
+          : issue.path[0] === "session"
+            ? `loop.session must be "continue" or "new"`
+            : `loop: ${firstIssue(parsed.error.issues)}`
+      );
+    }
+    return parsed.data;
+  }
+
+  setLoop(index: number, op: Extract<WorkflowPatchOp, { op: "set_loop" }>): void {
+    if (typeof op.edgeId !== "string" || op.edgeId.length === 0) this.fail(index, "set_loop needs `edgeId`");
+    const position = this.workflow.edges.findIndex((edge) => edge.id === op.edgeId);
+    if (position < 0) this.fail(index, `There is no connection "${op.edgeId}"`);
+    if (op.loop === undefined) this.fail(index, "set_loop needs `loop` (settings, or null for an ordinary connection)");
+    const { loop: _previous, ...rest } = this.workflow.edges[position]!;
+    void _previous;
+    this.workflow.edges[position] = op.loop === null ? rest : { ...rest, loop: this.loopSettings(index, op.loop) };
   }
 
   disconnect(index: number, op: Extract<WorkflowPatchOp, { op: "disconnect" }>): void {
@@ -324,6 +360,9 @@ class Patcher {
         else if (typeof op.description === "string") this.workflow.description = op.description;
         return;
       }
+      case "set_loop":
+        this.setLoop(index, op);
+        return;
       case "set_pinned": {
         const node = this.node(index, op.node);
         const pinned = { ...(this.workflow.pinned ?? {}) };
@@ -397,7 +436,13 @@ export function createWorkflowFromRequest(request: CreateWorkflowRequest, env: P
   edges.forEach((edge, offset) => {
     const index = nodes.length + offset;
     if (!isRecord(edge)) patcher.fail(index, "An edge must be an object");
-    const created = patcher.connect(index, { op: "connect", source: edge.source, sourceHandle: edge.sourceHandle, target: edge.target });
+    const created = patcher.connect(index, {
+      op: "connect",
+      source: edge.source,
+      sourceHandle: edge.sourceHandle,
+      target: edge.target,
+      ...(edge.loop !== undefined ? { loop: edge.loop } : {})
+    });
     if (edge.id !== undefined) {
       if (typeof edge.id !== "string" || edge.id.length === 0) patcher.fail(index, "An edge id must be a non-empty text");
       if (patcher.workflow.edges.some((other) => other !== created && other.id === edge.id)) {

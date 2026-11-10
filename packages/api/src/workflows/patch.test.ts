@@ -261,3 +261,63 @@ describe("createWorkflowFromRequest", () => {
     assert.throws(() => createWorkflowFromRequest({ ...request, nodes: [], project: { kind: "nope" } as never }, env()), WorkflowPatchError);
   });
 });
+
+describe("loop edges in patches (spec 2026-11-10 §7.1)", () => {
+  it("connect with loop makes a loop edge, session defaulting to continue", () => {
+    const result = patch([{ op: "connect", source: "Post", target: "Fix", loop: { maxLoops: 3 } }]);
+    const added = result.edges.at(-1)!;
+    assert.deepEqual({ source: added.source, target: added.target, sourceHandle: added.sourceHandle, loop: added.loop }, {
+      source: "post",
+      target: "fix",
+      sourceHandle: "success",
+      loop: { maxLoops: 3, session: "continue" }
+    });
+    const plain = patch([{ op: "connect", source: "Fetch", target: "Post" }]).edges.at(-1)!;
+    assert.equal("loop" in plain, false, "an ordinary connect stays ordinary");
+  });
+
+  it("connect refuses loop settings out of range, naming the op", () => {
+    for (const loop of [{ maxLoops: 0 }, { maxLoops: 21 }, { maxLoops: 2.5 }, { maxLoops: 2, session: "maybe" }, "twice"]) {
+      const error = patchError([{ op: "set_enabled", enabled: true }, { op: "connect", source: "Post", target: "Fix", loop: loop as never }]);
+      assert.equal(error.opIndex, 1);
+      assert.match(error.message, /loop/);
+    }
+  });
+
+  it("set_loop edits an edge's loop settings in place (same id), and null makes it ordinary", () => {
+    const looped = patch([{ op: "connect", source: "Post", target: "Fix", loop: { maxLoops: 2, session: "new" } }]);
+    const id = looped.edges.at(-1)!.id;
+    const raised = patch([{ op: "set_loop", edgeId: id, loop: { maxLoops: 5 } }], looped);
+    assert.deepEqual(raised.edges.at(-1), { ...looped.edges.at(-1)!, loop: { maxLoops: 5, session: "continue" } });
+    assert.equal(raised.edges.length, looped.edges.length);
+    const cleared = patch([{ op: "set_loop", edgeId: id, loop: null }], raised);
+    assert.equal("loop" in cleared.edges.at(-1)!, false);
+    assert.equal(cleared.edges.at(-1)!.id, id);
+    // An ordinary edge can become a loop edge.
+    const made = patch([{ op: "set_loop", edgeId: "fetch-success-fix", loop: { maxLoops: 1 } }]);
+    assert.deepEqual(made.edges.find((edge) => edge.id === "fetch-success-fix")!.loop, { maxLoops: 1, session: "continue" });
+    assert.match(patchError([{ op: "set_loop", edgeId: "nope", loop: null }]).message, /no connection "nope"/);
+    assert.match(patchError([{ op: "set_loop", edgeId: id, loop: { maxLoops: 99 } }], looped).message, /1 to 20/);
+  });
+
+  it("create_workflow edges carry loop settings", () => {
+    const workflow = createWorkflowFromRequest(
+      {
+        name: "Fix until approved",
+        project: { kind: "existing", projectPath: "/w/ws/app" },
+        nodes: [{ type: "trigger.manual", name: "Start" }, { type: "code", name: "Fix" }, { type: "code", name: "Check" }],
+        edges: [
+          { source: "Start", target: "Fix" },
+          { source: "Fix", target: "Check" },
+          { source: "Check", target: "Fix", loop: { maxLoops: 4, session: "new" } }
+        ],
+        autoLayout: true
+      },
+      env()
+    );
+    assert.deepEqual(workflow.edges.map((edge) => edge.loop ?? null), [null, null, { maxLoops: 4, session: "new" }]);
+    // The layout ranks the forward graph: the loop edge does not push Fix after Check.
+    const x = (name: string) => workflow.nodes.find((node) => node.name === name)!.position.x;
+    assert.ok(x("Start") < x("Fix") && x("Fix") < x("Check"));
+  });
+});
