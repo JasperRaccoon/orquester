@@ -116,7 +116,7 @@ describe("ChatImageLightbox", () => {
       root!.render(view(1));
       await settle();
     });
-    assert.equal(document.querySelector('button[aria-label="Copy image"]'), null, "the actions went with the image");
+    assert.equal(document.querySelector('button[aria-label="Copy image"]') === null, true, "the actions went with the image");
 
     await act(async () => {
       pressRight();

@@ -8,7 +8,7 @@ import { useAppStore } from "../../../store/app";
 import { ChatIconButton, COPY_FEEDBACK_MS } from "../primitives";
 import { useTimelineRowContext } from "../timeline/context";
 import type { ChatImageItem } from "./chat-image";
-import { attachImageAsReference, copyImageToClipboard } from "./image-actions";
+import { attachImageAsReference, copyImageToClipboard, readImageBlob } from "./image-actions";
 import { SaveImageDialog } from "./SaveImageDialog";
 
 function failureMessage(cause: unknown, fallback: string): string {
@@ -43,6 +43,24 @@ export function ChatImageActions(props: {
     return () => clearTimeout(timer);
   }, [copied]);
 
+  // An image whose type nobody told us (a Markdown `attachment:<id>`) is
+  // named by what its loaded bytes are, so a JPEG is never saved as `.png`.
+  const [sniffed, setSniffed] = React.useState<{ url: string; mimeType: string } | null>(null);
+  React.useEffect(() => {
+    if (url === null || item.mimeType !== undefined) return undefined;
+    let live = true;
+    readImageBlob(url).then(
+      (blob) => {
+        if (live) setSniffed({ url, mimeType: blob.type });
+      },
+      () => undefined
+    );
+    return () => {
+      live = false;
+    };
+  }, [url, item.mimeType]);
+  const mimeType = item.mimeType ?? (sniffed !== null && sniffed.url === url ? sniffed.mimeType : undefined);
+
   if (url === null) return null;
   const notice = (title: string, message: string) => useAppStore.getState().setNotice({ title, message });
   const attachment = item.source.kind === "attachment" ? item.source : null;
@@ -53,7 +71,7 @@ export function ChatImageActions(props: {
   const name = defaultSavedImagePath({
     ...(item.caption !== undefined ? { caption: item.caption } : {}),
     ...(item.title !== undefined ? { title: item.title } : {}),
-    ...(item.mimeType !== undefined ? { mimeType: item.mimeType } : {})
+    ...(mimeType !== undefined ? { mimeType } : {})
   });
 
   return (
