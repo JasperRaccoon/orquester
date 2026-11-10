@@ -408,7 +408,9 @@ export class VoxlStreamClient implements DesktopStreamClient {
     const { container, hello } = this;
     if (!container || !hello?.resize || hello.readOnly) return;
     if (this.mode.kind !== "fit" || !this.mode.driveSize) return;
-    const size = fitRequestSize({ width: container.clientWidth, height: container.clientHeight }, window.devicePixelRatio || 1);
+    // CSS pixels, as the RFB client's Fit sizes the display: text looks the same size on both
+    // backends, and the touch text-size presets are what trade size for space on dense screens.
+    const size = fitRequestSize({ width: container.clientWidth, height: container.clientHeight }, 1);
     if (!size) return;
     const key = `${size.width}x${size.height}`;
     if (key === this.lastFitSize) return;
