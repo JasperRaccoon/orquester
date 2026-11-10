@@ -3,9 +3,9 @@ import {
   AppWindow, Check, Clipboard, Copy, Expand, Info, Keyboard, LayoutGrid, Maximize2, Monitor, MoreHorizontal,
   Plus, Power, RotateCw, Shrink, Volume2, VolumeX, X
 } from "lucide-react";
-import type { DesktopSummary, DesktopWindow, DesktopWindowAction } from "@orquester/api";
+import type { DesktopSummary, DesktopVideoBackend, DesktopWindow, DesktopWindowAction } from "@orquester/api";
 import type { DesktopAudioState } from "../../lib/desktop-audio";
-import { DESKTOP_FIXED_SIZES, type DesktopPrefs } from "../../lib/desktop-prefs";
+import { DESKTOP_FIXED_SIZES, type DesktopPrefs, type DesktopTextSize } from "../../lib/desktop-prefs";
 import { cn } from "../../lib/cn";
 import { AdaptiveMenu } from "../ui/adaptive-menu";
 import { BottomSheet } from "../ui/sheet";
@@ -251,13 +251,41 @@ const DesktopSound: React.FC<{
 // View
 // ---------------------------------------------------------------------------
 
+const TEXT_SIZES: { id: DesktopTextSize; label: string }[] = [
+  { id: "fit", label: "Fit" },
+  { id: "large", label: "Large" },
+  { id: "medium", label: "Medium" },
+  { id: "more", label: "More space" }
+];
+
+/** The View menu's Video choice (spec 2026-11-10 R4.1); null while the daemon does not know voxl. */
+export interface DesktopVideoChoice {
+  current: DesktopVideoBackend;
+  /** A switch is in flight. */
+  busy: boolean;
+  /** Why Fast cannot be used here (the host's voxl, this browser), or null when it can. */
+  fastUnavailable: string | null;
+  onChange: (video: DesktopVideoBackend) => void;
+}
+
 const DesktopViewMenu: React.FC<{
+  video: DesktopVideoChoice | null;
   prefs: DesktopPrefs;
   onPrefs: (patch: Partial<DesktopPrefs>) => void;
-}> = ({ prefs, onPrefs }) => {
-  const fixed = prefs.view === "fixed" ? prefs.fixedSize : undefined;
+  /** Touch devices: the input mode and text-size presets. */
+  touch: boolean;
+  /** Actual size (drag to pan) is offered: not while touch drives the view (pinch zoom does that). */
+  panAvailable: boolean;
+}> = ({ video, prefs, onPrefs, touch, panAvailable }) => {
+  // A text-size preset sizes the display itself; picking a display size ends it.
+  const preset = touch && prefs.textSize !== undefined && prefs.textSize !== "fit";
+  const endPreset: Partial<DesktopPrefs> = preset ? { textSize: "fit" } : {};
+  const fixed = prefs.view === "fixed" && !preset ? prefs.fixedSize : undefined;
   const mode = prefs.fixedMode ?? "scale";
+  const pan = panAvailable && mode === "pan";
   const mark = (on: boolean) => (on ? <Check size={14} /> : <span />);
+  const inputMode = prefs.inputMode ?? "trackpad";
+  const textSize = prefs.textSize ?? "fit";
   return (
     <AdaptiveMenu
       title="View"
@@ -270,14 +298,14 @@ const DesktopViewMenu: React.FC<{
       }
     >
       <DropdownLabel>Display size</DropdownLabel>
-      <DropdownItem icon={mark(prefs.view === "fit")} onClick={() => onPrefs({ view: "fit" })}>
+      <DropdownItem icon={mark(prefs.view === "fit" && !preset)} onClick={() => onPrefs({ view: "fit", ...endPreset })}>
         Fit to tab
       </DropdownItem>
       {DESKTOP_FIXED_SIZES.map((size) => (
         <DropdownItem
           key={`${size.width}x${size.height}`}
           icon={mark(fixed?.width === size.width && fixed.height === size.height)}
-          onClick={() => onPrefs({ view: "fixed", fixedSize: { ...size }, fixedMode: mode })}
+          onClick={() => onPrefs({ view: "fixed", fixedSize: { ...size }, fixedMode: mode, ...endPreset })}
         >
           Fixed {size.width} × {size.height}
         </DropdownItem>
@@ -285,19 +313,57 @@ const DesktopViewMenu: React.FC<{
       <DropdownSeparator />
       <DropdownLabel>Fixed display</DropdownLabel>
       <DropdownItem
-        icon={mark(prefs.view === "fixed" && mode === "scale")}
-        disabled={prefs.view !== "fixed"}
+        icon={mark(prefs.view === "fixed" && !preset && !pan)}
+        disabled={prefs.view !== "fixed" || preset}
         onClick={() => onPrefs({ fixedMode: "scale" })}
       >
         Scale to fit
       </DropdownItem>
       <DropdownItem
-        icon={mark(prefs.view === "fixed" && mode === "pan")}
-        disabled={prefs.view !== "fixed"}
+        icon={mark(prefs.view === "fixed" && !preset && pan)}
+        disabled={prefs.view !== "fixed" || preset || !panAvailable}
         onClick={() => onPrefs({ fixedMode: "pan" })}
       >
         Actual size (drag to pan)
       </DropdownItem>
+      {touch && (
+        <>
+          <DropdownSeparator />
+          <DropdownLabel>Text size</DropdownLabel>
+          {TEXT_SIZES.map((size) => (
+            <DropdownItem key={size.id} icon={mark(textSize === size.id)} onClick={() => onPrefs({ textSize: size.id })}>
+              {size.label}
+            </DropdownItem>
+          ))}
+          <DropdownSeparator />
+          <DropdownLabel>Touch input</DropdownLabel>
+          <DropdownItem icon={mark(inputMode === "trackpad")} onClick={() => onPrefs({ inputMode: "trackpad" })}>
+            Trackpad
+          </DropdownItem>
+          <DropdownItem icon={mark(inputMode === "touch")} onClick={() => onPrefs({ inputMode: "touch" })}>
+            Touch
+          </DropdownItem>
+        </>
+      )}
+      {video && (
+        <>
+          <DropdownSeparator />
+          <DropdownLabel>Video</DropdownLabel>
+          <DropdownItem
+            icon={mark(video.current === "voxl")}
+            disabled={video.busy || (video.fastUnavailable !== null && video.current !== "voxl")}
+            onClick={() => video.onChange("voxl")}
+          >
+            <span className="flex min-w-0 flex-col">
+              <span>Fast (H.264)</span>
+              {video.fastUnavailable && <span className="truncate text-[11px] text-neutral-500">{video.fastUnavailable}</span>}
+            </span>
+          </DropdownItem>
+          <DropdownItem icon={mark(video.current === "rfb")} disabled={video.busy} onClick={() => video.onChange("rfb")}>
+            Compatible (VNC)
+          </DropdownItem>
+        </>
+      )}
     </AdaptiveMenu>
   );
 };
@@ -381,9 +447,14 @@ const DesktopClipboard: React.FC<{
 export interface DesktopToolbarProps {
   desktop: DesktopSummary;
   narrow: boolean;
+  /** A touch device (a coarse pointer, or a touch seen): the keyboard button and touch options show. */
   touch: boolean;
+  /** Actual size (drag to pan) is offered (not while touch drives the view). */
+  panAvailable: boolean;
   prefs: DesktopPrefs;
   onPrefs: (patch: Partial<DesktopPrefs>) => void;
+  /** The Video choice in the View menu, or null to hide it. */
+  video: DesktopVideoChoice | null;
   audio: DesktopAudioState;
   connected: boolean;
   remoteClipboard: string | null;
@@ -402,20 +473,23 @@ export interface DesktopToolbarProps {
   onRestart: () => void;
   onStop: () => void;
   onCloseTab: () => void;
+  /** The agent handoff's controls (`handoff/DesktopHandoff.tsx`), beside the View menu. */
+  handoff?: React.ReactNode;
 }
 
 export const DesktopToolbar: React.FC<DesktopToolbarProps> = (props) => {
   const { desktop, narrow, prefs, onPrefs, audio } = props;
   const runningApps = desktop.apps.filter((a) => a.status !== "exited").length;
   return (
-    <div className="flex h-9 shrink-0 items-center gap-1 border-b border-neutral-800 bg-neutral-900/40 px-2">
+    <div data-desktop-toolbar="" className="flex h-9 shrink-0 items-center gap-1 border-b border-neutral-800 bg-neutral-900/40 px-2">
       <DesktopWindows desktop={desktop} narrow={narrow} onAction={props.onWindowAction} />
       {narrow && <div className="flex-1" />}
       <IconButton label="Launch app in this desktop" onClick={props.onLaunchApp}>
         <Plus size={14} />
       </IconButton>
       <DesktopSound desktop={desktop} audio={audio} prefs={prefs} onPrefs={onPrefs} compact={narrow} />
-      <DesktopViewMenu prefs={prefs} onPrefs={onPrefs} />
+      {props.handoff}
+      <DesktopViewMenu video={props.video} prefs={prefs} onPrefs={onPrefs} touch={props.touch} panAvailable={props.panAvailable} />
       {props.touch && (
         // Focusing inside a button CLICK is the trusted-gesture path iOS
         // reliably raises the soft keyboard for.

@@ -185,6 +185,10 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
  * - `deviceRef`: the device a devices tool acted on, and a screenshot it kept
  *   (`DeviceToolReference`, `../devices.ts`: `{device, leaseId?, screenshotId?}`),
  *   read back with `deviceToolReferenceOfActivityData`.
+ * - `desktopRef`: the desktop a `desktop_action` (or `get_desktops` /
+ *   `control_desktop`) call acted on, and a screenshot it kept
+ *   (`DesktopToolReference`, `../desktops.ts`), read back by the UI's
+ *   `lib/desktops/chat-rows.logic.ts`.
  * - `imageRef`: the images a `show_image` / `generate_image` call put in the
  *   chat (`ImageToolReference`, `chat-images.ts`: stored attachment ids, never
  *   bytes), read back with `imageToolReferenceOfActivityPayload`.
@@ -192,6 +196,8 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
 export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = [
   // Devices: `open_device`, `device_action`, … (`DeviceToolReference`).
   "deviceRef",
+  // Desktops: `desktop_action`, … (`DesktopToolReference`, spec 2026-11-10 §2.5).
+  "desktopRef",
   "htmlRender",
   // `show_image` / `generate_image`: the inline image row's images (`ImageToolReference`, `chat-images.ts`).
   "imageRef",

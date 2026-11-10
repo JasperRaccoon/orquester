@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs ON the VPS (delivered by ./deploy.sh via scp — never `bash -s`).
 # Routine update cycle: fetch/reset -> pnpm install -> SPA build -> Go + orq-agent
-# build (best-effort) -> native-module guard -> chown -> version stamp -> public URL
+# build (best-effort) -> voxl (best-effort) -> native-module guard -> chown -> version stamp -> public URL
 # + unit -> restart -> health. If the new release never turns healthy, the previous
 # release (the last successful deploy) is reset, rebuilt, restarted and
 # health-checked, and the deploy still fails. Inputs via env:
@@ -64,6 +64,7 @@ tree_version() { # the checked-out package.json's version (no node: it may be th
 # Install, build and guard the checked-out tree. Every step checks its own status:
 # the revert path calls this from an `if`, where `set -e` does not apply.
 box_agent="skipped"
+voxl="skipped"
 build_tree() {
   # CI=1: non-interactive (a pnpm-version-mismatch prompt would wedge the deploy).
   # </dev/null: pnpm must never read stdin.
@@ -88,6 +89,23 @@ build_tree() {
       echo "[remote-update] WARNING: orq-agent not prebuilt — $box_agent (see output above)." >&2
       echo "[remote-update]          Continuing: the daemon builds it on demand, or boxes report builds unavailable." >&2
     fi
+  fi
+  # voxl, the optional H.264 desktop streamer: runtime libraries plus the pinned build (once per
+  # version; a no-op afterwards). Best-effort — a failure warns and desktops stream with RFB.
+  # Refs without the script (old rollbacks) skip this.
+  voxl="skipped"
+  if [ -f deploy/install-voxl.sh ]; then
+    voxl_log="$(mktemp)"
+    if $SUDO bash deploy/install-voxl.sh </dev/null 2>&1 | tee "$voxl_log"; then
+      voxl="$(sed -n 's/^\[install-voxl\] voxl \([^ ]*\) at .*/\1/p' "$voxl_log" | tail -n1)"
+      [ -n "$voxl" ] || voxl="ok"
+    else
+      voxl="FAILED: $(sed -n 's/^\[install-voxl\] ERROR: //p' "$voxl_log" | tail -n1)"
+      [ "$voxl" != "FAILED: " ] || voxl="FAILED: deploy/install-voxl.sh"
+      echo "[remote-update] WARNING: voxl not installed — $voxl (see output above)." >&2
+      echo "[remote-update]          Continuing: desktops stream with RFB/noVNC until it is." >&2
+    fi
+    rm -f "$voxl_log"
   fi
   # The daemon loads better-sqlite3 and node-pty under /usr/bin/node (the unit's
   # ExecStart interpreter): prove they load there, rebuilding any that don't,
@@ -176,4 +194,5 @@ echo "[remote-update] service=$(systemctl is-active orquester)"
 echo "[remote-update] version=$(tree_version) commit=$new_head"
 echo "[remote-update] bundle=$(curl -s "${HEALTH_URL%/health}/" | grep -o 'index-[^.]*\.js' | head -n1)"
 echo "[remote-update] box-agent=$box_agent"
+echo "[remote-update] voxl=$voxl"
 echo "[remote-update] OK"

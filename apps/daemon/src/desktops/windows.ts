@@ -1,11 +1,12 @@
 // Per-desktop window tracker (spec §6.2): an in-daemon X11 client that follows the EWMH client
-// list, titles, WM_CLASS, maximized state and the active window, maps each window to the app that
-// owns it, and performs activate / maximize / close through EWMH ClientMessages.
+// list, titles, WM_CLASS, maximized state, on-screen bounds (desktop agents spec R1.6) and the
+// active window, maps each window to the app that owns it, and performs activate / maximize /
+// close through EWMH ClientMessages.
 
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import type { Duplex } from "node:stream";
-import type { DesktopSize, DesktopWindow, DesktopWindowAction } from "@orquester/api";
+import type { DesktopRect, DesktopSize, DesktopWindow, DesktopWindowAction } from "@orquester/api";
 
 import { X11Connection, X11ConnectionClosedError, X11Error, X11MessageTooLargeError, x11SocketPath } from "./x11/connection.ts";
 import {
@@ -137,12 +138,14 @@ const ATOM_NAMES = [
   "_NET_WM_STATE_MAXIMIZED_VERT",
   "_NET_WM_STATE_MAXIMIZED_HORZ",
   "_NET_CLOSE_WINDOW",
-  "_NET_WM_PID"
+  "_NET_WM_PID",
+  "_NET_FRAME_EXTENTS"
 ] as const;
 type Atoms = Record<(typeof ATOM_NAMES)[number], number>;
 
 const ROOT_EVENT_MASK = EventMask.PropertyChange | EventMask.StructureNotify;
-const CLIENT_EVENT_MASK = EventMask.PropertyChange;
+/** StructureNotify: ConfigureNotify when the window (or, synthetically from the WM, its frame) moves or resizes. */
+const CLIENT_EVENT_MASK = EventMask.PropertyChange | EventMask.StructureNotify;
 const CLIENT_MESSAGE_MASK = EventMask.SubstructureRedirect | EventMask.SubstructureNotify;
 /** EWMH source indication: a pager (direct user action), so the WM honours the request. */
 const SOURCE_PAGER = 2;
@@ -162,6 +165,8 @@ interface TrackedWindow {
   appId: string | null;
   /** boxes: the owning process's /proc chain in the VM, read once per pid (remote displays only). */
   chain: ProcStat[] | null;
+  /** The frame on the root window. */
+  bounds: DesktopRect;
 }
 
 interface Session {
@@ -191,6 +196,8 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
   private reconnectTimer: NodeJS.Timeout | null = null;
   private disconnectedAt: number | null = null;
   private reconnectDelay = 0;
+  /** Windows with a bounds refresh queued and not started: a burst of ConfigureNotify (a drag) reads them once. */
+  private readonly boundsQueued = new Set<number>();
 
   constructor(readonly options: DesktopWindowTrackerOptions) {
     super();
@@ -222,7 +229,7 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
     for (const id of this.order) {
       const w = this.windows.get(id);
       if (!w) continue;
-      windows.push({ id: formatWindowId(id), title: w.netWmName ?? w.wmName ?? "", appId: w.appId, wmClass: w.wmClass, maximized: w.maximized });
+      windows.push({ id: formatWindowId(id), title: w.netWmName ?? w.wmName ?? "", appId: w.appId, wmClass: w.wmClass, maximized: w.maximized, bounds: { ...w.bounds } });
     }
     return {
       windows,
@@ -296,6 +303,10 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
       return;
     }
     conn.on("event", (event) => {
+      if (event.type === "ConfigureNotify" && event.window !== conn.root) {
+        if (this.boundsQueued.has(event.window)) return;
+        this.boundsQueued.add(event.window);
+      }
       void this.enqueue(() => this.handleEvent(conn, event)).catch((error) => this.onJobError(conn, error));
     });
     conn.on("close", (error) => {
@@ -349,6 +360,8 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
   }
 
   private async handleEvent(conn: X11Connection, event: XEvent): Promise<void> {
+    // Started (or dropped with its connection): a later ConfigureNotify queues a fresh read.
+    if (event.type === "ConfigureNotify") this.boundsQueued.delete(event.window);
     const session = this.session;
     if (this.stopped || !session || session.conn !== conn) return;
     const { atoms } = session;
@@ -367,6 +380,7 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
           else if (event.atom === PredefinedAtom.WM_NAME) w.wmName = await this.readWmName(session, w.id);
           else if (event.atom === PredefinedAtom.WM_CLASS) w.wmClass = await this.readWmClass(session, w.id);
           else if (event.atom === atoms._NET_WM_STATE) w.maximized = await this.readMaximized(session, w.id);
+          else if (event.atom === atoms._NET_FRAME_EXTENTS) w.bounds = await this.readBounds(session, w.id);
           else if (event.atom === atoms._NET_WM_PID) {
             w.netWmPid = await this.readNetWmPid(session, w.id);
             await this.loadChain(w);
@@ -377,10 +391,20 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
         }
         break;
       }
-      case "ConfigureNotify":
-        if (event.window !== conn.root) return;
-        this.updateSize({ width: event.width, height: event.height });
-        return;
+      case "ConfigureNotify": {
+        if (event.window === conn.root) {
+          this.updateSize({ width: event.width, height: event.height });
+          return;
+        }
+        const w = this.windows.get(event.window);
+        if (!w) return;
+        try {
+          w.bounds = await this.readBounds(session, w.id);
+        } catch (error) {
+          if (!(error instanceof X11Error)) throw error;
+        }
+        break;
+      }
       case "DestroyNotify":
         if (!this.windows.delete(event.window)) return;
         this.order = this.order.filter((id) => id !== event.window);
@@ -407,15 +431,16 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
   private async loadWindow(session: Session, id: number): Promise<TrackedWindow | null> {
     try {
       await session.conn.selectInput(id, CLIENT_EVENT_MASK);
-      const [netWmName, wmName, wmClass, maximized, netWmPid, xresPid] = await Promise.all([
+      const [netWmName, wmName, wmClass, maximized, netWmPid, xresPid, bounds] = await Promise.all([
         this.readNetWmName(session, id),
         this.readWmName(session, id),
         this.readWmClass(session, id),
         this.readMaximized(session, id),
         this.readNetWmPid(session, id),
-        session.xres === null ? Promise.resolve(null) : session.conn.xresClientPid(session.xres, id)
+        session.xres === null ? Promise.resolve(null) : session.conn.xresClientPid(session.xres, id),
+        this.readBounds(session, id)
       ]);
-      const w: TrackedWindow = { id, netWmName, wmName, wmClass, maximized, xresPid, netWmPid, appId: null, chain: null };
+      const w: TrackedWindow = { id, netWmName, wmName, wmClass, maximized, xresPid, netWmPid, appId: null, chain: null, bounds };
       await this.loadChain(w);
       w.appId = this.resolveApp(w);
       return w;
@@ -462,6 +487,21 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
     const property = await session.conn.getProperty(id, session.atoms._NET_WM_PID, PredefinedAtom.CARDINAL);
     const pid = property?.format === 32 ? propertyUint32s(property.value)[0] : undefined;
     return pid && pid > 0 ? pid : null;
+  }
+
+  /**
+   * The window's frame in root coordinates: the client's root position (TranslateCoordinates) and
+   * size (GetGeometry), grown by the WM's `_NET_FRAME_EXTENTS` decorations when it sets them.
+   */
+  private async readBounds(session: Session, id: number): Promise<DesktopRect> {
+    const { conn, atoms } = session;
+    const [geometry, origin, extents] = await Promise.all([
+      conn.getGeometry(id),
+      conn.translateCoordinates(id, conn.root, 0, 0),
+      conn.getProperty(id, atoms._NET_FRAME_EXTENTS, PredefinedAtom.CARDINAL)
+    ]);
+    const [left = 0, right = 0, top = 0, bottom = 0] = extents?.format === 32 ? propertyUint32s(extents.value) : [];
+    return { x: origin.x - left, y: origin.y - top, width: geometry.width + left + right, height: geometry.height + top + bottom };
   }
 
   /** XRes gives the owning client's pid; `_NET_WM_PID` is only a fallback when it is unknown. */

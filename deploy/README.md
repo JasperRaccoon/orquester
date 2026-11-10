@@ -19,6 +19,7 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
   First-time provisioning runs it, so any **new** VPS gets session dev tooling + scoped sudo out of
   the box. Idempotent — re-run to catch up an **existing** VPS, then `systemctl daemon-reload && systemctl restart orquester`.
 - `install-go.sh` → installs the pinned Go toolchain that builds `orq-agent` (see below); run as root.
+- `install-voxl.sh` → installs the pinned voxl H.264 desktop streamer (see below); run as root.
 - `install-unit.sh` → installs `orquester.service` (with `systemctl daemon-reload` when it changed)
   and `/etc/needrestart/conf.d/orquester.conf` (`$nrconf{override_rc}{qr(^orquester\.service$)} = 0;`,
   checked with `perl -c` first), so needrestart never restarts the daemon after an apt upgrade, and
@@ -94,6 +95,35 @@ fall back to an on-demand build, or report orq-agent builds unavailable when Go 
 To bump Go: set `GO_VERSION`, `GO_SHA256_AMD64` and `GO_SHA256_ARM64` in `install-go.sh` from the
 `linux-amd64` / `linux-arm64` archive entries of `https://go.dev/dl/?mode=json`; the next deploy
 installs it.
+
+### Desktop tabs — voxl (H.264 video)
+
+voxl ([tembo/voxl](https://github.com/tembo/voxl), the `voxl-server` crate) streams a desktop as
+H.264 over a WebSocket; desktops use it when it is installed and fall back to RFB/noVNC when it is
+not. `install-voxl.sh` (run as root by provision and every deploy, best-effort like `install-go.sh`)
+installs voxl's runtime libraries (`libx264-164 libyuv0 libopus0 libpulse0`) and builds a
+**pinned** voxl — currently **0.3.4** — once per version:
+
+- build dependencies from apt: `ca-certificates build-essential pkg-config clang libclang-dev
+  libx264-dev libyuv-dev libopus-dev libpulse-dev libxcb1-dev esbuild cargo-1.85 rustc-1.85`
+  (Ubuntu 24.04's versioned Rust 1.85.1; voxl 0.3.4 with `--locked` needs rustc ≥ 1.85, the default
+  apt rustc 1.75 is too old, so no rustup is involved);
+- `cargo install voxl-server --version =0.3.4 --locked`, run as `nobody` (`VOXL_BUILD_USER`) in a
+  temp dir under `/opt/orquester-tools/voxl/` — 4–9 minutes on a busy 16-core host;
+- the stripped binary (6 MB) at `/opt/orquester-tools/voxl/0.3.4/voxl`, symlinked at
+  `/usr/local/bin/voxl` (an existing non-symlink there is left alone).
+
+With the pinned version installed it only checks the runtime libraries. A failure only warns
+(`voxl=FAILED: …` at the end of the deploy output, `voxl=<version>` on success): the daemon still
+restarts and desktops stream with RFB. The daemon looks for voxl at `ORQUESTER_VOXL_BIN`, then
+`<appdir>/bin/voxl`, then the sessions' PATH, then `/usr/local/bin/voxl`; `GET /api/desktops/host`
+reports it under `voxl`. It runs voxl per desktop only while someone watches it, on 127.0.0.1 with a
+random per-desktop password, and copies the binary into Linux VMs for their desktops (the VM's GUI
+installer adds the runtime libraries). To bump: set `VOXL_VERSION` (and `RUST_SERIES` when the new
+release needs a newer rustc) in `install-voxl.sh`; the next deploy builds it.
+
+voxl links x264, which is GPL-2.0, so the built binary is GPL: it is built on each host for that
+host (and its VMs) and is not distributed.
 
 Archive previews want `p7zip-full` or `libarchive-tools` (`bsdtar`) on PATH; `provision-devtools.sh`
 installs `libarchive-tools`. Without either, archives degrade to a download card.

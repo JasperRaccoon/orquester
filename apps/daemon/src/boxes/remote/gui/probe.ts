@@ -42,6 +42,8 @@ export interface BoxGuiFacts {
   machineId: boolean;
   /** At least one TrueType/OpenType/PCF font is installed. */
   fonts: boolean;
+  /** Desktop part only: whether each of voxl's runtime libraries ({@link VOXL_LIBRARIES}) is installed, by soname; absent = not probed. */
+  libraries: Record<string, boolean>;
   /** Browser part only: a font with CJK glyphs is installed (else Chinese, Japanese and Korean pages show boxes). */
   cjkFonts: boolean;
   /** Browser part only: a color emoji font is installed. */
@@ -51,6 +53,18 @@ export interface BoxGuiFacts {
   /** Candidates passed over (snap shims, binaries that would not print a version). */
   chromeSkipped: string[];
 }
+
+/**
+ * voxl's runtime libraries (spec 2026-11-10 §5: the host's voxl binary runs in the VM when they are
+ * there; its direct `NEEDED` entries beside libc), with their packages. Optional like sound: a VM
+ * without them streams with RFB.
+ */
+export const VOXL_LIBRARIES: readonly { soname: string; apt: string; rpm: readonly string[] }[] = [
+  { soname: "libx264.so.164", apt: "libx264-164", rpm: ["x264-libs"] },
+  { soname: "libyuv.so.0", apt: "libyuv0", rpm: ["libyuv"] },
+  { soname: "libopus.so.0", apt: "libopus0", rpm: ["opus"] },
+  { soname: "libpulse-simple.so.0", apt: "libpulse0", rpm: ["pulseaudio-libs"] }
+];
 
 /** Tools the desktop part resolves: the host's list plus a terminal to launch on a fresh desktop. */
 export const GUI_PROBE_TOOLS = [...DESKTOP_TOOLS.map((tool) => tool.name), "xterm"];
@@ -98,7 +112,12 @@ export function guiProbeScript(parts: { desktop: boolean; browser: boolean }): s
       "if grep -q '[^[:space:]]' /etc/machine-id 2>/dev/null; then kv machine-id 1; else kv machine-id 0; fi",
       "fonts=0; for d in /usr/share/fonts /usr/local/share/fonts; do",
       "  if [ -d \"$d\" ] && [ -n \"$(find \"$d\" -type f \\( -name '*.ttf' -o -name '*.otf' -o -name '*.pcf*' \\) 2>/dev/null | head -n 1)\" ]; then fonts=1; break; fi",
-      'done; kv fonts "$fonts"'
+      'done; kv fonts "$fonts"',
+      // voxl's libraries in any (multiarch) lib dir.
+      `for l in ${VOXL_LIBRARIES.map((lib) => lib.soname).join(" ")}; do`,
+      '  f=0; for d in /usr/lib /usr/lib64 /usr/lib/*-linux-gnu /lib /lib64 /lib/*-linux-gnu; do if [ -e "$d/$l" ]; then f=1; break; fi; done',
+      '  kv "lib:$l" "$f"',
+      "done"
     );
   }
   if (parts.browser) {
@@ -156,6 +175,7 @@ export function parseGuiProbe(stdout: string): BoxGuiFacts {
     mesaDri: false,
     machineId: false,
     fonts: false,
+    libraries: {},
     cjkFonts: false,
     emojiFont: false,
     chrome: null,
@@ -181,6 +201,10 @@ export function parseGuiProbe(stdout: string): BoxGuiFacts {
     if (eq <= 0) continue;
     const key = line.slice(0, eq);
     const value = line.slice(eq + 1).trim();
+    if (key.startsWith("lib:")) {
+      facts.libraries[key.slice(4)] = value === "1";
+      continue;
+    }
     if (key.startsWith("tool:")) {
       // `command -v` prints a bare name for builtins and functions; only absolute paths count.
       facts.tools[key.slice(5)] = value.startsWith("/") ? value : null;
@@ -274,7 +298,8 @@ export const DESKTOP_PACKAGES: readonly DesktopPackage[] = [
   { apt: "ffmpeg", rpm: ["ffmpeg", "ffmpeg-free"], required: false },
   { apt: "xcompmgr", rpm: ["xcompmgr"], required: false },
   { apt: "xterm", rpm: ["xterm"], required: false },
-  { apt: "fonts-dejavu-core", rpm: ["dejavu-sans-fonts"], required: false }
+  { apt: "fonts-dejavu-core", rpm: ["dejavu-sans-fonts"], required: false },
+  ...VOXL_LIBRARIES.map((lib) => ({ apt: lib.apt, rpm: lib.rpm, required: false }))
 ];
 
 /** Fonts the in-box browser adds so CJK and emoji text renders (best effort; Ubuntu names first). */
@@ -323,6 +348,7 @@ export function desktopInstallPlan(facts: BoxGuiFacts, missingPackages: readonly
   const missing = new Set(missingPackages);
   if ((facts.tools.xterm ?? null) === null) missing.add("xterm");
   if (!facts.fonts) missing.add("fonts-dejavu-core");
+  for (const lib of VOXL_LIBRARIES) if (facts.libraries[lib.soname] === false) missing.add(lib.apt);
   const plan: DesktopInstallPlan = { missing: [], required: [], optional: [] };
   for (const pkg of DESKTOP_PACKAGES) {
     if (!missing.has(pkg.apt)) continue;

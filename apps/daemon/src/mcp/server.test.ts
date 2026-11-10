@@ -77,6 +77,8 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   // Desktops (desktop tab spec §7.4): launching an app runs anything, so no write claims a closed world.
   get_desktops: { required: [], annotations: READ },
   control_desktop: { required: ["action"], annotations: { ...WRITE, destructiveHint: true } },
+  // Input can do anything an app lets a person do.
+  desktop_action: { required: ["desktopId", "action"], annotations: { ...WRITE, destructiveHint: true } },
   secret_files_status: { required: [], annotations: READ }
 };
 

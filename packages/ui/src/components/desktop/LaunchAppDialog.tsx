@@ -33,6 +33,7 @@ import { DialogHeader, Field, SelectField } from "../right-rail/workflows/dialog
 import {
   DEFAULT_RENDER_THREADS,
   DESKTOP_SIZE_PRESETS,
+  DESKTOP_VIDEO_CHOICES,
   MAX_RENDER_THREADS,
   MIN_RENDER_THREADS,
   buildCreateRequest,
@@ -42,6 +43,7 @@ import {
   rowsFromEnv,
   startingDesktopDetail,
   suggestionItems,
+  type DesktopVideoChoiceId,
   type EnvRow,
   type LaunchSuggestion
 } from "./launch-dialog-model";
@@ -94,6 +96,7 @@ const LaunchAppForm: React.FC<{ target: LaunchDialogTarget; onClose: () => void 
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [sizeId, setSizeId] = useState("fit");
   const [renderThreads, setRenderThreads] = useState(DEFAULT_RENDER_THREADS);
+  const [video, setVideo] = useState<DesktopVideoChoiceId>("default");
   const [suggestions, setSuggestions] = useState<DesktopSuggestionsResponse | null>(null);
   const [listOpen, setListOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
@@ -164,7 +167,7 @@ const LaunchAppForm: React.FC<{ target: LaunchDialogTarget; onClose: () => void 
         await launchIntoDesktop(targetId, validation.request);
       } else {
         await createDesktopWithApp(
-          buildCreateRequest(projectPath, validation.request, { sizeId, renderThreads })
+          buildCreateRequest(projectPath, validation.request, { sizeId, renderThreads, video })
         );
       }
       onClose();
@@ -465,6 +468,20 @@ const LaunchAppForm: React.FC<{ target: LaunchDialogTarget; onClose: () => void 
                       onChange={(event) => setRenderThreads(Number(event.target.value))}
                       className={inputSize}
                     />
+                  </Field>
+                  <Field id={`${ids}-video`} label="Video">
+                    <SelectField
+                      id={`${ids}-video`}
+                      touch={touch}
+                      value={video}
+                      onChange={(event) => setVideo(event.target.value as DesktopVideoChoiceId)}
+                    >
+                      {DESKTOP_VIDEO_CHOICES.map((choice) => (
+                        <option key={choice.id} value={choice.id}>
+                          {choice.label}
+                        </option>
+                      ))}
+                    </SelectField>
                   </Field>
                 </div>
               ) : null}

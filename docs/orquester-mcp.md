@@ -18,12 +18,12 @@ notification to the user's devices; read files and a project's git state; keep t
 and the saved-prompt library; build, edit, run, debug and decide the gates of the daemon's automated workflows (§12);
 manage each agent CLI's own global MCP servers, skills, plugins, marketplaces, hooks, commands and
 instruction file (§13); open desktop tabs — Linux GUI apps on a virtual display on the daemon's
-host (§14); and check a repo's Secret files vault. That is **44 tools** (server version 3.0.0; §6 lists them, and opens with the migration
+host (§14); and check a repo's Secret files vault. That is **45 tools** (server version 3.0.0; §6 lists them, and opens with the migration
 from the 72-tool 2.x surface).
 
 **One catalog, two audiences.** The same tool definitions also serve the agents chatting *inside*
 Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
-these 44 tools plus six chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
+these 45 tools plus six chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
 `push_secret_files`, `report_step_result`), and — while their plugins allow — the plugin families: temporary boxes,
 the knowledge base, devices (§15) and GPT Image (§16). (`show_image` copies PNG, JPEG, WebP or GIF files — from the
 workspaces, the chat's own attachments or the host's temp folders, or named `recent:N` /
@@ -268,7 +268,7 @@ read); `list_sessions` adds `limit`; desktop tools take `project` where they too
 `create_session` accepts a legacy model when named (the result says `isLegacy: true`) and reports
 the account it got with `accountSource`.
 
-### The 44 tools
+### The 45 tools
 
 `tools/list` gives every tool a title, annotations, a description of every parameter and
 `_meta: {"orquester/tier", "orquester/toolset"}`. The toolset is the tool's group; the tier is what
@@ -322,6 +322,7 @@ call is listed by its widest (`admin` in `_meta`). For you, every tool simply ru
 | `edit_agent_profile` | agent-profile-editing | Admin | Up to 10 agent-profile changes in one call |
 | `get_desktops` | desktops | Read | Desktop tabs, their apps and windows, an app's log, the host's readiness |
 | `control_desktop` | desktops | Admin for `open` / `launch_app`; Act otherwise | Open a desktop, launch, stop or close apps and windows, close it |
+| `desktop_action` | desktops | Read for `screenshot` / `wait` / `clipboard_get`; Act otherwise | See and drive a desktop: screenshots, waits, pointer, keys, text, clipboard |
 | `secret_files_status` | secret-files | Read | A repo's Secret files vault: managed files, each clone's state per file, variable names that differ |
 <!-- external-tools:end -->
 
@@ -335,8 +336,8 @@ call (`control_session {action: "close"}` aside: the tab is gone). The tools tha
 command also return the host's `seq`; `update_session` returns the fields it `applied` instead.
 The annotations describe the most dangerous thing a tool can do: `readOnlyHint` on every tool that
 only reads or waits; `destructiveHint` on `control_session` (close, rewind), `update_todos`,
-`update_saved_prompts`, `delete_workflow`, `set_workflow_secret`, `edit_agent_profile` and
-`control_desktop`; `openWorldHint: false` on every read and on `update_todos` and
+`update_saved_prompts`, `delete_workflow`, `set_workflow_secret`, `edit_agent_profile`,
+`control_desktop` and `desktop_action`; `openWorldHint: false` on every read and on `update_todos` and
 `update_saved_prompts`, which touch only the daemon's own state (a tool that drives an agent keeps
 the default).
 
@@ -1467,7 +1468,7 @@ only `createdBy.kind`.
 ### Automated workflows, agent config, desktops
 
 The 14 workflow tools are in §12 (with the chat-only `report_step_result`), `get_agent_profile` and `edit_agent_profile` in §13,
-`get_desktops` and `control_desktop` in §14.
+`get_desktops`, `control_desktop` and `desktop_action` in §14.
 
 ---
 
@@ -2528,7 +2529,7 @@ A **desktop** is a tab that runs Linux GUI apps on the daemon's host: a virtual 
 (TigerVNC's `Xvnc`, the Openbox window manager, PulseAudio and a D-Bus session bus) that the user
 sees and controls live in the tab, with sound. Several apps can share one desktop — one display,
 one audio output — and the tab's window bar switches between their windows. Desktops live in their
-own tmux session, so they survive daemon restarts. These 2 tools are clients of the daemon's
+own tmux session, so they survive daemon restarts. These 3 tools are clients of the daemon's
 `/api/desktops*` routes, the tab's own: a desktop an agent opens appears as a tab in every client,
 and one the user opens is listed here.
 
@@ -2538,13 +2539,16 @@ and one the user opens is listed here.
 |---|---|---|
 | `get_desktops` | `project?` (omit for every project), `desktopId?`, `appId?` (with `desktopId`), `host?` | `{desktops: [Desktop]}`; `{desktopId}`: `{desktop: Desktop}`; `{desktopId, appId}`: `{desktopId, appId, text, truncated?}`; `host: true` adds `host: {available, audioAvailable, tools: [{name, path, required}], ffmpegPulse, ffmpegOpus, renderNode, tmuxUsable, warnings, installHint}` |
 | `control_desktop` | `action` (`"open"` \| `"launch_app"` \| `"stop_app"` \| `"close_window"` \| `"close"`), `project?`, `desktopId?`, `appId?`, `windowId?`, `command?`, `cwd?`, `env?`, `title?`, `size?`, `renderThreads?`, `force?`, `reason?` | `open`: `{desktop: Desktop}`; `launch_app`: `{app: App}`; `stop_app`: `{stopped: true, desktopId, appId, force}`; `close_window`: `{done: true, desktopId, windowId, action}`; `close`: `{closed: true, desktopId}` |
+| `desktop_action` | `desktopId`, `action` (`"screenshot"` \| `"wait"` \| `"move"` \| `"click"` \| `"mouse_down"` \| `"mouse_up"` \| `"drag"` \| `"scroll"` \| `"key"` \| `"type"` \| `"clipboard_get"` \| `"clipboard_set"`), and the action's fields (below) | `{desktopId, action, summary, seq, display: {width, height}, cursor?, changed?, timed_out?, waited_ms?, text?, screenshot?: {screenshot_id, width, height, scale, origin, mime_type}, note?, desktopRef}`; with a screenshot also an MCP image block (PNG, or a JPEG scaled to fit) |
 
 - **Desktop** is `{id, projectPath, title, order, createdAt, display, size, renderThreads, status:
   "starting" | "running" | "stopped" | "error", error?, audio: "available" | "unavailable", apps:
   [App], windows: [Window], activeWindowId}`; **App** is `{id, desktopId, command, cwd, env, status:
   "starting" | "running" | "exited", exitCode, startedAt, exitedAt}`; **Window** is `{id, title,
   appId, wmClass, maximized}` — `id` is the X window id in `0x…` hex, and `appId` is null for a
-  window no launched app owns.
+  window no launched app owns. `bounds: {x, y, width, height}` is its frame on the screen (display
+  pixels), absent while unknown. `control` is `null`, or `{controller: "agent" | "user", actor?,
+  since}`: who drives the desktop's input.
 - **Check `get_desktops {host: true}` first.** Desktops need `Xvnc`, `openbox`, `dbus-daemon` and a tmux
   ≥ 3.2; sound needs PulseAudio and an ffmpeg with `pulse` input and `libopus`. Without the
   required tools `open` answers `DESKTOP_UNAVAILABLE` and its message carries the host's
@@ -2561,9 +2565,30 @@ and one the user opens is listed here.
 - **`close_window`** asks the app to close (`_NET_CLOSE_WINDOW`), so it may prompt to save instead.
   `stop_app` sends SIGTERM to the app's process group, then SIGKILL after 5 s (at once with
   `force`). `close` stops every app and removes the tab everywhere — unsaved work is lost.
-  Raising or maximizing a window is the user's, in the tab (no tool sees the screen).
+  Raising or maximizing a window is the user's, in the tab (or `desktop_action`'s clicks).
 - **`get_desktops {desktopId, appId}`** returns the app's recent stdout and stderr (the daemon keeps the last
   64 KiB); a log too long for one result keeps its tail, `truncated: true`.
+- **`desktop_action`** fields per action (any other field is `INVALID_ARGUMENT`): `screenshot`
+  (`region?` or `window_id?` crops it, `max_size?` 320–3840 bounds the long edge, default 1920);
+  `wait` (`for?`: `"idle"` (default: still for `idle_ms?` 100–10 000, default 500) or `"change"`
+  (after `since?`, a `seq`), `region?`, `timeout_ms?` ≤ 60 000, default 10 000; a timeout returns
+  `timed_out: true`); `move` (`x`, `y`), `click` (`x?`, `y?`, `button?`, `count?` 1–3,
+  `modifiers?`), `mouse_down` / `mouse_up` (`x?`, `y?`, `button?`), `drag` (`x`, `y`, `to_x`,
+  `to_y`, `button?`, `modifiers?`), `scroll` (`direction`, `amount?` 1–50, default 3, `x?`, `y?`,
+  `modifiers?`): points default to the pointer, and with `screenshot_id` are pixels of that
+  screenshot (mapped through its `scale` and `origin`); `key` (`keys`: `"ctrl+shift+t"`, `"Return"`,
+  `repeat?` 1–20); `type` (`text`, ≤ 4 000 characters, `\n` is Return); `clipboard_get`;
+  `clipboard_set` (`text`, ≤ 1 MiB). Input actions take `screenshot: true` (and `max_size?`): the
+  result then carries a screenshot taken once the screen was still for 300 ms (at most 3 s).
+  Chat tiers: Read for `screenshot`, `wait` and `clipboard_get`, Act otherwise; no action raises a
+  card. Every action shows in the tab's activity log (typed text cut to 60 characters, clipboard
+  contents never). `desktopRef: {desktopId, projectPath, screenshotId?, action, summary}` is kept
+  through result slimming, so the chat row links the desktop and its screenshot after a reload.
+- **Control**: input claims control for the caller (the tab shows "<agent> is controlling"); it
+  lapses 2 minutes after the agent's last action. While the user has taken over, input fails
+  `DESKTOP_CONTROLLED_BY_USER` (reads still work): wait, or ask them to give it back. A
+  `screenshot_id` taken before the display was resized fails `DESKTOP_RESIZED` (take a new one); a
+  stopped desktop is `DESKTOP_NOT_RUNNING`.
 - **Errors**: the daemon's codes pass through (`DESKTOP_UNAVAILABLE`, a 404 `NOT_FOUND` for an
   unknown desktop, app or window, a 403 `FORBIDDEN` for a `cwd` outside the sandbox), with a hint
   naming the tool that lists the ids.

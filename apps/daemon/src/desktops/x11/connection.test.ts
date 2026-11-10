@@ -4,7 +4,7 @@ import { Duplex } from "node:stream";
 import { describe, test } from "node:test";
 
 import { MAX_SERVER_MESSAGE_BYTES, X11Connection, X11ConnectionClosedError, X11Error, X11MessageTooLargeError, X11SetupError } from "./connection.ts";
-import { Opcode, type XEvent } from "./protocol.ts";
+import { encodeSelectInput, Opcode, type XEvent } from "./protocol.ts";
 
 /** An in-memory X server end: records the client's requests and lets the test answer. */
 class FakeServer {
@@ -38,6 +38,8 @@ class FakeServer {
 
 function setupSuccess(root = 0x1e5): Buffer {
   const body = Buffer.alloc(32 + 40);
+  body.writeUInt32LE(0x0040_0000, 4); // resource-id-base
+  body.writeUInt32LE(0x001f_ffff, 8); // resource-id-mask
   body.writeUInt8(1, 20); // one screen, no formats, empty vendor
   body.writeUInt32LE(root, 32);
   body.writeUInt16LE(1024, 32 + 20);
@@ -191,6 +193,53 @@ describe("X11Connection", () => {
     await server.untilRequests(1);
     server.push(reply(1));
     assert.equal(await property, null);
+  });
+
+  test("a multi-MiB reply arriving in small reads, with its header straddling reads, is dispatched whole", async () => {
+    const { server, conn } = await connected();
+    const pixels = Buffer.alloc(3 * 1024 * 1024);
+    for (let i = 0; i < pixels.length; i += 4096) pixels[i] = (i / 4096) & 0xff;
+    const fields = Buffer.alloc(24);
+    fields.writeUInt32LE(0x21, 0);
+    const image = reply(1, fields, 24, pixels);
+    const pending = conn.getImage(0x1e5, { x: 0, y: 0, width: 1024, height: 768 });
+    await server.untilRequests(1);
+    assert.equal(server.requests[0]![0], Opcode.GetImage);
+    // A 7-byte read leaves the header short of 32 bytes; then 64 KiB reads.
+    server.push(image.subarray(0, 7));
+    for (let offset = 7; offset < image.length; offset += 65_536) server.push(image.subarray(offset, offset + 65_536));
+    const result = await pending;
+    assert.equal(result.depth, 24);
+    assert.equal(result.visual, 0x21);
+    assert.deepEqual(result.data, pixels);
+  });
+
+  test("post() settles at the next sync and rejects only with its own error", async () => {
+    const { server, conn } = await connected();
+    server.onRequest = (request, sequence) => queueMicrotask(() => {
+      if (request[0] === Opcode.GetInputFocus) server.push(reply(sequence));
+      else if (request.readUInt32LE(4) === 0x400002) server.push(xerror(sequence, 2, 0x400002, request[0]!));
+    });
+    let settled = 0;
+    const ok = conn.post(encodeSelectInput(0x400001, 0));
+    const bad = conn.post(encodeSelectInput(0x400002, 0));
+    void ok.then(() => settled++);
+    bad.catch(() => settled++);
+    // Nothing tells the client they were processed until a reply comes back.
+    await server.untilRequests(2);
+    assert.equal(settled, 0);
+    await conn.sync();
+    await ok;
+    await assert.rejects(bad, (error: unknown) => error instanceof X11Error && error.code === 2);
+    assert.equal(server.requests.length, 3, "one sync for both");
+  });
+
+  test("allocateId hands out distinct ids within the setup's range", async () => {
+    const { conn } = await connected();
+    const a = conn.allocateId();
+    const b = conn.allocateId();
+    assert.notEqual(a, b);
+    for (const id of [a, b]) assert.equal(id & ~conn.setup.resourceIdMask, conn.setup.resourceIdBase);
   });
 
   test("events split across chunks are dispatched whole", async () => {

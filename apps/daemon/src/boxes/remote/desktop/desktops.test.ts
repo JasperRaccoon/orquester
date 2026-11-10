@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -347,4 +347,35 @@ test("an orq-agent without unix channels is told apart, and its VM refuses deskt
   assert.match(status.warnings[0] ?? "", /orq-agent is too old for desktops/);
   assert.match(status.installHint ?? "", /recreate the VM/);
   await assert.rejects(old.desktops.ensure("b1", () => {}), { status: 409, code: DESKTOP_UNAVAILABLE_CODE, message: /updates itself once/ });
+});
+
+test("box voxl: the host's binary is copied in once (status reads never copy), runs there, and survives the scripts' copy", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "orq-boxdesk-voxl-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bin = join(root, "host-voxl");
+  await writeFile(bin, "#!/bin/sh\necho 'voxl 0.3.4'\n", { mode: 0o755 });
+  const home = join(root, "home");
+  await mkdir(home);
+  const connection = localBoxConnection({ sys: { home } });
+  const host = new BoxDesktopHost({
+    boxId: "b1",
+    connection: () => connection,
+    hostVoxl: async () => ({ available: true, version: "0.3.4", path: bin })
+  });
+  const before = await host.voxl({ probeOnly: true });
+  assert.equal(before.available, false);
+  assert.match(before.reason ?? "", /copied into the VM/);
+
+  const copied = await host.voxl();
+  assert.equal(copied.available, true);
+  assert.equal(copied.version, "0.3.4");
+  assert.match(copied.path ?? "", new RegExp(`^${join(home, ".orquester", "desktop-assets", "voxl-")}[0-9a-f]{16}/voxl$`));
+  // The scripts' copy clears older script copies, never voxl's.
+  await host.scripts();
+  assert.equal(await host.exists(copied.path!), true);
+  assert.deepEqual(await host.voxl({ probeOnly: true }), copied);
+
+  const without = new BoxDesktopHost({ boxId: "b1", connection: () => connection });
+  assert.equal((await without.voxl()).available, false);
+  assert.equal((await readdir(join(home, ".orquester", "desktop-assets"))).filter((name) => name.startsWith("voxl-")).length, 1);
 });

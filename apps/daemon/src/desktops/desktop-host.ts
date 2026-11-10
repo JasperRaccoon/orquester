@@ -1,8 +1,9 @@
 import { existsSync, watch } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { availableParallelism, tmpdir } from "node:os";
 import type { Duplex } from "node:stream";
-import type { DesktopHostStatus } from "@orquester/api";
+import type { DesktopHostStatus, DesktopVoxlStatus } from "@orquester/api";
 import { desktopRuntimeDir } from "@orquester/config";
 import { sessionNodeOptions } from "../plugins/session-env.ts";
 import { sessionEnvBase, sessionPath } from "../tmux.ts";
@@ -11,6 +12,7 @@ import { type AppEnvOptions, DESKTOP_APP_SCRIPT, DESKTOP_HOST_SCRIPT, buildAppEn
 import { hasRenderNode } from "./host-status.ts";
 import type { DesktopTmux } from "./manager.ts";
 import type { DesktopWindowTrackerOptions } from "./windows.ts";
+import { VOXL_SCRIPT, allocateLoopbackPort } from "./voxl.ts";
 
 // Where a desktop runs (desktop spec §5, boxes: Linux VM desktops). The
 // manager does every operation on a desktop's machine — its tmux service
@@ -31,6 +33,8 @@ export type DesktopGroupOwner = { environ: string } | { argument: string };
 export interface DesktopScripts {
   host: string;
   app: string;
+  /** voxl-run.sh (spec 2026-11-10 §5). */
+  voxl: string;
 }
 
 export interface DesktopHost {
@@ -89,6 +93,16 @@ export interface DesktopHost {
   connectUnix?(path: string): Promise<Duplex>;
   /** Starts the audio encoder there. Absent: this machine's ffmpeg (the audio hub's own). */
   readonly audioSpawn?: DesktopAudioSpawn;
+  // voxl (spec 2026-11-10 §5)
+  /**
+   * The voxl binary there and whether it runs (`--version`). A box gets the host's binary copied in
+   * first (content-hashed, once); `probeOnly`: only an existing copy is checked (status reads never copy).
+   */
+  voxl(options?: { probeOnly?: boolean }): Promise<DesktopVoxlStatus>;
+  /** A 127.0.0.1 port there for voxl to listen on (a taken one fails voxl's bind; the start retries). */
+  allocatePort(): Promise<number>;
+  /** A TCP stream to 127.0.0.1:`port` there (connected). */
+  connectTcp(port: number): Promise<Duplex>;
 }
 
 export interface LocalDesktopHostOptions {
@@ -101,7 +115,11 @@ export interface LocalDesktopHostOptions {
   renderNode?: () => boolean;
   /** Where the short socket fallback dirs go (default os.tmpdir()). */
   tmpDir?: string;
+  /** This host's voxl (default: none). */
+  voxl?: () => Promise<DesktopVoxlStatus>;
 }
+
+const NO_VOXL: DesktopVoxlStatus = { available: false, version: null, path: null, reason: "voxl is not configured on this daemon." };
 
 /** This machine: node:fs, the daemon's tmux, process.kill. */
 export class LocalDesktopHost implements DesktopHost {
@@ -123,7 +141,7 @@ export class LocalDesktopHost implements DesktopHost {
   }
 
   async scripts(): Promise<DesktopScripts> {
-    return { host: DESKTOP_HOST_SCRIPT, app: DESKTOP_APP_SCRIPT };
+    return { host: DESKTOP_HOST_SCRIPT, app: DESKTOP_APP_SCRIPT, voxl: VOXL_SCRIPT };
   }
 
   async prepareDirs(dirs: readonly string[]): Promise<void> {
@@ -226,6 +244,70 @@ export class LocalDesktopHost implements DesktopHost {
   trackerOptions(options: DesktopWindowTrackerOptions): DesktopWindowTrackerOptions {
     return options;
   }
+
+  voxl(): Promise<DesktopVoxlStatus> {
+    return this.options.voxl?.() ?? Promise.resolve(NO_VOXL);
+  }
+
+  allocatePort(): Promise<number> {
+    return allocateLoopbackPort();
+  }
+
+  connectTcp(port: number): Promise<Duplex> {
+    return new Promise((resolve, reject) => {
+      const socket = createConnection({ host: "127.0.0.1", port });
+      socket.once("connect", () => {
+        socket.off("error", reject);
+        resolve(socket);
+      });
+      socket.once("error", reject);
+    });
+  }
+}
+
+/**
+ * Resolve true once `done()` holds, re-checked on every watch event in `dir`
+ * (one check at a time), or false after `timeoutMs` (or when `dir` cannot be
+ * watched and the condition is not already true). No polling.
+ */
+export function waitFor(machine: DesktopHost, dir: string, done: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let watcher: DesktopWatch | null = null;
+    let settled = false;
+    let checking = false;
+    let again = false;
+    const holds = () => done().catch(() => false);
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      watcher?.close();
+      resolve(value);
+    };
+    const check = () => {
+      if (settled) return;
+      if (checking) {
+        again = true;
+        return;
+      }
+      checking = true;
+      void (async () => {
+        do {
+          again = false;
+          if (await holds()) finish(true);
+        } while (again && !settled);
+        checking = false;
+      })();
+    };
+    const timer = setTimeout(() => void holds().then(finish), timeoutMs);
+    try {
+      watcher = machine.watch(dir, check, () => void holds().then(finish));
+    } catch {
+      void holds().then(finish);
+      return;
+    }
+    check();
+  });
 }
 
 /**

@@ -260,12 +260,16 @@ import type {
 } from "@orquester/api";
 import type {
   CreateDesktopRequest,
+  DesktopActionLogResponse,
   DesktopAppSummary,
+  DesktopController,
+  DesktopControlRequest,
   DesktopHostStatus,
   DesktopSuggestionsResponse,
   DesktopSummary,
   DesktopWindowAction,
-  LaunchAppRequest
+  LaunchAppRequest,
+  UpdateDesktopRequest
 } from "@orquester/api";
 import type {
   AgentProfileAgentId,
@@ -2546,6 +2550,11 @@ export class ApiClient {
     return this.send("POST", desktopRoutes.create, { body });
   }
 
+  /** Change a desktop's settings (its video backend: only the stream restarts, spec 2026-11-10 R4.1). */
+  updateDesktop(id: string, body: UpdateDesktopRequest): Promise<DesktopSummary> {
+    return this.send("PATCH", desktopRoutes.desktop(id), { body });
+  }
+
   stopDesktop(id: string): Promise<DesktopSummary> {
     return this.send("POST", desktopRoutes.stop(id));
   }
@@ -2579,6 +2588,32 @@ export class ApiClient {
 
   desktopWindowAction(id: string, windowId: string, action: DesktopWindowAction): Promise<void> {
     return this.send("POST", desktopRoutes.windowAction(id, windowId, action));
+  }
+
+  /** The desktop's last agent actions (spec 2026-11-10 §3.3); validated by `lib/desktops/actions-store.ts`. */
+  desktopActionLog(id: string, signal?: AbortSignal): Promise<DesktopActionLogResponse> {
+    return this.send("GET", desktopRoutes.actionLog(id), { signal });
+  }
+
+  /** Hand control of a desktop's input over: `user` takes over, `agent` gives back, `null` clears (§3.1). */
+  setDesktopControl(id: string, controller: DesktopController | null): Promise<DesktopSummary> {
+    const body: DesktopControlRequest = { controller };
+    return this.send("PUT", desktopRoutes.control(id), { body });
+  }
+
+  /**
+   * Authenticated http(s):// URL of a kept desktop screenshot for an `<img>` (chat rows, the
+   * Activity popover), or null off HTTP. As {@link deviceImageUrl}: the bearer rides as `?token=`
+   * because an `<img>` cannot send a header.
+   */
+  desktopScreenshotUrl(id: string, screenshotId: string): string | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const path = desktopRoutes.screenshot(id, screenshotId);
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    const token = this.connection.password ? `?token=${encodeURIComponent(this.connection.password)}` : "";
+    return `${base}${path}${token}`;
   }
 
   /**
