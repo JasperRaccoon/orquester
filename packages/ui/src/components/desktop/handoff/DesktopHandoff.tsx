@@ -26,6 +26,7 @@ import {
   desktopHasHandoff,
   EMPTY_DESKTOP_RING,
   inputTakesOver,
+  liveDesktopActions,
   sizeLockNotice,
   takeoverToastText,
   unseenBadge,
@@ -338,9 +339,11 @@ export function DesktopHandoffLayer({
   const displayRef = React.useRef(display);
   displayRef.current = display;
   const mapPoint = React.useCallback((x: number, y: number) => mapStreamPoint(streamRoot.current, box.current, displayRef.current, { x, y }), [streamRoot]);
+  // History the log load brings never animates: only what arrived as events.
+  const live = React.useMemo(() => liveDesktopActions(handoff.ring), [handoff.ring]);
   return (
     <div ref={box} className="pointer-events-none absolute inset-0 z-10">
-      <DesktopAgentOverlay entries={handoff.ring.entries} mapPoint={mapPoint} active={handoff.live} />
+      <DesktopAgentOverlay entries={live} mapPoint={mapPoint} active={handoff.live} />
       <TakeoverToast handoff={handoff} />
     </div>
   );

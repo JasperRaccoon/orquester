@@ -10,6 +10,7 @@ import {
   desktopHasHandoff,
   EMPTY_DESKTOP_RING,
   inputTakesOver,
+  liveDesktopActions,
   mergeDesktopActionLog,
   parseDesktopActionEvent,
   parseDesktopControl,
@@ -81,6 +82,8 @@ describe("the recent-actions ring and its Activity badge", () => {
     const reloaded = mergeDesktopActionLog(ring, [entry("old2", 2), entry("a", 3), entry("b", 4)]);
     assert.deepEqual(reloaded.entries.map((e) => e.id), ["old1", "old2", "a", "b"]);
     assert.equal(reloaded.unseen, 2);
+    // Only what arrived live may draw on the overlay; the loaded history never does.
+    assert.deepEqual(liveDesktopActions(reloaded).map((e) => e.id), ["a", "b"]);
   });
 
   it("keeps the last 50 actions and caps the badge", () => {

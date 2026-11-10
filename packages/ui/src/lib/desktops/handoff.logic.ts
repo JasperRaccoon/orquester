@@ -173,9 +173,11 @@ export interface DesktopActionRing {
   readonly unseen: number;
   /** The daemon's log was loaded once on this connection. */
   readonly loaded: boolean;
+  /** Ids of the entries that arrived as events (the overlay draws only those, never history). */
+  readonly liveIds: readonly string[];
 }
 
-export const EMPTY_DESKTOP_RING: DesktopActionRing = { entries: [], unseen: 0, loaded: false };
+export const EMPTY_DESKTOP_RING: DesktopActionRing = { entries: [], unseen: 0, loaded: false, liveIds: [] };
 
 function byTime(a: DesktopActionEntry, b: DesktopActionEntry): number {
   return Date.parse(a.at) - Date.parse(b.at);
@@ -188,7 +190,8 @@ function byTime(a: DesktopActionEntry, b: DesktopActionEntry): number {
 export function appendDesktopAction(ring: DesktopActionRing, entry: DesktopActionEntry, viewing: boolean): DesktopActionRing {
   if (ring.entries.some((row) => row.id === entry.id)) return ring;
   const entries = [...ring.entries, entry].sort(byTime).slice(-DESKTOP_ACTION_LOG_LIMIT);
-  return { ...ring, entries, unseen: viewing ? 0 : Math.min(DESKTOP_ACTION_LOG_LIMIT, ring.unseen + 1) };
+  const liveIds = [...ring.liveIds, entry.id].slice(-DESKTOP_ACTION_LOG_LIMIT);
+  return { ...ring, entries, liveIds, unseen: viewing ? 0 : Math.min(DESKTOP_ACTION_LOG_LIMIT, ring.unseen + 1) };
 }
 
 /** The daemon's log merged in (history: it never counts as unseen). */
@@ -197,6 +200,13 @@ export function mergeDesktopActionLog(ring: DesktopActionRing, loaded: readonly 
   const fresh = loaded.filter((entry) => !ids.has(entry.id));
   const entries = fresh.length === 0 ? ring.entries : [...ring.entries, ...fresh].sort(byTime).slice(-DESKTOP_ACTION_LOG_LIMIT);
   return { ...ring, entries, loaded: true };
+}
+
+/** The entries that arrived live, oldest first: what the overlay may draw. */
+export function liveDesktopActions(ring: DesktopActionRing): DesktopActionEntry[] {
+  if (ring.liveIds.length === 0) return [];
+  const live = new Set(ring.liveIds);
+  return ring.entries.filter((entry) => live.has(entry.id));
 }
 
 /** The badge on the Activity button, or null with nothing unseen. */
