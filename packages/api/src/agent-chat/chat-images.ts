@@ -14,7 +14,7 @@
  * for a Codex item — as `data.imageRef` on the `image_generation` item.
  */
 
-import { sessionToolNameOfData, sessionToolReferences } from "./session-tools.ts";
+import { SESSION_TOOL_REFERENCE_MAX_BYTES, sessionToolNameOfData, sessionToolReferences } from "./session-tools.ts";
 
 /** The session tool that shows image files the agent points at (§9.3). */
 export const SHOW_IMAGE_TOOL_NAME = "show_image";
@@ -134,6 +134,58 @@ export function readImageToolReference(value: unknown): ImageToolReference | und
   if (title !== undefined) out.title = title;
   const revisedPrompt = oneLine(record.revisedPrompt, IMAGE_CAPTION_MAX_LENGTH * 4);
   if (revisedPrompt !== undefined) out.revisedPrompt = revisedPrompt;
+  return out;
+}
+
+const utf8 = new TextEncoder();
+const referenceBytes = (ref: ImageToolReference): number => utf8.encode(JSON.stringify(ref)).length;
+
+/** `text` cut to at most `max` code points (never half a surrogate pair), with an ellipsis when cut; undefined at 0. */
+function clipCodePoints(text: string | undefined, max: number): string | undefined {
+  if (text === undefined || max <= 0) return undefined;
+  const points = Array.from(text);
+  return points.length > max ? `${points.slice(0, max - 1).join("")}…` : text;
+}
+
+/**
+ * `ref` as a session-tool result may carry it: its JSON within
+ * {@link SESSION_TOOL_REFERENCE_MAX_BYTES}, which the slimming would
+ * otherwise drop whole — leaving a completed call with no image row. Every
+ * image producer passes its reference through here. What gives way, in
+ * order: the revised prompt, title and captions, shortened step by step and
+ * then dropped; then the images' project paths, last image first; and only
+ * past that (no real producer gets there) the trailing images. The images'
+ * attachment ids, types and sizes stay.
+ */
+export function boundImageToolReference(ref: ImageToolReference): ImageToolReference {
+  if (referenceBytes(ref) <= SESSION_TOOL_REFERENCE_MAX_BYTES) return ref;
+  let out: ImageToolReference = ref;
+  for (const max of [400, 200, 100, 50, 20, 0]) {
+    const revisedPrompt = clipCodePoints(ref.revisedPrompt, max);
+    const title = clipCodePoints(ref.title, max);
+    out = {
+      ...(title !== undefined ? { title } : {}),
+      images: ref.images.map(({ caption, ...image }) => {
+        const clipped = clipCodePoints(caption, max);
+        return clipped !== undefined ? { ...image, caption: clipped } : image;
+      }),
+      ...(revisedPrompt !== undefined ? { revisedPrompt } : {})
+    };
+    if (referenceBytes(out) <= SESSION_TOOL_REFERENCE_MAX_BYTES) return out;
+  }
+  for (let index = out.images.length - 1; index >= 0; index -= 1) {
+    if (out.images[index]!.path === undefined) continue;
+    const images = out.images.map((image, at) => {
+      if (at !== index) return image;
+      const { path: _path, ...rest } = image;
+      return rest;
+    });
+    out = { ...out, images };
+    if (referenceBytes(out) <= SESSION_TOOL_REFERENCE_MAX_BYTES) return out;
+  }
+  while (out.images.length > 1 && referenceBytes(out) > SESSION_TOOL_REFERENCE_MAX_BYTES) {
+    out = { ...out, images: out.images.slice(0, -1) };
+  }
   return out;
 }
 

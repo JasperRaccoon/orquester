@@ -1736,17 +1736,28 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     async copyPages(
       fromThreadId: string,
       toThreadId: string,
-      keep: (attachmentId: string) => boolean
+      keep: (attachmentId: string) => boolean,
+      options: { orLoggedImage?: (attachmentId: string) => boolean } = {}
     ): Promise<string[]> {
       assertSafeThreadId(fromThreadId);
       assertSafeThreadId(toThreadId);
       const fromDir = threadAttachmentsDir(rootDir, fromThreadId);
       const toDir = threadAttachmentsDir(rootDir, toThreadId);
       const entries = await fsp.readdir(fromDir).catch((): string[] => []);
+      // The images `keep` passes over that the caller would still take where
+      // the log names them as an image reference: one read of the log for all.
+      const maybe = new Set<string>();
+      for (const entry of entries) {
+        const attachmentId = parseAttachmentIdFromRelativePath(entry);
+        if (attachmentId !== null && isImageAttachmentId(attachmentId) && !keep(attachmentId) && options.orLoggedImage?.(attachmentId) === true) {
+          maybe.add(attachmentId);
+        }
+      }
+      const logged = await logMentions(fromThreadId, maybe, maybe);
       const copied: string[] = [];
       for (const entry of entries) {
         const attachmentId = parseAttachmentIdFromRelativePath(entry);
-        if (attachmentId === null || !isForkCopyableAttachmentId(attachmentId) || !keep(attachmentId)) {
+        if (attachmentId === null || !isForkCopyableAttachmentId(attachmentId) || !(keep(attachmentId) || logged.has(attachmentId))) {
           continue;
         }
         const source = path.join(fromDir, entry);

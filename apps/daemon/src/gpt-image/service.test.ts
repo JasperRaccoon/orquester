@@ -223,6 +223,47 @@ test("a refused token is renewed once; refused again, the account is flagged as 
   assert.equal(gone.requests.length, 0);
 });
 
+test("a renewal a live chat holds, or one with nothing to renew now, never flags the account: its token while it works, else try again", async () => {
+  for (const refresh of ["held", "unavailable"] as const) {
+    // Due for renewal but still good: the current token is used.
+    const due = harness([{ id: "a", life: 5 * 60_000 }], { refresh });
+    await due.service.start();
+    await due.service.generate(input(), signal());
+    assert.deepEqual(due.requests.map((request) => request.headers.Authorization), ["Bearer token-a-v1"], refresh);
+
+    // About to expire, or refused by the endpoint: a passing refusal, nothing sent with it.
+    const expiring = harness([{ id: "a", life: 60_000 }], { refresh });
+    await expiring.service.start();
+    assert.equal((await refusal(expiring.service.generate(input(), signal()))).code, "GPT_IMAGE_UNAVAILABLE", refresh);
+    assert.equal(expiring.requests.length, 0);
+    const refused = harness([{ id: "a" }], { refresh });
+    await refused.service.start();
+    refused.answer(() => respond(fixture("error-401-invalid-token.json")));
+    assert.equal((await refusal(refused.service.generate(input(), signal()))).code, "GPT_IMAGE_UNAVAILABLE", refresh);
+
+    for (const h of [due, expiring, refused]) {
+      assert.deepEqual(h.flagged, [], refresh);
+      assert.equal(h.service.toolsAvailable(), true, refresh);
+    }
+  }
+});
+
+test("an image answer that breaks off is not asked for again: the plan already paid for it", async () => {
+  const h = harness([{ id: "a" }]);
+  await h.service.start();
+  h.answer(() => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"data":[{"b64_json":"iVBOR'));
+        controller.error(new Error("socket hang up"));
+      }
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+  });
+  assert.equal((await refusal(h.service.generate(input(), signal()))).code, "GPT_IMAGE_UNAVAILABLE");
+  assert.equal(h.requests.length, 1);
+});
+
 test("upstream refusals map to plain errors; only passing failures are retried", async () => {
   const h = harness([{ id: "a" }]);
   await h.service.start();

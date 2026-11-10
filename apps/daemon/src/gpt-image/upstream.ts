@@ -10,7 +10,8 @@
  * - Answer: `{data: [{b64_json, generation_id}], background, output_format, quality, size, usage}`.
  *
  * Retried (with backoff, honoring `Retry-After`): a 429 that is not a usage limit, a 5xx, a network
- * failure. Never retried: a usage limit, a plan refusal, a safety refusal, a 401, any other 4xx.
+ * failure before an answer. Never retried: a usage limit, a plan refusal, a safety refusal, a 401, any
+ * other 4xx, and a 200 whose body broke off (the image was made and counted against the plan).
  * Nothing here logs or returns a token or an account id.
  */
 
@@ -25,6 +26,8 @@ const BASE_BACKOFF_MS = 1_000;
 const MAX_RETRY_AFTER_MS = 30_000;
 /** An answer larger than this is no image this endpoint sends (a 1536×1024 PNG is ~2 MB of base64). */
 const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+/** How much of a refusal's body is read to classify it. */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
 /** Upstream refusal text is clipped to this many characters before it reaches the agent. */
 const MAX_REFUSAL_CHARS = 300;
 
@@ -199,6 +202,28 @@ function abortReason(signal: AbortSignal): unknown {
 }
 
 /**
+ * An answer's body, read while it streams and never past `max` bytes: `over` when it had more (the rest is
+ * not read). Rejects when the body breaks off.
+ */
+async function readBody(res: Response, max: number): Promise<{ bytes: Buffer; over: boolean }> {
+  if (res.body === null) return { bytes: Buffer.alloc(0), over: false };
+  const reader = res.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return { bytes: Buffer.concat(chunks, size), over: false };
+    if (size + value.byteLength > max) {
+      await reader.cancel().catch(() => undefined);
+      chunks.push(Buffer.from(value.buffer, value.byteOffset, max - size));
+      return { bytes: Buffer.concat(chunks, max), over: true };
+    }
+    chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+    size += value.byteLength;
+  }
+}
+
+/**
  * One image request, retried per the module rules. Resolves the image or rejects an
  * {@link UpstreamError}; rejects the signal's reason once `signal` aborts.
  */
@@ -211,21 +236,31 @@ export async function postImageRequest(deps: UpstreamDeps, credentials: Upstream
     let failure: UpstreamFailure;
     try {
       const res = await deps.fetch(url, { method: "POST", headers: requestHeaders(credentials), body: payload, signal });
-      const buffer = Buffer.from(await res.arrayBuffer());
       if (res.ok) {
+        let body: { bytes: Buffer; over: boolean };
+        try {
+          body = await readBody(res, MAX_RESPONSE_BYTES);
+        } catch {
+          if (signal.aborted) throw abortReason(signal);
+          // The image was made (and counted against the plan) but did not arrive whole: never asked for again here.
+          deps.logger?.warn?.(`gpt-image: the image endpoint's answer broke off (HTTP ${res.status}); not retried`);
+          throw new UpstreamError({ kind: "transient", status: null, retryAfterMs: null });
+        }
         let json: unknown;
         try {
-          json = buffer.length <= MAX_RESPONSE_BYTES ? JSON.parse(buffer.toString("utf8")) : undefined;
+          json = body.over ? undefined : JSON.parse(body.bytes.toString("utf8"));
         } catch {
           json = undefined;
         }
         const image = parseImageResponse(json);
         if (image) return image;
         const keys = Object.keys(asRecord(json) ?? {}).slice(0, 12).join(",");
-        deps.logger?.warn?.(`gpt-image: unexpected answer from the image endpoint (HTTP ${res.status}, ${buffer.length} bytes, keys: ${keys || "none"})`);
+        deps.logger?.warn?.(`gpt-image: unexpected answer from the image endpoint (HTTP ${res.status}, ${body.over ? `over ${MAX_RESPONSE_BYTES}` : body.bytes.length} bytes, keys: ${keys || "none"})`);
         throw new UpstreamError({ kind: "unexpected", status: res.status });
       }
-      failure = classifyFailure(res.status, res.headers, buffer.subarray(0, 64 * 1024).toString("utf8"), deps.now());
+      // A refusal's body is only classified: what of it arrives, at most its head.
+      const head = await readBody(res, MAX_ERROR_BODY_BYTES).catch(() => ({ bytes: Buffer.alloc(0), over: false }));
+      failure = classifyFailure(res.status, res.headers, head.bytes.toString("utf8"), deps.now());
     } catch (error) {
       if (error instanceof UpstreamError) throw error;
       if (signal.aborted) throw abortReason(signal);

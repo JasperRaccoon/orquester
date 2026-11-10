@@ -134,13 +134,19 @@ export async function credentialsFor(
       login = await port.codexLogin(account.id);
       if (!login) return needsSignIn(port, account);
       refreshed = true;
-    } else if (outcome === "failed") {
-      // The sign-in service could not be reached: the current token while it still works.
-      const usable = !options.force && (login.expiresAt === null || login.expiresAt - now > STALE_TOKEN_FLOOR_MS);
-      if (!usable) throw new GptImageError("GPT_IMAGE_UNAVAILABLE", `The ChatGPT login of ${account.label} could not be renewed just now. Try again in a minute.`);
-    } else {
-      // `invalid-grant` (refreshNow flagged it already), `held`, `unavailable`.
+    } else if (outcome === "invalid-grant") {
+      // The sign-in service refused the refresh token: the login itself is gone (refreshNow flagged it already).
       return needsSignIn(port, account);
+    } else {
+      // No renewal now, but nothing says the login is gone: `failed` (the sign-in service could not be reached),
+      // `held` (a live Codex chat holds the account and renews it; an `allowHeld` caller can get it from a refresh
+      // another caller started) or `unavailable` (no refresh token to read just now). The current token while it still
+      // works, as the box broker does; else a passing refusal — never a flag that signs the account out everywhere.
+      const usable = !options.force && (login.expiresAt === null || login.expiresAt - now > STALE_TOKEN_FLOOR_MS);
+      if (!usable) {
+        const why = outcome === "held" ? "is being renewed by a running Codex chat" : "could not be renewed just now";
+        throw new GptImageError("GPT_IMAGE_UNAVAILABLE", `The ChatGPT login of ${account.label} ${why}. Try again shortly.`);
+      }
     }
   }
   return { credentials: { accessToken: login.accessToken, chatgptAccountId: login.chatgptAccountId }, plan: login.plan, refreshed };

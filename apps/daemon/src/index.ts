@@ -342,7 +342,7 @@ import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { createReadStream, existsSync } from "node:fs";
-import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fsPathFromQuery } from "./fs-path-query.js";
@@ -3704,12 +3704,16 @@ export function createServer(
   // in the query string; it is streamed to a temp file beside its destination
   // and renamed into place, so memory stays flat whatever the size and the
   // shared MAX_UPLOAD_BYTES cap is enforced by receiveUpload rather than a
-  // bodyLimit (see upload-stream.ts). Conflicts are decided AFTER the body has
-  // been received: a pre-existing target comes back as { conflict:true } (200,
-  // NOT an error) in reply to a completed request, so the client can prompt;
-  // "overwrite"/"rename" act only on an explicit user choice. The client
-  // supplies destDir + relativePath, but the joined final path is re-sanitized
-  // and assertInsideFsRoot'd, so nothing escapes fsRoot.
+  // bodyLimit (see upload-stream.ts). A target that exists is decided AFTER the
+  // body has been received: it comes back as { conflict:true, conflictKind:
+  // "file" | "dir" } (200, NOT an error) in reply to a completed request, so the
+  // client can prompt; "overwrite"/"rename" act only on an explicit user
+  // choice, and "error" / "rename" place the file exclusively (never over
+  // anything that appeared meanwhile). A FILE where the path needs a folder is
+  // { conflict:true, conflictKind: "parent" }, told before the body is read
+  // when it is already there (no other name in that folder can help). The
+  // client supplies destDir + relativePath, but the joined final path is
+  // re-sanitized and assertInsideFsRoot'd, so nothing escapes fsRoot.
   app.register(async (scope) => {
     acceptRawBody(scope);
     scope.post<{ Querystring: Partial<FsUploadRequest> }>(
@@ -3734,6 +3738,7 @@ export function createServer(
         }
         const leaf = segments[segments.length - 1];
         const fileConflict: FsUploadResponse = { path: "", name: leaf, size: 0, conflict: true, conflictKind: "file" };
+        const parentConflict: FsUploadResponse = { ...fileConflict, conflictKind: "parent" };
 
         let tmp: string | undefined;
         try {
@@ -3752,9 +3757,13 @@ export function createServer(
             const code = (error as NodeJS.ErrnoException)?.code;
             if (code === "ENOTDIR" || code === "EEXIST") {
               reply.header("connection", "close"); // body unread — see refuseUpload
-              return fileConflict;
+              return parentConflict;
             }
             throw error;
+          }
+          if (await fileOnFolderPath(safeDir, segments.slice(0, -1))) {
+            reply.header("connection", "close"); // body unread — see refuseUpload
+            return parentConflict;
           }
           tmp = uploadTempPath(safeDir);
           const size = await receiveUpload(request.raw, tmp);
@@ -3765,25 +3774,27 @@ export function createServer(
             const code = (error as NodeJS.ErrnoException)?.code;
             if (code === "ENOTDIR" || code === "EEXIST") {
               await discardUpload(tmp);
-              return fileConflict;
+              return parentConflict;
             }
             throw error;
           }
 
           if (onConflict === "error") {
-            const existing = await stat(target).catch(() => null);
-            if (existing) {
+            // Exclusive: an entry that appeared since (another upload's) is never replaced.
+            if (!(await placeExclusive(tmp, target))) {
+              const existing = await stat(target).catch(() => null);
               await discardUpload(tmp);
-              return { ...fileConflict, conflictKind: existing.isDirectory() ? "dir" : "file" };
+              return { ...fileConflict, conflictKind: existing?.isDirectory() ? "dir" : "file" };
             }
-            await rename(tmp, target);
             return { path: target, name: leaf, size };
           }
 
           if (onConflict === "rename") {
-            const renamed = await nextAvailableName(target);
-            await rename(tmp, renamed);
-            return { path: renamed, name: basename(renamed), size };
+            for (let attempt = 0; attempt < MAX_UPLOAD_RENAME_ATTEMPTS; attempt += 1) {
+              const renamed = await nextAvailableName(target);
+              if (await placeExclusive(tmp, renamed)) return { path: renamed, name: basename(renamed), size };
+            }
+            throw new Error("No free name for the uploaded file.");
           }
 
           // "overwrite" — rename replaces an existing file atomically. EISDIR if
@@ -5816,6 +5827,53 @@ function gitError(reply: FastifyReply, error: unknown): void {
   void reply.code(status).send({ code, message });
 }
 
+/** How often "rename" (keep both) looks for a free name when uploads race for each one it finds. */
+const MAX_UPLOAD_RENAME_ATTEMPTS = 100;
+
+/**
+ * Put the received upload `tmp` at `target` only while nothing is there: a hard
+ * link fails EEXIST on any entry, a dangling symlink included, so a concurrent
+ * upload's file is never replaced. Where hard links are not supported, an
+ * exclusive create claims the name before the rename. False when the name is
+ * taken (`tmp` is then left for the caller).
+ */
+async function placeExclusive(tmp: string, target: string): Promise<boolean> {
+  try {
+    await link(tmp, target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "EEXIST") return false;
+    if (code !== "EPERM" && code !== "ENOTSUP" && code !== "EOPNOTSUPP" && code !== "ENOSYS") throw error;
+    try {
+      await (await open(target, "wx")).close();
+    } catch (claim) {
+      if ((claim as NodeJS.ErrnoException)?.code === "EEXIST") return false;
+      throw claim;
+    }
+    await rename(tmp, target);
+    return true;
+  }
+  await unlink(tmp).catch(() => undefined);
+  return true;
+}
+
+/** Whether a FILE (not a folder) sits where `segments` under `dir` need folders: an upload there cannot land. */
+async function fileOnFolderPath(dir: string, segments: readonly string[]): Promise<boolean> {
+  let current = dir;
+  for (const segment of segments) {
+    current = join(current, segment);
+    let entry;
+    try {
+      entry = await stat(current);
+    } catch (error) {
+      // Missing: made on the way. ENOTDIR: a file earlier on the path.
+      return (error as NodeJS.ErrnoException)?.code === "ENOTDIR";
+    }
+    if (!entry.isDirectory()) return true;
+  }
+  return false;
+}
+
 /**
  * Given a desired absolute file path, return it if free, else the next free
  * `name (n).ext` in the same directory (n = 1, 2, …). Backs the upload route's
@@ -5831,9 +5889,9 @@ async function nextAvailableName(desired: string): Promise<string> {
   for (let n = 1; ; n++) {
     const candidate = join(dir, `${stem} (${n})${ext}`);
     try {
-      await stat(candidate);
+      await lstat(candidate);
     } catch {
-      return candidate; // stat threw → does not exist → free
+      return candidate; // lstat threw → no entry (a dangling link is one) → free
     }
   }
 }

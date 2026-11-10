@@ -153,6 +153,8 @@ function projectItem(
     const status = classified.status === "declined" ? "declined" : terminalStatus(classified.status);
     // Codex's own image is stored only from the live stream (`image-generation.ts`):
     // a projection is synchronous and replays, so a history row says why it has none.
+    // A native fork's replay gets its parent row's image instead, by item id
+    // (the orchestrator's `forkedReferences`), which drops this note.
     const detail =
       classified.itemType === IMAGE_GENERATION_ITEM_TYPE && status === "completed"
         ? "The image was not imported with the chat's Codex history"

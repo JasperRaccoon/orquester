@@ -95,6 +95,14 @@ export interface DaemonChatBox {
  * runs the daemon's own routes in-process with the caller's bearer, so every
  * gate, validation and error code is the GUI's by construction.
  */
+/** Where `show_image` / `generate_image` may read a host image from besides the sandbox (`DaemonApi.chatImageRoots`). */
+export interface ChatImageRoots {
+  attachmentsDir: string;
+  tempDirs: string[];
+  /** The appdir: every chat's attachments and the pending uploads under it are another chat's, wherever a root reaches. */
+  appDir?: string;
+}
+
 export interface DaemonApi {
   request(method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse>;
   /** Owns `bytes`: reads it or destroys it. InjectDaemonApi never throws here — a failed upload is an answer (§4.5 codes), as over HTTP. */
@@ -115,8 +123,11 @@ export interface DaemonApi {
   // Images in chats (design 2026-11-10 §9.3): what `show_image` may read besides the sandbox. The thread is always the
   // CALLER's (`ToolCaller.threadId`), never an argument. Optional so the many test doubles of this seam need not grow
   // them; without them only sandbox paths resolve.
-  /** `threadId`'s own attachments directory and the host's temp directories (the daemon's, and the one its agents get). */
-  chatImageRoots?(threadId: string): { attachmentsDir: string; tempDirs: string[] };
+  /**
+   * `threadId`'s own attachments directory, the host's temp directories (the daemon's, and the one its agents get) and
+   * the appdir, whose agent threads' and pending uploads' directories are refused unless inside the thread's own.
+   */
+  chatImageRoots?(threadId: string): ChatImageRoots;
   /** One stored attachment of `threadId`, as its host path; null when that thread has none by that id. */
   chatAttachmentPath?(threadId: string, attachmentId: string): Promise<string | null>;
   // boxes: begin
@@ -307,12 +318,13 @@ export class InjectDaemonApi implements DaemonApi {
     return new FsTools({ fsRoot: this.fsRoot, ...(this.opts.boxRegistry ? { boxes: this.opts.boxRegistry } : {}) }).readFileWindow(path, opts);
   }
 
-  chatImageRoots(threadId: string): { attachmentsDir: string; tempDirs: string[] } {
+  chatImageRoots(threadId: string): ChatImageRoots {
     const baseDir = this.opts.baseDir;
     // A caller's thread id is the daemon's own, but it becomes a path segment here: nothing that could climb out.
     if (baseDir === undefined || !/^[A-Za-z0-9_-]+$/.test(threadId)) return { attachmentsDir: "", tempDirs: [] };
     return {
       attachmentsDir: agentChatThreadAttachmentsDir(baseDir, threadId),
+      appDir: baseDir,
       // The daemon's TMPDIR, which its agent host and agents inherit, else `<appdir>/tmp`, which they get instead.
       tempDirs: [...new Set([tmpdir(), appTmpDir(baseDir)])]
     };

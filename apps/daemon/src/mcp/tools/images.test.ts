@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { boundSessionToolData, imageToolReferenceOfActivityPayload, sessionToolMarkedData } from "@orquester/api/agent-chat";
 
 import type { GptImageToolInput, GptImageToolResult } from "../../gpt-image/tool-port.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
@@ -34,8 +35,15 @@ const caller: ThreadCaller = {
   runtimeMode: "approval-required", planning: false, workflowOwned: false, exchange: null
 };
 
-const call = (api: FakeDaemonApi, args: unknown): Promise<CallToolResult> =>
-  executeToolCall({ approvals: null }, { name: "generate_image", arguments: args }, { caller, api, signal: new AbortController().signal });
+const call = (api: FakeDaemonApi, args: unknown, as: ThreadCaller = caller): Promise<CallToolResult> =>
+  executeToolCall({ approvals: null }, { name: "generate_image", arguments: args }, { caller: as, api, signal: new AbortController().signal });
+
+/** The image row a chat shows for a completed call: its result as a Claude row, marked and slimmed as ingestion does. */
+function imageRowRef(tool: string, result: CallToolResult) {
+  const text = JSON.stringify(result.structuredContent);
+  const data = sessionToolMarkedData({ toolName: `mcp__orquester__${tool}`, result: { type: "tool_result", content: [{ type: "text", text }] } }, new Set([tool]));
+  return imageToolReferenceOfActivityPayload({ itemType: "mcp_tool_call", status: "completed", data: boundSessionToolData(data) });
+}
 
 async function setup(t: { after(fn: () => Promise<void>): void }, made: GptImageToolResult) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "generate-image-")));
@@ -58,7 +66,9 @@ async function setup(t: { after(fn: () => Promise<void>): void }, made: GptImage
       return { ok: true, value: made };
     }
   });
-  return { api, ws, sent };
+  // A chat of the project acme/app, working at its root.
+  const inProject: ThreadCaller = { ...caller, projectPath: join(ws, "acme", "app"), workspace: "acme", cwd: join(ws, "acme", "app") };
+  return { api, ws, sent, inProject };
 }
 
 describe("generate_image", () => {
@@ -92,10 +102,39 @@ describe("generate_image", () => {
     assert.equal(body.account, "Work Plus");
   });
 
+  it("a reference image in another project is that project's card, as read_file's path is: nothing is sent", async (t) => {
+    const s = await setup(t, made);
+    await mkdir(join(s.ws, "acme", "other"), { recursive: true });
+    await writeFile(join(s.ws, "acme", "other", "logo.png"), png(64, 64));
+    for (const as of [s.inProject, { ...s.inProject, workflowOwned: true }]) {
+      const result = await call(s.api, { prompt: "restyle", images: ["../other/logo.png"] }, as);
+      assert.equal(result.isError, true);
+      assert.equal((result.structuredContent as { code: string }).code, "PERMISSION_DENIED");
+    }
+    assert.equal(s.sent.length, 0);
+    assert.equal(s.api.uploads.length, 0);
+  });
+
+  it("a long prompt, revised prompt and project path still make an image row", async (t) => {
+    const path = join("/w", "ws", "p", "生成".repeat(150), "画像.png");
+    const s = await setup(t, { ...made, revisedPrompt: "液体ガラス".repeat(240), path, relativePath: path.slice(9) });
+    const result = await call(s.api, { prompt: "リキッドグラス風のアイコン".repeat(100) });
+    assert.equal(result.isError, undefined, JSON.stringify(result).slice(0, 300));
+    assert.deepEqual(imageRowRef("generate_image", result)?.images.map((image) => image.attachmentId), [`${THREAD}-att-1`]);
+  });
+
+  it("an image saved in the project that the chat could not store says where it is, so a retry does not make another", async (t) => {
+    const s = await setup(t, { ...made, path: "/w/ws/p/assets/icon.png", relativePath: "assets/icon.png" });
+    s.api.onUpload(() => ({ status: 503, value: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting." } }));
+    const result = await call(s.api, { prompt: "an icon", save_as: "assets/" });
+    assert.equal(result.isError, true);
+    assert.match((result.structuredContent as { message: string }).message, /saved in the project as assets\/icon\.png/);
+  });
+
   it("sends nothing upstream when a reference is refused", async (t) => {
     const s = await setup(t, made);
     await writeFile(join(s.ws, "acme", "app", "notes.png"), "not an image");
-    const result = await call(s.api, { prompt: "restyle", images: ["acme/app/notes.png"] });
+    const result = await call(s.api, { prompt: "restyle", images: ["notes.png"] }, s.inProject);
     assert.equal(result.isError, true);
     assert.match((result.structuredContent as { message: string }).message, /^images\[0\]: not a PNG, JPEG, WebP or GIF image/);
     assert.equal(s.sent.length, 0);

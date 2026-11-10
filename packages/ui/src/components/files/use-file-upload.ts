@@ -144,7 +144,7 @@ export function useFileUpload(api: ApiClient, onUploaded: (destDir: string) => v
             );
             batch.finish();
             if (res.conflict) {
-              conflicts.push({ item, kind: res.conflictKind ?? "file" });
+              conflicts.push({ item, kind: res.conflictKind === "dir" ? "dir" : "file" });
             } else {
               touchedDirs(destDir, item.relativePath).forEach((dir) => touched.add(dir));
             }

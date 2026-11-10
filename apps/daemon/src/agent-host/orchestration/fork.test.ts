@@ -16,6 +16,7 @@ import {
   HANDOFF_PREAMBLE_BYTES,
   HISTORICAL_RAW_SOURCE,
   htmlRenderReferenceOfActivityPayload,
+  imageToolReferenceOfActivityPayload,
   mcpAppReferenceOfActivityPayload,
   isHtmlRenderAttachmentId,
   sessionToolMarkedData,
@@ -1242,7 +1243,8 @@ async function pushPageRow(
   threadId: string,
   turnId: string,
   id: string,
-  data: unknown
+  data: unknown,
+  itemType = "mcp_tool_call"
 ): Promise<void> {
   await host.orchestrator.ingestionSink(threadId, [
     domainEvent(threadId, host as unknown as TestHost, "thread.activity-appended", {
@@ -1252,7 +1254,7 @@ async function pushPageRow(
         tone: "tool",
         activityKind: "tool.completed",
         summary: "orquester: html_render",
-        payload: { itemType: "mcp_tool_call", toolUseId: id, status: "completed", data },
+        payload: { itemType, toolUseId: id, status: "completed", data },
         turnId,
         createdAt: host.clock.nowIso(),
         updatedAt: host.clock.nowIso()
@@ -1368,6 +1370,111 @@ describe("a fork's child and its parent's pages", () => {
     await assert.rejects(store.resolveAttachment("child", dropped), /not found/);
     await assert.rejects(store.resolveAttachment("child", pasted), /not found/);
     await assert.rejects(store.resolveAttachment("stranger", kept));
+  });
+
+  it("claude (native): an image row the parent's window dropped still loads in the child; a pasted image still stays behind", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-images-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const store = createThreadStore({ rootDir: join(root, "threads") });
+    t.after(() => store.close());
+    const adapter = createScriptedAdapter({
+      id: "claude",
+      forkConversation: async (input) => ({ resumeCursor: { threadId: input.threadId, resume: "forked" } })
+    });
+    const host = createTestHost({ adapters: { claude: adapter }, store });
+    t.after(() => host.stop());
+    const parentId = await host.createThread({ threadId: "parent", refId: "claude" });
+    const asFake = host as unknown as TestHost;
+    const first = await runTurn(asFake, adapter, parentId, "show it", "here");
+
+    const putImage = async (name: string) => {
+      const source = join(root, name);
+      await writeFile(source, name);
+      return (await store.putAttachment({ threadId: parentId, name, mimeType: "image/png", sourcePath: source })).id;
+    };
+    const old = await putImage("old.png");
+    const pasted = await putImage("pasted.png");
+    await pushPageRow(
+      host,
+      parentId,
+      first.turnId,
+      "row-old",
+      sessionToolMarkedData(
+        {
+          toolName: "mcp__orquester__show_image",
+          input: { images: [{ ref: `attachment:${pasted}` }] },
+          result: { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ imageRef: { images: [{ attachmentId: old }] }, shown: 1 }) }] }
+        },
+        new Set(["show_image"])
+      )
+    );
+    // A long first turn: its image row leaves the fold's activity window.
+    const rows = Array.from({ length: 600 }, (_, index) =>
+      domainEvent(parentId, asFake, "thread.activity-appended", {
+        activity: {
+          id: `row-${index}`, kind: "activity", tone: "info", activityKind: "runtime.warning", summary: `row ${index}`, payload: null,
+          turnId: first.turnId, createdAt: host.clock.nowIso(), updatedAt: host.clock.nowIso()
+        }
+      })
+    );
+    await host.orchestrator.ingestionSink(parentId, rows);
+    await host.settle();
+    await runTurn(asFake, adapter, parentId, "another", "there");
+    const parent = await snapshotOf(asFake, parentId);
+    assert.equal(parent.items.some((item) => item.id === "row-old"), false, "the image row is out of the window");
+
+    const result = await host.orchestrator.forkThread(parentId, forkRequest("child", "claude", { messageId: first.replyId }));
+    await host.settle();
+    assert.equal(result.strategy, "native");
+    assert.equal(await readFile(await store.resolveAttachment("child", old), "utf8"), "old.png");
+    await assert.rejects(store.resolveAttachment("child", pasted), /not found/);
+  });
+
+  it("codex (native): a replayed image_generation item gets its parent row's image, which loads in the child", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-codex-images-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const store = createThreadStore({ rootDir: join(root, "threads") });
+    t.after(() => store.close());
+    // The provider's history names the item, never the stored image (the adapter's projection says it was not imported).
+    const replayed = (threadId: string): RuntimeEvent[] => {
+      const raw = { source: HISTORICAL_RAW_SOURCE, payload: null };
+      const base = { threadId, createdAt: "1970-01-01T00:00:00.000Z", turnId: "turn-1", raw };
+      return [
+        { ...base, eventId: "h-start", type: "turn.started", payload: {} },
+        {
+          ...base,
+          eventId: "h-image",
+          itemId: "ig-1",
+          type: "item.completed",
+          payload: { itemType: "image_generation", status: "completed", detail: "The image was not imported with the chat's Codex history" }
+        },
+        { ...base, eventId: "h-end", type: "turn.completed", payload: { state: "completed", tokenUsage: { usageStatus: "unavailable" } } }
+      ] as unknown as RuntimeEvent[];
+    };
+    const codex = createScriptedAdapter({
+      id: "codex",
+      forkConversation: async (input) => ({ resumeCursor: { threadId: input.threadId, resume: "forked" } }),
+      history: { threadId: "child", turns: [{ id: "turn-1", items: [] }] },
+      projectHistory: () => replayed("child")
+    });
+    const host = createTestHost({ adapters: { codex }, store });
+    t.after(() => host.stop());
+    const parentId = await host.createThread({ threadId: "parent", refId: "codex" });
+    const first = await runTurn(host as unknown as TestHost, codex, parentId, "draw a dog", "here");
+    const source = join(root, "dog.png");
+    await writeFile(source, "dog");
+    const stored = await store.putAttachment({ threadId: parentId, name: "dog.png", mimeType: "image/png", sourcePath: source });
+    const imageRef = { images: [{ attachmentId: stored.id, mimeType: "image/png", caption: "a dog" }] };
+    await pushPageRow(host, parentId, first.turnId, "ig-1", { imageRef }, "image_generation");
+
+    const result = await host.orchestrator.forkThread(parentId, forkRequest("child", "codex", { messageId: first.replyId }));
+    await host.settle();
+    assert.equal(result.strategy, "native");
+
+    const replay = host.ingestion.ingested.find((event) => event.threadId === "child" && event.type === "item.completed" && event.itemId === "ig-1");
+    assert.deepEqual(imageToolReferenceOfActivityPayload(replay?.payload), imageRef);
+    assert.equal((replay?.payload as { detail?: unknown } | undefined)?.detail, undefined, "no 'not imported' note on a row showing its image");
+    assert.equal(await readFile(await store.resolveAttachment("child", stored.id), "utf8"), "dog");
   });
 
   it("codex (native): a replayed MCP App call gets its parent row's app, naming the child's own snapshot, which its sweep keeps", async (t) => {

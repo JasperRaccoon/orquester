@@ -28,13 +28,14 @@ import {
   IMAGE_TITLE_MAX_LENGTH,
   IMAGE_TOOL_MAX_IMAGES,
   MAX_TURN_IMAGE_BYTES,
+  boundImageToolReference,
   readImageToolReference,
   SHOW_IMAGE_TOOL_NAME,
   type ChatImageReference
 } from "@orquester/api/agent-chat";
 
 import { defineTool, type AnyOrquesterTool, type ScopeClaim, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
-import { resolveChatImages, storeChatImage } from "../chat-images.ts";
+import { chatImageScopePaths, resolveChatImages, storeChatImage } from "../chat-images.ts";
 import { ToolError } from "../errors.ts";
 import { imageResult } from "../../session-tools/results.ts";
 
@@ -67,7 +68,7 @@ const THEME = `Theme: :root CSS variables (hex), following the user's theme and 
 
 const html = z.string().min(1).max(HTML_RENDER_MAX_HTML_CHARS).describe("A complete, self-contained HTML document.");
 
-/** Neither tool claims anything the gate judges beyond the caller itself: it shows or measures a page. */
+/** The caller itself, nothing else the gate judges: a page shown or measured (`show_image` adds the files it reads). */
 const ownThread = (caller: ToolCaller, writes: boolean): ScopeClaim => ({
   projects: [],
   sessions: caller.kind === "thread" ? [caller.threadId] : [],
@@ -162,7 +163,7 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
   defineTool({
     name: SHOW_IMAGE_TOOL_NAME,
     title: "Show image",
-    description: `Show images to the user inline in this chat, large and always visible: a screenshot you took, a project image, an image the user pasted or one generated here. PNG, JPEG, WebP or GIF (by content), ≤ ${MAX_TURN_IMAGE_BYTES / (1024 * 1024)} MiB each. Each entry is {path} or {ref}. path: a file in the workspaces (as read_file takes it), in this chat's attachments or in a temp folder (browser or simulator screenshots land there); in a box chat, a path in the box. ref: "recent:1" is the latest image pasted, shown or generated in this chat ("recent:2" the one before), "attachment:<id>" one stored here. Returns each image's attachmentId and markdown: write ![alt](attachment:<id>) in a reply to show it again (![](path) shows a project file). The images are not sent back to you. ${IMAGE_SHOWN_MESSAGE}`,
+    description: `Show images to the user inline in this chat, large and always visible: a screenshot you took, a project image, an image the user pasted or one generated here. PNG, JPEG, WebP or GIF (by content), ≤ ${MAX_TURN_IMAGE_BYTES / (1024 * 1024)} MiB each. Each entry is {path} or {ref}. path: a file in the workspaces (relative: from this chat's directory), in this chat's attachments or in a temp folder (browser or simulator screenshots land there); in a box chat, a path in the box. ref: "recent:1" is the latest image pasted, shown or generated in this chat ("recent:2" the one before), "attachment:<id>" one stored here. Returns each image's attachmentId and markdown: write ![alt](attachment:<id>) in a reply to show it again (![](path) shows a project file). The images are not sent back to you. ${IMAGE_SHOWN_MESSAGE}`,
     input: {
       images: z
         .array(
@@ -184,7 +185,12 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
     tier: "act",
     // Showing a picture explains a plan as well as a page does.
     planSafe: true,
-    scope: async (_args, ctx) => ownThread(ctx.caller, true),
+    // The caller's own chat, and every workspace file it reads, which the gate classifies as read_file's path: another
+    // project's image is that project's card (the Act row: the call also changes this chat), a workflow's chat is refused.
+    scope: async (args, ctx) => {
+      const paths = await chatImageScopePaths(ctx.api, ctx.caller, args.images);
+      return paths.length > 0 ? { ...ownThread(ctx.caller, true), reads: "content", paths } : ownThread(ctx.caller, true);
+    },
     // Read-only in the MCP sense: it copies images into the caller's own chat and touches no workspace.
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     resultKind: "json",
@@ -214,8 +220,9 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
         });
         shown.push({ attachmentId, markdown: chatImageMarkdown(attachmentId, caption ?? image.name.replace(/\.[^.]*$/, "")) });
       }
-      // Through the one reader the timeline uses, so what is stored is what renders.
-      const imageRef = readImageToolReference({ ...(args.title !== undefined ? { title: args.title } : {}), images });
+      // Through the one reader the timeline uses, so what is stored is what renders, and within the size a row keeps.
+      const read = readImageToolReference({ ...(args.title !== undefined ? { title: args.title } : {}), images });
+      const imageRef = read && boundImageToolReference(read);
       return { imageRef, images: shown, shown: shown.length, message: IMAGE_SHOWN_MESSAGE };
     }
   })

@@ -252,8 +252,18 @@ export interface ThreadStore {
    * copies: its sweep keeps what its rows name, and deleting the parent
    * breaks nothing. Regular files only; an existing copy is left as is.
    * Answers the ids copied.
+   *
+   * `options.orLoggedImage`: an image `keep` passed over is copied too when
+   * this selects it AND `fromThreadId`'s log names it as an image
+   * reference's `attachmentId` — the row that showed it, past the fold's
+   * window (a pasted upload no row shows is named only as a message's).
    */
-  copyPages?(fromThreadId: string, toThreadId: string, keep: (attachmentId: string) => boolean): Promise<string[]>;
+  copyPages?(
+    fromThreadId: string,
+    toThreadId: string,
+    keep: (attachmentId: string) => boolean,
+    options?: { orLoggedImage?: (attachmentId: string) => boolean }
+  ): Promise<string[]>;
 
   /**
    * Sweep: `pending`-segment uploads after 24 h, `.part` files after 1 h, and

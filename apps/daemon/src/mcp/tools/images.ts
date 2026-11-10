@@ -16,6 +16,7 @@
 
 import { z } from "zod";
 import {
+  boundImageToolReference,
   chatImageMarkdown,
   GENERATE_IMAGE_TOOL_NAME,
   IMAGE_CAPTION_MAX_LENGTH,
@@ -24,7 +25,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { defineTool, type AnyOrquesterTool, type ScopeClaim, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
-import { resolveChatImages, storeChatImage, type ChatImageInput } from "../chat-images.ts";
+import { chatImageScopePaths, resolveChatImages, storeChatImage, type ChatImageInput } from "../chat-images.ts";
 import type { DaemonApi, DaemonOutcome } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
 import { imageResult } from "../../session-tools/results.ts";
@@ -60,7 +61,7 @@ const generateImage = defineTool({
   name: GENERATE_IMAGE_TOOL_NAME,
   title: "Generate an image",
   description:
-    "Make a picture, icon, logo, illustration or mockup, or edit/restyle images, with GPT Image on the user's ChatGPT plan (no API key, no cost). Use this for every image request: never write a script against an image API. images (≤ 5) switch it to editing: recent:1 is the latest image in this chat (pasted or generated; recent:2 the one before), attachment:<id> one from an earlier result, or a file path. transparent: a transparent background. save_as also writes it into the project (a path, or a folder ending in /); a taken name gets -v2. The user sees the image in the chat and you get it back.",
+    "Make a picture, icon, logo, illustration or mockup, or edit/restyle images, with GPT Image on the user's ChatGPT plan (no API key, no cost). Use this for every image request: never write a script against an image API. images (≤ 5) switch it to editing: recent:1 is the latest image in this chat (pasted or generated; recent:2 the one before), attachment:<id> one from an earlier result, or a file path (relative: from this chat's directory). transparent: a transparent background. save_as also writes it into the project (a path, or a folder ending in /); a taken name gets -v2. The user sees the image in the chat and you get it back.",
   chatNote: "It takes seconds to a couple of minutes. The result's markdown shows the image again in a reply.",
   input: {
     prompt: z.string().min(1).max(32_000).describe("What to make, or what to change in the images."),
@@ -80,15 +81,22 @@ const generateImage = defineTool({
   audiences: ["chat"],
   toolset: "images",
   tier: "act",
-  // It shows an image in the caller's own chat and may add a file to its own project.
-  scope: async (_args, ctx): Promise<ScopeClaim> => ({
-    projects: [],
-    sessions: ctx.caller.kind === "thread" ? [ctx.caller.threadId] : [],
-    self: "allow",
-    reads: "content",
-    writes: true,
-    causesTurnIn: []
-  }),
+  // It shows an image in the caller's own chat and may add a file to its own project. The workspace files it reads (and
+  // sends upstream) are claimed as read_file claims its path, so another project's is that project's card and a
+  // workflow's chat is refused. `save_as` is not claimed: it is written only inside the caller's own project
+  // (`gpt-image/storage.ts` refuses anything else before generating), the gate's own row, which allows it.
+  scope: async (args, ctx): Promise<ScopeClaim> => {
+    const paths = await chatImageScopePaths(ctx.api, ctx.caller, (args.images ?? []).map(imageInput));
+    return {
+      projects: [],
+      sessions: ctx.caller.kind === "thread" ? [ctx.caller.threadId] : [],
+      self: "allow",
+      reads: "content",
+      writes: true,
+      causesTurnIn: [],
+      ...(paths.length > 0 ? { paths } : {})
+    };
+  },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   resultKind: "image",
   async run(args, ctx) {
@@ -110,9 +118,17 @@ const generateImage = defineTool({
         { signal: ctx.signal }
       )
     );
-    const { attachmentId } = await storeChatImage(api, caller, { bytes: made.bytes, mimeType: made.mimeType, name: made.name });
+    let attachmentId: string;
+    try {
+      ({ attachmentId } = await storeChatImage(api, caller, { bytes: made.bytes, mimeType: made.mimeType, name: made.name }));
+    } catch (error) {
+      // The project copy is written by then: say where, so a retry shows it rather than making another (-v2).
+      if (!made.path || !(error instanceof ToolError)) throw error;
+      throw new ToolError(error.code, `${error.message} The image was made and saved in the project as ${made.relativePath ?? made.path}: show it with show_image instead of generating it again.`, error.detail);
+    }
     const text = caption(args.prompt);
-    const imageRef: ImageToolReference = {
+    // Within the size a row keeps (a long prompt and path would drop the whole row).
+    const imageRef: ImageToolReference = boundImageToolReference({
       images: [
         {
           attachmentId,
@@ -123,7 +139,7 @@ const generateImage = defineTool({
         }
       ],
       ...(made.revisedPrompt ? { revisedPrompt: made.revisedPrompt } : {})
-    };
+    });
     const inline = made.bytes.length <= INLINE_IMAGE_MAX_BYTES;
     const notes = [made.note, inline ? undefined : "The image is too large to return inline; the user sees it in the chat."].filter(Boolean);
     const value: Record<string, unknown> = {

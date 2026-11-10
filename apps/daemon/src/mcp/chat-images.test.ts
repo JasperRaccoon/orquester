@@ -101,7 +101,7 @@ async function layout() {
   api.workspacesDir = ws;
   const attachments = new Map<string, string>();
   Object.assign(api, {
-    chatImageRoots: (threadId: string) => ({ attachmentsDir: join(threads, threadId, "attachments"), tempDirs: [temp] }),
+    chatImageRoots: (threadId: string) => ({ attachmentsDir: join(threads, threadId, "attachments"), tempDirs: [temp], appDir: root }),
     // As the host resolves: an id names its thread's file, or nothing.
     chatAttachmentPath: async (threadId: string, id: string) => (id.startsWith(`${threadId}-`) ? attachments.get(id) ?? null : null)
   });
@@ -123,9 +123,10 @@ test("paths: the workspaces, this chat's own attachments and the temp folders ar
   await writeFile(join(s.elsewhere, "secret.png"), png(1, 1));
   await writeFile(join(s.other, "t2-x.png"), png(1, 1));
   await symlink(join(s.elsewhere, "secret.png"), join(s.ws, "acme", "app", "escape.png"));
-  const resolve = (inputs: ChatImageInput[]) => resolveChatImages(s.api, chatCaller(), inputs);
+  // A relative path is taken from the chat's working directory, as read_file takes it.
+  const resolve = (inputs: ChatImageInput[]) => resolveChatImages(s.api, chatCaller({ cwd: join(s.ws, "acme", "app") }), inputs);
 
-  const images = await resolve([{ path: "acme/app/logo.png" }, { path: join(s.own, "pasted.webp") }, { path: join(s.temp, "screenshot.jpeg") }]);
+  const images = await resolve([{ path: "logo.png" }, { path: join(s.own, "pasted.webp") }, { path: join(s.temp, "screenshot.jpeg") }]);
   assert.deepEqual(
     images.map(({ name, mimeType, width, height, path }) => ({ name, mimeType, width, height, path })),
     [
@@ -146,11 +147,25 @@ test("paths: the workspaces, this chat's own attachments and the temp folders ar
 test("a chat's temp folder set above the appdir still never reaches another chat's attachments", async (t) => {
   const s = await layout();
   t.after(() => rm(s.root, { recursive: true, force: true }));
-  Object.assign(s.api, { chatImageRoots: (threadId: string) => ({ attachmentsDir: join(s.root, "daemon", "agent", "threads", threadId, "attachments"), tempDirs: [s.root] }) });
+  Object.assign(s.api, { chatImageRoots: (threadId: string) => ({ attachmentsDir: join(s.root, "daemon", "agent", "threads", threadId, "attachments"), tempDirs: [s.root], appDir: s.root }) });
   await writeFile(join(s.other, "t2-x.png"), png(1, 1));
   await writeFile(join(s.own, "t1-y.png"), png(2, 2));
   await assert.rejects(resolveChatImages(s.api, chatCaller(), [{ path: join(s.other, "t2-x.png") }]), refusal("PATH_NOT_ALLOWED", /^images\[0\]: /));
   assert.equal((await resolveChatImages(s.api, chatCaller(), [{ path: join(s.own, "t1-y.png") }]))[0]!.width, 2);
+});
+
+test("before this chat has an attachments folder, another chat's attachments and the pending uploads stay out of reach", async (t) => {
+  const s = await layout();
+  t.after(() => rm(s.root, { recursive: true, force: true }));
+  // A chat whose attachments folder was never made, its temp folder set above the appdir.
+  Object.assign(s.api, { chatImageRoots: () => ({ attachmentsDir: join(s.root, "daemon", "agent", "threads", "t9", "attachments"), tempDirs: [s.root], appDir: s.root }) });
+  const pending = join(s.root, "daemon", "agent", "pending-attachments");
+  await mkdir(pending, { recursive: true });
+  await writeFile(join(s.other, "t2-x.png"), png(1, 1));
+  await writeFile(join(pending, "pending-y.png"), png(1, 1));
+  const caller = chatCaller({ threadId: "t9" });
+  await assert.rejects(resolveChatImages(s.api, caller, [{ path: join(s.other, "t2-x.png") }]), refusal("PATH_NOT_ALLOWED", /^images\[0\]: /));
+  await assert.rejects(resolveChatImages(s.api, caller, [{ path: join(pending, "pending-y.png") }]), refusal("PATH_NOT_ALLOWED", /^images\[0\]: /));
 });
 
 test("an image is one by its bytes and its size: a renamed text file and an oversized image are refused", async (t) => {
