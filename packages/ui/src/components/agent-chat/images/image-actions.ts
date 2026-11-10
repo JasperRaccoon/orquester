@@ -70,7 +70,8 @@ export function copyImageToClipboard(url: string): Promise<void> {
 
 /**
  * Save the image into the project at `relativePath` — or at `-v2`, `-v3`, …
- * when something is already there. Answers the host path it landed at.
+ * when a file already holds the name; anything else in the way rejects at
+ * once. Answers the host path it landed at.
  */
 export async function saveImageToProject(input: {
   api: ApiClient;
@@ -79,13 +80,9 @@ export async function saveImageToProject(input: {
   url: string;
 }): Promise<string> {
   const blob = await readImageBlob(input.url);
-  return writeWithoutOverwrite(input.relativePath, async (relativePath) => {
-    const result = await input.api.uploadFsEntry(
-      { destDir: input.projectRoot, relativePath, onConflict: "error" },
-      blob
-    );
-    return result.conflict === true ? { conflict: true } : { conflict: false, path: result.path };
-  });
+  return writeWithoutOverwrite(input.relativePath, (relativePath) =>
+    input.api.uploadFsEntry({ destDir: input.projectRoot, relativePath, onConflict: "error" }, blob)
+  );
 }
 
 /**
