@@ -23,6 +23,7 @@ import {
   TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
   createWorkflowFromRequest,
   EXPRESSION_PREVIEW_LIMITS,
+  isGateWaiting,
   isRunActive,
   WORKFLOW_LIMITS,
   WORKFLOW_NODE_NAME_PATTERN,
@@ -31,6 +32,9 @@ import {
   workflowRoutes,
   type ApprovalPreviewSection,
   type CreateWorkflowRequest,
+  type DecideWorkflowGateResponse,
+  type ListWorkflowGatesResponse,
+  type WorkflowGateState,
   type GetWorkflowNodeOutputResponse,
   type GetWorkflowResponse,
   type GetWorkflowRunResponse,
@@ -158,6 +162,9 @@ function runSummaryView(r: WorkflowRunSummary): Record<string, unknown> {
   if (r.endedAt) view.endedAt = r.endedAt;
   if (typeof r.durationMs === "number") view.durationMs = r.durationMs;
   if (r.current) view.current = `${r.current.name} (${r.current.index}/${r.current.total})`;
+  if (r.pendingGates) view.pendingGates = r.pendingGates;
+  if (r.parked) view.parked = true;
+  if (r.skipDetail) view.skipDetail = r.skipDetail;
   if (r.error) view.error = clipText(r.error, 500);
   if (r.projectPath) view.projectPath = r.projectPath;
   if (r.tempProject) view.tempProject = r.tempProject;
@@ -373,6 +380,52 @@ function orderedBlocks(run: WorkflowRun): WorkflowBlockRun[] {
 
 const OUTPUT_NOTE = "Outputs marked outputTruncated are cut (outputText is the head of their JSON): read one whole with get_workflow_runs {runId, nodeId}.";
 
+/** How long ago, in words ("12 min"). */
+function ageText(fromIso: string, now: number): string {
+  const minutes = Math.max(0, Math.floor((now - Date.parse(fromIso)) / 60_000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 48 ? `${hours} h` : `${Math.floor(hours / 24)} d`;
+}
+
+/** The exact decide call for a gate (what a decider is told to make). */
+function decideCall(gate: Pick<WorkflowGateState, "runId" | "gateId">, rest = '"choice": "<id>", "comment": "<why>"'): string {
+  return `decide_workflow_gate {"runId": ${JSON.stringify(gate.runId)}, "gateId": ${JSON.stringify(gate.gateId)}, ${rest}}`;
+}
+
+/** A gate, compact (spec 2026-11-10 §8): what it asks, who decides, and how it ended. */
+function gateView(gate: WorkflowGateState, now?: number): Record<string, unknown> {
+  const view: Record<string, unknown> = { gateId: gate.gateId, runId: gate.runId };
+  if (gate.rootRunId) view.rootRunId = gate.rootRunId;
+  if (gate.workflowName) view.workflow = gate.workflowName;
+  view.workflowId = gate.workflowId;
+  if (gate.projectPath) view.projectPath = gate.projectPath;
+  view.block = gate.nodeName;
+  if (gate.source === "loop_limit") view.source = "loop_limit";
+  view.question = clipText(gate.question, 400);
+  if (gate.details) view.details = clipText(gate.details, 2_000);
+  view.choices = gate.choices.map((choice) => ({ id: choice.id, label: clipText(choice.label, 120), ...(choice.comment !== "none" ? { comment: choice.comment } : {}) }));
+  view.decider = { kind: gate.decider.kind, label: gate.decider.label };
+  if (gate.decision) {
+    view.decision = {
+      choice: gate.decision.choice,
+      ...(gate.decision.comment ? { comment: clipText(gate.decision.comment, 1_000) } : {}),
+      by: gate.decision.decidedBy.label,
+      byKind: gate.decision.decidedBy.kind,
+      at: gate.decision.decidedAt
+    };
+  } else if (gate.cancelled) view.state = "cancelled";
+  else if (gate.expired) view.state = "expired";
+  else {
+    view.state = gate.phase === "agent" ? `waiting: ${gate.decider.label} decides (the person may decide first)` : "waiting: the person decides";
+    if (gate.phaseDeadlineAt) view.deadlineAt = gate.phaseDeadlineAt;
+    if (now !== undefined) view.waitingFor = ageText(gate.openedAt, now);
+  }
+  if (gate.escalated) view.escalated = gate.escalationReason ? clipText(gate.escalationReason, 500) : true;
+  if (gate.test) view.test = true;
+  return view;
+}
+
 /** A whole run: summary, every block with its output fitted to the budget, and the final output. */
 function runView(run: WorkflowRun, opts: { includeOutputs: boolean; extra?: Record<string, unknown> }): Record<string, unknown> {
   const blocks = orderedBlocks(run);
@@ -381,6 +434,9 @@ function runView(run: WorkflowRun, opts: { includeOutputs: boolean; extra?: Reco
   // The sub-workflow revisions the run froze as it started (what its Run workflow blocks run).
   if (run.subWorkflowRevisions && Object.keys(run.subWorkflowRevisions).length > 0) summary.subWorkflowRevisions = { ...run.subWorkflowRevisions };
   const result: Record<string, unknown> = { ...(opts.extra ?? {}), run: summary, blocks: views };
+  // Gates (spec 2026-11-10 §8): waiting ones and the decisions, opened order.
+  const gates = Object.values(run.gates ?? {});
+  if (gates.length > 0) result.gates = gates.sort((x, y) => (x.openedAt < y.openedAt ? -1 : 1)).map((gate) => gateView(gate));
   if (!opts.includeOutputs) return result;
   const slots: OutputSlot[] = blocks.map((b, i) => ({ holder: views[i]!, value: b.output, daemonTruncated: b.outputTruncated === true, key: "output" }));
   const runHolder = result.run as Record<string, unknown>;
@@ -438,6 +494,8 @@ function outputWindow(text: string, offset: number, maxBytes: number): { text: s
  */
 class RunEndTap {
   private readonly ended = new Set<string>();
+  /** Gates (spec 2026-11-10 §6.3) heard opening for a launcher, by their top-level run. */
+  private readonly launcherGates = new Map<string, WorkflowGateState[]>();
   private wake: (() => void) | null = null;
   private readonly off: () => void;
   constructor(api: DaemonApi) {
@@ -446,11 +504,27 @@ class RunEndTap {
       if (event.type !== "workflowRun.finished" && event.type !== "workflowRun.updated") return;
       const run = isRecord(event.payload) && isRecord(event.payload.run) ? (event.payload.run as unknown as WorkflowRunSummary) : null;
       if (!run || typeof run.id !== "string") return;
+      if (event.type === "workflowRun.updated" && isRecord(event.payload) && Array.isArray(event.payload.gates)) {
+        for (const gate of event.payload.gates as WorkflowGateState[]) this.heard(gate);
+      }
       if (event.type === "workflowRun.finished" || (typeof run.status === "string" && !isRunActive(run.status))) {
         this.ended.add(run.id);
         this.notify();
       }
     });
+  }
+  /** A gate state heard (an event, or the safety-net read): kept when it waits for a launcher. */
+  heard(gate: WorkflowGateState): void {
+    if (!isRecord(gate) || typeof gate.gateId !== "string" || typeof gate.runId !== "string") return;
+    const root = typeof gate.rootRunId === "string" ? gate.rootRunId : gate.runId;
+    const list = (this.launcherGates.get(root) ?? []).filter((known) => !(known.runId === gate.runId && known.gateId === gate.gateId));
+    if (gate.decider?.kind === "launcher" && gate.phase === "agent" && isGateWaiting(gate)) list.push(gate);
+    this.launcherGates.set(root, list);
+    if (list.length > 0) this.notify();
+  }
+  /** A gate of `runId`'s tree waiting for the chat `threadId` (its launcher). */
+  launcherGate(runId: string, threadId: string): WorkflowGateState | undefined {
+    return this.launcherGates.get(runId)?.find((gate) => gate.decider.sessionId === threadId);
   }
   hasEnded(runId: string): boolean { return this.ended.has(runId); }
   notify(): void { const w = this.wake; this.wake = null; w?.(); }
@@ -471,7 +545,12 @@ class RunEndTap {
  * Wait for `runId` to end: woken by the bus, re-reading the run every `rereadMs` whatever the bus says. Resolves with
  * the run as last read and whether it ended; a timeout or an abort resolves `ended: false`. The tap stays the caller's.
  */
-async function waitForRunEnd(api: DaemonApi, tap: RunEndTap, runId: string, opts: { timeoutMs: number; signal: AbortSignal }): Promise<{ run: WorkflowRun | null; ended: boolean }> {
+async function waitForRunEnd(
+  api: DaemonApi,
+  tap: RunEndTap,
+  runId: string,
+  opts: { timeoutMs: number; signal: AbortSignal; launcher?: string }
+): Promise<{ run: WorkflowRun | null; ended: boolean; gate?: WorkflowGateState }> {
   const rereadMs = RUN_REREAD_MS;
   const started = performance.now();
   const remaining = () => opts.timeoutMs - (performance.now() - started);
@@ -480,17 +559,36 @@ async function waitForRunEnd(api: DaemonApi, tap: RunEndTap, runId: string, opts
   const read = async (): Promise<boolean> => {
     const run = await readRun(api, runId);
     last = run;
+    if (opts.launcher !== undefined && isRunActive(run.status)) {
+      // The safety net for the launcher's gates too: every waiting gate of the run's tree.
+      for (const gate of Object.values(run.gates ?? {})) tap.heard(gate);
+      if (run.pendingGates !== undefined && run.pendingGates > 0) {
+        const res = await api.request("GET", workflowRoutes.gates).catch(() => null);
+        const gates = res && res.status < 400 ? ((res.body as ListWorkflowGatesResponse).gates ?? []) : [];
+        for (const gate of gates) if (gate.runId === runId || gate.rootRunId === runId) tap.heard(gate);
+      }
+    }
     return !isRunActive(run.status);
   };
+  /** A gate waiting for the caller (the run's launcher): the wait returns at once (spec 2026-11-10 §6.3). */
+  const launcherGate = (): WorkflowGateState | undefined => (opts.launcher !== undefined ? tap.launcherGate(runId, opts.launcher) : undefined);
   // A heard end is acted on once: when the read still says active (it raced the write), the schedule decides.
   let heardHandled = false;
   for (;;) {
     if (opts.signal.aborted) return { run: last, ended: false };
+    const gate = launcherGate();
+    if (gate !== undefined) {
+      try {
+        await read();
+      } catch { /* keep the last known state */ }
+      return { run: last, ended: false, gate };
+    }
     const heard = tap.hasEnded(runId) && !heardHandled;
     if (heard || performance.now() >= nextRereadAt) {
       if (heard) heardHandled = true;
       nextRereadAt = performance.now() + rereadMs;
       if (await read()) return { run: last, ended: true };
+      if (launcherGate() !== undefined) continue;
     }
     const left = remaining();
     if (left <= 0) {
@@ -502,7 +600,7 @@ async function waitForRunEnd(api: DaemonApi, tap: RunEndTap, runId: string, opts
       }
       return { run: last, ended: false };
     }
-    await tap.next(Math.min(left, Math.max(0, nextRereadAt - performance.now())), opts.signal, () => tap.hasEnded(runId) && !heardHandled);
+    await tap.next(Math.min(left, Math.max(0, nextRereadAt - performance.now())), opts.signal, () => (tap.hasEnded(runId) && !heardHandled) || launcherGate() !== undefined);
   }
 }
 
@@ -1386,7 +1484,8 @@ const runWorkflow = defineTool({
       }
       const started = res.body as RunWorkflowResponse;
       if (started.runId === null || started.skipped) {
-        return { runId: null, skipped: started.skipped ?? "overlap", message: "Not run: a run of this workflow is already active and its overlap policy skipped this one. Pass force:true to run anyway, or watch the active run (get_workflow_runs {workflowId})." };
+        const why = started.skipDetail ? ` (${started.skipDetail})` : "";
+        return { runId: null, skipped: started.skipped ?? "overlap", ...(started.skipDetail ? { skipDetail: started.skipDetail } : {}), message: `Not run: a run of this workflow is already active${why} and its overlap policy skipped this one. Pass force:true to run anyway, or watch the active run (get_workflow_runs {workflowId}).` };
       }
       // Defence in depth: the run froze the definition it started with. One that is not the revision
       // asked for (or approved), or that cannot be checked, is cancelled at once (fail closed).
@@ -1399,8 +1498,20 @@ const runWorkflow = defineTool({
         const child = frozenChildMismatch(ctx.approval.pins, args.workflowId, first?.subWorkflowRevisions);
         if (child !== null) await refuseStaleChildRun(api, started.runId, child, ctx.approval.outcome);
       }
-      if (!tap) return { runId: started.runId, status: "started", revision: args.revision, next: "get_workflow_runs {runId, waitSeconds} watches it; run_workflow with wait:true waits for the end." };
-      const { run, ended } = await waitForRunEnd(api, tap, started.runId, { timeoutMs: args.timeoutSeconds * 1_000, signal });
+      const queued = started.skipDetail ? { queued: started.skipDetail } : {};
+      if (!tap) return { runId: started.runId, status: "started", revision: args.revision, ...queued, next: "get_workflow_runs {runId, waitSeconds} watches it; run_workflow with wait:true waits for the end." };
+      // A gate that asks this chat (its launcher) ends the wait at once: the decision is this chat's to make.
+      const launcher = ctx.caller.kind === "thread" ? ctx.caller.threadId : undefined;
+      const { run, ended, gate } = await waitForRunEnd(api, tap, started.runId, { timeoutMs: args.timeoutSeconds * 1_000, signal, ...(launcher !== undefined ? { launcher } : {}) });
+      if (gate) {
+        const extra = {
+          runId: started.runId,
+          finished: false,
+          waitingOnGate: gateView(gate),
+          next: `The run waits for YOUR decision: ${decideCall(gate)} — a comment is required; or hand it to the person: ${decideCall(gate, '"escalate": true, "comment": "<why>"')}. Then get_workflow_runs {runId, waitSeconds} watches the rest.`
+        };
+        return run ? runView(run, { includeOutputs: false, extra }) : extra;
+      }
       if (!run) return { runId: started.runId, finished: false, timedOut: true, next: "get_workflow_runs {runId, waitSeconds} watches it." };
       const extra = ended ? { runId: run.id, finished: true } : { runId: run.id, finished: false, timedOut: true, next: "Still running: get_workflow_runs {runId, waitSeconds} later, or cancel_workflow_run." };
       return runView(run, { includeOutputs: true, extra });
@@ -1511,6 +1622,158 @@ const getWorkflowRuns = defineTool({
     if (offset === 0 && resultBytes({ ...result, output }) <= WORKFLOW_RESULT_BUDGET) return { ...result, output };
     const window = outputWindow(JSON.stringify(output), offset, Math.max(1_000, room));
     return { ...result, outputText: window.text, offset: window.offset, totalBytes: window.totalBytes, ...(window.nextOffset !== undefined ? { nextOffset: window.nextOffset, note: "The output's JSON text continues: call again with outputOffset = nextOffset." } : {}) };
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Gates (spec 2026-11-10 §6.3, §8)
+// ---------------------------------------------------------------------------
+
+/** The gate a decide call names: `gateId`, else the gate block `nodeName`'s (its waiting gate, else its latest). */
+async function gateIdFor(api: DaemonApi, runId: string, gateId: string | undefined, nodeName: string | undefined): Promise<string> {
+  if (gateId !== undefined) return gateId;
+  if (nodeName === undefined) throw new ToolError("INVALID_ARGUMENT", "Pass gateId (from the message, run_workflow or list_workflow_gates), or nodeName (the gate block's name).");
+  const run = await readRun(api, runId);
+  const gates = Object.values(run.gates ?? {})
+    .filter((gate) => gate.nodeName === nodeName || gate.nodeId === nodeName)
+    .sort((x, y) => (x.openedAt < y.openedAt ? -1 : 1));
+  const pick = gates.filter(isGateWaiting).at(-1) ?? gates.at(-1);
+  if (!pick) throw new ToolError("GATE_NOT_FOUND", `Run ${clipText(runId, MAX_ECHO_CHARS)} has no gate at "${clipText(nodeName, MAX_ECHO_CHARS)}". list_workflow_gates lists the waiting gates.`);
+  return pick.gateId;
+}
+
+const decideGate = defineTool({
+  name: "decide_workflow_gate",
+  title: "Decide a workflow gate",
+  description:
+    "Decide a gate a workflow run waits on; the run follows that choice. The first decision wins (later: alreadyDecided). An agent decider must comment, or hand the gate to the person with escalate: true.",
+  chatNote: "Only the chat assigned to the gate may decide it.",
+  externalNote: "Decides as the person.",
+  input: {
+    runId: z.string().min(1).describe("The gate's run."),
+    gateId: z.string().min(1).optional(),
+    nodeName: z.string().min(1).optional().describe("Instead of gateId: the gate block."),
+    choice: z.string().min(1).optional(),
+    comment: z.string().max(4_000).optional(),
+    escalate: z.boolean().optional()
+  },
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  // Act, and the claim names no project: the assigned decider is the daemon's record of the gate's
+  // own run (the reviewer's chat, or `startedBy`), never an argument — so the gate opens no Admin or
+  // boundary card for it, a workflow-owned reviewer and a launcher in another project included; every
+  // other chat is refused by the route (403 GATE_NOT_DECIDER), without a card. `writes` keeps the
+  // existing refusal while the caller plans (spec 2026-11-10 §6.3).
+  tier: "act",
+  async scope(_args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    return claim({ reads: "metadata", writes: true });
+  },
+  annotations: MUTATING_IDEMPOTENT,
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    if (args.escalate !== true && args.choice === undefined) throw new ToolError("INVALID_ARGUMENT", "Pass choice (one of the gate's choice ids), or escalate: true with a comment.");
+    if (args.escalate === true && args.choice !== undefined) throw new ToolError("INVALID_ARGUMENT", "Pass either choice or escalate, not both.");
+    const gateId = await gateIdFor(api, args.runId, args.gateId, args.nodeName);
+    const body = {
+      ...(args.choice !== undefined ? { choice: args.choice } : {}),
+      ...(args.comment !== undefined ? { comment: args.comment } : {}),
+      ...(args.escalate === true ? { escalate: true } : {})
+    };
+    const res = expectWorkflowOk<DecideWorkflowGateResponse>(await api.request("POST", workflowRoutes.gateDecide(args.runId, gateId), { body }));
+    const gate = res.gate;
+    const chat = isChat(ctx);
+    const watch = `get_workflow_runs {runId: ${JSON.stringify(gate.runId)}, waitSeconds} watches the run.`;
+    if (res.alreadyDecided && res.decision) {
+      const label = gate.choices.find((choice) => choice.id === res.decision!.choice)?.label ?? res.decision.choice;
+      return {
+        alreadyDecided: true,
+        choice: res.decision.choice,
+        decidedBy: res.decision.decidedBy.label,
+        decidedAt: res.decision.decidedAt,
+        ...(res.decision.comment ? { comment: clipText(res.decision.comment, 1_000) } : {}),
+        next: `Nothing changed: "${label}" by ${res.decision.decidedBy.label} stands.${chat ? " End your turn." : ` ${watch}`}`
+      };
+    }
+    if (!res.decision) {
+      return { escalated: true, runId: gate.runId, gateId: gate.gateId, next: `The person decides now (they were notified).${chat ? " End your turn." : ""}` };
+    }
+    const label = gate.choices.find((choice) => choice.id === res.decision!.choice)?.label ?? res.decision.choice;
+    return {
+      decided: true,
+      runId: gate.runId,
+      gateId: gate.gateId,
+      choice: res.decision.choice,
+      next: `Recorded: "${label}". The run continues on that choice.${chat ? " End your turn now." : ` ${watch}`}`
+    };
+  }
+});
+
+/** list_workflow_gates' project: the argument, else (chat) the caller's own; null: every project. */
+async function gatesProject(ctx: ScopeContext, project: string | undefined): Promise<string | null> {
+  if (project !== undefined) return (await resolveProject(ctx.api, project, ctx.caller)).path;
+  const own = isChat(ctx) ? ownProjectArg(ctx) : null;
+  return own !== null ? (await resolveProject(ctx.api, own)).path : null;
+}
+
+const listGates = defineTool({
+  name: "list_workflow_gates",
+  title: "List workflow gates",
+  description: "Workflow gates waiting for a decision: run, block, question, choices, decider, age. includeDecided adds recent decided ones.",
+  chatNote: "Default: this chat's project, plus gates assigned to this chat.",
+  externalNote: "Without project: every project.",
+  input: {
+    project: z.string().optional(),
+    includeDecided: z.boolean().default(false)
+  },
+  audiences: ["external", "chat"],
+  toolset: "reads",
+  tier: "read",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    const path = await gatesProject(ctx, args.project);
+    return claim({ projects: path !== null ? [path] : [], reads: "metadata" });
+  },
+  annotations: READ_ONLY,
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    const projectPath = await gatesProject(ctx, args.project);
+    const caller = ctx.caller;
+    const query: Record<string, string> = { ...(projectPath !== null ? { projectPath } : {}), ...(args.includeDecided ? { includeDecided: "1" } : {}) };
+    // A chat bound to no project, naming none, lists only the gates that wait for it (below).
+    const listed = caller.kind === "thread" && projectPath === null
+      ? []
+      : (expectWorkflowOk<ListWorkflowGatesResponse>(await api.request("GET", workflowRoutes.gates, Object.keys(query).length > 0 ? { query } : undefined)).gates ?? []);
+    const gates = [...listed];
+    if (caller.kind === "thread" && args.project === undefined) {
+      // A chat also sees the gates that wait for it, wherever they are: it is their assigned decider.
+      const everywhere = expectWorkflowOk<ListWorkflowGatesResponse>(await api.request("GET", workflowRoutes.gates));
+      for (const gate of everywhere.gates ?? []) {
+        if (gate.decider.sessionId === caller.threadId && isGateWaiting(gate) && gate.phase === "agent" && !gates.some((known) => known.runId === gate.runId && known.gateId === gate.gateId)) gates.push(gate);
+      }
+    }
+    const now = ctx.now();
+    const rows = gates.map((gate) => {
+      const row = gateView(gate, now);
+      if (caller.kind === "thread" && gate.decider.sessionId === caller.threadId && isGateWaiting(gate) && gate.phase === "agent") {
+        row.yours = true;
+        row.call = decideCall(gate);
+      }
+      return row;
+    });
+    const result: Record<string, unknown> = { gates: rows };
+    let kept = rows.length;
+    while (kept > 0 && resultBytes(result) > WORKFLOW_RESULT_BUDGET) {
+      kept -= 1;
+      result.gates = rows.slice(0, kept);
+      result.truncated = true;
+      result.omitted = rows.length - kept;
+    }
+    if (result.truncated) result.note = "Gates past the result size cap were left out: pass project to list fewer.";
+    result.next = rows.length === 0 ? "No gate is waiting." : "decide_workflow_gate {runId, gateId, choice, comment} decides one.";
+    return result;
   }
 });
 
@@ -1643,5 +1906,5 @@ const setSecret = defineTool({
 /** This family in the catalog (`../catalog/index.ts`), in spec §4 order. */
 export const workflowsFamily: readonly AnyOrquesterTool[] = [
   listBlockTypes, listWorkflows, getWorkflow, createWorkflow, updateWorkflow, deleteWorkflow,
-  previewExpression, runWorkflow, getWorkflowRuns, cancelRun, listSecrets, setSecret
+  previewExpression, runWorkflow, getWorkflowRuns, cancelRun, decideGate, listGates, listSecrets, setSecret
 ];

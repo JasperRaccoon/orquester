@@ -268,7 +268,7 @@ read); `list_sessions` adds `limit`; desktop tools take `project` where they too
 `create_session` accepts a legacy model when named (the result says `isLegacy: true`) and reports
 the account it got with `accountSource`.
 
-### The 42 tools
+### The 44 tools
 
 `tools/list` gives every tool a title, annotations, a description of every parameter and
 `_meta: {"orquester/tier", "orquester/toolset"}`. The toolset is the tool's group; the tier is what
@@ -314,6 +314,8 @@ call is listed by its widest (`admin` in `_meta`). For you, every tool simply ru
 | `run_workflow` | workflow-authoring | Admin | A manual run of a pinned revision, optionally waited on |
 | `get_workflow_runs` | reads | Read | Runs, one run's blocks, a block's whole output or log |
 | `cancel_workflow_run` | workflow-authoring | Act | Cancel an active run |
+| `decide_workflow_gate` | workflow-authoring | Act (only the gate's assigned chat) | Decide, or (agent deciders) escalate, a gate a run waits on |
+| `list_workflow_gates` | reads | Read | Gates waiting for a decision across runs (and decided ones) |
 | `list_workflow_secrets` | workflow-authoring | Read | Workflow secret names |
 | `set_workflow_secret` | workflow-authoring | Admin | Set or delete a workflow secret |
 | `get_agent_profile` | reads | Read | Agent CLIs' global config: summary, items, one item, instruction file, a marketplace's plugins |
@@ -1857,8 +1859,8 @@ limit (the daemon's backoff floor applies) but is still not for polling loops.
 
 Orquester runs **automated workflows**: n8n-like graphs of blocks — triggers (manual, schedule,
 git events), agents, JavaScript code, shell scripts, HTTP requests, if/switch/merge/wait/stop,
-sub-workflows — owned by the daemon and shown in the right rail's "Automated workflows" panel and
-the workflow editor tab. These 12 tools let an agent do what the editor does: "create a workflow
+sub-workflows, gates — owned by the daemon and shown in the right rail's "Automated workflows" panel and
+the workflow editor tab. These 14 tools let an agent do what the editor does: "create a workflow
 that does X, Y, Z", "edit workflow X to add this path", "run it and tell me what happened". They
 are clients of the daemon's `/api/workflows*`, `/api/workflow-runs*` and `/api/workflow-secrets*`
 routes, like every other tool; everything a tool changes shows up live in the editor and the rail.
@@ -1877,6 +1879,8 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 | `run_workflow` | `workflowId`, `revision`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}` |
 | `get_workflow_runs` | `workflowId` (`before?`, `limit? = 20`), or `runId` (`waitSeconds?`), or `runId` + `nodeId` (`outputOffset?`, `log?`) | runs, newest first, `before`; one run's `{run, blocks, outputNote?}`; one block's `output` or a window `{outputText, offset, totalBytes, nextOffset?}`, or its stdout/stderr log |
 | `cancel_workflow_run` | `runId` | `{cancelRequested: true, runId, run?}` |
+| `decide_workflow_gate` | `runId`, `gateId` (or `nodeName`), `choice`, `comment?`; or `escalate: true` + `comment` (agent deciders) | `{decided: true, runId, gateId, choice, next}`; `{escalated: true, …}`; a later call `{alreadyDecided: true, choice, decidedBy, decidedAt, comment?, next}` |
+| `list_workflow_gates` | `project?`, `includeDecided? = false` | `{gates: [{gateId, runId, rootRunId?, workflow, workflowId, projectPath?, block, question, details?, choices, decider, state, deadlineAt?, waitingFor?, decision?, escalated?, yours?, call?}], next}` |
 | `list_workflow_secrets` | `workflowId?` | `{secrets: [{name, scope, workflowId?, updatedAt, short?}]}` — names only |
 | `set_workflow_secret` | `name`, `value?`, `workflowId?`, `delete? = false` | `{set: true, name, scope, workflowId?, warning?}` or the deletion |
 
@@ -1968,7 +1972,47 @@ run as it stands: `finished: true`, or `finished: false, timedOut: true` for a r
 (the run itself goes on; `get_workflow_runs {runId, waitSeconds}` later, or `cancel_workflow_run`).
 Agent blocks can take hours: for those, start without `wait` and check back. When the overlap policy skips the run
 (`overlap: "skip"` and a run already active) the answer is `{runId: null, skipped: "overlap"}`;
-`force: true` runs anyway.
+`force: true` runs anyway. When the active run that held it back waits on a gate, the answer says so
+(`skipDetail: "previous run is waiting on gate “…”"`); a run queued behind one carries the same
+`queued` note.
+
+### Gates
+
+A **gate** block pauses its run for a decision between named choices; each choice is an output
+handle `choice:<id>` (plus `error`). Who decides is the block's `decider`:
+
+- **`human`** (the default): the person, in Orquester (a push, a "Needs you" row, a decision card in
+  the run view) — or from their own MCP client: an external `decide_workflow_gate` decides as the
+  person (recorded `decidedBy.kind: "external"`).
+- **`agent`**: a reviewer chat the gate starts with the agent block's machinery (chain, accounts,
+  Agent Profile, unattended). Its prompt is the decider prompt plus the question, details, choices
+  and the exact `decide_workflow_gate` call. If its turn ends without a decision it gets one
+  reminder; after that — or when it fails, is closed, or `maxMinutes` (default 60) passes — the gate
+  goes to the person (`escalated`).
+- **`launcher`**: the chat that started the run with `run_workflow` (a child run asks its top-level
+  run's launcher). The daemon queues a message into that chat — its next turn, never a steer — with
+  the exact call; and a `run_workflow {wait: true}` still waiting returns at once with
+  `waitingOnGate` and a `next` that names the call. A run started any other way (the GUI, REST, a
+  trigger), or whose chat is gone, asks the person. `startedBy` is the daemon's record of the
+  calling chat — never an argument.
+
+Rules: only the assigned chat may decide (any other chat is refused, `GATE_NOT_DECIDER`, with no
+card); for it the call is Act and opens no approval card, even from another project or a
+workflow-owned chat — except that a planning turn gets the usual planning refusal. An agent must
+`comment`; a choice with `comment: "required"` needs one from anyone. The person may always decide
+first. The **first decision wins**: it is persisted before the run moves on, and a later call
+answers `alreadyDecided: true` with the decision that stands. `escalate: true` (agent deciders
+only, with a comment) hands the gate to the person.
+
+Time: the agent phase lasts `maxMinutes`; the person phase lasts `timeout.minutes` from its start
+(then `timeout.then`: take a choice, `decidedBy.kind: "timeout"`, or fail `gate_expired`, never
+retried), at most 7 days. Gates survive daemon restarts (both deadlines are re-armed), hold no
+concurrency slot, and a run whose every active block waits on a gate, a timer or such a child run
+is **parked**: it does not count toward the global run cap, and parked time is not counted against
+`runTimeoutMinutes`. The gate's output is `{choice, comment?, decidedBy: {kind, label, sessionId?},
+decidedAt, escalated}`. A retry asks every gate again; a disabled gate takes its first choice; a
+pinned gate needs a `choice`; a test run's gate is answered by the person in the editor (no push,
+no agent). `get_workflow_runs {runId}` lists the run's `gates` with their decisions.
 
 **Sub-workflows are frozen when a run starts.** A top-level run records the definition of every
 workflow its Run workflow blocks reach (recursively) as it starts, and each child run runs that

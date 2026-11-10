@@ -107,7 +107,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "reads",
     label: "Workflows, agent config & prompts (read)",
-    tools: [read("list_workflows"), read("get_workflow"), read("get_workflow_runs"), read("get_agent_profile"), read("list_saved_prompts")]
+    tools: [read("list_workflows"), read("get_workflow"), read("get_workflow_runs"), read("list_workflow_gates"), read("get_agent_profile"), read("list_saved_prompts")]
   },
   {
     id: "notes",
@@ -142,6 +142,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       read("preview_expression"),
       admin("run_workflow"),
       act("cancel_workflow_run"),
+      act("decide_workflow_gate"),
       read("list_workflow_secrets"),
       admin("set_workflow_secret")
     ]

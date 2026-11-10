@@ -129,7 +129,8 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const imageRows = chat.filter((tool) => groups.get(tool.name) === "images");
   const baseRows = chat.filter((tool) => !boxRows.includes(tool) && !knowledgeRows.includes(tool) && !deviceRows.includes(tool) && !imageRows.includes(tool));
   const added = (rows: readonly Tool[]) => rows.reduce((sum, row) => sum + total([row]) - 1, 0);
-  assert.ok(total(baseRows) <= 57_344, `chat tools/list: ${total(baseRows)} bytes`);
+  // 60 KiB: 56 KiB plus room for the workflow gate and step-report tools (spec 2026-11-10 §8), which every chat sees.
+  assert.ok(total(baseRows) <= 61_440, `chat tools/list: ${total(baseRows)} bytes`);
   assert.ok(added(boxRows) <= 7_937, `box tools: ${added(boxRows)} bytes`);
   assert.ok(total(workerRows) <= 1_280, `worker tools/list: ${total(workerRows)} bytes`);
   assert.ok(added(imageRows) <= 2_560, `image tools: ${added(imageRows)} bytes`);

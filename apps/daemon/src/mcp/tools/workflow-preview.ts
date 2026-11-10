@@ -64,7 +64,9 @@ const ERROR_HINTS: Record<string, string> = {
   REVISION_CONFLICT: " The workflow changed since you read it: re-read it with get_workflow (its current revision), then send your ops again.",
   INVALID_WORKFLOW: " Fix the problems listed; list_workflow_block_types shows each block's config.",
   RUN_NOT_ACTIVE: " The run already ended: get_workflow_runs {runId} shows how.",
-  SECRET_INVALID: " A secret name is A-Z, 0-9 and _, starting with a letter; a value is at most 64 KiB."
+  SECRET_INVALID: " A secret name is A-Z, 0-9 and _, starting with a letter; a value is at most 64 KiB.",
+  GATE_NOT_FOUND: " list_workflow_gates lists the waiting gates with their runId and gateId.",
+  GATE_NOT_DECIDER: " Do not retry: the person (or the assigned agent) decides this gate."
 };
 
 /** Problems listed in a result / an error's detail, and quoted in an error's text. */
