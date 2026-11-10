@@ -3,9 +3,12 @@ import { isAbsolute, posix, resolve } from "node:path";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import {
+  DESKTOP_CLIPBOARD_MAX_BYTES,
   DESKTOP_ENV_KEY_PATTERN,
   DESKTOP_MAX_COMMAND_LENGTH,
   DESKTOP_UNAVAILABLE_CODE,
+  type DesktopActionLogResponse,
+  type DesktopActionResponse,
   type DesktopAppSummary,
   type DesktopHostStatus,
   type DesktopSuggestionsResponse,
@@ -39,7 +42,11 @@ export type DesktopRoutesService = Pick<
   | "stopApp"
   | "appLog"
   | "windowAction"
->;
+> &
+  DesktopAutomationRoutesService;
+
+/** Automation, control and the action log (spec 2026-11-10 §2.4). */
+export type DesktopAutomationRoutesService = Pick<DesktopManager, "runAction" | "setControl" | "actionLog" | "screenshot">;
 
 export interface DesktopRoutesDeps {
   desktops: DesktopRoutesService;
@@ -62,6 +69,25 @@ const MAX_ENV_VARS = 256;
 const MAX_TITLE_LENGTH = 200;
 
 const singleLine = (value: string): boolean => !/[\n\r\0]/.test(value);
+
+const controlSchema = z.object({ controller: z.enum(["agent", "user"]).nullable() }).strict();
+
+/** A clipboard_set of the largest text, however JSON escapes it (≤ 6 bytes per byte), fits. */
+const ACTION_BODY_LIMIT = DESKTOP_CLIPBOARD_MAX_BYTES * 6 + 64 * 1024;
+
+/** Screenshot ids never change what they name. */
+const SCREENSHOT_CACHE_CONTROL = "private, max-age=31536000, immutable";
+
+/** `GET desktopRoutes.screenshot` as registered. */
+export const DESKTOP_SCREENSHOT_ROUTE_PATTERN = "/api/desktops/:id/screenshots/:screenshotId";
+
+/**
+ * Whether a request may authenticate with `?token=` (as `deviceQueryTokenAllowed`): a GET/HEAD of
+ * a kept screenshot, which a chat row's `<img>` loads without a header. Nothing else here.
+ */
+export function desktopQueryTokenAllowed(method: string, routePath: string | undefined): boolean {
+  return (method === "GET" || method === "HEAD") && routePath === DESKTOP_SCREENSHOT_ROUTE_PATTERN;
+}
 
 // Launch values may be credentials: no message below ever echoes a value (and
 // the request logger only logs method + redacted URL, never bodies).
@@ -411,6 +437,67 @@ export function registerDesktopHttpRoutes(app: FastifyInstance, deps: DesktopRou
           .parse(request.params.action);
         await desktops.windowAction(request.params.id, request.params.windowId, action);
         return reply.code(204).send();
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  registerDesktopAutomationRoutes(app, desktops);
+}
+
+/**
+ * Automation, control and the action log (spec 2026-11-10 §2.4, §3): one action per POST (the
+ * agent tools' `desktop_action`), the log, a kept screenshot's bytes (the store names them: no
+ * path input), and the user's take over / give back.
+ */
+function registerDesktopAutomationRoutes(app: FastifyInstance, desktops: DesktopAutomationRoutesService): void {
+  app.post<{ Params: { id: string } }>(
+    "/api/desktops/:id/actions",
+    { bodyLimit: ACTION_BODY_LIMIT },
+    async (request, reply): Promise<DesktopActionResponse | FastifyReply> => {
+      // The caller went away before the answer: a wait stops waiting.
+      const abort = new AbortController();
+      reply.raw.once("close", () => {
+        if (!reply.raw.writableFinished) abort.abort();
+      });
+      try {
+        return await desktops.runAction(request.params.id, request.body, abort.signal);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/desktops/:id/actions/log",
+    async (request, reply): Promise<DesktopActionLogResponse | FastifyReply> => {
+      try {
+        return desktops.actionLog(request.params.id);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get<{ Params: { id: string; screenshotId: string } }>(
+    DESKTOP_SCREENSHOT_ROUTE_PATTERN,
+    async (request, reply): Promise<FastifyReply> => {
+      try {
+        const image = await desktops.screenshot(request.params.id, request.params.screenshotId);
+        return reply.type(image.mimeType).header("cache-control", SCREENSHOT_CACHE_CONTROL).send(image.data);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.put<{ Params: { id: string } }>(
+    "/api/desktops/:id/control",
+    async (request, reply): Promise<DesktopSummary | FastifyReply> => {
+      try {
+        const body = controlSchema.parse(request.body ?? {});
+        return desktops.setControl(request.params.id, body.controller);
       } catch (error) {
         return sendError(reply, error);
       }

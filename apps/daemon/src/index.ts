@@ -111,7 +111,7 @@ import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { DesktopAudioHub } from "./desktops/audio.ts";
 import { DesktopHostProbe, resolveTool } from "./desktops/host-status.ts";
-import { registerDesktopHttpRoutes } from "./desktops/http-routes.ts";
+import { desktopQueryTokenAllowed, registerDesktopHttpRoutes } from "./desktops/http-routes.ts";
 import { DesktopManager } from "./desktops/manager.ts";
 import { registerDesktopWsRoutes } from "./desktops/ws-routes.ts";
 import { registerAuthRoutes } from "./auth/routes.ts";
@@ -1484,6 +1484,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   desktops.on("updated", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.updated", d));
   desktops.on("closed", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.closed", p));
   desktops.on("windows", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.windows", p));
+  desktops.on("action", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.action", p));
   await desktops.reattach().catch((error) => console.error("Desktop reattach failed", error));
 
   // Dev-server URL suggestions: fed from every session's PTY output.
@@ -2329,7 +2330,9 @@ export function createServer(
     const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "");
     // Devices: a kept screenshot and a lease thumbnail load from `<img>` the same way (GET/HEAD of
     // matched route patterns only, never a prefix; the hub proxy and every POST need the header).
-    const queryTokenRoute = url === "/api/fs/download" || deviceQueryTokenAllowed(request.method, routePath);
+    // Desktops: a kept automation screenshot (a chat row's thumbnail), likewise.
+    const queryTokenRoute =
+      url === "/api/fs/download" || deviceQueryTokenAllowed(request.method, routePath) || desktopQueryTokenAllowed(request.method, routePath);
     const queryToken = queryTokenRoute ? (request.query as { token?: string }).token : undefined;
     const session = authSessions.verify(headerToken ?? queryToken);
     if (!session) {
