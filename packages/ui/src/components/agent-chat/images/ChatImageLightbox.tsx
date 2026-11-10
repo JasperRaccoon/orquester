@@ -31,6 +31,22 @@ export function ChatImageLightbox(props: {
     containerRef.current?.querySelector<HTMLElement>("[data-lightbox-close] button")?.focus({ preventScroll: true });
   }, []);
 
+  // The keys and the focus trap listen on the container, so focus never
+  // leaves it: a click on the image focuses the container itself (it is
+  // focusable, `tabIndex={-1}`), and a focused control that goes away — the
+  // actions unmount while the next image loads — hands focus back to it
+  // rather than to <body>, where the chat behind would take the next key.
+  React.useEffect(() => {
+    const container = containerRef.current;
+    if (container === null || typeof MutationObserver === "undefined") return undefined;
+    const observer = new MutationObserver(() => {
+      const active = document.activeElement;
+      if (container.isConnected && (active === null || active === document.body)) container.focus({ preventScroll: true });
+    });
+    observer.observe(container, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
+
   if (item === undefined) return null;
   const step = (delta: number) => onIndexChange((index + delta + items.length) % items.length);
 
@@ -39,21 +55,28 @@ export function ChatImageLightbox(props: {
     // A dialog opened from here (Save to project…) is portaled elsewhere, but
     // its keys still bubble through this tree: they are its own.
     if (container === null || !container.contains(event.target as Node)) return;
+    // A key handled here is the lightbox's alone: neither the row and chat
+    // it was opened from (React bubbles through the portal) nor a modal
+    // behind it act on it as well.
     if (many && event.key === "ArrowLeft") {
       event.preventDefault();
+      event.stopPropagation();
       step(-1);
     } else if (many && event.key === "ArrowRight") {
       event.preventDefault();
+      event.stopPropagation();
       step(1);
     } else if (event.key === "Tab") {
+      event.stopPropagation();
       const focusable = [...container.querySelectorAll<HTMLElement>(FOCUSABLE)];
       const first = focusable[0];
       const last = focusable.at(-1);
       if (first === undefined || last === undefined) return;
-      if (event.shiftKey && document.activeElement === first) {
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === container)) {
         event.preventDefault();
         last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
+      } else if (!event.shiftKey && (active === last || active === container)) {
         event.preventDefault();
         first.focus();
       }
@@ -68,7 +91,12 @@ export function ChatImageLightbox(props: {
       ariaLabel={many ? `Image ${index + 1} of ${items.length}: ${label}` : label}
       className="h-[min(92vh,calc(100vh-32px))] max-w-[min(96vw,1600px)] bg-neutral-950"
     >
-      <div ref={containerRef} className="flex min-h-0 min-w-0 flex-1 flex-col" onKeyDown={onKeyDown}>
+      <div
+        ref={containerRef}
+        tabIndex={-1}
+        className="flex min-h-0 min-w-0 flex-1 flex-col outline-none"
+        onKeyDown={onKeyDown}
+      >
         {/* Not keyed by the image: ←/→ keep the focused control (and with it
             the keys and the focus trap) where it is. */}
         <LightboxContent
