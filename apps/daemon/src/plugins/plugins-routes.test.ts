@@ -9,6 +9,7 @@ import {
   type PluginsResponse,
   PLUGINS_CHANGED_EVENT,
   DEVICES_PLUGIN_ID,
+  GPT_IMAGE_PLUGIN_ID,
   EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
   KNOWLEDGE_GRAPH_PLUGIN_ID,
@@ -146,7 +147,8 @@ test("GET lists the built-in plugins", async (t) => {
       [SECRET_FILES_PLUGIN_ID, "global", false, "supported", "idle"],
       [EPHEMERAL_VMS_PLUGIN_ID, "global", false, "supported", "idle"],
       [KNOWLEDGE_GRAPH_PLUGIN_ID, "global", true, "supported", "idle"],
-      [DEVICES_PLUGIN_ID, "global", false, "supported", "idle"]
+      [DEVICES_PLUGIN_ID, "global", false, "supported", "idle"],
+      [GPT_IMAGE_PLUGIN_ID, "global", false, "supported", "idle"]
     ]
   );
   assert.equal(body.plugins[0]?.enabled, false);
