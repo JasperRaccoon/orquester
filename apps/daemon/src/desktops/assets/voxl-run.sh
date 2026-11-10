@@ -33,6 +33,7 @@ if [ ! -r "$dir/voxl.env" ]; then
   exit 127
 fi
 set -a
+# shellcheck disable=SC1091 # written by the daemon at run time
 . "$dir/voxl.env"
 set +a
 
