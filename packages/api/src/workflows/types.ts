@@ -138,8 +138,12 @@ export const WORKFLOW_LIMITS = {
   maxOutputs: 20,
   /** `report_step_result`'s `summary`, in characters (§5.2). */
   reportSummaryChars: 2000,
+  /** `report_step_result`'s `outputs`, as UTF-8 JSON bytes (after coercion). */
+  reportOutputsBytes: 64 * 1024,
   /** A gate's `choices` (§6.1). */
   gateChoices: { min: 2, max: 8 },
+  /** An outcome's or a gate choice's `label`, in characters (prompts clip an older, longer one). */
+  labelChars: 80,
   /** A gate's rendered `question`, in characters. */
   gateQuestionChars: 300,
   /** A gate's rendered `details`, in UTF-8 bytes. */
@@ -572,6 +576,12 @@ export interface WorkflowGateState {
   /** A test run's gate: answered in the editor's run view only — no push, attention row or agent decider (§7.5). */
   test?: boolean;
 }
+
+/**
+ * The one refusal a chat gets for a gate it is not assigned to (spec 2026-11-10 §6.3) — the same
+ * whether that gate, its block or its run exists, and never naming its decider (another chat's title).
+ */
+export const GATE_NOT_DECIDER_MESSAGE = "This chat is not assigned to decide this gate. Only the chat the gate asks may decide it; the person decides in Orquester.";
 
 /** Waiting = neither decided, cancelled nor expired. */
 export function isGateWaiting(gate: Pick<WorkflowGateState, "decision" | "cancelled" | "expired">): boolean {

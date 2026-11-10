@@ -88,6 +88,8 @@ class GateRun {
   private extras: GateExtras = {};
   /** The block is done with its gate: a reviewer still running records nothing more. */
   private settled = false;
+  /** This execution ran (or resumed) the reviewer agent: its own work stops it. */
+  private reviewerAsked = false;
 
   constructor(
     private readonly ctx: NodeExecutionContext<"gate">,
@@ -200,9 +202,12 @@ class GateRun {
     if (root !== ctx.runId) gate.rootRunId = root;
     this.gateId = gateId;
     host.put(ctx.runId, gate);
-    ctx.update({ gateId, ...(warnings.length > 0 ? { warnings } : {}) });
-    // The record and the wait reach disk together, before anybody is told.
+    // Not stored: the engine is stopping (nothing more is recorded; the block re-runs after the restart).
+    if (!host.get(ctx.runId, gateId)) throw new EngineStoppedError();
+    // The record and the wait reach disk together, before anybody is told (an update first would
+    // save the record alone).
     await ctx.setWaitingOn(waitingOnFor(gate, this.extras));
+    ctx.update({ gateId, ...(warnings.length > 0 ? { warnings } : {}) });
   }
 
   /** The launcher chat's label, or null when it is gone. Unreadable: asked anyway (a closed chat escalates). */
@@ -237,6 +242,7 @@ class GateRun {
         };
       }
       if (gate.cancelled === true || ctx.signal.aborted) {
+        await this.stopRecordedReviewer();
         this.settled = true;
         host.cancel(ctx.runId, this.gateId);
         return { status: "cancelled" };
@@ -343,7 +349,7 @@ class GateRun {
     if (result.status === "succeeded") {
       if ((this.extras.reminders ?? 0) < 1) {
         // One reminder in the same chat (§6.3), persisted before it is sent.
-        const { agent: _agent, ...rest } = this.extras;
+        const { agent: _agent, turnEnded: _ended, ...rest } = this.extras;
         this.extras = { ...rest, reminders: 1 };
         await this.persistExtras();
         return;
@@ -380,6 +386,43 @@ class GateRun {
     const gate = this.host.get(this.ctx.runId, this.gateId);
     if (!gate) return;
     await this.ctx.setWaitingOn(waitingOnFor(gate, this.extras));
+  }
+
+  /**
+   * A reviewer turn recorded before a restart that this execution never resumed — a loop's stopped
+   * pass is resumed under an aborted signal only to stop what it started: resumed once more under an
+   * aborted signal, which interrupts its turn (the agent executor's cancel). Nothing it records is kept.
+   */
+  private async stopRecordedReviewer(): Promise<void> {
+    const { ctx } = this;
+    const decider = this.config.decider;
+    const resume = this.extras.agent;
+    if (this.reviewerAsked || resume === undefined || decider.kind !== "agent" || !this.agent) return;
+    this.reviewerAsked = true;
+    const gate = this.host.get(ctx.runId, this.gateId);
+    if (!gate) return;
+    const mode = (this.extras.reminders ?? 0) >= 1 && gate.decider.sessionId !== undefined ? "reminder" : "new";
+    const stop = new AbortController();
+    stop.abort();
+    try {
+      await runReviewer({
+        ctx,
+        agent: this.agent,
+        decider,
+        gate,
+        mode,
+        ...(gate.decider.sessionId !== undefined ? { sessionId: gate.decider.sessionId } : {}),
+        deadlineAt: new Date(gate.phaseDeadlineAt ?? ctx.services.clock.now().toISOString()),
+        resume,
+        signal: stop.signal,
+        persist: async () => undefined,
+        onSession: () => undefined,
+        settled: () => false
+      });
+    } catch (error) {
+      if (error instanceof EngineStoppedError) throw error;
+      ctx.log.warn("gate: the reviewer agent could not be stopped", { error: errorText(error) });
+    }
   }
 
   // --- the deciders' work -----------------------------------------------------------------------
@@ -422,6 +465,10 @@ class GateRun {
     const { ctx, host } = this;
     const decider = this.config.decider;
     if (decider.kind !== "agent" || !this.agent) return { kind: "error", error: new Error("no reviewer agent is configured") };
+    this.reviewerAsked = true;
+    // Its turn ended before a restart that came before the gate acted on it: acted on now (the
+    // turn's own result is gone — it settled without deciding).
+    if (this.extras.turnEnded === true && this.extras.agent === undefined) return { kind: "reviewer", result: { status: "succeeded", output: {} } };
     const mode = (this.extras.reminders ?? 0) >= 1 ? "reminder" : "new";
     const sessionId = gate.decider.sessionId;
     if (mode === "reminder" && sessionId === undefined) return { kind: "error", error: new Error("its chat is unknown, so it cannot be reminded") };
@@ -438,8 +485,10 @@ class GateRun {
       signal,
       persist: async (agentState) => {
         if (settled()) throw new GateSettledError();
-        const { agent: _agent, ...rest } = this.extras;
-        this.extras = agentState !== undefined ? { ...rest, agent: agentState } : rest;
+        const { agent: _agent, turnEnded: _ended, ...rest } = this.extras;
+        // A cleared state is the turn's end, recorded in the same write (a restart before the
+        // gate acts on it must not start a second reviewer chat).
+        this.extras = agentState !== undefined ? { ...rest, agent: agentState } : { ...rest, turnEnded: true };
         await this.persistExtras();
       },
       onSession: (id) => {

@@ -139,6 +139,11 @@ export type WaitingOn =
       /** Reminders the reviewer agent got after a turn that settled without a decision (at most one). */
       reminders?: number;
       /**
+       * The reviewer's current turn ended (its agent state cleared in this same write) and the gate
+       * has not acted on it yet: a restart then reminds or escalates — never a new reviewer chat.
+       */
+      turnEnded?: true;
+      /**
        * The launcher's queued message: its command id is minted and persisted BEFORE the first post
        * (the host's receipt dedupes a re-post after a restart); `delivered` once the chat took it.
        */
@@ -548,7 +553,10 @@ export interface GateChange {
 export interface GateServices {
   /** The gate's live record (a copy), or undefined. */
   get(runId: string, gateId: string): WorkflowGateState | undefined;
-  /** Store (or replace) a record, redacted — persisted with the run's next save, published. */
+  /**
+   * Store (or replace) a record, redacted — in memory only: persisted with the caller's next save
+   * (a Gate block's `setWaitingOn`), published. Ignored once the engine is stopping or the run ended.
+   */
   put(runId: string, gate: WorkflowGateState): void;
   /** Resolves on the gate's next change, or null once `signal` aborts. */
   nextChange(runId: string, gateId: string, signal: AbortSignal): Promise<GateChange | null>;

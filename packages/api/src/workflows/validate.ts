@@ -939,6 +939,14 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
           choiceIds.add(choice.id);
           if (choice.label.trim().length === 0) {
             push({ severity: "error", code: "gate_choice_label", message: `${node.name}: the choice "${choice.id}" has no label`, nodeId: node.id, field: `config.choices.${index}.label` });
+          } else if ([...choice.label].length > WORKFLOW_LIMITS.labelChars) {
+            push({
+              severity: "error",
+              code: "label_too_long",
+              message: `${node.name}: the choice "${choice.id}"'s label is at most ${WORKFLOW_LIMITS.labelChars} characters`,
+              nodeId: node.id,
+              field: `config.choices.${index}.label`
+            });
           }
         });
         if (config.question.trim().length === 0) {
@@ -1099,6 +1107,9 @@ function checkAgentReport(node: Extract<WorkflowNode, { type: "agent" }>, config
         push({ severity: "error", code: "duplicate_outcome", message: `${node.name}: two outcomes share the id "${outcome.id}"`, ...where(`config.outcomes.${index}.id`) });
       }
       seen.add(outcome.id);
+      if ([...(outcome.label ?? "")].length > WORKFLOW_LIMITS.labelChars) {
+        push({ severity: "error", code: "label_too_long", message: `${node.name}: the outcome "${outcome.id}"'s label is at most ${WORKFLOW_LIMITS.labelChars} characters`, ...where(`config.outcomes.${index}.label`) });
+      }
       if ((outcome.description?.length ?? 0) > describeLimit) {
         push({ severity: "error", code: "description_too_long", message: `${node.name}: the outcome "${outcome.id}"'s description is longer than ${describeLimit} characters`, ...where(`config.outcomes.${index}.description`) });
       }

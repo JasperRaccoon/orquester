@@ -129,7 +129,7 @@ import { createSlotPool, type SlotPool } from "./scheduler-queue.ts";
 import { overlapSkipDetail } from "./gates/engine-hooks.ts";
 import { createGateHost, type GateHost, type GateRunAccess } from "./gates/host.ts";
 import { createParking } from "./gates/parking.ts";
-import { clipChars, isLoopLimitWait, PERSON_LABEL, personDeadline } from "./gates/state.ts";
+import { clipChars, isLoopLimitWait, isWaiting, PERSON_LABEL, personDeadline } from "./gates/state.ts";
 import { createRedactor, type SecretRedactor } from "./sandbox/redact.ts";
 
 /** The services an executor gets, minus what the engine provides itself. */
@@ -727,10 +727,10 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     alive: () => alive(a),
     redact: (value) => a.redactor.value(value),
     save: () => save(a),
-    touched: (gateId) => {
+    touched: (gateId, persist = true) => {
       if (gateId !== undefined) a.gatesDirty.add(gateId);
       markDirty(a);
-      void save(a);
+      if (persist) void save(a);
     },
     parent: () => {
       const parent = a.run.parentRunId !== undefined ? active.get(a.run.parentRunId) : undefined;
@@ -1455,6 +1455,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       if (!block || !isPending(a, id)) continue;
       block.status = "skipped";
       block.endedAt = now;
+      // Loops: an earlier pass's output is no longer what `nodes.<Name>` reads (the pass is skipped).
+      a.outputs.delete(id);
       markDirty(a, id);
       changed = true;
     }
@@ -1698,6 +1700,25 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     }
   };
 
+  /**
+   * gates: a Gate block's waiting record that neither a block's WaitingOn nor a loop's interrupted
+   * pass names — written ahead of its wait by an older daemon that then crashed or stopped. Nobody
+   * waits on it (its block re-runs and opens its own), so it is cancelled: never counted, listed or
+   * decided. Engine-internal gates (a loop limit's) are named by their WaitingOn before they exist.
+   */
+  const cancelOrphanGates = (a: ActiveRun): void => {
+    const gates = a.run.gates;
+    if (gates === undefined) return;
+    const named = new Set<string>();
+    for (const block of Object.values(a.run.blocks)) {
+      if (block.waitingOn?.kind === "gate") named.add(block.waitingOn.gateId);
+      for (const pass of block.passes ?? []) if (pass.interruptedFrom?.kind === "gate") named.add(pass.interruptedFrom.gateId);
+    }
+    for (const gate of Object.values(gates)) {
+      if (gate.source === "gate" && isWaiting(gate) && !named.has(gate.gateId)) gateHost.cancel(a.run.id, gate.gateId);
+    }
+  };
+
   const resumeBlocks = (a: ActiveRun): void => {
     const now = nowIso();
     for (const id of a.order) {
@@ -1746,6 +1767,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     armRunTimeout(a);
     computeForced(a);
     applyInitialForcing(a);
+    if (resuming) cancelOrphanGates(a);
     if (resuming) resumeInterruptions(a);
     if (resuming) resumeBlocks(a);
     markDirty(a);
@@ -1791,6 +1813,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       if (isFinishedBlockStatus(block.status)) continue;
       block.status = a.ending !== null ? "cancelled" : "skipped";
       block.endedAt = now;
+      a.outputs.delete(id);
       delete block.waitingOn;
       delete block.waitingUntil;
       a.dirty.add(id);
@@ -2556,8 +2579,16 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       }
       for (const [id, block] of Object.entries(a.run.blocks)) {
         // Loops: a block waiting for its next pass reads as its latest finished one; one waiting at a
-        // loop's limit has finished its work (its output is its own).
-        const state = block.status === "succeeded" || block.status === "failed" ? block : isLoopLimitWait(block.waitingOn) ? { ...block, status: "succeeded" as const } : latestPass(block);
+        // loop's limit has finished its work (its output is its own). One that finished otherwise
+        // (skipped, cancelled) in its latest pass has no output: never an earlier pass's.
+        const state =
+          block.status === "succeeded" || block.status === "failed"
+            ? block
+            : isLoopLimitWait(block.waitingOn)
+              ? { ...block, status: "succeeded" as const }
+              : isFinishedBlockStatus(block.status)
+                ? undefined
+                : latestPass(block);
         if (state && (state.status === "succeeded" || state.status === "failed")) {
           const whole = await readWholeOutput(state);
           if (whole !== undefined) a.outputs.set(id, whole);

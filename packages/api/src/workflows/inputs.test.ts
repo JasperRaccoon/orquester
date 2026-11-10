@@ -21,12 +21,12 @@ const NOTE: WorkflowInputDecl = { name: "note", type: "string", multiline: true 
 const DECLS = [ENV, COUNT, DRY, NOTE];
 
 describe("coerceTypedValue", () => {
-  it("numbers: numbers and numeric text only", () => {
+  it("numbers: numbers and plain decimal numerals only", () => {
     assert.deepEqual(coerceTypedValue({ type: "number" }, 42), { ok: true, value: 42 });
     assert.deepEqual(coerceTypedValue({ type: "number" }, "42"), { ok: true, value: 42 });
-    assert.deepEqual(coerceTypedValue({ type: "number" }, " -1.5e2 "), { ok: true, value: -150 });
-    assert.deepEqual(coerceTypedValue({ type: "number" }, ".5"), { ok: true, value: 0.5 });
-    for (const bad of ["", "abc", "0x10", "Infinity", "1,5", true, null, [], {}, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.deepEqual(coerceTypedValue({ type: "number" }, " -1.5 "), { ok: true, value: -1.5 });
+    assert.deepEqual(coerceTypedValue({ type: "number" }, "0.25"), { ok: true, value: 0.25 });
+    for (const bad of ["", "abc", "0x10", "0b11", "0o7", "1e3", "-1.5e2", "+1", ".5", "1.", "-", "- 1", "Infinity", "1,5", true, null, [], {}, Number.NaN, Number.POSITIVE_INFINITY]) {
       assert.equal(coerceTypedValue({ type: "number" }, bad).ok, false, `rejects ${String(bad)}`);
     }
   });
@@ -70,9 +70,17 @@ describe("validateWorkflowInput", () => {
     assert.deepEqual(Object.keys(result.value as object), ["env", "count", "dry", "note"]);
   });
 
-  it("a given value wins over the default; null counts as absent", () => {
+  it("a given value wins over the default; null counts as absent for an optional input", () => {
     assert.deepEqual(validateWorkflowInput(DECLS, { env: "stg", count: "7" }).value, { env: "stg", count: 7 });
     assert.deepEqual(validateWorkflowInput(DECLS, { env: "stg", count: null, dry: null }).value, { env: "stg", count: 3 });
+  });
+
+  it("null for a required input is a wrong type, also with a default and in a test run", () => {
+    const required: WorkflowInputDecl = { name: "count", type: "number", required: true, default: 3 };
+    const expected = [{ input: "count", message: "input `count` must be a number (got null)" }];
+    assert.deepEqual(validateWorkflowInput([required], { count: null }).errors, expected);
+    assert.deepEqual(validateWorkflowInput([required], { count: null }, { requireAll: false }).errors, expected);
+    assert.deepEqual(validateWorkflowInput([ENV], { env: null }).errors, [{ input: "env", message: "input `env` must be one of: stg, prd (got null)" }]);
   });
 
   it("an absent optional input without a default stays absent", () => {

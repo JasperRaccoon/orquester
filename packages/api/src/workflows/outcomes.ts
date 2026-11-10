@@ -4,6 +4,7 @@
 // engine and the tool), the validator and the editor.
 
 import { agentOutcomeIds, choiceHandle, gateChoiceIds, outcomeHandle, outputHandles } from "./graph.ts";
+import { coerceTypedValue } from "./inputs.ts";
 import { WORKFLOW_LIMITS, type WorkflowNode, type WorkflowOutcomeDecl, type WorkflowOutputDecl } from "./types.ts";
 
 type NodeLike = Pick<WorkflowNode, "id" | "type"> & { config?: unknown };
@@ -48,33 +49,6 @@ export function outputTypeText(output: Pick<WorkflowOutputDecl, "type" | "values
   return `a ${output.type}`;
 }
 
-/**
- * One value against its declared type: numbers and booleans may come as their text (`"42"`,
- * `"true"`/`"false"` — agents send strings), nothing else is coerced (§4.2). `json` takes anything.
- */
-export function coerceOutputValue(output: Pick<WorkflowOutputDecl, "type" | "values">, value: unknown): { ok: true; value: unknown } | { ok: false } {
-  switch (output.type) {
-    case "string":
-      return typeof value === "string" ? { ok: true, value } : { ok: false };
-    case "number": {
-      if (typeof value === "number" && Number.isFinite(value)) return { ok: true, value };
-      if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value.trim()))) return { ok: true, value: Number(value.trim()) };
-      return { ok: false };
-    }
-    case "boolean":
-      if (typeof value === "boolean") return { ok: true, value };
-      if (value === "true") return { ok: true, value: true };
-      if (value === "false") return { ok: true, value: false };
-      return { ok: false };
-    case "enum":
-      return typeof value === "string" && (output.values ?? []).includes(value) ? { ok: true, value } : { ok: false };
-    case "json":
-      return value === undefined ? { ok: false } : { ok: true, value };
-    default:
-      return { ok: false };
-  }
-}
-
 /** A `report_step_result` call's arguments, as the agent sent them. */
 export interface StepReportArgs {
   outcome?: unknown;
@@ -88,12 +62,17 @@ export type StepReportCheck =
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
+/** UTF-8 bytes of a JSON value. */
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
 /**
  * Check a report against the block's declarations (§5.2): the outcome is a declared id (required when
  * outcomes are declared, refused when none are), the summary is text of at most
  * `reportSummaryChars`, every required output is present, each output fits its type (with §4.2's
- * coercion) and enum values, and there is no undeclared output. Every problem is listed, each naming
- * what is allowed.
+ * coercion) and enum values, there is no undeclared output, and the outputs are at most
+ * `reportOutputsBytes` as JSON. Every problem is listed, each naming what is allowed.
  */
 export function checkStepReport(decl: StepReportDecl, args: StepReportArgs): StepReportCheck {
   const problems: string[] = [];
@@ -142,9 +121,17 @@ export function checkStepReport(decl: StepReportDecl, args: StepReportArgs): Ste
         if (outputRequired(output)) problems.push(`outputs.${output.name} is required: ${outputTypeText(output)}.`);
         continue;
       }
-      const coerced = coerceOutputValue(output, given[output.name]);
+      // The run inputs' coercion (§4.2): numbers and booleans may come as their text.
+      const coerced = coerceTypedValue(output, given[output.name]);
       if (!coerced.ok) problems.push(`outputs.${output.name} must be ${outputTypeText(output)}.`);
       else outputs[output.name] = coerced.value;
+    }
+    const bytes = jsonBytes(outputs);
+    if (bytes > WORKFLOW_LIMITS.reportOutputsBytes) {
+      const limit = WORKFLOW_LIMITS.reportOutputsBytes / 1024;
+      problems.push(
+        `outputs are ${Math.ceil(bytes / 1024)} KiB as JSON; at most ${limit} KiB. Shorten the values, or write large content to a file in the project and report its path instead.`
+      );
     }
   }
 

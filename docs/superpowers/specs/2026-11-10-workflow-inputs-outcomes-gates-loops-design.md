@@ -98,10 +98,14 @@ inputs?: Array<{
 
 When `inputs` is declared, the run's input must be an object. The daemon:
 
-- applies defaults for absent keys;
+- applies defaults for absent keys; an explicit `null` counts as absent for an optional input and
+  is a wrong type for a required one (with or without a default, also in a test run);
 - rejects a missing required input, a wrong type, an enum value not in `values`, and unknown keys;
-- coerces `"42"` → 42 for numbers and `"true"`/`"false"` for booleans (agents send strings), and
-  nothing else.
+- coerces, and nothing else: for numbers, text that is a plain decimal numeral after trimming
+  surrounding whitespace — an optional leading `-`, digits, an optional `.` followed by digits
+  (`/^-?\d+(\.\d+)?$/`: `"42"` → 42, `"-1.5"` → -1.5; never `+`, a leading or trailing `.`, an
+  exponent, hex/binary/octal or `Infinity`); for booleans, exactly `"true"`/`"false"` (agents send
+  strings). An enum value must match one of `values` exactly.
 
 Errors name the input and the fix, e.g. ``input `env` must be one of: stg, prd``. Every error is
 returned at once, not the first only. The same check runs for the REST run route, MCP `run_workflow`,
@@ -131,7 +135,7 @@ How a `workflow` (sub-workflow) block's input relates to the child's declared in
 `agent` config gains two optional fields:
 
 ```ts
-outcomes?: Array<{ id: string; label?: string; description?: string }>;
+outcomes?: Array<{ id: string; label?: string; description?: string }>;   // label ≤ 80 chars
   // id ^[a-z][a-z0-9_]{0,39}$, unique, 2–12 entries
 outputs?: Array<{
   name: string;                // same rules as input names
@@ -165,7 +169,9 @@ A new catalog tool, chat audience only: **`report_step_result`**
   caller gets "This chat is not a workflow step that reports a result."
 - It must never open an approval card (not Admin tier).
 - It validates outcome ∈ declared ids, required outputs present, types (same coercion as §4.2),
-  enum values, no unknown outputs. A refusal lists exactly what is wrong and the allowed values.
+  enum values, no unknown outputs, and `outputs` of at most 64 KiB as JSON
+  (`WORKFLOW_LIMITS.reportOutputsBytes`; the refusal says to shorten them or report a file's path).
+  A refusal lists exactly what is wrong and the allowed values.
 - A valid call is stored on the pass. A later valid call in the same pass replaces it (the agent can
   correct itself) until the block settles.
 - The result says "Recorded. End your turn now." The tool does not end the turn.
@@ -200,7 +206,7 @@ New node type `gate` (category `flow`):
   details?: string;          // template, Markdown, ≤ 8 KB rendered
   choices: Array<{
     id: string;              // ^[a-z][a-z0-9_]{0,39}$, unique, 2–8 entries
-    label: string;
+    label: string;           // ≤ 80 chars
     color?: "default" | "primary" | "success" | "warning" | "danger";
     comment?: "none" | "optional" | "required";   // default "none"
   }>;
@@ -278,7 +284,8 @@ for unknown types (`run-context.ts:114`).
   If the run was not started by a chat, or that chat is gone or archived, the gate goes straight to
   the person phase; if the launcher does not decide within `decider.maxMinutes`, it escalates.
 - **Rules for every agent decider:** only the assigned chat may decide; any other in-chat caller gets
-  "Only <decider label> may decide this gate." A comment is required when an agent decides. While an
+  one generic refusal that never names the decider (another project's chat title), the same whether
+  the gate, its block or its run exists. A comment is required when an agent decides. While an
   agent is deciding, the person can still decide first. Escalation sends the push and attention
   entries of §6.4 and records `escalated: true`.
 - If `run_workflow` was called with `wait: true` and a gate opens for the launcher anywhere in the

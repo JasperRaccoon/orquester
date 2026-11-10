@@ -159,6 +159,32 @@ test("decide_workflow_gate: a block name finds its waiting gate; decided, escala
   assert.equal(posts.length, sent);
 });
 
+test("decide_workflow_gate by nodeName from a chat finds only a gate assigned to it: any other answer is one refusal, nothing sent", async (t) => {
+  const { api, own, other } = await sandbox(t);
+  const workflow = definition(own);
+  const theirs = gate({ decider: { kind: "launcher", label: "the launching chat “Secret plans”", sessionId: "someone-else" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(workflow, { gates: { "gate-1": theirs } }) } });
+  api.on("GET", "/api/workflow-runs/run-404", { status: 404, body: { error: { code: "RUN_NOT_FOUND", message: "No run with id \"run-404\"." } } });
+  let posts = 0;
+  api.on("POST", "/api/workflow-runs/run-1/gates/gate-1/decide", () => {
+    posts += 1;
+    return { status: 500, body: {} };
+  });
+  const prober = chat(other, { threadId: "prober", workspace: "beta", cwd: other, runtimeMode: "approval-required" });
+  const answers = [
+    await call(api, "decide_workflow_gate", { runId: "run-1", nodeName: "Approve", choice: "approve", comment: "x" }, prober, null),
+    await call(api, "decide_workflow_gate", { runId: "run-1", nodeName: "Nope", choice: "approve", comment: "x" }, prober, null),
+    await call(api, "decide_workflow_gate", { runId: "run-404", nodeName: "Approve", choice: "approve", comment: "x" }, prober, null)
+  ];
+  for (const answer of answers) {
+    assert.equal(answer.isError, true);
+    assert.equal(answer.result.code, "GATE_NOT_DECIDER");
+    assert.doesNotMatch(String(answer.result.message), /Secret plans|Approve|run-404/);
+  }
+  assert.equal(new Set(answers.map((answer) => answer.result.message)).size, 1, "the same refusal whether the run or gate exists or not");
+  assert.equal(posts, 0, "nothing is sent");
+});
+
 test("list_workflow_gates: a chat sees its project's gates plus the ones assigned to it; external callers every project's", async (t) => {
   const { api, own, other } = await sandbox(t);
   const mine = gate({ gateId: "mine", runId: "run-2", projectPath: other, workflowName: "Elsewhere" });

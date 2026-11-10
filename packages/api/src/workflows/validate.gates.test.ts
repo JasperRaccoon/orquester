@@ -46,6 +46,14 @@ describe("validate: gates", () => {
     assert.ok(codes(problemsOf(withGate({ choices: [{ id: "approve", label: "  " }, { id: "reject", label: "No" }] })), "error").includes("gate_choice_label"));
   });
 
+  it("a choice's label is at most 80 characters", () => {
+    const at = (label: string) => problemsOf(withGate({ choices: [{ id: "approve", label }, { id: "reject", label: "No" }] }));
+    assert.ok(!codes(at("x".repeat(80))).includes("label_too_long"));
+    const problem = at("x".repeat(81)).find((p) => p.code === "label_too_long");
+    assert.equal(problem?.severity, "error");
+    assert.equal(problem?.field, "config.choices.0.label");
+  });
+
   it("a question is required and at most 300 characters; details at most 8 KB", () => {
     assert.ok(codes(problemsOf(withGate({ question: "  " })), "error").includes("gate_question_empty"));
     assert.ok(codes(problemsOf(withGate({ question: "x".repeat(301) })), "error").includes("gate_question_too_long"));

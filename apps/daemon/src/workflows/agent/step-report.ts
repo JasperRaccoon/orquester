@@ -17,6 +17,8 @@ import {
   type WorkflowStepReport
 } from "@orquester/api";
 
+import { clipChars } from "../gates/state.ts";
+
 /** The block declares outcomes or outputs, so its agent must call `report_step_result`. */
 export function blockReports(config: Pick<AgentBlockConfig, "outcomes" | "outputs">): boolean {
   return reportRequired(config);
@@ -38,7 +40,7 @@ export function stepProtocolBlock(config: Pick<AgentBlockConfig, "outcomes" | "o
   if (outcomes.length > 0) {
     lines.push("", "Pick exactly one `outcome`:");
     for (const outcome of outcomes) {
-      const label = oneLine(outcome.label);
+      const label = clipChars(oneLine(outcome.label), WORKFLOW_LIMITS.labelChars).text;
       const description = oneLine(outcome.description);
       lines.push(`- \`${outcome.id}\`${label && label !== outcome.id ? ` (${label})` : ""}${description ? `: ${description}` : ""}`);
     }

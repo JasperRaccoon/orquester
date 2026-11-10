@@ -144,7 +144,8 @@ describe("e2e: typed outcomes through the tool, the route and the engine", () =>
       // get_workflow_runs shows the report.
       const viewed = await executeToolCall({ approvals: null }, { name: "get_workflow_runs", arguments: { runId } }, { caller: { kind: "external" }, api: h.api, signal: new AbortController().signal });
       const block = ((viewed.structuredContent as { blocks: Record<string, unknown>[] }).blocks).find((b) => b.name === "Review")!;
-      assert.deepEqual(block.report, { outcome: "approved", summary: "Fixed the nits.", outputs: { pr_url: "https://x/2" }, reportedAt: review.report!.reportedAt });
+      assert.deepEqual(block.report, { outcome: "approved", summary: "Fixed the nits.", reportedAt: review.report!.reportedAt });
+      assert.deepEqual((block.output as { outputs?: unknown }).outputs, { pr_url: "https://x/2" }, "the outputs are in the block's output");
     } finally {
       await h.close();
     }
