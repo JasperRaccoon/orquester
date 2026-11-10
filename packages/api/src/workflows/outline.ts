@@ -10,11 +10,11 @@
 // edge is ("→ continues at Merge"). Blocks no trigger reaches come last, flat, marked `unreachable`.
 // Sticky notes are not steps.
 
-import { outputHandles, reachableFromTriggers } from "./graph.ts";
+import { isLoopEdge, outputHandles, reachableFromTriggers } from "./graph.ts";
 import { isTriggerType, type WorkflowNode } from "./types.ts";
 
 type OutlineNode = Pick<WorkflowNode, "id" | "type" | "position"> & { config?: unknown };
-type OutlineEdge = { id: string; source: string; sourceHandle: string; target: string };
+type OutlineEdge = { id: string; source: string; sourceHandle: string; target: string; loop?: unknown };
 
 export interface OutlineItem {
   /** Unique within the outline (a block can have several `join-ref` items). */
@@ -37,7 +37,9 @@ export interface OutlineItem {
 export function buildStepOutline(workflow: { nodes: readonly OutlineNode[]; edges: readonly OutlineEdge[] }): OutlineItem[] {
   const nodes = workflow.nodes.filter((node) => node.type !== "note");
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target) && edge.source !== edge.target);
+  // The outline follows forward edges only: a loop edge back to an earlier block (spec 2026-11-10
+  // §7.1) is neither a child nor a join of its target.
+  const edges = workflow.edges.filter((edge) => !isLoopEdge(edge) && byId.has(edge.source) && byId.has(edge.target) && edge.source !== edge.target);
   const graph = { nodes, edges };
   const reachable = reachableFromTriggers(graph);
 

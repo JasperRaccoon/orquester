@@ -4,7 +4,7 @@
 
 import dagre from "@dagrejs/dagre";
 
-import { outputHandles } from "./graph.ts";
+import { isLoopEdge, outputHandles } from "./graph.ts";
 import type { WorkflowEdge, WorkflowNode } from "./types.ts";
 
 export const LAYOUT_NODE_WIDTH = 240;
@@ -22,7 +22,8 @@ export interface LayoutPoint {
 }
 
 type LayoutNode = Pick<WorkflowNode, "id" | "type" | "position"> & { config?: unknown };
-type LayoutEdge = Pick<WorkflowEdge, "source" | "sourceHandle" | "target">;
+/** `loop`: a loop edge (spec 2026-11-10 §7.1), drawn routed back — never part of the ranking. */
+type LayoutEdge = Pick<WorkflowEdge, "source" | "sourceHandle" | "target"> & { loop?: unknown };
 type LayoutGraph = { nodes: readonly LayoutNode[]; edges: readonly LayoutEdge[] };
 
 const snap = (value: number): number => Math.round(value / LAYOUT_GRID) * LAYOUT_GRID;
@@ -128,7 +129,8 @@ export function autoLayout(workflow: LayoutGraph, opts: { onlyNodeIds?: Iterable
   const nodes = workflow.nodes.filter((node) => node.type !== "note" && (only === null || only.has(node.id)));
   if (nodes.length === 0) return {};
   const ids = new Set(nodes.map((node) => node.id));
-  const edges = workflow.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target) && edge.source !== edge.target);
+  // Loop edges point back to an earlier block: ranked, they would pull it right of its own downstream.
+  const edges = workflow.edges.filter((edge) => !isLoopEdge(edge) && ids.has(edge.source) && ids.has(edge.target) && edge.source !== edge.target);
   const byId = new Map(nodes.map((node) => [node.id, node]));
 
   const failure = failureSide(nodes, edges);
@@ -230,6 +232,8 @@ function overlaps(a: LayoutPoint, b: LayoutPoint): boolean {
  */
 export function placeNewNodes(workflow: LayoutGraph, ids: Iterable<string>): Record<string, LayoutPoint> {
   const newIds = new Set(ids);
+  // A new block goes beside its forward neighbours, never beside a block a loop edge points back to.
+  workflow = { nodes: workflow.nodes, edges: workflow.edges.filter((edge) => !isLoopEdge(edge)) };
   const placed = new Map<string, LayoutPoint>();
   for (const node of workflow.nodes) if (!newIds.has(node.id)) placed.set(node.id, { ...node.position });
   const fresh = workflow.nodes.filter((node) => newIds.has(node.id));

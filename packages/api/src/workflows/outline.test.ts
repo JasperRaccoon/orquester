@@ -40,4 +40,11 @@ describe("buildStepOutline", () => {
     );
     assert.deepEqual(outline.filter((item) => item.kind === "node").map((item) => item.nodeId).sort(), ["a", "b", "t"]);
   });
+
+  it("a loop edge is neither a child nor a join: the steps read straight through", () => {
+    const graph = wf([["t", "trigger.manual"], ["fix", "agent"], ["check", "if"], ["done", "code"]], [["t", "fix"], ["fix", "check"], ["check", "done", "true"]]);
+    graph.edges.push({ id: "back", source: "check", target: "fix", sourceHandle: "false", loop: { maxLoops: 2, session: "continue" } } as never);
+    const outline = buildStepOutline(graph);
+    assert.deepEqual(outline.map((item) => [item.kind, item.nodeId]), [["node", "t"], ["node", "fix"], ["node", "check"], ["node", "done"]]);
+  });
 });
