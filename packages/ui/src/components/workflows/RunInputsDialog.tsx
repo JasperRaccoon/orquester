@@ -171,7 +171,8 @@ export const RunInputsDialog: React.FC<RunInputsDialogProps> = ({ open, onClose,
   const [errors, setErrors] = useState<readonly WorkflowInputError[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [skipped, setSkipped] = useState(false);
+  /** The last run was skipped (overlap), with why in the daemon's words; null when it was not. */
+  const [skipped, setSkipped] = useState<{ detail?: string } | null>(null);
   const [dirty, setDirty] = useState(false);
   const formId = useId();
 
@@ -188,7 +189,7 @@ export const RunInputsDialog: React.FC<RunInputsDialogProps> = ({ open, onClose,
       setJson("");
       setErrors([]);
       setProblem(null);
-      setSkipped(false);
+      setSkipped(null);
       setDirty(false);
       return;
     }
@@ -205,7 +206,7 @@ export const RunInputsDialog: React.FC<RunInputsDialogProps> = ({ open, onClose,
   const setValue = (name: string, value: RunInputValue): void => {
     setValues((current) => ({ ...current, [name]: value }));
     setErrors((current) => current.filter((error) => error.input !== name));
-    setSkipped(false);
+    setSkipped(null);
     setDirty(true);
   };
 
@@ -267,7 +268,7 @@ export const RunInputsDialog: React.FC<RunInputsDialogProps> = ({ open, onClose,
     if (!result.ok) {
       if (result.inputErrors && result.inputErrors.length > 0) setErrors(result.inputErrors);
       else setProblem(result.error);
-    } else if (result.skipped === "overlap") setSkipped(true);
+    } else if (result.skipped === "overlap") setSkipped(result.skipDetail ? { detail: result.skipDetail } : {});
     else onClose();
   };
 
@@ -368,7 +369,7 @@ export const RunInputsDialog: React.FC<RunInputsDialogProps> = ({ open, onClose,
               setJson(next);
               setProblem(null);
               setErrors([]);
-              setSkipped(false);
+              setSkipped(null);
               setDirty(true);
             }}
             mono
@@ -397,7 +398,7 @@ export const RunInputsDialog: React.FC<RunInputsDialogProps> = ({ open, onClose,
             </SmallButton>
           }
         >
-          It is already running, so this run was skipped (overlap: skip).
+          {skipped.detail ? `This run was skipped: ${skipped.detail}.` : "It is already running, so this run was skipped (overlap: skip)."}
         </Callout>
       ) : null}
     </form>

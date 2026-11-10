@@ -271,7 +271,7 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
       ) : null}
 
       {/* A gate's decision (spec 2026-11-10 §6.4) — also a loop-limit gate on any block. */}
-      <GateRunSection runId={runId} nodeId={nodeId} definition={definition} loopLimits={entry.detail?.loopLimits} now={now} variant={variant} />
+      <GateRunSection runId={runId} nodeId={nodeId} definition={definition} loopLimits={entry.loopLimits} now={now} variant={variant} />
 
       {/* Sub-workflow. */}
       {type === "workflow" && block?.childRunId ? (
@@ -385,9 +385,10 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
         ) : null}
 
         {activeTab === "logs" && logs ? (
-          // An earlier pass's log is readable when its attempt number is its own (attempts count on across passes).
-          earlierPass && !(block && latest && block.attempt > 0 && block.attempt < latest.attempt) ? (
-            <Muted>Only the latest pass's log can be shown here.</Muted>
+          // Attempts restart with each pass and the daemon keeps the latest pass's log only:
+          // an earlier pass's attempt number would read the latest pass's log.
+          earlierPass ? (
+            <Muted>Only the latest pass's log is kept.</Muted>
           ) : block && block.attempt > 0 ? (
             <LogViewer
               key={block.attempt}

@@ -183,6 +183,30 @@ describe("the gate decision card", () => {
     assert.deepEqual(decisions, [["reject", "needs a fix"]]);
   });
 
+  it("Cancel and Escape close the box empty and hand focus back to its choice", () => {
+    render(gate());
+    clock += 1_000;
+    click(button(/^Reject/));
+    type(mount.querySelector("textarea")!, "not this one");
+    click(button(/^Cancel$/));
+    assert.equal(mount.querySelector("textarea"), null);
+    assert.equal(dom.window.document.activeElement, button(/^Reject/), "focus is not dropped to the page");
+    // The next choice's box starts empty (past the guard: the box closing is a change).
+    clock += 1_000;
+    click(button(/^Hold/));
+    const box = mount.querySelector("textarea")!;
+    assert.equal(box.value, "");
+    type(box, "draft");
+    act(() => {
+      box.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    assert.equal(mount.querySelector("textarea"), null);
+    assert.equal(dom.window.document.activeElement, button(/^Hold/));
+    clock += 1_000;
+    click(button(/^Reject/));
+    assert.equal(mount.querySelector("textarea")!.value, "");
+  });
+
   it("a required comment: Send stays off until there is one", async () => {
     render(gate());
     clock += 1_000;
@@ -218,6 +242,13 @@ describe("the gate decision card", () => {
   it("says an agent is deciding, and that the user may decide first", () => {
     render(gate({ phase: "agent", decider: { kind: "agent", label: "Reviewer (claude)" } }));
     assert.match(mount.textContent ?? "", /Reviewer \(claude\) is deciding; you can decide first\./);
+  });
+
+  it("says why an agent handed the decision over", () => {
+    render(gate({ escalated: true, decider: { kind: "agent", label: "Reviewer" }, escalationReason: "The agent did not answer in 10 minutes." }));
+    assert.match(mount.textContent ?? "", /Reviewer handed this to you: The agent did not answer in 10 minutes\.(?!\.)/);
+    render(gate({ escalated: true, decider: { kind: "agent", label: "Reviewer" } }));
+    assert.match(mount.textContent ?? "", /Reviewer handed this to you\./);
   });
 
   it("on a phone, every target is finger-sized", () => {

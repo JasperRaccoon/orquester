@@ -106,7 +106,10 @@ export function loopEdgeLabel(
   return counter ? `↺ ${named}${counter.used}/${counter.max}` : `↺ ${named}max ${loop.maxLoops}`;
 }
 
-/** The label for screen readers and tooltips: "Loops back to Fix on changes, at most 2 times, in the same chat". */
+/**
+ * The label for screen readers and tooltips: "Loops back to Fix on changes, at most 2 times, in the same chat".
+ * In a run, "at most" is the run's limit (raised by "Allow one more loop"), the counter's.
+ */
 export function loopEdgeDescription(
   sourceName: string,
   handleLabel: string | null,
@@ -115,7 +118,8 @@ export function loopEdgeDescription(
   counter: LoopCounter | null = null
 ): string {
   const on = handleLabel && handleLabel !== "success" ? ` on ${handleLabel}` : "";
-  const times = loop.maxLoops === 1 ? "once" : `${loop.maxLoops} times`;
+  const max = counter?.max ?? loop.maxLoops;
+  const times = max === 1 ? "once" : `${max} times`;
   const used = counter
     ? `; used ${counter.used} of ${counter.max}${counter.exhausted ? ", its limit" : ""}`
     : "";

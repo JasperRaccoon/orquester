@@ -94,6 +94,8 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
   const [error, setError] = React.useState<string | null>(null);
   const inFlight = React.useRef(false);
   const commentRef = React.useRef<HTMLTextAreaElement | null>(null);
+  /** Each choice's button, by choice id: Cancel hands focus back to the one that opened the box. */
+  const choiceRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const focusComment = React.useRef(false);
   const ids = React.useId();
 
@@ -148,6 +150,14 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
     void send(choice, undefined);
   };
 
+  /** Cancel or Escape: the box closes empty, and focus goes back to its choice (not to the page). */
+  const closeComment = (): void => {
+    const choiceId = selected;
+    setSelected(null);
+    setComment("");
+    if (choiceId !== null) choiceRefs.current.get(choiceId)?.focus({ preventScroll: true });
+  };
+
   const submitComment = (): void => {
     if (!selectedChoice) return;
     const rule = commentRule(selectedChoice, comment);
@@ -173,6 +183,8 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
     .join(" · ");
   const Icon = gate.source === "loop_limit" ? RotateCcw : ShieldCheck;
   const details = gate.details?.trim() ?? "";
+  // Why the agent handed it over (its comment, its failure, its silence), in the daemon's words.
+  const escalationReason = gate.escalationReason?.trim() ?? "";
   const rule = selectedChoice ? commentRule(selectedChoice, comment) : null;
   const busy = sending !== null;
 
@@ -202,7 +214,9 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
           ) : gate.escalated && !node ? (
             <p className="flex items-start gap-1.5 text-[12px] leading-4 text-neutral-400">
               <UserRound size={12} aria-hidden className="mt-0.5 shrink-0" />
-              <span className="min-w-0">{gate.decider.label} handed this to you.</span>
+              <span className="min-w-0 break-words">
+                {gate.decider.label} handed this to you{escalationReason ? `: ${escalationReason}` : "."}
+              </span>
             </p>
           ) : null}
 
@@ -247,6 +261,10 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
               return (
                 <button
                   key={choice.id}
+                  ref={(element) => {
+                    if (element) choiceRefs.current.set(choice.id, element);
+                    else choiceRefs.current.delete(choice.id);
+                  }}
                   type="button"
                   aria-label={destination ? `${choice.label}, ${destination.spoken}` : choice.label}
                   aria-expanded={commentRule(choice, "").asks ? on : undefined}
@@ -266,7 +284,7 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
                     FOCUS,
                     COLOR[choice.color ?? "default"],
                     on && "ring-2 ring-neutral-300",
-                    node ? "min-h-7 px-2 text-[11px]" : sheet ? "min-h-11 w-full justify-between px-3.5 text-[13.5px]" : "min-h-8 px-3 text-xs"
+                    node ? "min-h-8 px-2.5 text-[11px]" : sheet ? "min-h-11 w-full justify-between px-3.5 text-[13.5px]" : "min-h-8 px-3 text-xs"
                   )}
                 >
                   <span className="flex min-w-0 items-center gap-1.5">
@@ -303,7 +321,7 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
                     if (!event.repeat && !keyboardGuarded()) submitComment();
                   } else if (event.key === "Escape") {
                     event.preventDefault();
-                    setSelected(null);
+                    closeComment();
                   }
                 }}
                 placeholder={rule.required ? "Say why — the next step reads it." : "Anything the next step should know"}
@@ -316,12 +334,12 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
               <div className="flex flex-wrap items-center justify-end gap-1.5">
                 <button
                   type="button"
-                  onClick={() => setSelected(null)}
+                  onClick={closeComment}
                   disabled={busy}
                   className={cn(
                     "inline-flex items-center rounded-md px-2.5 text-xs font-medium text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-50",
                     FOCUS,
-                    sheet ? "min-h-11" : node ? "min-h-7" : "min-h-8"
+                    sheet ? "min-h-11" : "min-h-8"
                   )}
                 >
                   Cancel
@@ -343,7 +361,7 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
                     "disabled:pointer-events-none disabled:opacity-50",
                     FOCUS,
                     COLOR[selectedChoice.color ?? "default"],
-                    sheet ? "min-h-11" : node ? "min-h-7" : "min-h-8"
+                    sheet ? "min-h-11" : "min-h-8"
                   )}
                 >
                   {sending === selectedChoice.id ? <Loader2 size={12} aria-hidden className="motion-safe:animate-spin" /> : null}

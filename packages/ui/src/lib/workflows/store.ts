@@ -128,7 +128,9 @@ export interface WorkflowRunsList extends WorkflowsLoad {
 /**
  * One run as this client knows it. `blocks`/`takenEdges`/`deadEdges` are the
  * live overlay — the loaded run's, merged with every `workflowRun.updated`
- * delta since (or only the deltas, before the run was loaded).
+ * delta since (or only the deltas, before the run was loaded). A load's edge
+ * lists replace the held ones (a loop shrinks them) but for the edges an
+ * update changed while it was in flight.
  */
 export interface WorkflowRunEntry {
   summary: WorkflowRunSummary;
@@ -220,6 +222,11 @@ let listInFlight: Promise<void> | null = null;
 let listTouched: Set<string> | null = null;
 const runsInFlight = new Map<string, Promise<void>>();
 const runInFlight = new Map<string, Promise<void>>();
+/**
+ * Per run whose load is in flight, the edges an update changed meanwhile: id → whether the
+ * update's list has it (taken or dead). The loaded lists are the truth but for these.
+ */
+const runEdgesTouched = new Map<string, { taken: Map<string, boolean>; dead: Map<string, boolean> }>();
 const secretsInFlight = new Map<string, Promise<void>>();
 let gatesInFlight: Promise<void> | null = null;
 /** The gates a change touched while the gate list load was in flight (`runId/gateId`). */
@@ -337,10 +344,22 @@ function loopCountsOf(
   return out;
 }
 
-function union(current: readonly string[], incoming: readonly string[]): string[] {
-  if (incoming.length === 0) return current as string[];
-  const set = new Set(current);
-  for (const id of incoming) set.add(id);
+/** Note which edges `next` adds to or drops from `current` in `touched`. */
+function touchEdges(touched: Map<string, boolean>, current: readonly string[], next: readonly string[]): void {
+  const before = new Set(current);
+  const after = new Set(next);
+  for (const id of after) if (!before.has(id)) touched.set(id, true);
+  for (const id of before) if (!after.has(id)) touched.set(id, false);
+}
+
+/** The loaded list, with what an update added or dropped while the load was in flight. */
+function withTouchedEdges(loaded: readonly string[], touched: ReadonlyMap<string, boolean> | undefined): string[] {
+  if (touched === undefined || touched.size === 0) return loaded as string[];
+  const set = new Set(loaded);
+  for (const [id, held] of touched) {
+    if (held) set.add(id);
+    else set.delete(id);
+  }
   return [...set];
 }
 
@@ -553,15 +572,22 @@ export function applyWorkflowsEvent(event: { type: string; payload: unknown }): 
       const state = getState();
       const entry = state.runs[run.id];
       if (entry === undefined) return null;
+      // The daemon sends the whole lists when they change; a loop can reopen edges, so they replace.
+      const takenEdges = Array.isArray(payload.takenEdges) ? sanitizeEdgeIds(payload.takenEdges) : entry.takenEdges;
+      const deadEdges = Array.isArray(payload.deadEdges) ? sanitizeEdgeIds(payload.deadEdges) : entry.deadEdges;
+      const touched = runEdgesTouched.get(run.id);
+      if (touched !== undefined) {
+        touchEdges(touched.taken, entry.takenEdges, takenEdges);
+        touchEdges(touched.dead, entry.deadEdges, deadEdges);
+      }
       workflowsStore.setState({
         runs: {
           ...state.runs,
           [run.id]: {
             ...entry,
             blocks: mergeBlocks(entry.blocks, sanitizeBlocks(payload.blocks)),
-            // The daemon sends the whole lists when they change; a loop can reopen edges, so they replace.
-            takenEdges: Array.isArray(payload.takenEdges) ? sanitizeEdgeIds(payload.takenEdges) : entry.takenEdges,
-            deadEdges: Array.isArray(payload.deadEdges) ? sanitizeEdgeIds(payload.deadEdges) : entry.deadEdges,
+            takenEdges,
+            deadEdges,
             ...loopCountsOf(payload, entry)
           }
         }
@@ -746,6 +772,8 @@ export function loadWorkflowRun(api: WorkflowsApi, runId: string, options?: { fo
   if (pending !== undefined) return pending;
   if (!options?.force && getState().runs[runId]?.detail) return Promise.resolve();
   const gen = generation;
+  const touched = { taken: new Map<string, boolean>(), dead: new Map<string, boolean>() };
+  runEdgesTouched.set(runId, touched);
   const promise: Promise<void> = Promise.resolve().then(async () => {
     try {
       if (gen !== generation) return;
@@ -779,8 +807,9 @@ export function loadWorkflowRun(api: WorkflowsApi, runId: string, options?: { fo
             detail: run,
             // The answer may predate a delta that already landed: per block, the one further along stands.
             blocks: mergeBlocks(blocks, entry.blocks),
-            takenEdges: union(takenEdges, entry.takenEdges),
-            deadEdges: union(deadEdges, entry.deadEdges),
+            // The loaded lists stand (a loop shrinks them), but for an update that landed meanwhile.
+            takenEdges: withTouchedEdges(takenEdges, touched.taken),
+            deadEdges: withTouchedEdges(deadEdges, touched.dead),
             ...loopCountsOf(run, entry),
             error: null,
             stale: false
@@ -796,6 +825,7 @@ export function loadWorkflowRun(api: WorkflowsApi, runId: string, options?: { fo
         workflowsStore.setState({ runs: { ...state.runs, [runId]: { ...entry, error: message } } });
       }
     } finally {
+      if (runEdgesTouched.get(runId) === touched) runEdgesTouched.delete(runId);
       if (runInFlight.get(runId) === promise) runInFlight.delete(runId);
     }
   });
@@ -984,6 +1014,7 @@ export function resetWorkflows(): void {
   listTouched = null;
   runsInFlight.clear();
   runInFlight.clear();
+  runEdgesTouched.clear();
   secretsInFlight.clear();
   gatesInFlight = null;
   gatesTouched = null;
@@ -1183,9 +1214,10 @@ export async function setWorkflowEnabled(
 
 /**
  * Run now. An overlap skip is not a failure: it becomes the panel's notice
- * with "Run anyway", which calls this again with `force`.
+ * with "Run anyway", which calls this again with `force`. `quiet` leaves a
+ * refusal and an overlap skip to the caller (the Run now form shows input
+ * errors beside their fields, and the skip with its own "Run anyway").
  */
-/** Run now. `quiet` leaves a refusal to the caller (the Run now form shows input errors beside their fields). */
 export async function runWorkflowNow(
   api: WorkflowsApi,
   id: string,
@@ -1199,6 +1231,7 @@ export async function runWorkflowNow(
   // Why it did not start, in the daemon's words (e.g. "previous run is waiting on gate “Deploy?”").
   const detail = isRecord(answer) && typeof answer.skipDetail === "string" ? answer.skipDetail.trim() : "";
   if (isRecord(answer) && answer.skipped === "overlap") {
+    if (options.quiet) return result;
     setWorkflowsNotice({
       tone: "info",
       workflowId: id,

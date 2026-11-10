@@ -215,11 +215,19 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
             variant={variant}
             now={now}
             openRunDisabledReason={projectAvailable ? null : NO_PROJECT_REASON}
-            onOpenRun={(runId, gateId) => {
+            onOpenRun={(gate) => {
               if (!projectAvailable) return;
-              if (openWorkflowRunInEditor({ runId, gateId, workflowId: workflow.id, workflowName: workflow.name, ...(projectPath ? { projectPath } : {}) })) {
-                onDelivered?.();
-              }
+              // The gate's own run in its own workflow: a sub-workflow's gate opens the child run in the child workflow.
+              const own = gate.workflowId === workflow.id;
+              const workflowName = own ? workflow.name : gate.workflowName;
+              const target = {
+                runId: gate.runId,
+                gateId: gate.gateId,
+                workflowId: gate.workflowId,
+                ...(workflowName ? { workflowName } : {}),
+                ...(projectPath ? { projectPath } : {})
+              };
+              if (openWorkflowRunInEditor(target)) onDelivered?.();
             }}
           />
         )}
@@ -240,7 +248,13 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
               { quiet: true }
             );
             if (!result.ok) return { ok: false, error: result.error, ...(result.inputErrors ? { inputErrors: result.inputErrors } : {}) };
-            return { ok: true, runId: result.value.runId, ...(result.value.skipped ? { skipped: result.value.skipped } : {}) };
+            const skipDetail = typeof result.value.skipDetail === "string" ? result.value.skipDetail.trim() : "";
+            return {
+              ok: true,
+              runId: result.value.runId,
+              ...(result.value.skipped ? { skipped: result.value.skipped } : {}),
+              ...(skipDetail ? { skipDetail } : {})
+            };
           }}
         />
       ) : null}
