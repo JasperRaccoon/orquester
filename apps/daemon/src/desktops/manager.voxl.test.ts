@@ -44,7 +44,7 @@ interface Harness {
   behaviour: VoxlBehaviour;
 }
 
-async function harness(t: TestContext, voxl: DesktopVoxlStatus): Promise<Harness> {
+async function harness(t: TestContext, voxl: DesktopVoxlStatus | (() => Promise<DesktopVoxlStatus>)): Promise<Harness> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-desktop-voxl-"));
   const servers: Server[] = [];
   const h: Harness = { manager: undefined as unknown as DesktopManager, appdir, sessions: [], voxlLaunches: [], behaviour: "listen" };
@@ -91,7 +91,7 @@ async function harness(t: TestContext, voxl: DesktopVoxlStatus): Promise<Harness
     indexFile: desktopsIndexPath(appdir),
     tmux,
     hostStatus: async () => HOST,
-    voxlStatus: async () => voxl,
+    voxlStatus: typeof voxl === "function" ? voxl : async () => voxl,
     baseEnv: () => ({ PATH: "/usr/bin:/bin" }),
     renderNode: () => false,
     createTracker: (() => tracker) as unknown as DesktopManagerOptions["createTracker"],
@@ -145,6 +145,20 @@ test("without a voxl binary a voxl desktop runs on, its stream unavailable with 
   assert.equal(summary.status, "running");
   await assert.rejects(h.manager.voxlUpstream(desktop.id)!(), VoxlUnavailableError);
   assert.equal(h.voxlLaunches.length, 0);
+});
+
+test("a viewer arriving while the machine's voxl is still being looked for waits for it instead of being refused", async (t) => {
+  let found!: (status: DesktopVoxlStatus) => void;
+  const probe = new Promise<DesktopVoxlStatus>((resolve) => (found = resolve));
+  const h = await harness(t, () => probe);
+  const desktop = await h.manager.create({ projectPath: h.appdir, projectRealPath: h.appdir, video: "voxl" });
+  assert.deepEqual(h.manager.get(desktop.id)?.voxl, { state: "starting" });
+  const leased = h.manager.voxlUpstream(desktop.id)!();
+  found(VOXL);
+  const lease = await leased;
+  assert.equal(h.voxlLaunches.length, 1);
+  assert.ok(h.voxlLaunches[0]!.includes(`--port=${lease.port}`));
+  lease.release();
 });
 
 test("PATCH switches the backend without restarting the desktop; it is persisted", async (t) => {

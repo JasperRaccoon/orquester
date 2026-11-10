@@ -74,6 +74,8 @@ interface Entry {
   binary: string | null;
   proc: VoxlProcess | null;
   starting: Promise<VoxlProcess> | null;
+  /** The check for the machine's voxl while the state is `starting` (a viewer waits for it). */
+  probing: Promise<void> | null;
   viewers: number;
   idleTimer: NodeJS.Timeout | null;
   /** Bumped when the desktop goes or switches away: work of an older attach is dropped. */
@@ -129,26 +131,16 @@ export class DesktopVoxlStreams {
       binary: null,
       proc: null,
       starting: null,
+      probing: null,
       viewers: 0,
       idleTimer: null,
       epoch: 0
     };
     this.entries.set(desktop.id, entry);
-    const epoch = entry.epoch;
     this.options.changed(desktop.id);
-    let reason: string | null = null;
-    try {
-      const status = await desktop.machine.voxl();
-      if (status.available && status.path) entry.binary = status.path;
-      else reason = status.reason ?? "voxl is not available.";
-    } catch (error) {
-      reason = `voxl could not be checked: ${errorMessage(error)}`;
-    }
-    if (!this.current(entry, epoch)) return;
-    if (options.adopt) await this.adoptOrClean(entry).catch((error) => this.options.logger.warn(`Desktop ${desktop.id}: voxl reattach failed`, error));
-    if (!this.current(entry, epoch)) return;
-    entry.state = entry.binary !== null || entry.proc !== null ? { state: "ready" } : { state: "unavailable", reason: reason ?? "voxl is not available." };
-    this.options.changed(desktop.id);
+    const probing = this.probe(entry, options);
+    entry.probing = probing;
+    await probing;
   }
 
   /**
@@ -166,13 +158,18 @@ export class DesktopVoxlStreams {
 
   /**
    * A viewer wants voxl: the running one, or a new one started for it (concurrent viewers share
-   * one start). Throws {@link VoxlUnavailableError} when voxl cannot run (the state says why).
+   * one start); while the machine's voxl is still being looked for, it waits for that. Throws {@link VoxlUnavailableError} when voxl cannot run (the state says why).
    */
   async acquire(desktopId: string): Promise<VoxlLease> {
-    const entry = this.entries.get(desktopId);
+    let entry = this.entries.get(desktopId);
+    // While the machine's voxl is being looked for (`starting`), the viewer waits for the answer.
+    while (entry?.probing) {
+      await entry.probing;
+      entry = this.entries.get(desktopId);
+    }
     if (!entry) throw new VoxlUnavailableError("This desktop does not stream with voxl.");
     if (entry.binary === null && entry.proc === null) {
-      throw new VoxlUnavailableError(entry.state.reason ?? (entry.state.state === "starting" ? "voxl is still being checked." : "voxl is not available."));
+      throw new VoxlUnavailableError(entry.state.reason ?? "voxl is not available.");
     }
     const epoch = entry.epoch;
     entry.viewers += 1;
@@ -211,6 +208,26 @@ export class DesktopVoxlStreams {
 
   private current(entry: Entry, epoch: number): boolean {
     return this.entries.get(entry.desktop.id) === entry && entry.epoch === epoch;
+  }
+
+  /** Look for the machine's voxl (a VM's first one is copied over the box link), then settle the state. */
+  private async probe(entry: Entry, options: { adopt?: boolean }): Promise<void> {
+    const { desktop } = entry;
+    const epoch = entry.epoch;
+    let reason: string | null = null;
+    try {
+      const status = await desktop.machine.voxl();
+      if (status.available && status.path) entry.binary = status.path;
+      else reason = status.reason ?? "voxl is not available.";
+    } catch (error) {
+      reason = `voxl could not be checked: ${errorMessage(error)}`;
+    }
+    if (!this.current(entry, epoch)) return;
+    if (options.adopt) await this.adoptOrClean(entry).catch((error) => this.options.logger.warn(`Desktop ${desktop.id}: voxl reattach failed`, error));
+    if (!this.current(entry, epoch)) return;
+    entry.probing = null;
+    entry.state = entry.binary !== null || entry.proc !== null ? { state: "ready" } : { state: "unavailable", reason: reason ?? "voxl is not available." };
+    this.options.changed(desktop.id);
   }
 
   private dropEntry(desktopId: string): void {

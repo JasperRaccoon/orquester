@@ -36,7 +36,7 @@ import {
 import { TEXT_SIZE_DEBOUNCE_MS, textSizeDisplaySize } from "./desktop-text-size";
 import { sharpFitAllowed } from "./desktop-viewport.logic";
 import { createDesktopStreamClient, voxlViewerSupport } from "./stream/create-stream-client";
-import { desktopVideo, viewerUnsupportedReason, voxlStreamUsable } from "./stream/backend-choice.logic";
+import { VOXL_MAX_FAILURES, desktopVideo, viewerUnsupportedReason, voxlStreamUsable } from "./stream/backend-choice.logic";
 import type { DesktopStreamClient, DesktopStreamEvents, DesktopViewMode } from "./stream/types";
 import { DesktopHandoffControls, DesktopHandoffLayer, useDesktopHandoff } from "./handoff/DesktopHandoff";
 import { takeoverSink } from "../../lib/desktops/handoff.logic";
@@ -129,14 +129,24 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   const [stream, setStream] = useState<{ backend: DesktopVideoBackend; fallback: string | null } | null>(null);
   /**
    * Consecutive voxl connections that closed before their `hello` (spec R4.6): kept across
-   * reconnects, so the third failure falls back to RFB; reset when voxl connects or the desktop's
-   * stream changes.
+   * reconnects, so the third failure falls back to RFB; reset when voxl connects, the desktop's
+   * stream changes, or its stream becomes `ready`.
    */
   const voxlFailuresRef = useRef(0);
   const voxlUsable = voxlStreamUsable(desktop);
   useEffect(() => {
     voxlFailuresRef.current = 0;
   }, [desktop.id, voxlUsable]);
+  // Failures while voxl was still being checked or started say nothing about a `ready` stream: a
+  // view they pinned to RFB reconnects and tries voxl again.
+  const voxlReady = voxlUsable && desktop.voxl?.state === "ready";
+  const [voxlRetry, setVoxlRetry] = useState(0);
+  useEffect(() => {
+    if (!voxlReady) return;
+    const pinned = voxlFailuresRef.current >= VOXL_MAX_FAILURES;
+    voxlFailuresRef.current = 0;
+    if (pinned) setVoxlRetry((n) => n + 1);
+  }, [desktop.id, voxlReady]);
 
   // ---- Touch -----------------------------------------------------------------
 
@@ -358,9 +368,10 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       drop();
       setConn("idle");
     };
-    // A new video backend, or a voxl stream that became usable or unusable, reconnects with the
-    // factory's new choice (only the stream restarts, not the desktop).
-  }, [shouldConnect, api, desktop.id, desktop.video, voxlUsable, setDriving, clientViewMode]);
+    // A new video backend, a voxl stream that became usable or unusable, or one that became ready
+    // for a view pinned to RFB, reconnects with the factory's new choice (only the stream restarts,
+    // not the desktop).
+  }, [shouldConnect, api, desktop.id, desktop.video, voxlUsable, voxlRetry, setDriving, clientViewMode]);
 
   // Re-apply the view whenever it changes. A fixed size or a preset is
   // requested only when what it depends on changes (a choice, a connection, an
