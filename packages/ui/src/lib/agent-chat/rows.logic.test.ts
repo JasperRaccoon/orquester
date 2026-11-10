@@ -1656,6 +1656,15 @@ describe("images in the chat — the image row (design 2026-11-10 §9)", () => {
     assert.ok(!kinds(rows).includes("thinking"), "the placeholder is the live response's activity");
   });
 
+  it("a placeholder with the reply continuing below it leaves the working row at the bottom", () => {
+    const rows = rowsOf([
+      ...call("mcp_tool_call", marked("generate_image"), 1, "inProgress"),
+      message("assistant", "While that renders, a note.", { turnId: "t1", createdAt: stamp(2) })
+    ]);
+    assert.ok(kinds(rows).includes("image-pending"), JSON.stringify(kinds(rows)));
+    assert.equal(kinds(rows).at(-1), "thinking", JSON.stringify(kinds(rows)));
+  });
+
   it("a failed generate_image call stays an ordinary tool row", () => {
     const rows = rowsOf(call("mcp_tool_call", marked("generate_image"), 1, "failed"), {
       expandedTurnIds: new Set(["t1"])

@@ -1418,8 +1418,10 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
           createdAt: timelineEntry.createdAt,
           turnId: entry.turnId
         });
-        // The placeholder is the live response's own activity row.
-        hasActivityRow = true;
+        // The placeholder is the live response's own activity row only at
+        // the timeline's end, as the live tool row is: with anything below
+        // it the response still shows it is working there.
+        hasActivityRow ||= tailHere && index === entries.length - 1;
       } else {
         rows.push({
           kind: "work",
