@@ -7,7 +7,7 @@
 
 import { parentPort } from "node:worker_threads";
 
-import { fitScreenshot, thumbnailJpeg } from "./screenshot-image.ts";
+import { fitRgbScreenshot, fitScreenshot, type FittedScreenshot, thumbnailJpeg } from "./screenshot-image.ts";
 import type { ImageWorkerReply, ImageWorkerRequest } from "./image-pool.ts";
 
 const port = parentPort;
@@ -22,7 +22,10 @@ port.on("message", (message: ImageWorkerRequest) => {
     if (job.kind === "thumbnail") {
       reply = { id: message.id, ok: true, result: { kind: "thumbnail", data: thumbnailJpeg(bytes(job.image), job.width) } };
     } else {
-      const fitted = fitScreenshot(bytes(job.png), job.maxBase64Chars);
+      const fitted: FittedScreenshot =
+        job.kind === "fit"
+          ? fitScreenshot(bytes(job.png), job.maxBase64Chars)
+          : fitRgbScreenshot({ width: job.width, height: job.height, data: bytes(job.rgb) }, job.maxLongEdge, job.maxBase64Chars);
       reply = { id: message.id, ok: true, result: { kind: "fit", mimeType: fitted.mimeType, data: fitted.data, width: fitted.width, height: fitted.height } };
     }
   } catch (error) {

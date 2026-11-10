@@ -1,7 +1,7 @@
 /**
- * Device images off the event loop: the fleet view's thumbnails and the agent's screenshots are
- * decoded, scaled and re-encoded (`screenshot-image.ts`, ~300 ms for a 720×1280 frame) in a small
- * pool of worker threads (`image-worker.ts`).
+ * Images off the event loop: the device fleet view's thumbnails and the agents' device and desktop
+ * screenshots are decoded, scaled and (re-)encoded (`screenshot-image.ts`, ~300 ms for a 720×1280
+ * frame) in a small pool of worker threads (`image-worker.ts`).
  *
  * - **Bounded.** At most {@link IMAGE_WORKERS} workers, started on demand and stopped after
  *   {@link IMAGE_WORKER_IDLE_MS} idle; at most {@link IMAGE_QUEUE_CAP} jobs wait, beyond that a job
@@ -25,7 +25,10 @@ const IMAGE_QUEUE_CAP = 32;
 const IMAGE_JOB_TIMEOUT_MS = 30_000;
 const IMAGE_WORKER_IDLE_MS = 60_000;
 
-export type ImageJob = { kind: "thumbnail"; image: Uint8Array; width: number } | { kind: "fit"; png: Uint8Array; maxBase64Chars: number };
+export type ImageJob =
+  | { kind: "thumbnail"; image: Uint8Array; width: number }
+  | { kind: "fit"; png: Uint8Array; maxBase64Chars: number }
+  | { kind: "fitRgb"; rgb: Uint8Array; width: number; height: number; maxLongEdge: number; maxBase64Chars: number };
 
 export type ImageResult =
   | { kind: "thumbnail"; data: Uint8Array }
@@ -83,6 +86,13 @@ export class ImageWorkerPool {
   /** `fitScreenshot` in a worker: the PNG when it fits, else a JPEG scaled until it does. */
   async fit(png: Buffer, maxBase64Chars: number): Promise<FittedScreenshot> {
     const result = await this.run({ kind: "fit", png, maxBase64Chars }, null);
+    if (result.kind !== "fit") throw new Error("The image worker answered another job.");
+    return { mimeType: result.mimeType, data: toBuffer(result.data), width: result.width, height: result.height };
+  }
+
+  /** `fitRgbScreenshot` in a worker: raw RGB scaled to `maxLongEdge`, as PNG when it fits, else a JPEG scaled until it does. */
+  async fitRgb(image: { width: number; height: number; rgb: Buffer }, maxLongEdge: number, maxBase64Chars: number): Promise<FittedScreenshot> {
+    const result = await this.run({ kind: "fitRgb", rgb: image.rgb, width: image.width, height: image.height, maxLongEdge, maxBase64Chars }, null);
     if (result.kind !== "fit") throw new Error("The image worker answered another job.");
     return { mimeType: result.mimeType, data: toBuffer(result.data), width: result.width, height: result.height };
   }
