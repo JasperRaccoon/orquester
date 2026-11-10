@@ -69,6 +69,11 @@ export interface GateHostDeps {
 
 /** A person-only gate opened by the engine itself (a loop edge at its limit, §7.2). */
 export interface OpenPersonGateSpec {
+  /**
+   * The gate's id, when the caller minted and persisted it first (a loop-limit wait records it on
+   * its block before the gate exists, so a restart in between opens that same gate); else minted.
+   */
+  gateId?: string;
   /** The block the gate belongs to (the loop edge's source). */
   nodeId: string;
   /** Its pass. */
@@ -435,8 +440,10 @@ export function createGateHost(deps: GateHostDeps): GateHost {
       if (!a || !a.alive()) throw new GateRefusal(409, "RUN_NOT_ACTIVE", "The run is no longer active.");
       const now = clock.now();
       const node = a.workflow.nodes.find((candidate) => candidate.id === spec.nodeId);
+      // Opened already (the same id asked again after a restart): that one, never a second.
+      if (spec.gateId !== undefined && record(a, spec.gateId) !== undefined) return structuredClone(record(a, spec.gateId)!);
       const gate: WorkflowGateState = {
-        gateId: deps.mintId(),
+        gateId: spec.gateId ?? deps.mintId(),
         runId,
         workflowId: a.run.workflowId,
         nodeId: spec.nodeId,

@@ -10,6 +10,7 @@ import {
   gateAttentionRows,
   gateChoiceDestinations,
   gateDeciderNote,
+  gateNeedsPerson,
   gateRecordLine,
   gatesOfNode,
   gateTitle,
@@ -90,6 +91,41 @@ describe("gates off the wire", () => {
       assert.equal(sanitizeGateState(value), null, missing);
     }
     assert.equal(sanitizeGateState("g"), null);
+  });
+
+  it("reads the daemon's loop-limit gate as it sends it; an expired gate no longer waits", () => {
+    // As the engine records it (apps/daemon/src/workflows/engine.ts `waitAtLoopLimit`).
+    const wire = {
+      gateId: "id-7",
+      runId: "r1",
+      workflowId: "wf-1",
+      nodeId: "review",
+      nodeName: "Review",
+      pass: 3,
+      source: "loop_limit",
+      edgeId: "review-loop-fix",
+      question: "Review → Fix reached its limit (2).",
+      details: "The loop back to Fix already ran 2 loops. **Allow one more loop** runs Fix again once more; **Stop** ends the loop: Review fails, and with it the run.",
+      choices: [
+        { id: "allow", label: "Allow one more loop", color: "primary", comment: "none" },
+        { id: "stop", label: "Stop", color: "danger", comment: "none" }
+      ],
+      decider: { kind: "human", label: "you" },
+      phase: "person",
+      openedAt: T0,
+      phaseStartedAt: T0,
+      phaseDeadlineAt: "2026-11-17T10:42:00.000Z",
+      escalated: false
+    };
+    const parsed = sanitizeGateState(wire)!;
+    assert.deepEqual(parsed, wire, "nothing the daemon sends is lost");
+    assert.equal(gateNeedsPerson(parsed), true);
+    const expired = sanitizeGateState({ ...wire, expired: true, escalationReason: "x" })!;
+    assert.equal(expired.expired, true);
+    assert.equal(expired.escalationReason, "x");
+    assert.equal(gateNeedsPerson(expired), false, "an expired gate leaves the attention rows");
+    assert.equal(mergeGate(parsed, expired).expired, true);
+    assert.equal(mergeGate(expired, parsed).expired, true, "it never waits again");
   });
 
   it("reads a run's map and an update's array alike", () => {
@@ -182,6 +218,8 @@ describe("where each choice leads", () => {
     const withFailure = { ...withLoop, edges: [...withLoop.edges, edge("Review", "Alert", "error")] };
     assert.equal(gateChoiceDestinations(withFailure, limitGate).stop?.text, "→ Alert");
     assert.equal(gateTitle(limitGate, withLoop), "Review → Fix reached its limit (3)");
+    // The daemon's question names the limit when it asked: a later raise does not rewrite it.
+    assert.equal(gateTitle({ ...limitGate, question: "Review → Fix reached its limit (3)." }, withLoop, { "loop-1": 4 }), "Review → Fix reached its limit (3).");
     assert.equal(gateTitle(limitGate, withLoop, { "loop-1": 4 }), "Review → Fix reached its limit (4)");
     assert.equal(gateTitle(limitGate, null), "Review's loop reached its limit");
     assert.equal(gateTitle({ ...limitGate, question: "Review → Fix reached its limit (3)." }, null), "Review → Fix reached its limit (3).");
@@ -218,6 +256,14 @@ describe("the card's words", () => {
       "rejected by timeout, 10:42"
     );
     assert.equal(gateRecordLine(gate({ cancelled: true }), clock), "Cancelled with the run");
+    assert.equal(gateRecordLine(gate({ expired: true }), clock), "Expired: nobody decided in time");
+    // A loop-limit gate's choices.
+    const limit = gate({ choices: [{ id: "allow", label: "Allow one more loop", comment: "none" }, { id: "stop", label: "Stop", color: "danger", comment: "none" }] });
+    assert.equal(gateRecordLine({ ...limit, decision: { choice: "stop", decidedBy: { kind: "human", label: "you" }, decidedAt: T0 } }, clock), "stopped by you, 10:42");
+    assert.equal(gateRecordLine({ ...limit, decision: { choice: "allow", decidedBy: { kind: "human", label: "you" }, decidedAt: T0 } }, clock), "“Allow one more loop” by you, 10:42");
+    assert.equal(choicePastTense("Ship"), "shipped");
+    assert.equal(choicePastTense("Edit"), "edited");
+    assert.equal(choicePastTense("Allow"), "allowed");
   });
 
   it("the toast: sent, or who decided first", () => {

@@ -182,6 +182,8 @@ class GateRun {
       workflowId: ctx.workflow.id,
       nodeId: ctx.node.id,
       nodeName: ctx.node.name,
+      // A loop's later pass asks again with a gate of its own (spec 2026-11-10 §7.2).
+      ...(ctx.loop !== undefined ? { pass: ctx.loop.pass } : {}),
       source: "gate",
       question: question.text,
       ...(details !== undefined ? { details } : {}),

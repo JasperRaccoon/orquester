@@ -5,7 +5,7 @@ import type { Workflow } from "@orquester/api";
 
 import type { PersistedBlockState, PersistedRun } from "../contracts.ts";
 import { edge, node, workflow } from "../testing/fakes.ts";
-import { onLoopLimitReached } from "./limit.ts";
+import { LOOP_LIMIT_CHOICES, loopLimitDetails, loopLimitError, loopLimitQuestion } from "./limit.ts";
 import {
   applyLoopReset,
   loopCount,
@@ -206,12 +206,17 @@ describe("loop state", () => {
     assert.deepEqual(loopNamespace(undefined), { pass: 1 });
   });
 
-  test("the loop-limit decision fails the pass with loop_limit, naming the edge and its limit", () => {
+  test("the loop-limit gate: its question, the allow / stop choices the gates UI keys on, and Stop's loop_limit failure", () => {
     const taken = loopEdgeTaken(def(), "Check", "false") as LoopEdge;
-    const decision = onLoopLimitReached({ edge: taken, sourceName: "Check", targetName: "A", limit: 2 });
-    assert.equal(decision.kind, "fail");
-    assert.equal(decision.error.kind, "loop_limit");
-    assert.equal(decision.error.message, "Check → A reached its limit (2 loops).");
-    assert.deepEqual(decision.error.detail, { edgeId: taken.id, limit: 2 });
+    const facts = { sourceName: "Check", targetName: "A", limit: 2 };
+    assert.equal(loopLimitQuestion(facts), "Check → A reached its limit (2).");
+    assert.deepEqual(LOOP_LIMIT_CHOICES.map((choice) => [choice.id, choice.color]), [["allow", "primary"], ["stop", "danger"]]);
+    assert.match(loopLimitDetails(facts, true), /Check fails and its error connection runs/);
+    assert.match(loopLimitDetails({ ...facts, limit: 1 }, false), /already ran 1 loop\. .*Check fails, and with it the run/);
+    const stopped = loopLimitError({ edge: taken, ...facts }, "stopped");
+    assert.equal(stopped.kind, "loop_limit");
+    assert.equal(stopped.message, "Check → A reached its limit (2 loops); stopped.");
+    assert.deepEqual(stopped.detail, { edgeId: taken.id, limit: 2 });
+    assert.match(loopLimitError({ edge: taken, ...facts }, "expired").message, /nobody decided/);
   });
 });

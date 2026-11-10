@@ -285,6 +285,32 @@ describe("loop edges (spec 2026-11-10 §7.1)", () => {
     assert.deepEqual(only(problems, "unknown_reference").map((problem) => problem.nodeId), ["Done"]);
   });
 
+  it("a gate choice may loop; an outcome block's absent success handle may not, loop or not", () => {
+    const gate = testNode("g", "gate", { question: "Ship?", choices: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }] }, { name: "Gate" });
+    const wf = testWorkflow(
+      [manual(), fixer(), reviewer(), gate, testNode("done", "stop", { as: "success" }, { name: "Done" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), loop("review", "Fix", "outcome:changes"), testEdge("review", "g", "outcome:approved"), loop("g", "Fix", "choice:reject"), testEdge("g", "done", "choice:approve")]
+    );
+    assert.deepEqual(problemsOf(wf).filter((problem) => problem.severity === "error"), []);
+    const shared = problemsOf(testWorkflow(wf.nodes, [...wf.edges, testEdge("g", "done", "choice:reject")]));
+    assert.deepEqual(only(shared, "loop_handle_shared").map((problem) => problem.edgeId), ["g-choice:reject-Fix"]);
+    assert.equal(only(problemsOf(base([loop("review", "Fix", "success")])), "edge_invalid_handle").length, 1);
+    assert.equal(only(problemsOf(base([loop("review", "Fix", "choice:changes")])), "edge_invalid_handle").length, 1, "an agent has no choice handles");
+  });
+
+  it("a disabled block whose pass-through handle carries a loop edge warns that the loop is not taken", () => {
+    const disabledFirst = testWorkflow(
+      [manual(), fixer(), testNode("review", "agent", { prompt: { kind: "text", text: "Review" }, outcomes: [{ id: "changes" }, { id: "approved" }] }, { name: "Review", disabled: true }), testNode("done", "stop", { as: "success" }, { name: "Done" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), testEdge("review", "done", "outcome:approved"), loop("review", "Fix", "outcome:changes")]
+    );
+    const warned = only(problemsOf(disabledFirst), "loop_from_disabled");
+    assert.deepEqual(warned.map((problem) => [problem.severity, problem.edgeId]), [["warning", "review-outcome:changes-Fix"]]);
+    // Its first outcome is not the loop's: nothing to say beyond the pass-through warning.
+    const disabledOther = testWorkflow(base([loop("review", "Fix", "outcome:changes")]).nodes.map((n) => (n.id === "review" ? { ...n, disabled: true } : n)), base([loop("review", "Fix", "outcome:changes")]).edges);
+    assert.deepEqual(only(problemsOf(disabledOther), "loop_from_disabled"), []);
+    assert.equal(only(problemsOf(disabledOther), "disabled_takes_first_outcome").length, 1);
+  });
+
   it("a block reading a later block of its loop is told it reads the previous pass", () => {
     const wf = testWorkflow(
       [manual(), agent("Fix", "Fix: {{ nodes.Review.output.summary }}"), reviewer(), testNode("done", "stop", { as: "success" }, { name: "Done" })],

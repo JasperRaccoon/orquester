@@ -142,6 +142,19 @@ describe("the run fields gates add", () => {
     assert.equal(summary?.parked, true);
     assert.equal(summary?.skipDetail, "previous run is waiting on gate “Deploy?”");
     assert.equal(sanitizeBlockRun({ nodeId: "Gate", status: "waiting", gateId: "g1" })?.gateId, "g1");
+    // A reported agent block, as the daemon sends it: the report (and each earlier pass's) survives.
+    const report = { outcome: "changes_requested", summary: "Add a test.", outputs: { files: 2 }, sessionId: "s1", reportedAt: "2026-11-10T10:00:00.000Z" };
+    const reviewed = sanitizeBlockRun({
+      nodeId: "Review",
+      status: "succeeded",
+      pass: 2,
+      report: { ...report, outcome: "approved", summary: "Good now." },
+      passes: [{ pass: 1, status: "succeeded", attempt: 1, report, gateId: "g0" }]
+    });
+    assert.deepEqual(reviewed?.report, { ...report, outcome: "approved", summary: "Good now." });
+    assert.deepEqual(reviewed?.passes?.[0]?.report, report);
+    assert.equal(reviewed?.passes?.[0]?.gateId, "g0");
+    assert.equal(sanitizeBlockRun({ nodeId: "Review", status: "running", report: { outcome: "x" } })?.report, undefined, "no summary, no report");
     const whole = sanitizeWorkflowRun({
       ...run(),
       definition: workflow([node("T", "trigger.manual"), node("Gate", "gate")]),

@@ -29,7 +29,7 @@ export const GATE_COMMENT_MAX_CHARS = 4_000;
 
 export type GateWaitingOn = Extract<WaitingOn, { kind: "gate" }>;
 /** The executor's own part of the WaitingOn: what only it resumes. */
-export type GateExtras = Pick<GateWaitingOn, "agent" | "reminders" | "launcher">;
+export type GateExtras = Pick<GateWaitingOn, "agent" | "reminders" | "launcher" | "loopLimit">;
 
 /** The label of the person, as decisions and deciders name them. */
 export const PERSON_LABEL = "you";
@@ -73,6 +73,7 @@ export function waitingOnFor(gate: WorkflowGateState, extras: GateExtras = {}): 
   if (extras.agent !== undefined) waitingOn.agent = structuredClone(extras.agent);
   if (extras.reminders !== undefined) waitingOn.reminders = extras.reminders;
   if (extras.launcher !== undefined) waitingOn.launcher = { ...extras.launcher };
+  if (extras.loopLimit !== undefined) waitingOn.loopLimit = { ...extras.loopLimit };
   return waitingOn;
 }
 
@@ -83,7 +84,18 @@ export function extrasOf(waitingOn: WaitingOn | undefined): GateExtras {
   if (waitingOn.agent !== undefined) extras.agent = structuredClone(waitingOn.agent);
   if (typeof waitingOn.reminders === "number") extras.reminders = waitingOn.reminders;
   if (waitingOn.launcher !== undefined && typeof waitingOn.launcher.commandId === "string") extras.launcher = { ...waitingOn.launcher };
+  if (isLoopLimitWait(waitingOn)) extras.loopLimit = { ...waitingOn.loopLimit };
   return extras;
+}
+
+/** A loop-limit gate's wait (§7.2): the engine's own, never a block executor's. */
+export function isLoopLimitWait(waitingOn: WaitingOn | undefined): waitingOn is GateWaitingOn & { loopLimit: { edgeId: string; handle: string } } {
+  return (
+    waitingOn?.kind === "gate" &&
+    waitingOn.loopLimit !== undefined &&
+    typeof waitingOn.loopLimit.edgeId === "string" &&
+    typeof waitingOn.loopLimit.handle === "string"
+  );
 }
 
 /** The gate's output (§6.2). */

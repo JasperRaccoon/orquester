@@ -4,7 +4,8 @@
 // phase) under the gate's own node id, so its chat's owner names the gate's node. The executor's
 // `WaitingOn {kind: "agent"}` is kept inside the gate's (`WaitingOn.agent`), so a restart resumes the
 // reviewer exactly like an agent block. The one reminder is a follow-up turn into the same chat
-// (`session: continue`, the chat found through the gate's own name in the expression context).
+// (`session: continue`, the chat found through the gate's own name in the expression context). In a
+// loop's later pass the reviewer gets the gate's `ctx.loop`, so the loop's session option applies.
 
 import { agentConfigSchema, type AgentBlockConfig } from "@orquester/config";
 import { WORKFLOW_LIMITS, type GateBlockConfig, type WorkflowGateState, type WorkflowNode } from "@orquester/api";
@@ -113,6 +114,11 @@ export async function runReviewer(input: ReviewerRunInput): Promise<NodeResult> 
     services: ctx.services,
     log: ctx.log
   };
+  // A gate a loop runs again (spec 2026-11-10 §7.3): its reviewer follows the loop's session option
+  // like an agent block of the reset set — `continue` in its previous pass's chat (the gate block's
+  // recorded `sessionId`), else a new chat with the previous pass's decision. Not the reminder: that
+  // turn always goes into this pass's own chat.
+  if (input.mode === "new" && ctx.loop !== undefined) sub.loop = structuredClone(ctx.loop);
   if (input.resume !== undefined) sub.resumeFrom = { kind: "agent", ...structuredClone(input.resume) };
   return input.agent.execute(sub);
 }

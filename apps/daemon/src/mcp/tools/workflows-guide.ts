@@ -109,6 +109,9 @@ function blockContracts(): string {
 
 /** The MCP's own hints on a recipe, after its shared notes. */
 const RECIPE_MCP_NOTES: Record<string, readonly string[]> = {
+  "loop-until-approved": [
+    "list_workflow_gates lists a waiting gate; decide_workflow_gate {runId, nodeName: \"Approve\", choice: \"approve\"} decides it (an external client as the person; a chat only a gate assigned to it)."
+  ],
   "agent-outcomes": [
     "After a run, get_workflow_runs {runId} shows Triage's `report` (outcome, summary, outputs) and which connection was taken; preview_expression {workflowId, node: \"Page\", template: \"{{ input.outputs.summary_line }}\"} shows the value Page sends."
   ]
@@ -119,7 +122,7 @@ const bullets = (items: readonly { term?: string; text: string }[]): string =>
 
 export const WORKFLOW_AUTHORING_GUIDE = `# Authoring workflows through the MCP
 
-1. A workflow is a directed acyclic graph of blocks (nodes). An edge goes from one block's output
+1. A workflow is a graph of blocks (nodes). An edge goes from one block's output
    handle to the next block. A run starts at a trigger (trigger.manual, trigger.schedule,
    trigger.git); run_workflow starts one by hand, from any trigger, even while the workflow is
    disabled. Edges run one way; a loop edge (point 4b) is the only way back to an earlier block,
@@ -134,8 +137,8 @@ export const WORKFLOW_AUTHORING_GUIDE = `# Authoring workflows through the MCP
    "… is empty: nothing at <path>" means the path reads nothing, and \`available\` lists the keys.
 3. Output handles: triggers \`success\`; agent, code, shell, http, merge, wait and workflow
    \`success\` and \`error\`; an agent with \`outcomes\` \`outcome:<id>\` per outcome and \`error\`
-   (no \`success\`); if \`true\` / \`false\` / \`error\`; switch \`case:0\`, \`case:1\`, …,
-   \`default\`, \`error\`; stop and note have none. An edge without sourceHandle is \`success\`.
+   (no \`success\`); gate \`choice:<id>\` per choice and \`error\`; if \`true\` / \`false\` /
+   \`error\`; switch \`case:0\`, \`case:1\`, …, \`default\`, \`error\`; stop and note have none. An edge without sourceHandle is \`success\`.
    A block runs once all its incoming edges are settled and at least one is live; a block whose
    incoming edges are all dead (an if's other branch) is skipped.
 4. Failures and retries:

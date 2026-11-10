@@ -143,6 +143,13 @@ export type WaitingOn =
        * (the host's receipt dedupes a re-post after a restart); `delivered` once the chat took it.
        */
       launcher?: { commandId: string; delivered?: true };
+      /**
+       * A loop-limit gate (§7.2), engine-owned: the block finished (its output kept) on `handle`,
+       * whose loop edge `edgeId` was at its limit. Its gate id is minted and persisted here with the
+       * block's finish, BEFORE the record is stored and the person pushed; a restart re-opens or
+       * re-awaits exactly that gate. The block's executor never resumes this wait.
+       */
+      loopLimit?: { edgeId: string; handle: string };
     };
 
 export interface PersistedBlockState extends WorkflowBlockRun {

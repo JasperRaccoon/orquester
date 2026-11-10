@@ -48,6 +48,16 @@ describe("workflow recipes", () => {
     assert.deepEqual(recipe.edges.filter((edge) => edge.source === "Triage").map((edge) => edge.sourceHandle), ["outcome:high", "outcome:low"]);
   });
 
+  it("the worked loop recipe is fix → review → loop back on changes_requested → a person's gate before merge", () => {
+    const recipe = WORKFLOW_RECIPES.find((entry) => entry.id === "loop-until-approved")!;
+    const loops = recipe.edges.filter((edge) => edge.loop !== undefined);
+    assert.deepEqual(loops, [{ source: "Review", sourceHandle: "outcome:changes_requested", target: "Fix", loop: { maxLoops: 3, session: "continue" } }]);
+    const gate = recipe.nodes.find((node) => node.type === "gate")!;
+    assert.deepEqual(outputHandles({ id: "x", type: "gate", config: gate.config }), ["choice:approve", "choice:reject", "error"]);
+    assert.deepEqual(recipe.edges.filter((edge) => edge.source === "Review" && edge.loop === undefined).map((edge) => [edge.sourceHandle, edge.target]), [["outcome:approved", gate.name]]);
+    assert.deepEqual(recipe.edges.filter((edge) => edge.source === gate.name).map((edge) => edge.sourceHandle), ["choice:approve", "choice:reject"]);
+  });
+
   it("no guide text still tells an agent to parse a reply in a Code block", () => {
     const text = JSON.stringify({ WORKFLOW_BLOCK_GUIDES, WORKFLOW_EXPRESSION_RULES, WORKFLOW_RECIPES });
     assert.doesNotMatch(text, /parse it in a Code block/i);

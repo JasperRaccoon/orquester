@@ -190,7 +190,7 @@ export const WORKFLOW_FAILURE_GUIDE: readonly WorkflowGuideItem[] = [
   },
   {
     term: "never retried",
-    text: "`all_burnt` (every agent account out of usage), `limit_exceeded` (an output or body too large, sub-workflows nested too deep) and `loop_limit` (a loop edge taken more often than its `maxLoops`); nor a Stop block, `stop()` or a cancelled run."
+    text: "`all_burnt` (every agent account out of usage), `limit_exceeded` (an output or body too large, sub-workflows nested too deep), `loop_limit` (a loop stopped at its limit) and `gate_expired`; nor a Stop block, `stop()` or a cancelled run. `no_report` is retried."
   }
 ];
 
@@ -198,9 +198,9 @@ export const WORKFLOW_FAILURE_GUIDE: readonly WorkflowGuideItem[] = [
 // Loop edges (spec 2026-11-10 §7)
 // ---------------------------------------------------------------------------
 
-/** What happens when a loop edge is taken at its limit, in words (one place: an integration may replace it with a gate). */
+/** What happens when a loop edge is taken at its limit, in words (the loop-limit gate, §7.2). */
 export const WORKFLOW_LOOP_LIMIT_TEXT =
-  "Taken once more than `maxLoops`, the loop edge is not followed: its source block fails with `loop_limit` (never retried), so its `error` connection runs, else the run fails.";
+  "A loop edge taken after `maxLoops` loops opens a loop-limit gate on its source for the person (a gate like any other, source `loop_limit`): `allow` raises that edge's limit by one for this run and loops; `stop`, or no decision in 7 days, fails the source with `loop_limit`, so its `error` connection runs, else the run fails.";
 
 /** How loop edges behave: the facts the MCP's authoring guide and the editor's help share. */
 export const WORKFLOW_LOOP_GUIDE: readonly WorkflowGuideItem[] = [
@@ -325,7 +325,7 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
         },
         {
           term: "disabled, pinned",
-          text: "A disabled block with outcomes passes its input on through its first outcome. Pinned data of a block with outcomes must include `outcome` (a declared id): it picks the handle."
+          text: "A disabled block with outcomes passes its input on through its first outcome (never a loop edge there: a warning says so). Pinned data of a block with outcomes must include `outcome` (a declared id): it picks the handle."
         }
       ]
     },
@@ -824,7 +824,7 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
     id: "handle-failure",
     title: "Retry, then handle the failure",
     notes: [
-      "`retry` is a block field, not config: the `error` connection is taken only after the last try. `all_burnt` and `limit_exceeded` are never retried.",
+      "`retry` is a block field, not config: the `error` connection is taken only after the last try. `all_burnt`, `limit_exceeded`, `loop_limit` and `gate_expired` are never retried.",
       "After `error`, `input` is the failed block's output (Shell `{ stdout, stderr, exitCode }`, e.g. `{{ input.stderr | lines(20) }}`) and `{{ nodes.Deploy.error.message }}` says why.",
       "A handled failure no longer fails the run: the Stop with `as: \"failure\"` keeps it failed (and notified)."
     ],
@@ -876,19 +876,19 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
   },
   {
     id: "loop-until-approved",
-    title: "Fix until a review approves (a loop edge)",
+    title: "Fix, review, loop back on requested changes, then a person approves the merge",
     notes: [
-      "Review's `changes_requested` outcome carries only the loop edge back to Fix (`loop: { maxLoops: 3 }`): taking it runs Fix and Review again, Fix in its previous chat (`session: \"continue\"`) with Review's report summary as feedback.",
-      `Review's other outcome goes on. ${WORKFLOW_LOOP_LIMIT_TEXT}`
+      "Review's `outcomes` replace its `success` handle. `outcome:changes_requested` carries only the loop edge back to Fix: Fix and Review run again, Fix in its previous chat (`session: \"continue\"`) with Review's summary as feedback; a fourth request opens the loop-limit gate.",
+      "`outcome:approved` reaches the Approve gate: the person picks `choice:approve` (Merge) or `choice:reject` (the run fails with the comment)."
     ],
     nodes: [
       { type: "trigger.manual", name: "Start", config: { inputExample: "{ \"task\": \"Add a --json flag to the CLI\" }" } },
-      { type: "agent", name: "Fix", config: { prompt: { kind: "text", text: "Implement in {project}: {{ trigger.input.task }}. Do not commit." }, chain: CLAUDE } },
+      { type: "agent", name: "Fix", config: { prompt: { kind: "text", text: "Implement in {project}: {{ trigger.input.task }}. Commit on a new branch; do not merge." }, chain: CLAUDE } },
       {
         type: "agent",
         name: "Review",
         config: {
-          prompt: { kind: "text", text: "Review the uncommitted changes for: {{ trigger.input.task }}. Approve them, or request changes and say which." },
+          prompt: { kind: "text", text: "Review the branch Fix committed for: {{ trigger.input.task }}. Approve it, or request changes and say which." },
           chain: CLAUDE,
           outcomes: [
             { id: "approved", label: "Approved" },
@@ -896,13 +896,28 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
           ]
         }
       },
-      { type: "agent", name: "Commit", config: { prompt: { kind: "text", text: "Commit the changes with a short message." }, chain: CLAUDE } }
+      {
+        type: "gate",
+        name: "Approve",
+        config: {
+          question: "Merge the fix for: {{ trigger.input.task }}?",
+          details: "{{ nodes.Review.output.summary }}",
+          choices: [
+            { id: "approve", label: "Approve" },
+            { id: "reject", label: "Reject", comment: "optional" }
+          ]
+        }
+      },
+      { type: "agent", name: "Merge", config: { prompt: { kind: "text", text: "Merge the branch Fix committed into the branch it started from." }, chain: CLAUDE } },
+      { type: "stop", name: "Rejected", config: { as: "failure", message: "Rejected: {{ nodes.Approve.output.comment | default(\"no comment\") }}" } }
     ],
     edges: [
       { source: "Start", target: "Fix" },
       { source: "Fix", target: "Review" },
-      { source: "Review", sourceHandle: "outcome:approved", target: "Commit" },
-      { source: "Review", sourceHandle: "outcome:changes_requested", target: "Fix", loop: { maxLoops: 3, session: "continue" } }
+      { source: "Review", sourceHandle: "outcome:changes_requested", target: "Fix", loop: { maxLoops: 3, session: "continue" } },
+      { source: "Review", sourceHandle: "outcome:approved", target: "Approve" },
+      { source: "Approve", sourceHandle: "choice:approve", target: "Merge" },
+      { source: "Approve", sourceHandle: "choice:reject", target: "Rejected" }
     ]
   },
   {

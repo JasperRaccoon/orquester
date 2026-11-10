@@ -23,8 +23,8 @@ from the 72-tool 2.x surface).
 
 **One catalog, two audiences.** The same tool definitions also serve the agents chatting *inside*
 Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
-these 44 tools plus five chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
-`push_secret_files`), and — while their plugins allow — the plugin families: temporary boxes,
+these 44 tools plus six chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
+`push_secret_files`, `report_step_result`), and — while their plugins allow — the plugin families: temporary boxes,
 the knowledge base, devices (§15) and GPT Image (§16). (`show_image` copies PNG, JPEG, WebP or GIF files — from the
 workspaces, the chat's own attachments or the host's temp folders, or named `recent:N` /
 `attachment:<id>` — into the chat as an inline image row; it reads nothing else.) Every
@@ -1466,7 +1466,7 @@ only `createdBy.kind`.
 
 ### Automated workflows, agent config, desktops
 
-The 12 workflow tools are in §12, `get_agent_profile` and `edit_agent_profile` in §13,
+The 14 workflow tools are in §12 (with the chat-only `report_step_result`), `get_agent_profile` and `edit_agent_profile` in §13,
 `get_desktops` and `control_desktop` in §14.
 
 ---
@@ -1880,7 +1880,7 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 | `get_workflow_runs` | `workflowId` (`before?`, `limit? = 20`), or `runId` (`waitSeconds?`), or `runId` + `nodeId` (`outputOffset?`, `log?`) | runs, newest first, `before`; one run's `{run, blocks, gates?, loops?, outputNote?}`; one block's `output` or a window `{outputText, offset, totalBytes, nextOffset?}`, or its stdout/stderr log |
 | `cancel_workflow_run` | `runId` | `{cancelRequested: true, runId, run?}` |
 | `decide_workflow_gate` | `runId`, `gateId` (or `nodeName`), `choice`, `comment?`; or `escalate: true` + `comment` (agent deciders) | `{decided: true, runId, gateId, choice, next}`; `{escalated: true, …}`; a later call `{alreadyDecided: true, choice, decidedBy, decidedAt, comment?, next}` |
-| `list_workflow_gates` | `project?`, `includeDecided? = false` | `{gates: [{gateId, runId, rootRunId?, workflow, workflowId, projectPath?, block, question, details?, choices, decider, state, deadlineAt?, waitingFor?, decision?, escalated?, yours?, call?}], next}` |
+| `list_workflow_gates` | `project?`, `includeDecided? = false` | `{gates: [{gateId, runId, rootRunId?, workflow, workflowId, projectPath?, block, source?, question, details?, choices, decider, state, deadlineAt?, waitingFor?, decision?, escalated?, yours?, call?}], next}` |
 | `list_workflow_secrets` | `workflowId?` | `{secrets: [{name, scope, workflowId?, updatedAt, short?}]}` — names only |
 | `set_workflow_secret` | `name`, `value?`, `workflowId?`, `delete? = false` | `{set: true, name, scope, workflowId?, warning?}` or the deletion |
 
@@ -1892,8 +1892,8 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   projectOverride?}`. `config` is merged over the type's default config, so only what differs is
   needed; a missing name is minted (`Agent`, `Agent2`, …). Positions are optional: without any,
   the daemon lays the whole graph out.
-- **Edges** name blocks by **name** (or id): `{source, sourceHandle?, target}`, `sourceHandle`
-  defaulting to `success`.
+- **Edges** name blocks by **name** (or id): `{source, sourceHandle?, target, loop?}`, `sourceHandle`
+  defaulting to `success` (`loop`: "Loop edges" below).
 - **`settings`**: `overlap` (`skip` — the default: a trigger that fires while a run is active is
   skipped —, `queue`, `parallel`), `maxConcurrent` (1–8, parallel only), `timezone` (IANA;
   defaults to the daemon host's own zone), `runTimeoutMinutes`, `notify {onFailure, onSuccess}`,
@@ -1916,14 +1916,16 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 ### Authoring rules (what `list_workflow_block_types`' `authoringGuide` teaches)
 
 - Blocks read earlier outputs through expressions: `{{ nodes.<Name>.output… }}`, `{{ input }}`
-  (the output of the block feeding this one), `{{ trigger… }}`, `{{ run… }}`, `{{ project… }}`,
+  (the output of the block feeding this one), `{{ trigger… }}`, `{{ run… }}`, `{{ project… }}`, `{{ workflow… }}`,
   `{{ secrets.NAME }}`, `{{ loop.pass }}` / `{{ loop.feedback }}` (loop edges), with filters (`| json`, `| compact`, `| default("x")`, `| length`, …). The
   `expressionGuide` has the full grammar.
 - Output handles: triggers `success`; agent, code, shell, http, merge, wait and workflow `success`
   and `error`; an agent block with `outcomes` one `outcome:<id>` per outcome (in declared order) and
-  `error`, no `success`; if `true` / `false` / `error`; switch `case:0`, `case:1`, …, `default`,
-  `error`; stop and note none. A failed block with no `error` edge fails the run. A block all of whose
-  incoming edges are dead (an if's other branch) is skipped.
+  `error`, no `success`; gate one `choice:<id>` per choice and `error`; if `true` / `false` /
+  `error`; switch `case:0`, `case:1`, …, `default`, `error`; stop and note none. A failed block
+  with no `error` edge fails the run; a block's `retry: {maxTries, delaySeconds}` re-runs it first,
+  except after `all_burnt`, `limit_exceeded`, `loop_limit` or `gate_expired` (`no_report` is
+  retried). A block all of whose incoming edges are dead (an if's other branch) is skipped.
 - **Shell scripts never contain `{{ }}`** (validation refuses it): map values to environment
   variables in the block's `env` list and read `"$NAME"` in the script.
 - **Code** is an ES module whose default export `async function ({ input, nodes, trigger,
@@ -1950,7 +1952,8 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   with no report gets **one** reminder turn in the same chat; still none, the block fails with error
   kind `no_report` (retryable: its `retry` and `error` edge apply). Read the values as
   `{{ nodes.Review.output.outcome }}`, `{{ nodes.Review.output.outputs.pr_url }}`. A disabled agent
-  block with outcomes passes its input on through its **first** outcome (a warning says so);
+  block with outcomes passes its input on through its **first** outcome, never taking a loop edge
+  there (a warning says so);
   pinned data of a block with outcomes must include `outcome` (it picks the handle;
   `pinned_outcome_missing` otherwise). Validation codes: `outcomes_count`, `duplicate_outcome`,
   `outputs_count`, `duplicate_output`, `enum_values`, `description_too_long`,
@@ -1978,8 +1981,14 @@ loop edge as `Review (outcome:changes) ↺ Fix (loop: at most 3, same chat)`.
 - **Taking it.** When the source finishes on that output, its target and every block after the
   target (the source included) — the *reset set* — run again as a new *pass*; blocks of the set
   still running are stopped first (after a restart too), blocks before the target keep their
-  results, and a loop nested in the set gets a fresh budget. Taken once more than `maxLoops`, the
-  source's pass fails with `loop_limit` (never retried): its `error` edge runs, else the run fails.
+  results, and a loop nested in the set gets a fresh budget.
+- **At its limit.** Taken after it has looped `maxLoops` times, the edge opens a **loop-limit gate**
+  on its source block, decided by the person: "<source> → <target> reached its limit (N)." with
+  choices `allow` ("Allow one more loop": that edge's limit goes up by one for this run and the
+  loop is taken) and `stop` ("Stop": the source pass fails with `loop_limit`, never retried; its
+  `error` edge runs, else the run fails). It is a gate like any other (see Gates: push, "Needs you",
+  `list_workflow_gates` with `source: "loop_limit"`, `decide_workflow_gate`); undecided after 7 days
+  it fails `loop_limit`.
 - **Sessions.** `session` (default `continue`) applies to every agent block of the reset set:
   `continue` sends a follow-up turn into that block's chat from its previous pass, headed
   "Workflow loop: pass N of up to M", with its prompt rendered again (the target also gets the
@@ -2036,7 +2045,9 @@ Agent blocks can take hours: for those, start without `wait` and check back. Whe
 ### Gates
 
 A **gate** block pauses its run for a decision between named choices; each choice is an output
-handle `choice:<id>` (plus `error`). Who decides is the block's `decider`:
+handle `choice:<id>` (plus `error`). A loop edge at its limit opens the same kind of gate on its
+source block (`source: "loop_limit"`, person only; "Loop edges" above). Who decides is the block's
+`decider`:
 
 - **`human`** (the default): the person, in Orquester (a push, a "Needs you" row, a decision card in
   the run view) — or from their own MCP client: an external `decide_workflow_gate` decides as the
@@ -2177,6 +2188,54 @@ same pass replaces it until the block settles. The tool does not end the turn; t
 Route: `POST /api/workflow-step-report` (`workflowRoutes.stepReport`), honoured only with an
 in-chat agent principal.
 
+### Worked example: fix → review → loop → approve
+
+The request: *"Have Claude implement a task, have a second pass review it until it approves (at
+most three rounds of changes), then ask me before merging."* This is the authoring guide's recipe
+"Fix, review, loop back on requested changes, then a person approves the merge":
+
+```
+create_workflow {
+  "name": "Fix and review", "project": { "kind": "existing", "project": "acme/api" },
+  "nodes": [
+    { "type": "trigger.manual", "name": "Start" },
+    { "type": "agent", "name": "Fix", "config": {
+        "prompt": { "kind": "text", "text": "Implement in {project}: {{ trigger.input.task }}. Commit on a new branch; do not merge." },
+        "chain": [{ "agent": "claude", "model": "default" }] } },
+    { "type": "agent", "name": "Review", "config": {
+        "prompt": { "kind": "text", "text": "Review the branch Fix committed for: {{ trigger.input.task }}. Approve it, or request changes and say which." },
+        "chain": [{ "agent": "claude", "model": "default" }],
+        "outcomes": [{ "id": "approved", "label": "Approved" },
+                     { "id": "changes_requested", "label": "Changes requested", "description": "Something must change first; the summary says what." }] } },
+    { "type": "gate", "name": "Approve", "config": {
+        "question": "Merge the fix for: {{ trigger.input.task }}?", "details": "{{ nodes.Review.output.summary }}",
+        "choices": [{ "id": "approve", "label": "Approve" }, { "id": "reject", "label": "Reject", "comment": "optional" }] } },
+    { "type": "agent", "name": "Merge", "config": {
+        "prompt": { "kind": "text", "text": "Merge the branch Fix committed into {branch}." },
+        "chain": [{ "agent": "claude", "model": "default" }] } },
+    { "type": "stop", "name": "Rejected", "config": { "as": "failure", "message": "Rejected: {{ nodes.Approve.output.comment | default(\"no comment\") }}" } }
+  ],
+  "edges": [
+    { "source": "Start", "target": "Fix" },
+    { "source": "Fix", "target": "Review" },
+    { "source": "Review", "sourceHandle": "outcome:changes_requested", "target": "Fix", "loop": { "maxLoops": 3, "session": "continue" } },
+    { "source": "Review", "sourceHandle": "outcome:approved", "target": "Approve" },
+    { "source": "Approve", "sourceHandle": "choice:approve", "target": "Merge" },
+    { "source": "Approve", "sourceHandle": "choice:reject", "target": "Rejected" }
+  ]
+}
+```
+
+- Review declares `outcomes`, so its handles are `outcome:approved`, `outcome:changes_requested`
+  and `error` (no `success`); it reports with `report_step_result {outcome, summary}`.
+- `outcome:changes_requested` carries only the loop edge: Fix and Review run again, Fix as a
+  follow-up turn in its own chat with Review's summary as feedback (`{{ loop.feedback }}`).
+  A fourth request for changes opens the loop-limit gate (`allow` / `stop`, above).
+- `outcome:approved` reaches the Approve gate (decider: the person). While it waits,
+  `list_workflow_gates` lists it and `decide_workflow_gate {runId, nodeName: "Approve", choice:
+  "approve"}` decides it (from your client, as the person); `reject` ends the run failed with the
+  comment.
+
 ### Worked example: the Jira fixer
 
 The request: *"Every 15 minutes, fetch new Jira tickets labelled orquester-fix; if there are none,
@@ -2261,7 +2320,7 @@ run_workflow { "workflowId": "5f0c…", "revision": 1, "wait": true, "timeoutSec
       { "name": "FetchTickets", "status": "succeeded", "output": { "tickets": [{ "key": "PROJ-7", "summary": "…" }] } },
       { "name": "HasTickets", "status": "succeeded", "handle": "true", "output": { /* … */ } },
       { "name": "NoTickets", "status": "skipped" },
-      { "name": "FixTickets", "status": "succeeded", "sessionId": "c-19…", "hops": [ /* … */ ], "output": { "text": "{\"fixed\":[\"PROJ-7\"]}", /* … */ } },
+      { "name": "FixTickets", "status": "succeeded", "sessionId": "c-19…", "hops": [ /* … */ ], "report": { "summary": "Fixed PROJ-7.", "outputs": { "fixed": ["PROJ-7"] }, /* … */ }, "output": { "text": "Fixed PROJ-7.", "outputs": { "fixed": ["PROJ-7"] }, /* … */ } },
       { "name": "MarkDone", "status": "succeeded", "output": { "moved": ["PROJ-7"] } },
       { "name": "NotifySlack", "status": "succeeded", "output": { "status": 200, /* … */ } },
       { "name": "Failed", "status": "skipped" } ] }
