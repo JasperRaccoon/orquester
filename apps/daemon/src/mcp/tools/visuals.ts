@@ -68,7 +68,7 @@ const THEME = `Theme: :root CSS variables (hex), following the user's theme and 
 
 const html = z.string().min(1).max(HTML_RENDER_MAX_HTML_CHARS).describe("A complete, self-contained HTML document.");
 
-/** Neither tool claims anything the gate judges beyond the caller itself: it shows or measures a page. */
+/** The caller itself, nothing else the gate judges: a page shown or measured (`show_image` adds the files it reads). */
 const ownThread = (caller: ToolCaller, writes: boolean): ScopeClaim => ({
   projects: [],
   sessions: caller.kind === "thread" ? [caller.threadId] : [],
