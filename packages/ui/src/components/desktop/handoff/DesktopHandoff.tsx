@@ -39,7 +39,7 @@ import { useAppStore } from "../../../store/app";
 import { Dropdown } from "../../ui/dropdown";
 import { DesktopActionLogPanel } from "./DesktopActionLog";
 import { DesktopAgentOverlay } from "./DesktopAgentOverlay";
-import { canvasShowsWholeDisplay, mapDisplayPoint, unionRect, type Rect, type ViewPoint } from "./overlay.logic";
+import { canvasShowsWholeDisplay, clientToBox, mapDisplayPoint, unionRect, type Rect, type ViewPoint } from "./overlay.logic";
 
 /** Elements whose input is not desktop input (the toolbar, this UI's own controls, local-only controls). */
 const NOT_DESKTOP_INPUT = "[data-desktop-toolbar], [data-desktop-handoff]";
@@ -351,21 +351,34 @@ function TakeoverToast({ handoff }: { handoff: DesktopHandoff }) {
 
 /**
  * Over the stream (a sibling of its element, covering the same box): the agent's marks and the
- * takeover toast. `streamRoot` holds the rendered surface; `display` is the desktop's size.
+ * takeover toast. Marks are placed with `displayToClient` (the stream client's, which knows its
+ * pan and includes the local zoom); while it cannot place a point, from the surface rendered in
+ * `streamRoot`. `display` is the display's size as the stream reports it.
  */
 export function DesktopHandoffLayer({
   handoff,
   streamRoot,
-  display
+  display,
+  displayToClient
 }: {
   handoff: DesktopHandoff;
   streamRoot: React.RefObject<HTMLElement | null>;
   display: DesktopSize;
+  displayToClient: (x: number, y: number) => ViewPoint | null;
 }): React.ReactElement {
   const box = React.useRef<HTMLDivElement | null>(null);
-  const displayRef = React.useRef(display);
-  displayRef.current = display;
-  const mapPoint = React.useCallback((x: number, y: number) => mapStreamPoint(streamRoot.current, box.current, displayRef.current, { x, y }), [streamRoot]);
+  const latest = React.useRef({ display, displayToClient });
+  latest.current = { display, displayToClient };
+  const mapPoint = React.useCallback(
+    (x: number, y: number) => {
+      const container = box.current;
+      if (!container) return null;
+      const onScreen = latest.current.displayToClient(x, y);
+      if (onScreen) return clientToBox(onScreen, rectOf(container));
+      return mapStreamPoint(streamRoot.current, container, latest.current.display, { x, y });
+    },
+    [streamRoot]
+  );
   // History the log load brings never animates: only what arrived as events.
   const live = React.useMemo(() => liveDesktopActions(handoff.ring), [handoff.ring]);
   return (

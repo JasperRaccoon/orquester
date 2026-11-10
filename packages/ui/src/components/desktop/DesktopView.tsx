@@ -846,7 +846,12 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
           <div ref={containerRef} className="absolute inset-0 touch-none" />
         </div>
         {touchRendering && inputMode === "trackpad" && conn === "connected" && <DesktopTouchCursor store={touchStore} />}
-        <DesktopHandoffLayer handoff={handoff} streamRoot={containerRef} display={desktop.size} />
+        <DesktopHandoffLayer
+          handoff={handoff}
+          streamRoot={containerRef}
+          display={displaySize}
+          displayToClient={(x, y) => clientRef.current?.displayToClient(x, y) ?? null}
+        />
         {overlay && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 overflow-y-auto bg-neutral-950/90 px-4 py-6 text-center text-sm text-neutral-400">
             {overlay}
