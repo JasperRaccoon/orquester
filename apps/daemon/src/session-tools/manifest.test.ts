@@ -209,6 +209,20 @@ test("knowledge: a workflow-owned chat keeps its tools and receives approval and
   assert.match(manifest.instructions, KNOWLEDGE_LINE);
 });
 
+test("GPT Image: generate_image and its instruction line only while images are available", () => {
+  const chat = catalogFor("chat");
+  const off = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [], devicesAvailable: true });
+  const on = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [], imagesAvailable: true });
+  const owned = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [], imagesAvailable: true });
+  assert.ok(!off.tools.includes("generate_image"));
+  assert.doesNotMatch(off.instructions, /generate_image/);
+  assert.ok(on.tools.includes("generate_image"));
+  assert.ok(owned.tools.includes("generate_image"), "it is not Admin, so a workflow-owned chat keeps it");
+  assert.equal(on.instructions.split("\n").filter((line) => line.includes("generate_image")).length, 1);
+  // Gated independently of the device tools.
+  assert.ok(!on.tools.includes("list_devices"));
+});
+
 test("devices: the device tools and their instruction line only while devices are available", () => {
   const chat = catalogFor("chat");
   const DEVICE_TOOLS = ["list_devices", "open_device", "device_action", "device_install", "close_device"];

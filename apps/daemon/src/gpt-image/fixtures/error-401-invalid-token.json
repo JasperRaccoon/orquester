@@ -1,0 +1,24 @@
+{
+  "note": "A garbage bearer token.",
+  "request": {
+    "path": "/backend-api/codex/images/generations",
+    "headers": [
+      "Authorization: Bearer garbage-not-a-token",
+      "chatgpt-account-id",
+      "Content-Type"
+    ],
+    "body": {
+      "prompt": "A small flat-style icon of a red apple on a plain background",
+      "model": "gpt-image-2",
+      "quality": "low"
+    }
+  },
+  "status": 401,
+  "headers": {
+    "cf-ray": "<id>",
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": "Could not parse your authentication token. Please try signing in again."
+  }
+}

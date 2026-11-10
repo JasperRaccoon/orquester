@@ -113,8 +113,14 @@ import {
   type AgentRowsMode
 } from "@orquester/api/agent-chat";
 
-import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
-import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
+import type { AccountHome, HistoryImportProgress, ImageToolReference, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
+import {
+  htmlRenderReferenceOfActivityPayload,
+  IMAGE_GENERATION_ITEM_TYPE,
+  imageToolReferenceOfActivityPayload,
+  isHtmlRenderAttachmentId,
+  mcpAppReferenceOfActivityPayload
+} from "@orquester/api/agent-chat";
 import {
   APPROVAL_ALREADY_ANSWERED_REASON,
   APPROVAL_ARRIVED_REASON,
@@ -2471,7 +2477,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         return;
       }
       const total = events.length;
-      const forkedApps = await forkedMcpApps(head);
+      const forked = await forkedReferences(head);
       reportHistoryImport(runtime, { phase: "importing", done: 0, total });
       runtime.historyBuffer = [];
       try {
@@ -2485,7 +2491,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               type: event.type
             });
           }
-          await ingestion.ingest(withForkedMcpApp(event, forkedApps));
+          await ingestion.ingest(withForkedReferences(event, forked));
         }
         await ingestion.flushThread(runtime.id);
       } finally {
@@ -2510,30 +2516,40 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * adapter's, attached live. So the parent's rows lend theirs, by call id —
    * the provider's fork keeps its item ids — and the snapshot they name is
    * the child's own copy (`copyRetainedPages` copied every retained turn's),
-   * which the child's sweep then keeps because a row names it. Read from the
-   * parent's fold at replay time: a parent deleted before the child's first
-   * start, or a row its window no longer holds, lends nothing and the call
-   * replays as a plain tool row.
+   * which the child's sweep then keeps because a row names it. Codex's own
+   * images (`image_generation` items) are the same: the adapter stores the
+   * image from the live stream only (`adapters/codex/image-generation.ts`),
+   * so a replayed item gets its parent row's `data.imageRef`, naming the
+   * child's copy. What is lent lands in the child's log with the replayed
+   * row, which stays the record. Read from the parent's fold at replay time:
+   * a parent deleted before the child's first start, or a row its window no
+   * longer holds, lends nothing and the call replays as it was projected.
    */
-  const forkedMcpApps = async (head: ThreadHead): Promise<ReadonlyMap<string, McpAppReference>> => {
-    const apps = new Map<string, McpAppReference>();
-    if (head.lineage?.relation !== "fork") return apps;
+  const forkedReferences = async (head: ThreadHead): Promise<ForkedReferences> => {
+    const lent = { apps: new Map<string, McpAppReference>(), images: new Map<string, ImageToolReference>() };
+    if (head.lineage?.relation !== "fork") return lent;
     try {
       const parent = await loadRuntime(head.lineage.parentThreadId);
-      if (parent.deleted || parent.state.deleted) return apps;
+      if (parent.deleted || parent.state.deleted) return lent;
       for (const activity of parent.state.activities) {
+        const payload = activity.payload as { toolUseId?: unknown; itemType?: unknown } | null;
+        const callId = payload?.toolUseId;
+        if (typeof callId !== "string") continue;
         const reference = mcpAppReferenceOfActivityPayload(activity.payload);
-        const callId = (activity.payload as { toolUseId?: unknown } | null)?.toolUseId;
-        if (reference !== undefined && typeof callId === "string") apps.set(callId, reference);
+        if (reference !== undefined) lent.apps.set(callId, reference);
+        if (payload?.itemType === IMAGE_GENERATION_ITEM_TYPE) {
+          const image = imageToolReferenceOfActivityPayload(activity.payload);
+          if (image !== undefined) lent.images.set(callId, image);
+        }
       }
     } catch (error) {
-      logger.warn("agent-host: a fork's parent could not lend its MCP App rows", {
+      logger.warn("agent-host: a fork's parent could not lend its MCP App and image rows", {
         threadId: head.id,
         parentThreadId: head.lineage.parentThreadId,
         error: describeFailure(error)
       });
     }
-    return apps;
+    return lent;
   };
 
   /**
@@ -5313,7 +5329,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     for (const activity of activities) {
       for (const reference of [
         htmlRenderReferenceOfActivityPayload(activity.payload),
-        mcpAppReferenceOfActivityPayload(activity.payload)
+        mcpAppReferenceOfActivityPayload(activity.payload),
+        ...(imageToolReferenceOfActivityPayload(activity.payload)?.images ?? [])
       ]) {
         if (reference === undefined) continue;
         named.add(reference.attachmentId);
@@ -5321,7 +5338,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     }
     try {
-      await store.copyPages(parentThreadId, threadId, (id) => kept.has(id) || !named.has(id));
+      // An image row's image (design 2026-11-10 §9) when a retained turn's row
+      // shows it, or — no fold row naming it — when the parent's log names it
+      // as an image reference: a row the window dropped, so one of the oldest,
+      // which a fork keeps (as a page no row names). An image the log names
+      // only as a message's attachment is a pasted upload, never copied.
+      await store.copyPages(
+        parentThreadId,
+        threadId,
+        (id) => kept.has(id) || (!named.has(id) && isHtmlRenderAttachmentId(id)),
+        { orLoggedImage: (id) => !named.has(id) }
+      );
     } catch (error) {
       logger.warn("agent-host: a fork's pages could not be copied to the child", {
         threadId,
@@ -10440,15 +10467,31 @@ function stampHistoryTimes<TEvent extends { createdAt?: string }>(
   });
 }
 
-/** A replayed call's completion with the app its parent row named ({@link forkedMcpApps}); else as it was. */
-function withForkedMcpApp(event: RuntimeEvent, apps: ReadonlyMap<string, McpAppReference>): RuntimeEvent {
-  if (apps.size === 0 || event.type !== "item.completed" || event.itemId === undefined) return event;
-  const mcpApp = apps.get(event.itemId);
-  if (mcpApp === undefined) return event;
+/** What a fork's parent rows lend its replayed items, by item id ({@link forkedReferences}). */
+interface ForkedReferences {
+  apps: ReadonlyMap<string, McpAppReference>;
+  images: ReadonlyMap<string, ImageToolReference>;
+}
+
+/**
+ * A replayed call's completion with the app its parent row named, or a
+ * replayed Codex image with its parent row's image ({@link forkedReferences});
+ * else as it was.
+ */
+function withForkedReferences(event: RuntimeEvent, lent: ForkedReferences): RuntimeEvent {
+  if ((lent.apps.size === 0 && lent.images.size === 0) || event.type !== "item.completed" || event.itemId === undefined) return event;
   const data = event.payload.data;
   const record = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
-  if ("mcpApp" in record) return event;
-  return { ...event, payload: { ...event.payload, data: { ...record, mcpApp } } };
+  const mcpApp = lent.apps.get(event.itemId);
+  if (mcpApp !== undefined) {
+    if ("mcpApp" in record) return event;
+    return { ...event, payload: { ...event.payload, data: { ...record, mcpApp } } };
+  }
+  const imageRef = event.payload.itemType === IMAGE_GENERATION_ITEM_TYPE ? lent.images.get(event.itemId) : undefined;
+  if (imageRef === undefined || "imageRef" in record || event.payload.status !== "completed") return event;
+  // The projection's "not imported" note is about the image now shown.
+  const { detail: _detail, ...payload } = event.payload;
+  return { ...event, payload: { ...payload, data: { ...record, imageRef } } };
 }
 
 /**

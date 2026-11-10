@@ -6,6 +6,7 @@ import {
   DEVICES_PLUGIN_ID,
   EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
+  GPT_IMAGE_PLUGIN_ID,
   KNOWLEDGE_GRAPH_PLUGIN_ID,
   type PluginEngineInfo,
   type PluginId,
@@ -80,6 +81,17 @@ export const BUILT_IN_PLUGINS: readonly PluginCatalogEntry[] = [
     id: DEVICES_PLUGIN_ID,
     name: "Device simulators",
     description: "Run iOS simulators and Android emulators next to your chats; agents drive them and you watch live.",
+    source: { label: "JasperRaccoon/orquester", url: "https://github.com/JasperRaccoon/orquester" },
+    provider: "Orquester",
+    scope: "global",
+    updates: false
+  },
+  {
+    // Part of Orquester; `generate_image` calls the ChatGPT image endpoint with a connected Codex
+    // account's login, only while it's on (docs/superpowers/specs/2026-11-10-gpt-image-plugin-design.md).
+    id: GPT_IMAGE_PLUGIN_ID,
+    name: "GPT Image",
+    description: "Let your agents generate and edit images with GPT Image on a connected ChatGPT plan.",
     source: { label: "JasperRaccoon/orquester", url: "https://github.com/JasperRaccoon/orquester" },
     provider: "Orquester",
     scope: "global",

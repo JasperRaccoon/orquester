@@ -43,6 +43,9 @@ export function rowBottomPadding(row: AgentChatTimelineRow): string {
     row.kind === "goal-marker" ||
     // A published page sits just above the reply it belongs to.
     row.kind === "visual" ||
+    // So do the images an agent put in the chat, and the place one is coming in.
+    row.kind === "image" ||
+    row.kind === "image-pending" ||
     // So does an MCP App, beside the reply its call belongs to.
     row.kind === "mcp-app" ||
     row.kind === "work" ||

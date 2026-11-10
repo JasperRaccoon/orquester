@@ -1,0 +1,42 @@
+{
+  "note": "No prompt.",
+  "request": {
+    "path": "/backend-api/codex/images/generations",
+    "headers": [
+      "Authorization",
+      "chatgpt-account-id",
+      "Content-Type"
+    ],
+    "body": {
+      "model": "gpt-image-2"
+    }
+  },
+  "status": 400,
+  "headers": {
+    "cf-ray": "<id>",
+    "content-type": "application/json",
+    "x-codex-active-limit": "imagegen_premium",
+    "x-codex-credits-balance": "",
+    "x-codex-credits-has-credits": "True",
+    "x-codex-credits-unlimited": "False",
+    "x-codex-imagegen-request-id": "<id>",
+    "x-codex-plan-type": "pro",
+    "x-codex-primary-over-secondary-limit-percent": "0",
+    "x-codex-primary-reset-after-seconds": "81555",
+    "x-codex-primary-reset-at": "1794348905",
+    "x-codex-primary-used-percent": "0",
+    "x-codex-primary-window-minutes": "1440",
+    "x-codex-secondary-reset-after-seconds": "0",
+    "x-codex-secondary-reset-at": "",
+    "x-codex-secondary-used-percent": "0",
+    "x-codex-secondary-window-minutes": "0"
+  },
+  "body": {
+    "error": {
+      "message": "Missing required parameter: 'prompt'.",
+      "type": "invalid_request_error",
+      "param": "prompt",
+      "code": "missing_required_parameter"
+    }
+  }
+}

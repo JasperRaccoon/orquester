@@ -162,7 +162,7 @@ export type RuntimeErrorClass =
   | "unknown";
 
 /**
- * The seven item types that become activity rows (§5.1 ingestion rules).
+ * The item types that become activity rows (§5.1 ingestion rules).
  * Everything else in `CanonicalItemType` is already represented as a message
  * or as its own event and is dropped from the activity path.
  *
@@ -175,7 +175,9 @@ export const TOOL_LIFECYCLE_ITEM_TYPES = [
   "dynamic_tool_call",
   "collab_agent_tool_call",
   "web_search",
-  "image_view"
+  "image_view",
+  // Codex's own built-in image tool (`chat-images.ts`): an inline image row.
+  "image_generation"
 ] as const;
 
 export type ToolLifecycleItemType = (typeof TOOL_LIFECYCLE_ITEM_TYPES)[number];

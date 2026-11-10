@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { imageToolReferenceOfActivityPayload } from "./chat-images.ts";
 import { parseGoalUpdatedPayload } from "./goal.ts";
 import { slimActivityPayload } from "./slim.ts";
 
@@ -252,6 +253,18 @@ test("a small tool row that loses nothing is not flagged truncated", () => {
   assert.equal(slim.truncated, undefined);
   assert.deepEqual(slim.data, { toolCallId: "tu-1", kind: "bash", toolName: "Bash" });
   assert.equal(slim.toolUseId, "tu-1");
+});
+
+test("a Codex image_generation row keeps its image reference on the wire", () => {
+  const imageRef = {
+    images: [{ attachmentId: "thread_1-uuid-png", mimeType: "image/png", width: 1, height: 1, caption: "a red fox" }],
+    revisedPrompt: "a red fox"
+  };
+  const payload = { itemType: "image_generation", status: "completed", toolUseId: "ig-1", data: { imageRef } };
+  const slim = record(slimActivityPayload(payload));
+  assert.deepEqual(imageToolReferenceOfActivityPayload(slim), imageRef);
+  assert.equal(slim.truncated, undefined, "nothing was cut");
+  assert.deepEqual(record(slimActivityPayload(slim)).data, { imageRef }, "the same after a second slim");
 });
 
 test("ACP content blocks are summarised", () => {

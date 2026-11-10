@@ -46,7 +46,9 @@ export const TOOLSET_IDS = [
   // Knowledge Graph plugin: the shared knowledge base (its spec, "Agent tools").
   "knowledge",
   // Device simulators plugin: iOS simulators and Android emulators (devices spec §9).
-  "devices"
+  "devices",
+  // GPT Image plugin: generate and edit images on a ChatGPT plan (GPT Image design 2026-11-10 §6).
+  "images"
 ] as const;
 export type ToolsetId = (typeof TOOLSET_IDS)[number];
 
@@ -75,7 +77,8 @@ const admin = (name: string): ToolsetToolSpec => ({ name, tier: "admin" });
 /**
  * Every toolset, with its tools in catalog order (spec §9.1), advertised to every chat
  * (the `boxes` ones while boxes can be rented, the `knowledge` ones while the Knowledge Graph
- * plugin is on, the `devices` ones while a device platform is on).
+ * plugin is on, the `devices` ones while a device platform is on, the `images` one while GPT Image
+ * can make images).
  */
 export const TOOLSETS: readonly ToolsetSpec[] = [
   {
@@ -97,6 +100,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       read("get_usage"),
       read("html_preview"),
       act("html_render"),
+      act("show_image"),
       act("request_secret")
     ]
   },
@@ -203,6 +207,13 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
     id: "devices",
     label: "Devices",
     tools: [read("list_devices"), act("open_device"), act("device_action"), act("device_install"), act("close_device")]
+  },
+  // GPT Image: advertised only while the plugin is on and a Codex account can make images
+  // (`session-tools/manifest.ts`). No card: it cannot cost money.
+  {
+    id: "images",
+    label: "Images",
+    tools: [act("generate_image")]
   }
 ];
 

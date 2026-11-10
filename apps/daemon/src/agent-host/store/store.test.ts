@@ -901,6 +901,131 @@ test("a published page stays while any log line names it, past the fold's window
   await store.resolveAttachment("t1", page.id);
 });
 
+test("an inline image row's picture stays while its row is held or named in the log (design 2026-11-10 §9)", async (t) => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
+  const src = path.join(rootDir, "src");
+  const image = await store.putAttachment({
+    threadId: "t1",
+    name: "codex-image.png",
+    mimeType: "image/png",
+    sourcePath: await writeSource(src, "a.png", 64)
+  });
+  const orphan = await store.putAttachment({
+    threadId: "t1",
+    name: "codex-image.png",
+    mimeType: "image/png",
+    sourcePath: await writeSource(src, "b.png", 64)
+  });
+  const activityEvent = (id: string, payload: unknown): AppendableDomainEvent =>
+    ({
+      eventId: `e-${id}`,
+      threadId: "t1",
+      type: "thread.activity-appended",
+      payload: {
+        activity: {
+          kind: "activity",
+          id,
+          tone: "tool",
+          activityKind: "tool.completed",
+          summary: "image",
+          payload,
+          turnId: null,
+          createdAt: "2026-01-01T00:00:01.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z"
+        }
+      },
+      occurredAt: "2026-01-01T00:00:01.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    }) as AppendableDomainEvent;
+  // A Codex `image_generation` row, as its adapter writes it.
+  await store.append({
+    threadId: "t1",
+    events: [
+      created(),
+      activityEvent("image", {
+        itemType: "image_generation",
+        status: "completed",
+        data: { imageRef: { images: [{ attachmentId: image.id, mimeType: "image/png", caption: "a fox" }] } }
+      })
+    ]
+  });
+  await store.drain();
+
+  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(48) });
+  await store.resolveAttachment("t1", image.id);
+  await assert.rejects(store.resolveAttachment("t1", orphan.id), /not found/, "an unnamed image is an orphan");
+
+  // Past the 500-row window the fold keeps, the log's reference still holds it.
+  await store.append({ threadId: "t1", events: Array.from({ length: 600 }, (_, i) => activityEvent(`noise-${i}`, { i })) });
+  await store.drain();
+  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(96) });
+  await assert.doesNotReject(store.resolveAttachment("t1", image.id));
+});
+
+test("an image an image row shows stays past the fold's window; an image never shown goes (design 2026-11-10 §9)", async (t) => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
+  const src = path.join(rootDir, "src");
+  const put = async (name: string) =>
+    store.putAttachment({ threadId: "t1", name, mimeType: "image/png", sourcePath: await writeSource(src, name, 64) });
+  const shown = await put("shot.png");
+  const unsent = await put("unsent.png");
+  const activityEvent = (id: string, payload: unknown): AppendableDomainEvent =>
+    ({
+      eventId: `e-${id}`,
+      threadId: "t1",
+      type: "thread.activity-appended",
+      payload: {
+        activity: {
+          kind: "activity",
+          id,
+          tone: "tool",
+          activityKind: "tool.completed",
+          summary: "show_image",
+          payload,
+          turnId: null,
+          createdAt: "2026-01-01T00:00:01.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z"
+        }
+      },
+      occurredAt: "2026-01-01T00:00:01.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    }) as AppendableDomainEvent;
+  const result = JSON.stringify({ imageRef: { images: [{ attachmentId: shown.id, mimeType: "image/png" }] }, shown: 1 });
+  await store.append({
+    threadId: "t1",
+    events: [
+      created(),
+      activityEvent("show", {
+        itemType: "mcp_tool_call",
+        status: "completed",
+        data: {
+          toolName: "mcp__orquester__show_image",
+          sessionTool: { name: "show_image" },
+          result: { type: "tool_result", content: [{ type: "text", text: result }] }
+        }
+      })
+    ]
+  });
+  await store.drain();
+
+  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(48) });
+  await store.resolveAttachment("t1", shown.id);
+  await assert.rejects(store.resolveAttachment("t1", unsent.id), /not found/, "an image nothing names is an orphan");
+
+  await store.append({ threadId: "t1", events: Array.from({ length: 600 }, (_, i) => activityEvent(`noise-${i}`, { i })) });
+  await store.drain();
+  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(96) });
+  await assert.doesNotReject(store.resolveAttachment("t1", shown.id), "the old image row still serves its image");
+});
+
 test("pruneAttachments sweeps .part files after an hour and pending uploads after a day", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });

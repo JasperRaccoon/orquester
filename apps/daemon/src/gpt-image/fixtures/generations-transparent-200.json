@@ -1,0 +1,65 @@
+{
+  "note": "background transparent: the real image was an RGBA PNG (colour type 6), 82% of pixels alpha 0. quality low asked, medium returned. Image bytes replaced by a 2x2 RGBA PNG.",
+  "request": {
+    "path": "/backend-api/codex/images/generations",
+    "headers": [
+      "Authorization",
+      "chatgpt-account-id",
+      "Content-Type"
+    ],
+    "body": {
+      "prompt": "A flat icon of a blue star, isolated, no background",
+      "model": "gpt-image-2",
+      "background": "transparent",
+      "quality": "low",
+      "size": "1024x1024"
+    }
+  },
+  "status": 200,
+  "headers": {
+    "cf-ray": "<id>",
+    "content-type": "application/json",
+    "x-codex-active-limit": "imagegen_premium",
+    "x-codex-credits-balance": "",
+    "x-codex-credits-has-credits": "True",
+    "x-codex-credits-unlimited": "False",
+    "x-codex-imagegen-request-id": "<id>",
+    "x-codex-plan-type": "pro",
+    "x-codex-primary-over-secondary-limit-percent": "0",
+    "x-codex-primary-reset-after-seconds": "81498",
+    "x-codex-primary-reset-at": "1794348905",
+    "x-codex-primary-used-percent": "0",
+    "x-codex-primary-window-minutes": "1440",
+    "x-codex-secondary-reset-after-seconds": "0",
+    "x-codex-secondary-reset-at": "",
+    "x-codex-secondary-used-percent": "0",
+    "x-codex-secondary-window-minutes": "0"
+  },
+  "body": {
+    "created": 1794267423,
+    "background": "transparent",
+    "data": [
+      {
+        "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGM4oaHBcEJD4z+YAHEAOxMGXyNHwhwAAAAASUVORK5CYII=",
+        "generation_id": "00000000-0000-0000-0000-000000000000"
+      }
+    ],
+    "output_format": "png",
+    "quality": "medium",
+    "safety_identifier": null,
+    "size": "1536x1024",
+    "usage": {
+      "input_tokens": 18,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 18
+      },
+      "output_tokens": 1372,
+      "output_tokens_details": {
+        "image_tokens": 1372,
+        "text_tokens": 0
+      },
+      "total_tokens": 1390
+    }
+  }
+}

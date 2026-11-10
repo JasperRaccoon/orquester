@@ -8,6 +8,7 @@ import type { TemporaryBoxTools } from "../boxes/temporary/tools.ts";
 import type { BoxRegistry } from "../boxes/contracts.ts";
 import type { TokenBrokerSession } from "../boxes/broker/broker.ts";
 import type { DeviceToolsPort } from "../devices/tools-port.ts";
+import type { GptImageToolPort } from "../gpt-image/tool-port.ts";
 
 export type { DaemonApi } from "../mcp/daemon-api.ts";
 export { ToolError, expectOk } from "../mcp/errors.ts";
@@ -33,10 +34,12 @@ interface InternalDaemonApiOptions {
   app: FastifyInstance;
   broadcaster: Broadcaster;
   /** For attachment uploads and visual pages; `null` answers `HOST_UNAVAILABLE`, as the MCP does. */
-  agentChat: Pick<AgentChatService, "uploadAttachment" | "publishHtmlRender" | "previewHtmlRender"> | null;
+  agentChat: (Pick<AgentChatService, "uploadAttachment" | "publishHtmlRender" | "previewHtmlRender"> & Partial<Pick<AgentChatService, "attachmentPath">>) | null;
   /** Getters for a long-lived client: `PUT /api/config/daemon` moves both in place. */
   fsRoot: LivePath;
   workspacesDir: LivePath;
+  /** The appdir: `show_image` reads the calling chat's attachments and the temp directories under it. */
+  baseDir?: string;
   // boxes: the temporary-box backend behind the box MCP tools' `DaemonApi` operations.
   boxes?: TemporaryBoxTools | null;
   // boxes: which paths live in a box project, for the file reads (absent: all host).
@@ -45,6 +48,8 @@ interface InternalDaemonApiOptions {
   boxSessions?: () => Iterable<TokenBrokerSession>;
   // Devices: the device service behind the device MCP tools (null while the plugin is off).
   devices?: () => DeviceToolsPort | null;
+  // GPT Image: the image service behind generate_image (it refuses while the plugin is off).
+  gptImage?: () => GptImageToolPort | null;
 }
 
 /**
@@ -61,9 +66,11 @@ export function createInternalDaemonApi(opts: InternalDaemonApiOptions): InjectD
     broadcaster: opts.broadcaster,
     fsRoot: opts.fsRoot,
     workspacesDir: opts.workspacesDir,
+    ...(opts.baseDir !== undefined ? { baseDir: opts.baseDir } : {}),
     boxes: opts.boxes,
     boxRegistry: opts.boxRegistry,
     boxSessions: opts.boxSessions,
-    devices: opts.devices
+    devices: opts.devices,
+    gptImage: opts.gptImage
   });
 }

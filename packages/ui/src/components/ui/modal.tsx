@@ -12,6 +12,8 @@ export interface ModalProps {
   onBackdropClick?: () => void;
   children: React.ReactNode;
   className?: string;
+  /** The dialog's accessible name, where no visible heading gives it one. */
+  ariaLabel?: string;
 }
 
 /**
@@ -37,7 +39,7 @@ const escapeStack: object[] = [];
  * On a phone, Back closes it too (`useBackClose`): one modal at a time, the
  * newest first.
  */
-export const Modal: React.FC<ModalProps> = ({ open, onClose, onBackdropClick, children, className }) => {
+export const Modal: React.FC<ModalProps> = ({ open, onClose, onBackdropClick, children, className, ariaLabel }) => {
   const layerRef = useRef<{ release: () => void; isTopmost: () => boolean } | null>(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -124,6 +126,7 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, onBackdropClick, ch
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
+        aria-label={ariaLabel}
         onMouseDown={(e) => e.stopPropagation()}
         className={cn(
           "flex max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900 shadow-2xl",

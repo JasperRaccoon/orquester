@@ -103,6 +103,8 @@ export interface SessionToolsRefreshDeps {
   boxesAvailable?(): boolean;
   /** Devices: whether the device tools are usable now (plugin on, agents allowed, a platform enabled). Absent: never. */
   devicesAvailable?(): boolean;
+  /** GPT Image: whether `generate_image` is usable now (plugin on, a Codex account can make images). Absent: never. */
+  imagesAvailable?(): boolean;
   /**
    * Knowledge Graph plugin: its view of one chat (thread id = session id) — on or off, worker or
    * not, what it sees (`knowledge/visibility.ts` `createKnowledgeForSession`). Read fresh for every
@@ -381,6 +383,8 @@ export class SessionToolsRefresher {
       boxesAvailable: this.deps.boxesAvailable?.() === true,
       // Devices: the device tools only while devices can be used.
       devicesAvailable: this.deps.devicesAvailable?.() === true,
+      // GPT Image: generate_image only while an account can make images.
+      imagesAvailable: this.deps.imagesAvailable?.() === true,
       ...(knowledge ? { knowledge } : {})
     });
     return { ...manifest, seq: this.nextSeq(), epoch: this.epoch };

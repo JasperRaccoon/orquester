@@ -995,3 +995,24 @@ probe dir `~/tmp/mcp-apps-probe`.
 - `turn/start.additionalContext {"mcp-app:probe": {kind: "untrusted", value}}`: the value appears in
   no live notification and in neither `thread/read {includeTurns}` nor `thread/turns/list` — no
   `userMessage` item carries it.
+
+## 26. Codex's own image tool (`imageGeneration`) — read from the bindings, not captured
+
+**Not captured.** No file in this set asks the model for an image. This is read from the generated
+bindings (`_generated/protocol/ImageGenerationItem.ts`, `ImageGenerationFailure.ts`) for design
+`2026-11-10-gpt-image-plugin-design.md` §9.4, and tested with observed-shape frames built from them
+and a tiny valid PNG (`image-generation.test.ts`).
+
+- The item is `{type: "imageGeneration", id, status: string, revisedPrompt: string | null,
+  result: string, transparentBackground?, failure: {type: "usageLimitExceeded", limitId,
+  resetsAt: number | null} | null, savedPath?}`. `status` is an open string; the adapter reads
+  `completed` and `failed` and treats anything else as in progress. `result` is the image as
+  base64; `savedPath` is an absolute path, documented nowhere further — Codex writes under
+  `$CODEX_HOME/generated_images/`.
+- The live completion's picture is stored as a thread attachment and the row carries only
+  `data.imageRef` (`image-generation.ts`); `result` is read first, `savedPath` only as a regular
+  file inside the session's host CODEX_HOME (never in a box). A `failure`, a `failed` status, or a
+  completion with neither field is a `failed` row with the reason as its `detail`.
+- `resetsAt` is read as Unix seconds (a value of 10¹² or more as milliseconds); unverified.
+- A capture of a turn that generates an image — and of one that hits the image usage limit —
+  would settle `status`'s values, whether `result` and `savedPath` both arrive, and `resetsAt`'s unit.

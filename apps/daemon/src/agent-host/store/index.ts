@@ -71,6 +71,7 @@ import {
   createEmptyThreadState,
   deserializeFoldState,
   htmlRenderReferenceOfActivityPayload,
+  imageToolReferenceOfActivityPayload,
   mcpAppReferenceOfActivityPayload,
   isHtmlRenderAttachmentId,
   parseFoldSnapshotFile,
@@ -97,6 +98,7 @@ import {
   attachmentFileName,
   attachmentFileNameCandidates,
   createAttachmentId,
+  parseAttachmentFileExtension,
   parseAttachmentIdFromRelativePath,
   parseThreadSegmentFromAttachmentId,
   toSafeThreadAttachmentSegment
@@ -161,6 +163,14 @@ const threadAttachmentsDir = (rootDir: string, threadId: string): string =>
   path.join(threadDir(rootDir, threadId), "attachments");
 const receiptsPath = (rootDir: string): string => path.join(rootDir, "receipts.json");
 
+/**
+ * What precedes an id the log names as an image reference's `attachmentId`
+ * (`"attachmentId":"<id>`, or escaped once or more inside a JSON string), and
+ * how far back it is looked for.
+ */
+const IMAGE_REFERENCE_KEY_BEFORE = /attachmentId\\*"\s*:\s*\\*"$/;
+const REFERENCE_KEY_LOOKBEHIND = 32;
+
 /** The stored extensions that make a file an image for the §4.1 size bound. */
 const IMAGE_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
   ".gif",
@@ -169,6 +179,18 @@ const IMAGE_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
   ".png",
   ".webp"
 ]);
+
+/** Whether an attachment id is an image's: its stored extension is an image extension. */
+const isImageAttachmentId = (attachmentId: string): boolean =>
+  IMAGE_FILE_EXTENSIONS.has(`.${parseAttachmentFileExtension(attachmentId) ?? ""}`);
+
+/**
+ * What a fork copies from an ancestor under the same id (`copyPages`): a
+ * published page or MCP App snapshot (`-html`), or an image an inline image
+ * row shows (design 2026-11-10 §9).
+ */
+const isForkCopyableAttachmentId = (attachmentId: string): boolean =>
+  isHtmlRenderAttachmentId(attachmentId) || isImageAttachmentId(attachmentId);
 
 /**
  * A thread id may name a directory the store creates, reads and recursively
@@ -991,11 +1013,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (segment === toSafeThreadAttachmentSegment(threadId)) {
       return threadAttachmentsDir(rootDir, threadId);
     }
-    // A page or MCP App snapshot an ANCESTOR published keeps its ancestor's
-    // segment when a fork copies it here (`copyPages`): it is looked up in
-    // this thread's own directory only, so it resolves only once copied —
-    // never another thread's file.
-    return isHtmlRenderAttachmentId(attachmentId) ? threadAttachmentsDir(rootDir, threadId) : null;
+    // A page, MCP App snapshot or image row's image an ANCESTOR kept keeps
+    // its ancestor's segment when a fork copies it here (`copyPages`): it is
+    // looked up in this thread's own directory only, so it resolves only once
+    // copied — never another thread's file.
+    return isForkCopyableAttachmentId(attachmentId) ? threadAttachmentsDir(rootDir, threadId) : null;
   }
 
   async function findAttachmentFile(dir: string, attachmentId: string): Promise<string | null> {
@@ -1093,6 +1115,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         if (app !== undefined) {
           referenced.add(app.attachmentId);
         }
+        // An inline image row (design 2026-11-10 §9): a Codex
+        // `image_generation` item's, or a `show_image` / `generate_image` call's.
+        for (const image of imageToolReferenceOfActivityPayload(item.payload)?.images ?? []) {
+          referenced.add(image.attachmentId);
+        }
       }
     }
     return referenced;
@@ -1107,13 +1134,33 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
    * (spec 2026-10-14 §2.2). Attachment ids are `[a-z0-9_-]` and never escaped
    * in JSON, so a byte search is exact; a chunk keeps the previous one's tail
    * so an id split across two reads is still found.
+   *
+   * An id in `asReference` counts only where the log names it as an image
+   * reference's `attachmentId` (design 2026-11-10 §9), in any JSON escaping:
+   * an inline image row's picture stays while its row is in the log, but a
+   * pasted image a revert dropped (named only as a message's `id`) still goes.
    */
-  async function logMentions(threadId: string, ids: ReadonlySet<string>): Promise<Set<string>> {
+  async function logMentions(
+    threadId: string,
+    ids: ReadonlySet<string>,
+    asReference: ReadonlySet<string> = new Set()
+  ): Promise<Set<string>> {
     const found = new Set<string>();
     if (ids.size === 0) {
       return found;
     }
-    const longest = Math.max(...[...ids].map((id) => id.length));
+    const longest = Math.max(...[...ids].map((id) => id.length)) + REFERENCE_KEY_LOOKBEHIND;
+    const named = (text: string, id: string): boolean => {
+      if (!asReference.has(id)) {
+        return text.includes(id);
+      }
+      for (let at = text.indexOf(id); at !== -1; at = text.indexOf(id, at + 1)) {
+        if (IMAGE_REFERENCE_KEY_BEFORE.test(text.slice(Math.max(0, at - REFERENCE_KEY_LOOKBEHIND), at))) {
+          return true;
+        }
+      }
+      return false;
+    };
     let carry = "";
     try {
       for await (const chunk of createReadStream(threadEventsPath(rootDir, threadId), {
@@ -1121,7 +1168,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       })) {
         const text = carry + (chunk as Buffer).toString("latin1");
         for (const id of ids) {
-          if (!found.has(id) && text.includes(id)) {
+          if (!found.has(id) && named(text, id)) {
             found.add(id);
           }
         }
@@ -1142,10 +1189,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
   }
 
   /**
-   * The published pages in `entries` the fold does not reference that are past
-   * the unreferenced grace — the only ones the sweep would delete — that the
-   * log still names. Anything younger is kept by the grace anyway, so the log
-   * is read only when a page could actually go.
+   * The published pages and inline images in `entries` the fold does not
+   * reference that are past the unreferenced grace — the only ones the sweep
+   * would delete — that the log still names (an image: as an image
+   * reference's). Anything younger is kept by the grace anyway, so the log is
+   * read only when one could actually go.
    */
   async function pagesStillNamed(
     threadId: string,
@@ -1155,17 +1203,23 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     nowMs: number
   ): Promise<Set<string>> {
     const candidates = new Set<string>();
+    const images = new Set<string>();
     for (const entry of entries) {
       const attachmentId = parseAttachmentIdFromRelativePath(entry);
-      if (attachmentId === null || !isHtmlRenderAttachmentId(attachmentId) || referenced.has(attachmentId)) {
+      if (attachmentId === null || referenced.has(attachmentId)) {
+        continue;
+      }
+      const image = isImageAttachmentId(attachmentId);
+      if (!image && !isHtmlRenderAttachmentId(attachmentId)) {
         continue;
       }
       const stat = await fsp.stat(path.join(dir, entry)).catch(() => null);
       if (stat !== null && nowMs - stat.mtimeMs > UNREFERENCED_ATTACHMENT_GRACE_MS) {
         candidates.add(attachmentId);
+        if (image) images.add(attachmentId);
       }
     }
-    return logMentions(threadId, candidates);
+    return logMentions(threadId, candidates, images);
   }
 
   async function sweepDirectory(
@@ -1682,17 +1736,28 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     async copyPages(
       fromThreadId: string,
       toThreadId: string,
-      keep: (attachmentId: string) => boolean
+      keep: (attachmentId: string) => boolean,
+      options: { orLoggedImage?: (attachmentId: string) => boolean } = {}
     ): Promise<string[]> {
       assertSafeThreadId(fromThreadId);
       assertSafeThreadId(toThreadId);
       const fromDir = threadAttachmentsDir(rootDir, fromThreadId);
       const toDir = threadAttachmentsDir(rootDir, toThreadId);
       const entries = await fsp.readdir(fromDir).catch((): string[] => []);
+      // The images `keep` passes over that the caller would still take where
+      // the log names them as an image reference: one read of the log for all.
+      const maybe = new Set<string>();
+      for (const entry of entries) {
+        const attachmentId = parseAttachmentIdFromRelativePath(entry);
+        if (attachmentId !== null && isImageAttachmentId(attachmentId) && !keep(attachmentId) && options.orLoggedImage?.(attachmentId) === true) {
+          maybe.add(attachmentId);
+        }
+      }
+      const logged = await logMentions(fromThreadId, maybe, maybe);
       const copied: string[] = [];
       for (const entry of entries) {
         const attachmentId = parseAttachmentIdFromRelativePath(entry);
-        if (attachmentId === null || !isHtmlRenderAttachmentId(attachmentId) || !keep(attachmentId)) {
+        if (attachmentId === null || !isForkCopyableAttachmentId(attachmentId) || !(keep(attachmentId) || logged.has(attachmentId))) {
           continue;
         }
         const source = path.join(fromDir, entry);

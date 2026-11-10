@@ -884,6 +884,49 @@ export class TemporaryBoxTools {
   }
 
   /**
+   * `show_image` in a box chat (design 2026-11-10 §9.3): one regular file of the calling chat's OWN
+   * project box — never a temporary box or another project's — as the agent there names it
+   * (absolute, or from the box user's home), symlinks followed inside the box, read whole up to
+   * `maxBytes`. Nothing is written anywhere; what the bytes are is the caller's to check.
+   */
+  async readChatFile(remotePath: string, maxBytes: number, options: BoxCallOptions = {}): Promise<BoxOutcome<{ bytes: Buffer }>> {
+    if (!this.connection) return DISABLED;
+    const project = this.chatProject(options.principal ?? { kind: "user" });
+    if (!project.ok) return project;
+    const fs = project.value.box;
+    if (fs === null) return refuse(400, "INVALID_ARGUMENT", "This chat runs on the host, not in a box.");
+    const connection = fs.connection;
+    if (!connection.connected) return projectBoxRefusal(fs.notConnected());
+    const remote = boxPathFor(connection.sys, remotePath);
+    if (remote === null || remotePath.trim() === "") return refuse(400, "INVALID_ARGUMENT", "path is not a usable path.");
+    const signal = options.signal ? { signal: options.signal } : {};
+    try {
+      const stat = await connection.request("fs.stat", { path: remote, followSymlinks: true }, signal);
+      if (stat === null) return refuse(404, "NOT_FOUND", "file not found.");
+      if (stat.kind !== "file") return refuse(400, "INVALID_ARGUMENT", "not a regular file.");
+      if (stat.size > maxBytes) return refuse(413, "TOO_LARGE", `the file is ${stat.size} bytes; at most ${maxBytes}.`);
+      // A bounded read: the stat's size, at most one byte past the cap (so a file that grew trips it).
+      const source = await connection.readFile(remote, { length: Math.min(stat.size, maxBytes + 1), ...signal });
+      abortWith(options.signal, () => source.destroy(new Error("cancelled")));
+      const chunks: Buffer[] = [];
+      let total = 0;
+      for await (const chunk of source) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        total += bytes.length;
+        if (total > maxBytes) {
+          source.destroy();
+          return refuse(413, "TOO_LARGE", `the file is over ${maxBytes} bytes.`);
+        }
+        chunks.push(bytes);
+      }
+      return done({ bytes: Buffer.concat(chunks) });
+    } catch (error) {
+      if (options.signal?.aborted) return refuse(499, "CANCELLED", "The call was cancelled.");
+      return refuse(502, "BOX_TRANSFER_FAILED", `The box could not read the file: ${clip(transferMessage(error), 300)}`);
+    }
+  }
+
+  /**
    * Expose an owned box's port where the calling chat can reach it (reused for the same port;
    * closed when the box goes): on a host loopback port, or — for a box project's chat — on its
    * project box's loopback, plus a host loopback port while its Browser tab runs on the host.

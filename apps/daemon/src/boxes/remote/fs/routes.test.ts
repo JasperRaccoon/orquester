@@ -378,6 +378,8 @@ test("POST /api/fs/upload streams a multi-MB body into the box, with conflicts",
   assert.equal((await h.get("assets/data.bin")).toString(), "third");
   const dirClash = (await upload("assets", "error", Buffer.from("x"))).json() as FsUploadResponse;
   assert.equal(dirClash.conflictKind, "dir");
+  const parentClash = (await upload("assets/data.bin/inner.bin", "rename", Buffer.from("x"))).json() as FsUploadResponse;
+  assert.equal(parentClash.conflictKind, "parent");
 
   const invalid = await upload("../escape.bin", undefined, Buffer.from("invalid"));
   assert.equal(invalid.statusCode, 400);

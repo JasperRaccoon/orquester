@@ -20,7 +20,13 @@
  * No React import. Tested by `presentation.logic.test.ts`.
  */
 
-import { isToolLifecycleItemType, type ToolApprovalReference } from "@orquester/api/agent-chat";
+import {
+  GENERATE_IMAGE_TOOL_NAME,
+  IMAGE_GENERATION_ITEM_TYPE,
+  isToolLifecycleItemType,
+  SHOW_IMAGE_TOOL_NAME,
+  type ToolApprovalReference
+} from "@orquester/api/agent-chat";
 
 import { deviceToolRowLabel, type DeviceNameResolver } from "../devices/chat-rows.logic";
 import type { ToolGroupSummaryKind, WorkLogEntry } from "./contracts";
@@ -518,6 +524,10 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   html_render: "Rendered HTML",
   // Secrets (design 2026-10-14 §5).
   request_secret: "Requested a secret",
+  // Images (design 2026-11-10 §9). A completed call shows as its `image`
+  // row; these label the row when it failed (`imageRowLabel` for the rest).
+  show_image: "Showed images",
+  generate_image: "Generated image",
   // reads
   list_workflows: "Listed workflows",
   get_workflow: "Read a workflow",
@@ -690,6 +700,35 @@ function humanizeToolName(name: string): string {
   return words.length > 0 ? capitalize(words) : name;
 }
 
+/**
+ * An image call's label where its status or its images say more than the
+ * tool's name (design 2026-11-10 §9): "Generating image…" while a
+ * `generate_image` call or a Codex `image_generation` item runs, "Generated
+ * image" once it has (or that it failed), and "Showed 3 images" for a
+ * `show_image` call that did.
+ * Null for any other row.
+ */
+function imageRowLabel(entry: WorkLogEntry): string | null {
+  const generating = entry.sessionTool === GENERATE_IMAGE_TOOL_NAME || entry.itemType === IMAGE_GENERATION_ITEM_TYPE;
+  if (generating) {
+    if (entry.toolLifecycleStatus === "inProgress") return "Generating image…";
+    return entry.toolLifecycleStatus === "failed" ? "Image generation failed" : "Generated image";
+  }
+  if (entry.sessionTool === SHOW_IMAGE_TOOL_NAME) {
+    if (entry.toolLifecycleStatus === "inProgress") return "Showing images…";
+    const count = entry.image?.images.length ?? 0;
+    if (count > 0) return count === 1 ? "Showed an image" : `Showed ${count} images`;
+  }
+  return null;
+}
+
+/**
+ * The label of a `generate_image` call or Codex `image_generation` item that
+ * a turn left running and is over (design 2026-11-10 §9.1): no image is
+ * coming, so it must not read as one being made.
+ */
+export const IMAGE_GENERATION_STOPPED_LABEL = "Image generation stopped";
+
 /** The label of a session tool's row. */
 export function sessionToolLabel(name: string): string {
   return SESSION_TOOL_LABELS[name] ?? `Orquester: ${humanizeToolName(name)}`;
@@ -710,7 +749,10 @@ export function sessionToolEntryLabel(
   }
   // A device tool's row reads as what it did to which device (devices spec
   // §10.3: "Opened Pixel 9", "Tapped “Search”"), from its `deviceRef`.
-  const base = deviceToolRowLabel(entry.sessionTool, entry.deviceLink, resolveDeviceName) ?? sessionToolLabel(entry.sessionTool);
+  const base =
+    deviceToolRowLabel(entry.sessionTool, entry.deviceLink, resolveDeviceName) ??
+    imageRowLabel(entry) ??
+    sessionToolLabel(entry.sessionTool);
   // A call that went through an Orquester card or a grant (unified MCP §7.1):
   // its tool's label, then how the card ended.
   const approval = entry.toolApproval;
@@ -729,6 +771,10 @@ export function singleToolCallLabel(entry: WorkLogEntry, resolveDeviceName?: Dev
   if (command) {
     return command;
   }
+  const image = imageRowLabel(entry);
+  if (image !== null) {
+    return image;
+  }
   return capitalize(normalizeCompactToolLabel(entry.toolTitle || entry.label));
 }
 
@@ -746,6 +792,12 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot?: strin
   }
   if (entry.command) {
     return entry.command;
+  }
+  // Codex's own image tool: its detail is the prompt, which the image row
+  // captions; the row reads as what it does.
+  const image = imageRowLabel(entry);
+  if (image !== null) {
+    return image;
   }
   if (entry.detail && !isStreamedOutputEntry(entry)) {
     return entry.detail;

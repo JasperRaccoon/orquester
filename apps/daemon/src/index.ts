@@ -186,6 +186,9 @@ import { ensureKnowledgeIndexerProfile } from "./knowledge/linking/indexer-profi
 import { isBoxLocation, sendBoxError, type BoxService } from "./boxes/service/index.ts";
 // Device simulators plugin: the device service, its routes and the device tools' backend.
 import { createDaemonDevices, type DaemonDevices } from "./devices/wiring.ts";
+// GPT Image plugin (GPT Image design 2026-11-10): generate_image's service and its settings routes.
+import { registerGptImageRoutes } from "./gpt-image/routes.ts";
+import { GptImageService } from "./gpt-image/service.ts";
 import { detectRepoInfo, remoteRepoFields } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
@@ -339,7 +342,7 @@ import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { createReadStream, existsSync } from "node:fs";
-import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fsPathFromQuery } from "./fs-path-query.js";
@@ -1588,6 +1591,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     threadExists: (id) => !sessionsReattached || agentChat.chat.has(id),
     logger: console
   });
+  // GPT Image: generate_image on a connected Codex account's ChatGPT plan, while the plugin is on.
+  // Its logins are read and renewed through the accounts service only (`gpt-image/accounts.ts`).
+  const gptImage = new GptImageService({ plugins, accounts: agentAccounts, fsRoot: () => resolved.fsRoot, logger: console });
   const services: Services = {
     buildInfo,
     authSessions,
@@ -1612,7 +1618,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxes: boxes.service,
     boxRegistry: boxes.registry,
     boxWiring: boxes,
-    devices
+    devices,
+    gptImage
   };
   // umcp:t3 begin
   // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
@@ -1657,6 +1664,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (!rolledBack) devices.chatClosed(id);
   });
   await devices.start().catch((error) => console.error("Device service start failed", error instanceof Error ? error.message : error));
+  // GPT Image: follows the plugin switch and the Codex accounts (their plans) from now on.
+  await gptImage.start().catch((error) => console.error("GPT Image start failed", error instanceof Error ? error.message : error));
   // The rest of the box wiring over the session list, browser tabs and chats: the token broker,
   // git auth, the MCP bridge, dev-server forwards, agent chats in boxes, the Template command, and
   // the box tools (connected while the plugin is on).
@@ -1690,6 +1699,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxesAvailable: () => temporaryBoxTools.available(),
     // Devices: the device tools only while the plugin is on, agents may use devices and a platform is enabled.
     devicesAvailable: () => devices.toolsAvailable(),
+    // GPT Image: generate_image only while the plugin is on and a Codex account can make images.
+    imagesAvailable: () => gptImage.toolsAvailable(),
     // Knowledge Graph: the plugin's view of each chat (on or off, worker or not, what it sees).
     knowledgeForSession: (threadId) => knowledge.knowledgeForSession(threadId),
     api: () => services.internalApi,
@@ -1714,6 +1725,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Devices: likewise when the device tools come or go.
   devices.onToolsChange(() => {
     void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: device tools refresh failed", error instanceof Error ? error.message : String(error)));
+  });
+  // GPT Image: likewise when the plugin toggles or the Codex accounts change what can make images.
+  gptImage.onToolsChange(() => {
+    void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: image tool refresh failed", error instanceof Error ? error.message : String(error)));
   });
   // A changed MCP server config (agent profile) is read afresh by the next manifest.
   const agentProfileSink = {
@@ -1785,6 +1800,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Getters: the client lives as long as the daemon, and PUT /api/config/daemon moves both.
     fsRoot: () => resolved.fsRoot,
     workspacesDir: () => resolved.workspacesDir,
+    // show_image: the calling chat's attachments and the temp directories its agents write to.
+    baseDir: paths.baseDir,
     // boxes: the box MCP tools' streamed operations.
     boxes: temporaryBoxTools,
     // boxes: read_file / directory reads of box projects go to the box.
@@ -1792,7 +1809,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // boxes: which accounts a box's chats already use, as the token broker reads them.
     boxSessions: () => sessions.list(),
     // Devices: the device MCP tools' operations (null while the plugin is off).
-    devices: () => devices.service()
+    devices: () => devices.service(),
+    // GPT Image: generate_image's operation (it refuses while the plugin is off).
+    gptImage: () => gptImage
   });
 
   lineage.attachApi(services.internalApi);
@@ -1899,6 +1918,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Devices: before the plugins (no switch is followed any more). Setups and boots in flight are
     // cancelled; devices keep running and a restart reattaches.
     await devices.stop().catch((error) => console.error("Device service stop failed", error instanceof Error ? error.message : error));
+    // GPT Image: stops following the plugin and the accounts.
+    gptImage.stop();
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
@@ -2135,6 +2156,8 @@ interface Services {
   boxWiring?: DaemonBoxes;
   /** Device simulators: the device service (while the plugin is on) and its routes. Optional: route tests build a partial `services`. */
   devices?: DaemonDevices;
+  /** GPT Image: the plugin's service (settings routes). Optional: route tests build a partial `services`. */
+  gptImage?: GptImageService;
 }
 
 export function createServer(
@@ -3681,12 +3704,16 @@ export function createServer(
   // in the query string; it is streamed to a temp file beside its destination
   // and renamed into place, so memory stays flat whatever the size and the
   // shared MAX_UPLOAD_BYTES cap is enforced by receiveUpload rather than a
-  // bodyLimit (see upload-stream.ts). Conflicts are decided AFTER the body has
-  // been received: a pre-existing target comes back as { conflict:true } (200,
-  // NOT an error) in reply to a completed request, so the client can prompt;
-  // "overwrite"/"rename" act only on an explicit user choice. The client
-  // supplies destDir + relativePath, but the joined final path is re-sanitized
-  // and assertInsideFsRoot'd, so nothing escapes fsRoot.
+  // bodyLimit (see upload-stream.ts). A target that exists is decided AFTER the
+  // body has been received: it comes back as { conflict:true, conflictKind:
+  // "file" | "dir" } (200, NOT an error) in reply to a completed request, so the
+  // client can prompt; "overwrite"/"rename" act only on an explicit user
+  // choice, and "error" / "rename" place the file exclusively (never over
+  // anything that appeared meanwhile). A FILE where the path needs a folder is
+  // { conflict:true, conflictKind: "parent" }, told before the body is read
+  // when it is already there (no other name in that folder can help). The
+  // client supplies destDir + relativePath, but the joined final path is
+  // re-sanitized and assertInsideFsRoot'd, so nothing escapes fsRoot.
   app.register(async (scope) => {
     acceptRawBody(scope);
     scope.post<{ Querystring: Partial<FsUploadRequest> }>(
@@ -3711,6 +3738,7 @@ export function createServer(
         }
         const leaf = segments[segments.length - 1];
         const fileConflict: FsUploadResponse = { path: "", name: leaf, size: 0, conflict: true, conflictKind: "file" };
+        const parentConflict: FsUploadResponse = { ...fileConflict, conflictKind: "parent" };
 
         let tmp: string | undefined;
         try {
@@ -3729,9 +3757,13 @@ export function createServer(
             const code = (error as NodeJS.ErrnoException)?.code;
             if (code === "ENOTDIR" || code === "EEXIST") {
               reply.header("connection", "close"); // body unread — see refuseUpload
-              return fileConflict;
+              return parentConflict;
             }
             throw error;
+          }
+          if (await fileOnFolderPath(safeDir, segments.slice(0, -1))) {
+            reply.header("connection", "close"); // body unread — see refuseUpload
+            return parentConflict;
           }
           tmp = uploadTempPath(safeDir);
           const size = await receiveUpload(request.raw, tmp);
@@ -3742,25 +3774,27 @@ export function createServer(
             const code = (error as NodeJS.ErrnoException)?.code;
             if (code === "ENOTDIR" || code === "EEXIST") {
               await discardUpload(tmp);
-              return fileConflict;
+              return parentConflict;
             }
             throw error;
           }
 
           if (onConflict === "error") {
-            const existing = await stat(target).catch(() => null);
-            if (existing) {
+            // Exclusive: an entry that appeared since (another upload's) is never replaced.
+            if (!(await placeExclusive(tmp, target))) {
+              const existing = await stat(target).catch(() => null);
               await discardUpload(tmp);
-              return { ...fileConflict, conflictKind: existing.isDirectory() ? "dir" : "file" };
+              return { ...fileConflict, conflictKind: existing?.isDirectory() ? "dir" : "file" };
             }
-            await rename(tmp, target);
             return { path: target, name: leaf, size };
           }
 
           if (onConflict === "rename") {
-            const renamed = await nextAvailableName(target);
-            await rename(tmp, renamed);
-            return { path: renamed, name: basename(renamed), size };
+            for (let attempt = 0; attempt < MAX_UPLOAD_RENAME_ATTEMPTS; attempt += 1) {
+              const renamed = await nextAvailableName(target);
+              if (await placeExclusive(tmp, renamed)) return { path: renamed, name: basename(renamed), size };
+            }
+            throw new Error("No free name for the uploaded file.");
           }
 
           // "overwrite" — rename replaces an existing file atomically. EISDIR if
@@ -5026,6 +5060,8 @@ export function createServer(
   services.boxes?.registerRoutes(app);
   // Devices (`deviceRoutes`): both transports, the hub proxy too (the desktop app's relay reaches it here).
   services.devices?.registerRoutes(app);
+  // GPT Image (`gptImageRoutes.settings`): both transports like the plugin routes (the bearer hook gates HTTP).
+  if (services.gptImage) registerGptImageRoutes(app, { service: services.gptImage });
 
   // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
   // transports; the bearer hook above gates HTTP. Secret values are write-only.
@@ -5791,6 +5827,53 @@ function gitError(reply: FastifyReply, error: unknown): void {
   void reply.code(status).send({ code, message });
 }
 
+/** How often "rename" (keep both) looks for a free name when uploads race for each one it finds. */
+const MAX_UPLOAD_RENAME_ATTEMPTS = 100;
+
+/**
+ * Put the received upload `tmp` at `target` only while nothing is there: a hard
+ * link fails EEXIST on any entry, a dangling symlink included, so a concurrent
+ * upload's file is never replaced. Where hard links are not supported, an
+ * exclusive create claims the name before the rename. False when the name is
+ * taken (`tmp` is then left for the caller).
+ */
+async function placeExclusive(tmp: string, target: string): Promise<boolean> {
+  try {
+    await link(tmp, target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "EEXIST") return false;
+    if (code !== "EPERM" && code !== "ENOTSUP" && code !== "EOPNOTSUPP" && code !== "ENOSYS") throw error;
+    try {
+      await (await open(target, "wx")).close();
+    } catch (claim) {
+      if ((claim as NodeJS.ErrnoException)?.code === "EEXIST") return false;
+      throw claim;
+    }
+    await rename(tmp, target);
+    return true;
+  }
+  await unlink(tmp).catch(() => undefined);
+  return true;
+}
+
+/** Whether a FILE (not a folder) sits where `segments` under `dir` need folders: an upload there cannot land. */
+async function fileOnFolderPath(dir: string, segments: readonly string[]): Promise<boolean> {
+  let current = dir;
+  for (const segment of segments) {
+    current = join(current, segment);
+    let entry;
+    try {
+      entry = await stat(current);
+    } catch (error) {
+      // Missing: made on the way. ENOTDIR: a file earlier on the path.
+      return (error as NodeJS.ErrnoException)?.code === "ENOTDIR";
+    }
+    if (!entry.isDirectory()) return true;
+  }
+  return false;
+}
+
 /**
  * Given a desired absolute file path, return it if free, else the next free
  * `name (n).ext` in the same directory (n = 1, 2, …). Backs the upload route's
@@ -5806,9 +5889,9 @@ async function nextAvailableName(desired: string): Promise<string> {
   for (let n = 1; ; n++) {
     const candidate = join(dir, `${stem} (${n})${ext}`);
     try {
-      await stat(candidate);
+      await lstat(candidate);
     } catch {
-      return candidate; // stat threw → does not exist → free
+      return candidate; // lstat threw → no entry (a dangling link is one) → free
     }
   }
 }

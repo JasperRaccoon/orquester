@@ -93,6 +93,15 @@ describe("the chat's URL filter", () => {
     assert.equal(t(`orquester-knowledge:entry/${LIVE}`, "src"), "", "never an image source");
   });
 
+  it("keeps a chat image source (design 2026-11-10 §9.2) as an image source only, exactly as written", () => {
+    const t = (url: string, key = "href") => markdown.chatUrlTransform(url, key, {} as never);
+    const image = "attachment:t1-0f8fad5b-d9cb-469f-a165-70867728950e-png";
+    assert.equal(t(image, "src"), image);
+    assert.equal(t(image), "", "never a link");
+    assert.equal(t("attachment:../../etc/passwd", "src"), "");
+    assert.equal(t(` ${image}`, "src"), "");
+  });
+
   it("refuses every near-citation: case, whitespace, controls, encodings, smuggling, length", () => {
     const t = (url: string, key = "href") => markdown.chatUrlTransform(url, key, {} as never);
     const refused = [

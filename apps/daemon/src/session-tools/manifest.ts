@@ -3,7 +3,8 @@
  * which chat tools ONE provider session of a thread advertises — every chat tool, but no
  * always-Admin one to a workflow-owned chat (§5.4), the box tools only while a box can be
  * rented (Ephemeral AI VMs §13), the knowledge tools only while the Knowledge Graph plugin is
- * on (its spec, "Agent tools"), the device tools only while devices can be used (devices spec §9)
+ * on (its spec, "Agent tools"), the device tools only while devices can be used (devices spec §9),
+ * `generate_image` only while GPT Image can make images (GPT Image design 2026-11-10 §10)
  * — its instruction block (§10) and the MCP servers it must deny
  * (§12.1). The agent host asks for it at every provider-session start
  * (`daemonRoutesForHost.sessionToolsManifest`) and is handed a new one when the daemon pushes one
@@ -56,6 +57,8 @@ export interface ManifestInput {
   boxesAvailable?: boolean;
   /** Devices: whether the device tools are usable (the plugin is on, agents may use devices, a platform is enabled); absent = no. */
   devicesAvailable?: boolean;
+  /** GPT Image: whether `generate_image` is usable (the plugin is on and a Codex account can make images); absent = no. */
+  imagesAvailable?: boolean;
   /** Knowledge Graph: the plugin's view of this chat; absent = the plugin is off. */
   knowledge?: ManifestKnowledge;
 }
@@ -89,7 +92,7 @@ const BOX_CHAT_TOOLS: readonly string[] = ["list_boxes", "box_lend_accounts", "b
  * chat pays for tools it cannot use, but for {@link BOX_CHAT_TOOLS} in a chat running in a box; (devices) less the `devices` toolset likewise. Knowledge Graph:
  * the `knowledge` toolset only while the plugin is on, without the entry tools
  * ({@link KNOWLEDGE_SEARCH_TOOLS}) for a chat that sees no collection, and never the worker tools; a
- * worker session gets ONLY the worker tools.
+ * worker session gets ONLY the worker tools. GPT Image: the `images` toolset only while it can make images.
  */
 function advertisedChatTools(
   catalog: readonly AnyOrquesterTool[],
@@ -97,7 +100,8 @@ function advertisedChatTools(
   boxesAvailable = false,
   knowledge?: ManifestKnowledge,
   devicesAvailable = false,
-  inBox = false
+  inBox = false,
+  imagesAvailable = false
 ): string[] {
   if (knowledge?.worker === true) return catalog.filter((tool) => KNOWLEDGE_WORKER_TOOLS.includes(tool.name)).map((tool) => tool.name);
   const knowledgeTool = (tool: AnyOrquesterTool): boolean => {
@@ -112,6 +116,7 @@ function advertisedChatTools(
         !(workflowOwned && tool.tier === "admin") &&
         (boxesAvailable || tool.toolset !== "boxes" || (inBox && BOX_CHAT_TOOLS.includes(tool.name))) &&
         (devicesAvailable || tool.toolset !== "devices") &&
+        (imagesAvailable || tool.toolset !== "images") &&
         knowledgeTool(tool)
     )
     .map((tool) => tool.name);
@@ -168,7 +173,7 @@ function denyFor(thread: ManifestThread, servers: readonly DaemonPointingServer[
 /** The manifest of one thread. */
 export function buildSessionToolsManifest(input: ManifestInput): SessionToolsManifest {
   const knowledge = input.knowledge;
-  const tools = advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true, knowledge, input.devicesAvailable === true, input.thread.inBox === true);
+  const tools = advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true, knowledge, input.devicesAvailable === true, input.thread.inBox === true, input.imagesAvailable === true);
   const instructions =
     knowledge?.worker === true
       ? KNOWLEDGE_WORKER_INSTRUCTIONS
@@ -178,6 +183,8 @@ export function buildSessionToolsManifest(input: ManifestInput): SessionToolsMan
           boxes: tools.includes("create_box"),
           // The devices line names list_devices: only where it is advertised.
           devices: tools.includes("list_devices"),
+          // The images line names generate_image: only where it is advertised.
+          images: tools.includes("generate_image"),
           // The line names knowledge_search: only where it is advertised.
           ...(knowledge?.enabled === true && tools.includes("knowledge_search") ? { knowledgeCollections: knowledge.visibleCollectionNames } : {})
         });

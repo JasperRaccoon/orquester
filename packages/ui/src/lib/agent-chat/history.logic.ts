@@ -842,6 +842,8 @@ export function rowTurnId(row: AgentChatTimelineRow): string | null {
     case "turn-diff":
     case "goal-marker":
     case "visual":
+    case "image":
+    case "image-pending":
     case "mcp-app":
       return row.turnId;
     case "work":
