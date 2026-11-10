@@ -174,8 +174,10 @@ class FakeApi implements WorkflowsApi {
   async deleteWorkflow(): Promise<void> {
     if (this.deleteError) throw this.deleteError;
   }
+  runError: unknown = null;
   async runWorkflow(id: string, req?: RunWorkflowRequest): Promise<RunWorkflowResponse> {
     this.runs.push({ id, req });
+    if (this.runError) throw this.runError;
     return this.runAnswer;
   }
   async listWorkflowRuns(): Promise<ListWorkflowRunsResponse> {
@@ -229,6 +231,28 @@ describe("sanitising", () => {
       ["r1"],
       "another workflow's run and a malformed one never ride this row"
     );
+  });
+});
+
+describe("sanitising a manual trigger's declared inputs", () => {
+  it("keeps each input the schema accepts, on a manual trigger only", () => {
+    const row = sanitizeWorkflowSummary({
+      id: "a",
+      name: "A",
+      triggers: [
+        {
+          nodeId: "t",
+          type: "trigger.manual",
+          text: "Run now",
+          inputs: [{ name: "env", type: "enum", values: ["stg"], required: true }, { name: "1bad", type: "string" }, { name: "n", type: "date" }, "junk"]
+        },
+        { nodeId: "s", type: "trigger.schedule", text: "Hourly", inputs: [{ name: "x", type: "string" }] },
+        { nodeId: "u", type: "trigger.manual", text: "Run now", inputs: [{ name: "1bad", type: "string" }] }
+      ]
+    });
+    assert.deepEqual(row?.triggers[0]?.inputs, [{ name: "env", type: "enum", values: ["stg"], required: true }]);
+    assert.equal(row && "inputs" in row.triggers[1]!, false, "a schedule takes no inputs");
+    assert.equal(row && "inputs" in row.triggers[2]!, false, "none left: no inputs key");
   });
 });
 
@@ -575,6 +599,31 @@ describe("mutations", () => {
     api.runAnswer = { runId: "r9" };
     await runWorkflowNow(api, "a", { force: true });
     assert.deepEqual(api.runs[1]?.req, { force: true });
+  });
+
+  it("an overlap skip remembers the run's input for Run anyway", async () => {
+    const api = new FakeApi();
+    api.list = [summary({ id: "a", name: "Deploy" })];
+    await loadWorkflows(api);
+    api.runAnswer = { runId: null, skipped: "overlap" };
+    await runWorkflowNow(api, "a", { input: { env: "prd" } });
+    assert.deepEqual(state().notice?.input, { env: "prd" });
+  });
+
+  it("an INVALID_INPUT refusal hands back its input errors; quiet leaves the notice alone", async () => {
+    const api = new FakeApi();
+    api.list = [summary({ id: "a", name: "Deploy" })];
+    await loadWorkflows(api);
+    const inputErrors = [{ input: "env", message: "input `env` is required: pass one of: stg, prd" }];
+    api.runError = Object.assign(apiError(400, "INVALID_INPUT", "The input does not fit"), { inputErrors });
+    const refused = await runWorkflowNow(api, "a", { input: {} }, { quiet: true });
+    assert.equal(refused.ok, false);
+    assert.deepEqual(refused.ok ? null : refused.inputErrors, inputErrors);
+    assert.equal(refused.ok ? null : refused.code, "INVALID_INPUT");
+    assert.equal(state().notice, null, "the form shows it in place");
+    const loud = await runWorkflowNow(api, "a", { input: {} });
+    assert.equal(loud.ok, false);
+    assert.equal(state().notice?.tone, "error");
   });
 
   it("create shows the row at once; delete removes it, and a gone workflow counts as deleted", async () => {

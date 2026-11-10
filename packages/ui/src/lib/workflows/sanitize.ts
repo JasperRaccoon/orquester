@@ -11,7 +11,7 @@
  * schemas in @orquester/config, so those go through `safeParse`.
  */
 
-import { WORKFLOW_NODE_TYPES, workflowProjectSchema, workflowRecordSchema } from "@orquester/config";
+import { WORKFLOW_NODE_TYPES, workflowInputDeclSchema, workflowProjectSchema, workflowRecordSchema } from "@orquester/config";
 import { WORKFLOW_SUMMARY_MAX_ERRORS } from "@orquester/api";
 import type {
   AccountSelectionDecision,
@@ -155,6 +155,14 @@ function sanitizeTrigger(value: unknown): WorkflowTriggerSummary | null {
   for (const key of ["nextRunAt", "lastPollAt", "lastError"] as const) {
     const field = value[key];
     if (typeof field === "string" || field === null) trigger[key] = field;
+  }
+  // A manual trigger's declared inputs (the rail's Run now form): each one the schema accepts.
+  if (value.type === "trigger.manual" && Array.isArray(value.inputs)) {
+    const inputs = list(value.inputs, (entry) => {
+      const parsed = workflowInputDeclSchema.safeParse(entry);
+      return parsed.success ? parsed.data : null;
+    });
+    if (inputs.length > 0) trigger.inputs = inputs;
   }
   return trigger;
 }

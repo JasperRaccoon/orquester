@@ -46,6 +46,22 @@ describe("templateCompletions", () => {
     assert.deepEqual(labels("{{ input.te"), ["text"]);
   });
 
+  it("offers the manual trigger's declared inputs after trigger.input. (spec 2026-11-10 §4)", () => {
+    const typed = workflow(
+      [
+        node("t", "trigger.manual", { inputs: [{ name: "env", type: "enum", values: ["stg"], required: true, description: "Where" }, { name: "count", type: "number" }] }, { name: "Start" }),
+        node("a", "agent", {}, { name: "Deploy" })
+      ],
+      [edge("t", "a")]
+    );
+    const typedScope = completionScopeFor(typed, "a");
+    assert.deepEqual(labels("{{ trigger.input.", typedScope), ["env", "count"]);
+    assert.deepEqual(labels("{{ nodes.Start.output.input.c", typedScope), ["count"]);
+    const env = templateCompletions("{{ trigger.input.e", 18, typedScope)?.options[0];
+    assert.deepEqual([env?.detail, env?.info], ["enum, required", "Where"]);
+    assert.equal(labels("{{ trigger.input."), null, "no declared inputs: nothing to offer");
+  });
+
   it("offers filters after a pipe, with arguments filled in", () => {
     const answer = templateCompletions("{{ input.text | de", 18, scope());
     assert.deepEqual(answer?.options.map((o) => [o.label, o.apply]), [["default", 'default("")']]);

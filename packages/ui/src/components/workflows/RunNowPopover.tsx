@@ -7,11 +7,16 @@
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, Loader2, Play } from "lucide-react";
 
+import type { WorkflowInputError } from "@orquester/api";
+
 import { cn } from "../../lib/cn";
 import { Popover } from "./ui/Popover";
 import { SmallButton } from "./ui/controls";
 
-export type RunNowResult = { ok: true; runId: string | null; skipped?: "overlap" | "missed" } | { ok: false; error: string };
+export type RunNowResult =
+  | { ok: true; runId: string | null; skipped?: "overlap" | "missed" }
+  /** `inputErrors`: the daemon refused the input against the declared inputs (the typed form shows them beside their fields). */
+  | { ok: false; error: string; inputErrors?: WorkflowInputError[] };
 
 export interface RunNowPopoverProps {
   open: boolean;

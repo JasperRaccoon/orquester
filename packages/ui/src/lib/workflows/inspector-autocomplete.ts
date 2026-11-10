@@ -17,8 +17,10 @@ import {
   upstreamOf,
   WORKFLOW_EXPRESSION_FILTER_GUIDE,
   WORKFLOW_EXPRESSION_ROOT_GUIDE,
+  workflowRunInputs,
   type ExpressionRoot,
   type Workflow,
+  type WorkflowInputDecl,
   type WorkflowNodeType
 } from "@orquester/api";
 
@@ -55,6 +57,13 @@ export interface CompletionScope {
   secretNames: readonly string[];
   /** An agent prompt: `{variables}` complete too. */
   promptVariables: boolean;
+  /** The manual trigger's declared inputs (`trigger.input.<name>`), when it declares any. */
+  inputs?: readonly WorkflowInputDecl[];
+}
+
+/** The declared inputs as `trigger.input.` options: the name, its type, its help text. */
+function inputOptions(scope: CompletionScope): CompletionOption[] {
+  return (scope.inputs ?? []).map((decl) => prop(decl.name, decl.required ? `${decl.type}, required` : decl.type, decl.description));
 }
 
 /** What a block's `output` is known to hold (spec §3.2). */
@@ -167,11 +176,13 @@ function pathOptions(parents: string[], scope: CompletionScope): CompletionOptio
       if (rest[1] === "error" && rest.length === 2) return NESTED_FIELDS.error!.map((field) => prop(field));
       if (rest[1] !== "output" || !node) return [];
       if (rest.length === 2) return fieldsOf(node.type).map((field) => prop(field));
+      if (rest.length === 3 && node.type === "trigger.manual" && rest[2] === "input") return inputOptions(scope);
       if (rest.length === 3 && isTriggerType(node.type)) return (NESTED_FIELDS[rest[2]!] ?? []).map((field) => prop(field));
       return [];
     }
     case "trigger":
       if (rest.length === 0) return triggerFields(scope.triggerTypes).map((field) => prop(field));
+      if (rest.length === 1 && rest[0] === "input") return inputOptions(scope);
       if (rest.length === 1) return (NESTED_FIELDS[rest[0]!] ?? []).map((field) => prop(field));
       return [];
     case "input":
@@ -264,7 +275,9 @@ export function completionScopeFor(
     .filter((node): node is NonNullable<typeof node> => node !== undefined);
   const distinct = [...new Map(parents.map((node) => [node.id, node])).values()];
   const inputFields = distinct.length === 1 ? [...fieldsOf(distinct[0]!.type)] : distinct.map((node) => node.name);
+  const inputs = workflowRunInputs(workflow);
   return {
+    ...(inputs !== undefined ? { inputs } : {}),
     upstream,
     triggerTypes: workflow.nodes.filter((node) => isTriggerType(node.type)).map((node) => node.type),
     inputFields,

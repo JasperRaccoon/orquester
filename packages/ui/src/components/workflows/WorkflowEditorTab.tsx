@@ -22,6 +22,7 @@ import {
   isRunActive,
   outputHandles,
   placeNewNodes,
+  workflowRunInputs,
   type WorkflowNodeType
 } from "@orquester/api";
 
@@ -66,6 +67,7 @@ import { EditorToolbar, type EditorMode } from "./EditorToolbar";
 import { Inspector } from "./inspector/Inspector";
 import { PhoneEditor } from "./phone/PhoneEditor";
 import { PhoneLayoutContext, useIsPhoneLayout } from "./phone/phone-context";
+import { RunInputsDialog } from "./RunInputsDialog";
 import { RunNowPopover, type RunNowResult } from "./RunNowPopover";
 import { WorkflowRunsMode } from "./RunsMode";
 import { useWorkflowEditor } from "./use-workflow-editor";
@@ -494,14 +496,23 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
     return manual && manual.type === "trigger.manual" ? (manual.config.inputExample ?? "") : "";
   }, [draft]);
 
+  /** The declared inputs Run now's form is built from (the first enabled manual trigger's), when there are any. */
+  const manualInputs = useMemo(() => (draft ? workflowRunInputs(draft) : undefined), [draft]);
+
   const runNow = useCallback(
     async (input: unknown, options: { force: boolean }): Promise<RunNowResult> => {
       await editor.flush();
-      const result = await runWorkflowNow(api, workflowId, {
-        ...(input !== undefined ? { input } : {}),
-        ...(options.force ? { force: true } : {})
-      });
-      if (!result.ok) return { ok: false, error: result.error };
+      const result = await runWorkflowNow(
+        api,
+        workflowId,
+        {
+          ...(input !== undefined ? { input } : {}),
+          ...(options.force ? { force: true } : {})
+        },
+        // The typed form shows an input refusal beside its fields, not as a rail notice.
+        { quiet: manualInputs !== undefined }
+      );
+      if (!result.ok) return { ok: false, error: result.error, ...(result.inputErrors ? { inputErrors: result.inputErrors } : {}) };
       const answer = result.value;
       if (answer.runId) {
         selectRun(answer.runId);
@@ -509,7 +520,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
       }
       return { ok: true, runId: answer.runId, ...(answer.skipped ? { skipped: answer.skipped } : {}) };
     },
-    [api, editor, workflowId, selectRun]
+    [api, editor, workflowId, selectRun, manualInputs]
   );
 
   const toggleEnabled = useCallback(
@@ -641,14 +652,26 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
           })
         }
       />
-      <RunNowPopover
-        open={runNowOpen}
-        anchor={runButton.current}
-        onClose={() => setRunNowOpen(false)}
-        example={manualExample}
-        blockingErrors={errorCount}
-        onRun={runNow}
-      />
+      {manualInputs !== undefined ? (
+        <RunInputsDialog
+          open={runNowOpen}
+          onClose={() => setRunNowOpen(false)}
+          workflowName={draft.name}
+          inputs={manualInputs}
+          blockingErrors={errorCount}
+          phone={phone}
+          onRun={runNow}
+        />
+      ) : (
+        <RunNowPopover
+          open={runNowOpen}
+          anchor={runButton.current}
+          onClose={() => setRunNowOpen(false)}
+          example={manualExample}
+          blockingErrors={errorCount}
+          onRun={runNow}
+        />
+      )}
       <WorkflowSettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}

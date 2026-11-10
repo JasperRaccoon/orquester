@@ -39,6 +39,7 @@ import {
   type Workflow,
   type WorkflowBlockRun,
   type WorkflowBlockStatus,
+  type WorkflowInputError,
   type WorkflowProblem,
   type WorkflowRun,
   type WorkflowRunSummary,
@@ -141,6 +142,8 @@ export interface WorkflowsNotice {
   workflowId?: string;
   /** "Run anyway": the overlap policy skipped a Run now. */
   action?: "run-anyway";
+  /** The skipped run's input, sent again by "Run anyway". */
+  input?: unknown;
 }
 
 export interface WorkflowsState {
@@ -225,6 +228,13 @@ function errorCode(error: unknown): string | null {
   const body = (error as { body?: unknown }).body;
   if (isRecord(body) && isRecord(body.error) && typeof body.error.code === "string") return body.error.code;
   return null;
+}
+
+/** An `INVALID_INPUT` refusal's input errors (the client's `WorkflowApiError` sanitized them). */
+function errorInputErrors(error: unknown): WorkflowInputError[] {
+  if (typeof error !== "object" || error === null) return [];
+  const errors = (error as { inputErrors?: unknown }).inputErrors;
+  return Array.isArray(errors) ? (errors as WorkflowInputError[]) : [];
 }
 
 function loadFailureText(error: unknown): string {
@@ -780,7 +790,10 @@ export function dismissWorkflowsNotice(): void {
 // Mutations
 // ---------------------------------------------------------------------------
 
-export type WorkflowMutationResult<T> = { ok: true; value: T } | { ok: false; error: string; code: string | null };
+export type WorkflowMutationResult<T> =
+  | { ok: true; value: T }
+  /** `inputErrors`: an `INVALID_INPUT` refusal's errors, field by field (spec 2026-11-10 §4.2). */
+  | { ok: false; error: string; code: string | null; inputErrors?: WorkflowInputError[] };
 
 const CONNECTION_CHANGED = "The connection changed before the daemon answered.";
 
@@ -848,7 +861,8 @@ async function mutate<T>(
     if (gen === generation && failure !== null) {
       setWorkflowsNotice({ tone: "error", text: `${failure}: ${message}` });
     }
-    return { ok: false, error: message, code: errorCode(error) };
+    const inputErrors = errorInputErrors(error);
+    return { ok: false, error: message, code: errorCode(error), ...(inputErrors.length > 0 ? { inputErrors } : {}) };
   }
 }
 
@@ -956,13 +970,15 @@ export async function setWorkflowEnabled(
  * Run now. An overlap skip is not a failure: it becomes the panel's notice
  * with "Run anyway", which calls this again with `force`.
  */
+/** Run now. `quiet` leaves a refusal to the caller (the Run now form shows input errors beside their fields). */
 export async function runWorkflowNow(
   api: WorkflowsApi,
   id: string,
-  request: RunWorkflowRequest = {}
+  request: RunWorkflowRequest = {},
+  options: { quiet?: boolean } = {}
 ): Promise<WorkflowMutationResult<RunWorkflowResponse>> {
   const name = getState().summaries.get(id)?.name ?? "the workflow";
-  const result = await mutate(api, () => api.runWorkflow(id, request), `Couldn't run “${name}”`);
+  const result = await mutate(api, () => api.runWorkflow(id, request), options.quiet ? null : `Couldn't run “${name}”`);
   if (!result.ok) return result;
   const answer = result.value;
   if (isRecord(answer) && answer.skipped === "overlap") {
@@ -970,6 +986,7 @@ export async function runWorkflowNow(
       tone: "info",
       workflowId: id,
       action: "run-anyway",
+      ...(request.input !== undefined ? { input: request.input } : {}),
       text: `“${name}” is already running — this run was skipped (overlap: skip).`
     });
   }
