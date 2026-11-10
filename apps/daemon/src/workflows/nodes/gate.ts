@@ -349,7 +349,7 @@ class GateRun {
     if (result.status === "succeeded") {
       if ((this.extras.reminders ?? 0) < 1) {
         // One reminder in the same chat (§6.3), persisted before it is sent.
-        const { agent: _agent, ...rest } = this.extras;
+        const { agent: _agent, turnEnded: _ended, ...rest } = this.extras;
         this.extras = { ...rest, reminders: 1 };
         await this.persistExtras();
         return;
@@ -466,6 +466,9 @@ class GateRun {
     const decider = this.config.decider;
     if (decider.kind !== "agent" || !this.agent) return { kind: "error", error: new Error("no reviewer agent is configured") };
     this.reviewerAsked = true;
+    // Its turn ended before a restart that came before the gate acted on it: acted on now (the
+    // turn's own result is gone — it settled without deciding).
+    if (this.extras.turnEnded === true && this.extras.agent === undefined) return { kind: "reviewer", result: { status: "succeeded", output: {} } };
     const mode = (this.extras.reminders ?? 0) >= 1 ? "reminder" : "new";
     const sessionId = gate.decider.sessionId;
     if (mode === "reminder" && sessionId === undefined) return { kind: "error", error: new Error("its chat is unknown, so it cannot be reminded") };
@@ -482,8 +485,10 @@ class GateRun {
       signal,
       persist: async (agentState) => {
         if (settled()) throw new GateSettledError();
-        const { agent: _agent, ...rest } = this.extras;
-        this.extras = agentState !== undefined ? { ...rest, agent: agentState } : rest;
+        const { agent: _agent, turnEnded: _ended, ...rest } = this.extras;
+        // A cleared state is the turn's end, recorded in the same write (a restart before the
+        // gate acts on it must not start a second reviewer chat).
+        this.extras = agentState !== undefined ? { ...rest, agent: agentState } : { ...rest, turnEnded: true };
         await this.persistExtras();
       },
       onSession: (id) => {

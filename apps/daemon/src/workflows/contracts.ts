@@ -139,6 +139,11 @@ export type WaitingOn =
       /** Reminders the reviewer agent got after a turn that settled without a decision (at most one). */
       reminders?: number;
       /**
+       * The reviewer's current turn ended (its agent state cleared in this same write) and the gate
+       * has not acted on it yet: a restart then reminds or escalates — never a new reviewer chat.
+       */
+      turnEnded?: true;
+      /**
        * The launcher's queued message: its command id is minted and persisted BEFORE the first post
        * (the host's receipt dedupes a re-post after a restart); `delivered` once the chat took it.
        */

@@ -877,6 +877,37 @@ describe("gate: a reviewer agent decides", () => {
     assert.equal((await second.engine.waitForRun(runId!)).status, "succeeded");
   });
 
+  test("a restart right after the reviewer's turn ended reminds it in the same chat, never a second chat", async () => {
+    const e = env([reviewerFlow()]);
+    const firstAgent = controlledExecutor("agent");
+    const first = e.boot({ executors: { gate: createGateExecutor({ agent: firstAgent }) } });
+    const { runId } = await first.engine.run("w1", { input: { v: "1" } });
+    await flush();
+    const call = firstAgent.calls[0]! as AgentCall;
+    await reviewerSession(call, "rev-1");
+    // The turn ended without a decision: the agent executor clears its wait, then the daemon goes
+    // down before the gate records the reminder.
+    await call.ctx.setWaitingOn(undefined);
+    await first.engine.stop();
+    const stored = (await e.shared.runStore.load(runId!))!.blocks.G!.waitingOn;
+    assert.ok(stored?.kind === "gate" && stored.agent === undefined, "the turn's end is on disk");
+
+    const agent = controlledExecutor("agent");
+    const second = e.boot({ executors: { gate: createGateExecutor({ agent }) } });
+    await second.engine.resume();
+    await flush();
+    assert.equal(agent.calls.length, 1);
+    const reminder = agent.calls[0]! as AgentCall;
+    assert.deepEqual(reminder.ctx.node.config.session, { kind: "continue", fromNode: "G" }, "the reminder, into the same chat");
+    assert.deepEqual(reminder.ctx.expressionContext().nodes.G?.output, { sessionId: "rev-1" });
+    const waiting = (await second.runStore.load(runId!))!.blocks.G!.waitingOn;
+    assert.ok(waiting?.kind === "gate" && waiting.reminders === 1, "persisted before the reminder");
+    reminder.resolve({ status: "succeeded", output: {} });
+    await flush();
+    assert.match((await onlyGate(second, runId!)).escalationReason ?? "", /twice without deciding/);
+    await second.engine.cancel(runId!);
+  });
+
   test("a restart after the escalation was persisted does not ask the reviewer again", async () => {
     const e = env([reviewerFlow()]);
     const firstAgent = controlledExecutor("agent");
