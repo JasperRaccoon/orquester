@@ -1,7 +1,8 @@
 // The desktop automation engine (spec 2026-11-10 §2.3): one X11 client per running desktop, with
 // its own connection and the desktop's authority, that
 //
-// - captures the screen (GetImage in bands, converted to RGB through the root visual's masks),
+// - captures the screen (GetImage in bands, the raw pixels with the root visual's layout: the image
+//   workers convert them to RGB, `./pixels.ts`),
 // - follows every change through a RawRectangles DAMAGE on the root: each DamageNotify bumps the
 //   screen sequence and stamps the 16×16 blocks it covers, so waits for "idle" and "change" run
 //   on events plus one deadline timer, never by polling; a wait's region is watched at that block
@@ -53,6 +54,7 @@ import {
 import { findMitCookie, parseXauthority } from "../x11/xauth.ts";
 import { encodeXTestFakeInput, encodeXTestGetVersion, FakeEventType, XTEST_EXTENSION_NAME, type FakeInput } from "../x11/xtest.ts";
 import { Keysym, keysymsForText, letterCases, parseCombo, type ComboKey } from "./keys.ts";
+import type { DesktopPixelFormat } from "./pixels.ts";
 import {
   DesktopAutomationError,
   type DesktopAutomation,
@@ -136,10 +138,8 @@ interface OwnedClipboard {
   time: number;
 }
 
-/** Pixel conversion for the root visual: 32-bit pixels in the server's image byte order → RGB. */
-type PixelConverter = (src: Buffer, dst: Buffer, dstOffset: number, pixels: number) => void;
-
-function pixelConverter(setup: SetupInfo): PixelConverter {
+/** The root visual's pixel layout; refused (DESKTOP_UNSUPPORTED_VISUAL) unless 24/32-bit TrueColor at 32 bits per pixel. */
+function pixelFormat(setup: SetupInfo): DesktopPixelFormat {
   const screen = setup.screens[0]!;
   const visual = screen.rootVisual;
   const format = setup.pixmapFormats.find((entry) => entry.depth === screen.rootDepth);
@@ -149,38 +149,7 @@ function pixelConverter(setup: SetupInfo): PixelConverter {
       `The display's visual (depth ${screen.rootDepth}, ${format?.bitsPerPixel ?? "?"} bits per pixel) cannot be captured; only 24/32-bit TrueColor is supported.`
     );
   }
-  const lsb = setup.imageByteOrder === "lsb";
-  const { redMask, greenMask, blueMask } = visual;
-  if (redMask === 0xff0000 && greenMask === 0xff00 && blueMask === 0xff) {
-    // The usual layout: B G R X in memory (LSBFirst), X R G B (MSBFirst).
-    const [r, g, b] = lsb ? [2, 1, 0] : [1, 2, 3];
-    return (src, dst, dstOffset, pixels) => {
-      for (let i = 0, s = 0, d = dstOffset; i < pixels; i++, s += 4, d += 3) {
-        dst[d] = src[s + r]!;
-        dst[d + 1] = src[s + g]!;
-        dst[d + 2] = src[s + b]!;
-      }
-    };
-  }
-  const channel = (mask: number): { mask: number; shift: number; scale: Uint8Array } => {
-    let shift = 0;
-    while (shift < 32 && ((mask >>> shift) & 1) === 0) shift++;
-    const max = mask >>> shift;
-    const scale = new Uint8Array(max + 1);
-    for (let v = 0; v <= max; v++) scale[v] = Math.round((v * 255) / max);
-    return { mask, shift, scale };
-  };
-  const red = channel(redMask);
-  const green = channel(greenMask);
-  const blue = channel(blueMask);
-  return (src, dst, dstOffset, pixels) => {
-    for (let i = 0, s = 0, d = dstOffset; i < pixels; i++, s += 4, d += 3) {
-      const pixel = lsb ? src.readUInt32LE(s) : src.readUInt32BE(s);
-      dst[d] = red.scale[(pixel & red.mask) >>> red.shift]!;
-      dst[d + 1] = green.scale[(pixel & green.mask) >>> green.shift]!;
-      dst[d + 2] = blue.scale[(pixel & blue.mask) >>> blue.shift]!;
-    }
-  };
+  return { byteOrder: setup.imageByteOrder === "lsb" ? "lsb" : "msb", redMask: visual.redMask, greenMask: visual.greenMask, blueMask: visual.blueMask };
 }
 
 interface BlockRange {
@@ -291,7 +260,7 @@ class X11DesktopAutomation implements DesktopAutomation {
   private subtractQueued = false;
   private readonly waiters = new Set<Waiter>();
   private readonly resizeListeners = new Set<(size: DesktopSize) => void>();
-  private converter: PixelConverter | null = null;
+  private pixelFormat: DesktopPixelFormat | null = null;
 
   private keyboardCache: Keyboard | null = null;
   /** Bumped on every MappingNotify: a mapping read before it is stale. */
@@ -393,12 +362,13 @@ class X11DesktopAutomation implements DesktopAutomation {
 
   async capture(region?: DesktopRect): Promise<DesktopCapture> {
     this.assertOpen();
-    this.converter ??= pixelConverter(this.conn.setup);
+    const format = (this.pixelFormat ??= pixelFormat(this.conn.setup));
     const rect = this.clip(region ?? { x: 0, y: 0, ...this.display });
     const seq = this.sequence;
     const display = this.size();
     const stride = rect.width * 4;
-    const rgb = Buffer.allocUnsafe(rect.width * rect.height * 3);
+    // Not from Buffer's pool: its own ArrayBuffer, which the encoder hands to an image worker whole.
+    const pixels = Buffer.allocUnsafeSlow(rect.height * stride);
     const bandRows = Math.max(1, Math.floor(CAPTURE_BAND_BYTES / stride));
     const depth = this.conn.setup.screens[0]!.rootDepth;
     try {
@@ -406,10 +376,10 @@ class X11DesktopAutomation implements DesktopAutomation {
         const rows = Math.min(bandRows, rect.height - row);
         const reply = await this.conn.getImage(this.conn.root, { x: rect.x, y: rect.y + row, width: rect.width, height: rows });
         if (reply.depth !== depth || reply.data.length < rows * stride) throw new Error(`GetImage answered depth ${reply.depth} with ${reply.data.length} bytes for ${rect.width}×${rows}`);
-        this.converter(reply.data, rgb, row * rect.width * 3, rows * rect.width);
+        reply.data.copy(pixels, row * stride, 0, rows * stride);
       }
       const pointer = await this.conn.queryPointer(this.conn.root);
-      return { width: rect.width, height: rect.height, origin: { x: rect.x, y: rect.y }, rgb, seq, display, cursor: { x: pointer.rootX, y: pointer.rootY } };
+      return { width: rect.width, height: rect.height, origin: { x: rect.x, y: rect.y }, pixels, format, seq, display, cursor: { x: pointer.rootX, y: pointer.rootY } };
     } catch (error) {
       throw notRunning(error);
     }

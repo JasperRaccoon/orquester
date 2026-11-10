@@ -44,7 +44,7 @@ export class FakeDesktopAutomation implements DesktopAutomation {
   async capture(region?: DesktopRect): Promise<DesktopCapture> {
     this.calls.push({ kind: "capture", ...(region ? { region } : {}) });
     const rect = region ?? { x: 0, y: 0, ...this.display };
-    return { width: rect.width, height: rect.height, origin: { x: rect.x, y: rect.y }, rgb: Buffer.alloc(0), seq: this.sequence, display: this.size(), cursor: { ...this.cursor } };
+    return { width: rect.width, height: rect.height, origin: { x: rect.x, y: rect.y }, pixels: Buffer.alloc(0), format: { byteOrder: "lsb", redMask: 0xff0000, greenMask: 0xff00, blueMask: 0xff }, seq: this.sequence, display: this.size(), cursor: { ...this.cursor } };
   }
 
   async wait(options: DesktopWaitOptions): Promise<DesktopWaitResult> {

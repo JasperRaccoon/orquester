@@ -4,6 +4,7 @@
 
 import type { Duplex } from "node:stream";
 import type { DesktopModifier, DesktopRect, DesktopSize } from "@orquester/api";
+import type { DesktopPixelFormat } from "./pixels.ts";
 
 /** How the engine reaches a display: as the window tracker does (`DesktopWindowTrackerOptions`). */
 export interface DesktopAutomationTarget {
@@ -15,13 +16,18 @@ export interface DesktopAutomationTarget {
   readAuthority(): Promise<Buffer>;
 }
 
-/** A raw capture: RGB, 3 bytes per pixel, row-major. */
+/** A raw capture: the server's 32-bit pixels, row-major, converted to RGB only in the image workers (`./pixels.ts`). */
 export interface DesktopCapture {
   width: number;
   height: number;
   /** The captured rectangle's top-left in display pixels. */
   origin: { x: number; y: number };
-  rgb: Buffer;
+  /**
+   * width × height × 4 bytes in `format`, on an ArrayBuffer of its own: encoding transfers it to
+   * an image worker, after which it is empty here.
+   */
+  pixels: Buffer;
+  format: DesktopPixelFormat;
   /** The screen sequence when the capture was taken. */
   seq: number;
   /** The display size at capture time. */

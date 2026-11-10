@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { MAX_SERVER_MESSAGE_BYTES, X11Error } from "../x11/connection.ts";
 import { encodeSelectionNotify } from "../x11/protocol.ts";
 import { openDesktopAutomation } from "./engine.ts";
+import { pixelsToRgb } from "./pixels.ts";
 import { DesktopAutomationError, type DesktopAutomation } from "./types.ts";
 
 const ROOT = 0x1e5;
@@ -694,10 +695,14 @@ describe("DesktopAutomation capture", () => {
       const { server, engine } = await open({ imageByteOrder });
       server.pointer = { x: 5, y: 6 };
       const capture = await engine.capture({ x: 10, y: 4, width: 3, height: 2 });
-      assert.deepEqual({ ...capture, rgb: undefined }, { width: 3, height: 2, origin: { x: 10, y: 4 }, rgb: undefined, seq: 0, display: { width: 64, height: 48 }, cursor: { x: 5, y: 6 } });
+      assert.deepEqual(
+        { ...capture, pixels: undefined },
+        { width: 3, height: 2, origin: { x: 10, y: 4 }, pixels: undefined, format: { byteOrder: imageByteOrder, redMask: 0xff0000, greenMask: 0xff00, blueMask: 0xff }, seq: 0, display: { width: 64, height: 48 }, cursor: { x: 5, y: 6 } }
+      );
       const expected = [];
       for (let y = 4; y < 6; y++) for (let x = 10; x < 13; x++) expected.push(...FakeXServer.color(x, y));
-      assert.deepEqual([...capture.rgb], expected);
+      assert.deepEqual([...pixelsToRgb(capture.pixels, capture.format, 6)], expected);
+      assert.equal(capture.pixels.buffer.byteLength, 6 * 4, "on an ArrayBuffer of its own, to be transferred whole");
       await engine.close();
     });
   }
@@ -708,7 +713,8 @@ describe("DesktopAutomation capture", () => {
     const bands = server.requests.filter((request) => request.opcode === 73).map((request) => request.buf.readUInt16LE(14));
     assert.deepEqual(bands, [1023, 77]);
     for (const rows of bands) assert.ok(32 + rows * 1024 * 4 <= MAX_SERVER_MESSAGE_BYTES);
-    const at = (x: number, y: number): number[] => [...capture.rgb.subarray((y * 1024 + x) * 3, (y * 1024 + x) * 3 + 3)];
+    const rgb = pixelsToRgb(capture.pixels, capture.format, 1024 * 1100);
+    const at = (x: number, y: number): number[] => [...rgb.subarray((y * 1024 + x) * 3, (y * 1024 + x) * 3 + 3)];
     assert.deepEqual(at(1023, 1099), FakeXServer.color(1023, 1099));
     assert.deepEqual(at(7, 1023), FakeXServer.color(7, 1023));
     await engine.close();

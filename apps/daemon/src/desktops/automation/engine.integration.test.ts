@@ -31,6 +31,7 @@ import {
 } from "../x11/protocol.ts";
 import { encodeXauthEntry, MIT_MAGIC_COOKIE } from "../x11/xauth.ts";
 import { openDesktopAutomation } from "./engine.ts";
+import { pixelsToRgb } from "./pixels.ts";
 import type { DesktopAutomation } from "./types.ts";
 
 const WAIT_MS = 15_000;
@@ -203,9 +204,10 @@ describe("DesktopAutomation against Xvnc", { skip: onPath("Xvnc") ? false : "mis
 
     const capture = await engine.capture({ x: 190, y: 95, width: 220, height: 110 });
     assert.deepEqual([capture.width, capture.height, capture.origin.x, capture.origin.y], [220, 110, 190, 95]);
+    const rgb = pixelsToRgb(capture.pixels, capture.format, capture.width * capture.height);
     const at = (x: number, y: number): number[] => {
       const i = ((y - capture.origin.y) * capture.width + (x - capture.origin.x)) * 3;
-      return [...capture.rgb.subarray(i, i + 3)];
+      return [...rgb.subarray(i, i + 3)];
     };
     for (const [i, color] of colors.entries()) {
       const { x, y, width, height } = quadrant(i);
@@ -215,7 +217,7 @@ describe("DesktopAutomation against Xvnc", { skip: onPath("Xvnc") ? false : "mis
     assert.ok(!colors.some((color) => at(199, 99).every((value, c) => value === color[c])));
 
     const full = await engine.capture();
-    assert.deepEqual([full.width, full.height, full.rgb.length], [WIDTH, HEIGHT, WIDTH * HEIGHT * 3]);
+    assert.deepEqual([full.width, full.height, full.pixels.length], [WIDTH, HEIGHT, WIDTH * HEIGHT * 4]);
     const idle = await engine.wait({ for: "idle", idleMs: 100, region: { x: 200, y: 100, width: 200, height: 100 }, timeoutMs: WAIT_MS });
     assert.equal(idle.timedOut, false);
   });
