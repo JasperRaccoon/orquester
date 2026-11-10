@@ -4,8 +4,9 @@ Every agent-chat agent (Claude, Codex, Grok, OpenCode) gets an MCP server named 
 scoped to its own thread. Its tools are the **Orquester catalog's** chat audience — the same tool
 definitions the external `/mcp` serves (`../mcp/catalog/`, one module per family in
 `../mcp/tools/`), run by the same executor (`../mcp/executor.ts`) — under **tiers and approval
-cards**. Every chat gets every chat tool (no always-Admin one for a workflow-owned chat); there is
-no per-agent or per-chat tool switch. This directory is the transport only: the socket route, the
+cards**. Every chat gets every base chat tool (no always-Admin one for a workflow-owned chat; a
+plugin family's tools only while that plugin can be used); there is no per-agent or per-chat tool
+switch. This directory is the transport only: the socket route, the
 per-thread manifest (tools, instruction block, denials), the manifest pushes and the legacy-name
 aliases. Design:
 `docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md` (cited as §n); the external
@@ -67,11 +68,16 @@ No dynamic `import()` either.
 | `agent-profile-editing` | `edit_agent_profile` (1) |
 | `desktops` | `get_desktops`, `control_desktop` (2) |
 | `secret-files` | `secret_files_status`, `push_secret_files` (2) |
-| `boxes` | the temporary-box tools (8), advertised only while a box can be rented |
+| `boxes` | `create_box`, `list_boxes`, `box_exec`, `box_exec_output`, `box_upload`, `box_download`, `box_forward_port`, `destroy_box`, `box_lend_accounts`, `box_return_accounts` (10), advertised only while a box can be rented (a chat running in a box keeps `list_boxes` and the two account tools) |
 | `knowledge` | `knowledge_search`, `knowledge_get`, `knowledge_save`, `knowledge_update`, `knowledge_delete`, `knowledge_merge`, `knowledge_collections`, `knowledge_insights`, `knowledge_worker_next_task`, `knowledge_worker_submit` (10), advertised only while the Knowledge Graph plugin is on — search, get, insights, update, delete and merge only to a chat that sees a collection, the worker tools only (and alone) to the plugin's own indexing sessions |
+| `devices` | `list_devices`, `open_device`, `device_action`, `device_install`, `close_device` (5), advertised only while devices can be used |
+| `images` | `generate_image` (1), advertised only while GPT Image can make images |
 
-50 chat tools (the 44 external ones plus `html_preview`, `html_render`, `show_image`, `request_secret`, `push_secret_files`, `report_step_result`), **all
-advertised to every chat** of every agent. A toolset is only a group: a label in `@orquester/api`
+76 chat tools: 50 base ones (the 44 external ones plus the chat-only `html_preview`, `html_render`,
+`show_image`, `request_secret`, `push_secret_files`, `report_step_result`), **all advertised to
+every chat** of every agent (less the always-Admin ones for a workflow-owned chat), and the 26 of the
+plugin families above (boxes 10, knowledge 10, devices 5, images 1), each advertised only while
+its plugin can be used. A toolset is only a group: a label in `@orquester/api`
 `TOOLSETS` and the `orquester/toolset` tag external clients see. There is no master switch, no
 per-agent default and no per-chat override, and no `request_toolset`. Older builds kept such
 switches in `agent-tools.json`; this build keeps those keys verbatim and never reads them
@@ -79,11 +85,12 @@ switches in `agent-tools.json`; this build keeps those keys verbatim and never r
 continue turns in old transcripts.
 
 **Measured** (`mcp/catalog/registry.test.ts` serialises `tools/list` as the host does, and asserts
-the budgets): all 46 chat tools are 54 399 bytes (≤ 73 728, the one chat budget); the external set
-59 101 bytes for 42 tools (≤ 81 920). Every
-tool is ≤ 3 000 bytes but `html_render` (2 755, ≤ 3 100) and `create_workflow`, `update_workflow`,
-`edit_agent_profile` (≤ 6 500); every description ≤ 1 000 bytes (`html_*` ≤ 2 000), every field
-text ≤ 160.
+the budgets): the 49 base chat tools other than `report_step_result` are 59 442 bytes (≤ 61 440);
+`report_step_result` adds 658 (≤ 768), the box tools 7 937 (≤ 7 937), GPT Image 1 501 (≤ 2 560),
+and the two knowledge worker tools are 1 169 alone (≤ 1 280); the external set is 63 310 bytes for
+44 tools (≤ 81 920). Every tool is ≤ 3 000 bytes (several less, `TOOL_TARGETS` in that test) but
+`create_workflow`, `update_workflow`, `edit_agent_profile` (≤ 6 500); every description ≤ 1 000
+bytes (`html_*` ≤ 2 000), every field text ≤ 160.
 
 ## Tiers, the gate and cards (§5, §6, §7)
 
