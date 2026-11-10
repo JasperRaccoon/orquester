@@ -28,6 +28,10 @@ import { createStore } from "zustand/vanilla";
 import {
   isRunActive,
   type CreateWorkflowRequest,
+  type DecideWorkflowGateRequest,
+  type DecideWorkflowGateResponse,
+  type ListWorkflowGatesQuery,
+  type ListWorkflowGatesResponse,
   type GetWorkflowResponse,
   type GetWorkflowRunResponse,
   type ListWorkflowRunsResponse,
@@ -39,6 +43,7 @@ import {
   type Workflow,
   type WorkflowBlockRun,
   type WorkflowBlockStatus,
+  type WorkflowGateState,
   type WorkflowProblem,
   type WorkflowRun,
   type WorkflowRunSummary,
@@ -47,7 +52,10 @@ import {
   type WorkflowTriggerSummary,
   type WorkflowWriteResponse
 } from "@orquester/api";
-import { isTriggerType, workflowSummaryErrors } from "@orquester/api";
+import { isGateWaiting, isGateWaitingForPerson, isTriggerType, workflowSummaryErrors } from "@orquester/api";
+
+import { resetGateFocus } from "./gate-focus";
+import { cancelledWithRun, mergeGate, sanitizeDecideAnswer, sanitizeGateList, type GatesByRun } from "./gates";
 
 import {
   isRecord,
@@ -86,6 +94,9 @@ export interface WorkflowsApi {
   listWorkflowSecrets(workflowId?: string | null, signal?: AbortSignal): Promise<ListWorkflowSecretsResponse>;
   setWorkflowSecret(name: string, value: string, workflowId?: string | null): Promise<void>;
   deleteWorkflowSecret(name: string, workflowId?: string | null): Promise<void>;
+  /** Gates (spec 2026-11-10 §6, §8). Optional: a fake without them reads as a daemon without gates. */
+  listWorkflowGates?(query?: ListWorkflowGatesQuery, signal?: AbortSignal): Promise<ListWorkflowGatesResponse>;
+  decideWorkflowGate?(runId: string, gateId: string, req: DecideWorkflowGateRequest): Promise<DecideWorkflowGateResponse>;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +168,13 @@ export interface WorkflowsState {
   /** Per secrets scope: `"global"` or a workflow id. */
   secrets: Readonly<Record<string, WorkflowSecretsList>>;
   notice: WorkflowsNotice | null;
+  /**
+   * Every gate this client knows (spec 2026-11-10 §6.4), by run id then gate id: a loaded run's,
+   * an update's, and the waiting ones of every project (`loadWorkflowGates`, the attention rows).
+   */
+  gates: GatesByRun;
+  /** The cross-project gate list's load (attention). */
+  gatesLoad: WorkflowsLoad;
 }
 
 const IDLE_LOAD: WorkflowsLoad = { status: "idle", error: null, refreshing: false, stale: false };
@@ -168,7 +186,9 @@ const INITIAL: WorkflowsState = {
   recentRuns: {},
   runs: {},
   secrets: {},
-  notice: null
+  notice: null,
+  gates: {},
+  gatesLoad: IDLE_LOAD
 };
 
 export const workflowsStore = createStore<WorkflowsState>(() => INITIAL);
@@ -194,6 +214,9 @@ let listTouched: Set<string> | null = null;
 const runsInFlight = new Map<string, Promise<void>>();
 const runInFlight = new Map<string, Promise<void>>();
 const secretsInFlight = new Map<string, Promise<void>>();
+let gatesInFlight: Promise<void> | null = null;
+/** The gates a change touched while the gate list load was in flight (`runId/gateId`). */
+let gatesTouched: Set<string> | null = null;
 /** Deleted workflow ids. An id is never reused, so none of them may come back. */
 const tombstones = new Set<string>();
 /** Bumped by `markWorkflowsStale`: a load that crossed it stays stale. */
@@ -355,7 +378,12 @@ function removeWorkflowLocal(id: string): void {
   for (const [runId, entry] of Object.entries(state.runs)) {
     if (entry.summary.workflowId !== id) runs[runId] = entry;
   }
-  workflowsStore.setState({ summaries, enabledOverrides, recentRuns, secrets, runs });
+  const gates: Record<string, Record<string, WorkflowGateState>> = {};
+  for (const [runId, byId] of Object.entries(state.gates)) {
+    const kept = Object.fromEntries(Object.entries(byId).filter(([, gate]) => gate.workflowId !== id));
+    if (Object.keys(kept).length > 0) gates[runId] = kept;
+  }
+  workflowsStore.setState({ summaries, enabledOverrides, recentRuns, secrets, runs, gates });
 }
 
 /** A run summary from an event or a load: into the run cache, its workflow's row and its recent-runs list. */
@@ -364,6 +392,7 @@ function applyRunSummary(run: WorkflowRunSummary): void {
   const state = getState();
   const entry = state.runs[run.id];
   const summary = mergeRunSummary(entry?.summary, run);
+  if (!isRunActive(summary.status)) settleGatesOfEndedRun(summary.id);
   const runs = {
     ...state.runs,
     [run.id]: entry
@@ -387,6 +416,59 @@ function applyRunSummary(run: WorkflowRunSummary): void {
     };
   }
   workflowsStore.setState(patch);
+}
+
+// ---------------------------------------------------------------------------
+// Gates (spec 2026-11-10 §6.4)
+// ---------------------------------------------------------------------------
+
+/** Gates from any source (a run, an update, the list, a decide answer): per gate, the one further along stands. */
+function upsertGatesLocal(incoming: readonly WorkflowGateState[]): void {
+  if (incoming.length === 0) return;
+  const state = getState();
+  let gates: Record<string, Record<string, WorkflowGateState>> | null = null;
+  for (const gate of incoming) {
+    if (tombstones.has(gate.workflowId)) continue;
+    gatesTouched?.add(`${gate.runId}/${gate.gateId}`);
+    const held = (gates ?? state.gates)[gate.runId]?.[gate.gateId];
+    const next = mergeGate(held, gate);
+    if (next === held) continue;
+    gates ??= { ...state.gates };
+    gates[gate.runId] = { ...gates[gate.runId], [gate.gateId]: next };
+  }
+  if (gates !== null) workflowsStore.setState({ gates });
+}
+
+/** A run that ended holds no waiting gate (it was cancelled with it): the badges clear at once. */
+function settleGatesOfEndedRun(runId: string): void {
+  const byId = getState().gates[runId];
+  if (!byId || !Object.values(byId).some(isGateWaiting)) return;
+  upsertGatesLocal(Object.values(byId).map(cancelledWithRun));
+}
+
+/** Waiting-for-the-person gates held for a top-level run, its child runs' included. */
+function heldPersonGates(runId: string): number {
+  let count = 0;
+  for (const byId of Object.values(getState().gates)) {
+    for (const gate of Object.values(byId)) {
+      if ((gate.runId === runId || gate.rootRunId === runId) && isGateWaitingForPerson(gate)) count += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * A top-level run says more gates wait for the person than this client holds
+ * (an update without its gates, a child run never loaded): the gate list is
+ * asked again. Only ever when something is missing, so it cannot loop.
+ */
+function reconcileGateCounts(run: WorkflowRunSummary): void {
+  if (run.parentRunId || run.pendingPersonGates === undefined || !isRunActive(run.status)) return;
+  if (heldPersonGates(run.id) >= run.pendingPersonGates) return;
+  const load = getState().gatesLoad;
+  if ((load.status === "loaded" || load.status === "loading") && !load.stale) {
+    workflowsStore.setState({ gatesLoad: { ...load, stale: true } });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -422,13 +504,22 @@ export function applyWorkflowsEvent(event: { type: string; payload: unknown }): 
     case "workflowRun.started":
     case "workflowRun.finished": {
       const run = sanitizeRunSummary(payload.run);
-      if (run !== null) applyRunSummary(run);
+      if (run !== null) {
+        applyRunSummary(run);
+        reconcileGateCounts(run);
+      }
       return null;
     }
     case "workflowRun.updated": {
       const run = sanitizeRunSummary(payload.run);
       if (run === null) return null;
       applyRunSummary(run);
+      if (!tombstones.has(run.workflowId)) {
+        // Gates of a sub-workflow's run ride its own updates; each names its run.
+        upsertGatesLocal(sanitizeGateList(payload.gates));
+        if (!isRunActive(run.status)) settleGatesOfEndedRun(run.id);
+        reconcileGateCounts(run);
+      }
       const state = getState();
       const entry = state.runs[run.id];
       if (entry === undefined) return null;
@@ -631,7 +722,18 @@ export function loadWorkflowRun(api: WorkflowsApi, runId: string, options?: { fo
       const run = isRecord(response) ? sanitizeWorkflowRun(response.run) : null;
       if (run === null) throw new Error("The daemon answered the run in an unexpected shape.");
       if (tombstones.has(run.workflowId)) return;
-      const { definition: _d, triggerPayload: _t, blocks, takenEdges, deadEdges, finalOutput: _f, ...summaryFields } = run;
+      const {
+        definition: _d,
+        triggerPayload: _t,
+        blocks,
+        takenEdges,
+        deadEdges,
+        finalOutput: _f,
+        gates,
+        loopLimits: _l,
+        ...summaryFields
+      } = run;
+      upsertGatesLocal(Object.values(gates ?? {}));
       applyRunSummary(summaryFields);
       const state = getState();
       const entry = state.runs[runId];
@@ -722,6 +824,91 @@ export function loadWorkflowSecrets(
 }
 
 /**
+ * The gates waiting anywhere — every project's (spec 2026-11-10 §8,
+ * `GET /api/workflow-gates`) — for the attention rows and badges. Concurrent
+ * callers share one request; a loaded, fresh list is not asked again unless
+ * `force`. A held waiting gate the answer no longer lists (decided or gone
+ * while this client looked away) is dropped — unless an event touched it
+ * while the load was in flight — and a run held whole that it belongs to is
+ * reloaded when on screen, so its card turns into the record.
+ */
+export function loadWorkflowGates(api: WorkflowsApi, options?: { force?: boolean }): Promise<void> {
+  bindConnection(api);
+  if (gatesInFlight !== null) return gatesInFlight;
+  const held = getState().gatesLoad;
+  if (!options?.force && held.status === "loaded" && !held.stale) return Promise.resolve();
+  if (typeof api.listWorkflowGates !== "function") {
+    workflowsStore.setState({ gatesLoad: { status: "error", error: "Gates are not available.", refreshing: false, stale: false } });
+    return Promise.resolve();
+  }
+  const gen = generation;
+  const touched = new Set<string>();
+  gatesTouched = touched;
+  const hadRows = held.status === "loaded";
+  workflowsStore.setState({
+    gatesLoad: hadRows ? { ...held, refreshing: true, stale: false } : { status: "loading", error: null, refreshing: false, stale: false }
+  });
+  const promise: Promise<void> = Promise.resolve().then(async () => {
+    try {
+      if (gen !== generation) return;
+      const response = await api.listWorkflowGates!({});
+      if (gen !== generation) return;
+      if (!isRecord(response) || !Array.isArray(response.gates)) {
+        throw new Error("The daemon answered the gate list in an unexpected shape.");
+      }
+      applyLoadedGates(sanitizeGateList(response.gates), touched);
+      // A change announced while this was in flight (a reconnect, a count it did not cover): ask again.
+      const current = getState().gatesLoad;
+      workflowsStore.setState({ gatesLoad: { status: "loaded", error: null, refreshing: false, stale: current.stale } });
+    } catch (error) {
+      if (gen !== generation) return;
+      const message = loadFailureText(error);
+      workflowsStore.setState({
+        gatesLoad: hadRows
+          ? { status: "loaded", error: message, refreshing: false, stale: false }
+          : { status: "error", error: message, refreshing: false, stale: false }
+      });
+    } finally {
+      if (gatesTouched === touched) gatesTouched = null;
+      if (gatesInFlight === promise) gatesInFlight = null;
+    }
+  });
+  gatesInFlight = promise;
+  return promise;
+}
+
+/** The list's answer over what is held: see `loadWorkflowGates`. Test runs' gates are not the list's (§7.5). */
+function applyLoadedGates(fresh: readonly WorkflowGateState[], touched: ReadonlySet<string>): void {
+  const listed = new Set(fresh.map((gate) => `${gate.runId}/${gate.gateId}`));
+  const state = getState();
+  const gates: Record<string, Record<string, WorkflowGateState>> = {};
+  const staleRuns = new Set<string>();
+  for (const [runId, byId] of Object.entries(state.gates)) {
+    const kept: Record<string, WorkflowGateState> = {};
+    for (const [gateId, gate] of Object.entries(byId)) {
+      const key = `${runId}/${gateId}`;
+      if (isGateWaiting(gate) && gate.test !== true && !listed.has(key) && !touched.has(key)) {
+        staleRuns.add(runId);
+        continue;
+      }
+      kept[gateId] = gate;
+    }
+    if (Object.keys(kept).length > 0) gates[runId] = kept;
+  }
+  const patch: Partial<WorkflowsState> = { gates };
+  if (staleRuns.size > 0) {
+    const runs = { ...state.runs };
+    for (const runId of staleRuns) {
+      const entry = runs[runId];
+      if (entry?.detail) runs[runId] = { ...entry, stale: true };
+    }
+    patch.runs = runs;
+  }
+  workflowsStore.setState(patch);
+  upsertGatesLocal(fresh);
+}
+
+/**
  * Everything loaded may be out of date — the event stream was down (a
  * reconnect) and the daemon has no replay. The rows stay; the hooks reload
  * what is on screen in the background.
@@ -731,6 +918,7 @@ export function markWorkflowsStale(): void {
   const state = getState();
   const patch: Partial<WorkflowsState> = {};
   if (state.load.status === "loaded" && !state.load.stale) patch.load = { ...state.load, stale: true };
+  if (state.gatesLoad.status === "loaded" && !state.gatesLoad.stale) patch.gatesLoad = { ...state.gatesLoad, stale: true };
   const recentRuns: Record<string, WorkflowRunsList> = {};
   for (const [id, list] of Object.entries(state.recentRuns)) {
     recentRuns[id] = list.status === "loaded" ? { ...list, stale: true } : list;
@@ -763,6 +951,9 @@ export function resetWorkflows(): void {
   runsInFlight.clear();
   runInFlight.clear();
   secretsInFlight.clear();
+  gatesInFlight = null;
+  gatesTouched = null;
+  resetGateFocus();
   tombstones.clear();
   enabledTokens.clear();
   workflowsStore.setState(INITIAL, true);
@@ -965,15 +1156,76 @@ export async function runWorkflowNow(
   const result = await mutate(api, () => api.runWorkflow(id, request), `Couldn't run “${name}”`);
   if (!result.ok) return result;
   const answer = result.value;
+  // Why it did not start, in the daemon's words (e.g. "previous run is waiting on gate “Deploy?”").
+  const detail = isRecord(answer) && typeof answer.skipDetail === "string" ? answer.skipDetail.trim() : "";
   if (isRecord(answer) && answer.skipped === "overlap") {
     setWorkflowsNotice({
       tone: "info",
       workflowId: id,
       action: "run-anyway",
-      text: `“${name}” is already running — this run was skipped (overlap: skip).`
+      text: detail
+        ? `“${name}” was skipped: ${detail}.`
+        : `“${name}” is already running — this run was skipped (overlap: skip).`
     });
+  } else if (detail && isRecord(answer) && answer.skipped === undefined) {
+    setWorkflowsNotice({ tone: "info", workflowId: id, text: `“${name}” is queued: ${detail}.` });
   }
   return result;
+}
+
+/**
+ * Decide a gate (spec 2026-11-10 §6.2). The answer's gate is applied at once —
+ * the card becomes its record and the badges drop without waiting for the
+ * update event. A gate decided first by someone else is not a failure: the
+ * answer says `alreadyDecided` with the decision that stands.
+ */
+export async function decideWorkflowGate(
+  api: WorkflowsApi,
+  runId: string,
+  gateId: string,
+  request: DecideWorkflowGateRequest
+): Promise<WorkflowMutationResult<DecideWorkflowGateResponse>> {
+  if (typeof api.decideWorkflowGate !== "function") {
+    return { ok: false, error: "This daemon cannot decide gates yet — update it.", code: null };
+  }
+  const result = await mutate(api, () => api.decideWorkflowGate!(runId, gateId, request), null);
+  if (!result.ok) {
+    // Gone or no longer waiting: what this client shows is out of date.
+    if (result.code === "GATE_NOT_FOUND" || result.code === "RUN_NOT_FOUND" || result.code === "RUN_NOT_ACTIVE") {
+      void loadWorkflowRun(api, runId, { force: true });
+    }
+    return result;
+  }
+  const answer = sanitizeDecideAnswer(result.value);
+  if (answer === null) {
+    void loadWorkflowRun(api, runId, { force: true });
+    return { ok: false, error: "The daemon answered in an unexpected shape.", code: null };
+  }
+  const before = getState().gates[answer.gate.runId]?.[answer.gate.gateId];
+  upsertGatesLocal([answer.gate]);
+  const after = getState().gates[answer.gate.runId]?.[answer.gate.gateId];
+  if (before !== undefined && isGateWaiting(before) && after !== undefined && !isGateWaiting(after)) {
+    countGateSettled(before);
+  }
+  return { ok: true, value: answer };
+}
+
+/** A gate stopped waiting: its run's (and top-level run's) badge counts drop now; the next update confirms them. */
+function countGateSettled(gate: WorkflowGateState): void {
+  for (const runId of new Set([gate.runId, ...(gate.rootRunId ? [gate.rootRunId] : [])])) {
+    const summary = getState().runs[runId]?.summary;
+    if (!summary || (summary.pendingGates === undefined && summary.pendingPersonGates === undefined)) continue;
+    const next: WorkflowRunSummary = { ...summary };
+    const pending = Math.max(0, (summary.pendingGates ?? 0) - 1);
+    if (pending > 0) next.pendingGates = pending;
+    else delete next.pendingGates;
+    if (gate.phase === "person") {
+      const person = Math.max(0, (summary.pendingPersonGates ?? 0) - 1);
+      if (person > 0) next.pendingPersonGates = person;
+      else delete next.pendingPersonGates;
+    }
+    applyRunSummary(next);
+  }
 }
 
 export async function setWorkflowSecret(

@@ -13,6 +13,7 @@
 
 import { WORKFLOW_NODE_TYPES, workflowProjectSchema, workflowRecordSchema } from "@orquester/config";
 import { WORKFLOW_SUMMARY_MAX_ERRORS } from "@orquester/api";
+import { sanitizeGateList } from "./gates";
 import type {
   AccountSelectionDecision,
   AgentHop,
@@ -144,6 +145,14 @@ export function sanitizeRunSummary(value: unknown): WorkflowRunSummary | null {
   if (parentRunId !== undefined) run.parentRunId = parentRunId;
   const retryOf = nonEmpty(value.retryOf);
   if (retryOf !== undefined) run.retryOf = retryOf;
+  // Gates (spec 2026-11-10 §6.2, §6.4): the badges' counts, parked, and why a run did not start.
+  for (const key of ["pendingGates", "pendingPersonGates"] as const) {
+    const count = finite(value[key]);
+    if (count !== undefined && count > 0) run[key] = Math.floor(count);
+  }
+  if (value.parked === true) run.parked = true;
+  const skipDetail = str(value.skipDetail)?.trim();
+  if (skipDetail) run.skipDetail = skipDetail;
   return run;
 }
 
@@ -328,6 +337,8 @@ export function sanitizeBlockRun(value: unknown): WorkflowBlockRun | null {
   }
   const childRunId = nonEmpty(value.childRunId);
   if (childRunId !== undefined) block.childRunId = childRunId;
+  const gateId = nonEmpty(value.gateId);
+  if (gateId !== undefined) block.gateId = gateId;
   if ("output" in value) block.output = value.output;
   if (value.outputTruncated === true) block.outputTruncated = true;
   if (value.pinned === true) block.pinned = true;
@@ -359,6 +370,16 @@ export function sanitizeBlocks(value: unknown): Record<string, WorkflowBlockRun>
   return out;
 }
 
+/** An id → count map (`loopLimits`); `undefined` when it holds nothing usable. */
+function sanitizeCounts(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [key, count] of Object.entries(value)) {
+    if (key.length > 0 && typeof count === "number" && Number.isFinite(count) && count >= 0) out[key] = Math.floor(count);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export function sanitizeEdgeIds(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
 }
@@ -388,6 +409,10 @@ export function sanitizeWorkflowRun(value: unknown): WorkflowRun | null {
     deadEdges: sanitizeEdgeIds(value.deadEdges)
   };
   if ("finalOutput" in value) run.finalOutput = value.finalOutput;
+  const gates = sanitizeGateList(value.gates);
+  if (gates.length > 0) run.gates = Object.fromEntries(gates.map((gate) => [gate.gateId, gate]));
+  const loopLimits = sanitizeCounts(value.loopLimits);
+  if (loopLimits !== undefined) run.loopLimits = loopLimits;
   return run;
 }
 
