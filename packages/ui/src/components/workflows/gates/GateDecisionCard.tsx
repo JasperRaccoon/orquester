@@ -94,6 +94,8 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
   const [error, setError] = React.useState<string | null>(null);
   const inFlight = React.useRef(false);
   const commentRef = React.useRef<HTMLTextAreaElement | null>(null);
+  /** Each choice's button, by choice id: Cancel hands focus back to the one that opened the box. */
+  const choiceRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const focusComment = React.useRef(false);
   const ids = React.useId();
 
@@ -146,6 +148,14 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
       return;
     }
     void send(choice, undefined);
+  };
+
+  /** Cancel or Escape: the box closes empty, and focus goes back to its choice (not to the page). */
+  const closeComment = (): void => {
+    const choiceId = selected;
+    setSelected(null);
+    setComment("");
+    if (choiceId !== null) choiceRefs.current.get(choiceId)?.focus({ preventScroll: true });
   };
 
   const submitComment = (): void => {
@@ -251,6 +261,10 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
               return (
                 <button
                   key={choice.id}
+                  ref={(element) => {
+                    if (element) choiceRefs.current.set(choice.id, element);
+                    else choiceRefs.current.delete(choice.id);
+                  }}
                   type="button"
                   aria-label={destination ? `${choice.label}, ${destination.spoken}` : choice.label}
                   aria-expanded={commentRule(choice, "").asks ? on : undefined}
@@ -307,7 +321,7 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
                     if (!event.repeat && !keyboardGuarded()) submitComment();
                   } else if (event.key === "Escape") {
                     event.preventDefault();
-                    setSelected(null);
+                    closeComment();
                   }
                 }}
                 placeholder={rule.required ? "Say why — the next step reads it." : "Anything the next step should know"}
@@ -320,7 +334,7 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
               <div className="flex flex-wrap items-center justify-end gap-1.5">
                 <button
                   type="button"
-                  onClick={() => setSelected(null)}
+                  onClick={closeComment}
                   disabled={busy}
                   className={cn(
                     "inline-flex items-center rounded-md px-2.5 text-xs font-medium text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-50",
