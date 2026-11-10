@@ -740,6 +740,52 @@ describe("engine: loops across a daemon restart", () => {
     const run = (await second.engine.getRun(runId!)) as WorkflowRun;
     assert.deepEqual(run.blocks.M!.output, { Check: null, Long: "long 2" });
   });
+
+  test("mid-reset: a reviewer gate's stopped pass interrupts its reviewer's turn after the restart, then cancels its gate", async () => {
+    const runStore = new HeldRunStore();
+    const decider = { kind: "agent", prompt: { kind: "text", text: "Review." }, chain: CHAIN, maxMinutes: 30 };
+    const wf = workflow(
+      "w1",
+      [T(), node("A", "code"), node("G", "gate", { question: "Ship?", decider }), node("Check", "if"), node("M", "merge", { mode: "all" })],
+      [edge("T", "A"), edge("A", "G"), edge("A", "Check"), loopEdge("Check", "A", "false", 2), edge("Check", "M", "true"), edge("G", "M", "choice:approve")]
+    );
+    const env = restartable([wf], runStore);
+    const firstAgent = controlledExecutor("agent");
+    const checkGate = controlledExecutor("if");
+    const first = env.boot({ code: scripted("code"), gate: createGateExecutor({ agent: firstAgent }), if: checkGate });
+    const { runId } = await first.engine.run("w1", {});
+    await flush();
+    const reviewerCall = firstAgent.calls[0]! as AgentCall;
+    reviewerCall.ctx.update({ sessionId: "rev-1" });
+    await reviewerCall.ctx.setWaitingOn({ kind: "agent", sessionId: "rev-1", commandId: "cmd-1", command: "turn", baseline: null, deadlineAt: "2026-09-28T11:00:00.000Z", phase: "watching", state: { v: 1 } });
+    await flush();
+    const firstGateId = (await first.engine.getRun(runId!))!.blocks.G!.gateId!;
+    runStore.hold();
+    checkGate.calls[0]!.resolve({ status: "succeeded", output: null, handle: "false" });
+    await flush();
+    const stopping = first.engine.stop();
+    runStore.release();
+    await stopping;
+    const stored = (await runStore.load(runId!))!;
+    const interrupted = stored.blocks.G!.passes![0]!.interruptedFrom;
+    assert.ok(interrupted?.kind === "gate" && interrupted.agent?.sessionId === "rev-1", "the stopped pass's reviewer state is on disk");
+
+    const agent = controlledExecutor("agent");
+    const second = env.boot({ code: scripted("code"), gate: createGateExecutor({ agent }), if: scripted("if", { Check: () => ({ status: "succeeded", output: null, handle: "true" }) }) });
+    await second.engine.resume();
+    await flush();
+    const stopped = agent.calls.find((call) => call.ctx.resumeFrom?.kind === "agent");
+    assert.ok(stopped, "the stopped pass's reviewer is resumed once more…");
+    assert.equal(stopped.ctx.resumeFrom?.kind === "agent" && stopped.ctx.resumeFrom.sessionId, "rev-1");
+    assert.equal(stopped.ctx.signal.aborted, true, "…under an aborted signal: its turn is interrupted");
+    // The agent executor's cancel ends that turn.
+    stopped.resolve({ status: "cancelled" });
+    await flush();
+    const run = (await second.engine.getRun(runId!))!;
+    assert.equal(run.gates![firstGateId]!.cancelled, true, "its gate is cancelled");
+    assert.equal(run.blocks.G!.passes![0]!.interruptedFrom, undefined, "settled");
+    await second.engine.cancel(runId!);
+  });
 });
 
 // ---------------------------------------------------------------------------

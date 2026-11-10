@@ -88,6 +88,8 @@ class GateRun {
   private extras: GateExtras = {};
   /** The block is done with its gate: a reviewer still running records nothing more. */
   private settled = false;
+  /** This execution ran (or resumed) the reviewer agent: its own work stops it. */
+  private reviewerAsked = false;
 
   constructor(
     private readonly ctx: NodeExecutionContext<"gate">,
@@ -240,6 +242,7 @@ class GateRun {
         };
       }
       if (gate.cancelled === true || ctx.signal.aborted) {
+        await this.stopRecordedReviewer();
         this.settled = true;
         host.cancel(ctx.runId, this.gateId);
         return { status: "cancelled" };
@@ -385,6 +388,43 @@ class GateRun {
     await this.ctx.setWaitingOn(waitingOnFor(gate, this.extras));
   }
 
+  /**
+   * A reviewer turn recorded before a restart that this execution never resumed — a loop's stopped
+   * pass is resumed under an aborted signal only to stop what it started: resumed once more under an
+   * aborted signal, which interrupts its turn (the agent executor's cancel). Nothing it records is kept.
+   */
+  private async stopRecordedReviewer(): Promise<void> {
+    const { ctx } = this;
+    const decider = this.config.decider;
+    const resume = this.extras.agent;
+    if (this.reviewerAsked || resume === undefined || decider.kind !== "agent" || !this.agent) return;
+    this.reviewerAsked = true;
+    const gate = this.host.get(ctx.runId, this.gateId);
+    if (!gate) return;
+    const mode = (this.extras.reminders ?? 0) >= 1 && gate.decider.sessionId !== undefined ? "reminder" : "new";
+    const stop = new AbortController();
+    stop.abort();
+    try {
+      await runReviewer({
+        ctx,
+        agent: this.agent,
+        decider,
+        gate,
+        mode,
+        ...(gate.decider.sessionId !== undefined ? { sessionId: gate.decider.sessionId } : {}),
+        deadlineAt: new Date(gate.phaseDeadlineAt ?? ctx.services.clock.now().toISOString()),
+        resume,
+        signal: stop.signal,
+        persist: async () => undefined,
+        onSession: () => undefined,
+        settled: () => false
+      });
+    } catch (error) {
+      if (error instanceof EngineStoppedError) throw error;
+      ctx.log.warn("gate: the reviewer agent could not be stopped", { error: errorText(error) });
+    }
+  }
+
   // --- the deciders' work -----------------------------------------------------------------------
 
   private async launcherTask(gate: WorkflowGateState, signal: AbortSignal): Promise<TaskOutcome> {
@@ -425,6 +465,7 @@ class GateRun {
     const { ctx, host } = this;
     const decider = this.config.decider;
     if (decider.kind !== "agent" || !this.agent) return { kind: "error", error: new Error("no reviewer agent is configured") };
+    this.reviewerAsked = true;
     const mode = (this.extras.reminders ?? 0) >= 1 ? "reminder" : "new";
     const sessionId = gate.decider.sessionId;
     if (mode === "reminder" && sessionId === undefined) return { kind: "error", error: new Error("its chat is unknown, so it cannot be reminded") };
