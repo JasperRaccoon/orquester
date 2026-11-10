@@ -30,7 +30,7 @@ import {
   withoutLoopEdges
 } from "./graph.ts";
 import { createUndeclaredInputCheck, inputDeclarationProblems } from "./inputs.ts";
-import { pinnedOutcomeProblem } from "./outcomes.ts";
+import { passThroughHandle, pinnedOutcomeProblem } from "./outcomes.ts";
 import { presetToCron, scheduleIntervalProblem, validateCron, isValidTimeZone } from "./schedule.ts";
 import {
   isTriggerType,
@@ -463,6 +463,18 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         severity: "error",
         code: "loop_handle_shared",
         message: `${label(loop.source)}: its "${loop.sourceHandle}" output has a loop edge, so it can carry no other connection (a block there would be reset at once)`,
+        edgeId: loop.id,
+        nodeId: loop.source
+      });
+    }
+    // A disabled block passes through on its first outcome / choice (§7.5): were that a loop's
+    // handle, the loop would only repeat itself — the engine never takes it.
+    const source = byId.get(loop.source);
+    if (source?.disabled === true && passThroughHandle(source) === loop.sourceHandle) {
+      push({
+        severity: "warning",
+        code: "loop_from_disabled",
+        message: `${source.name} is disabled and passes through on "${loop.sourceHandle}", which has a loop edge: the loop is not taken, so this path ends there`,
         edgeId: loop.id,
         nodeId: loop.source
       });
