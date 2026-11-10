@@ -1,14 +1,22 @@
 // Automated workflows — gates (spec 2026-11-10 §6.3): what an agent decider is told. The reviewer
-// agent's prompt is its decider prompt plus the gate section (the question and details as their
-// TEMPLATES, so the agent block's renderer frames untrusted values as it does in any agent prompt);
-// everything else in the section is literal text, escaped for both of the agent prompt's passes.
-// The launcher's message is plain text built from the rendered (redacted) record.
+// agent's prompt is its decider prompt plus the gate section: the question and details as the
+// gate's record holds them (rendered, secrets redacted — the reviewer never sees a secret the person
+// does not), framed as untrusted data like any copied value in an agent prompt; everything else in
+// the section is literal text, escaped for both of the agent prompt's passes. The launcher's
+// message is plain text built from the same record.
 
-import { escapePromptVariables, type AgentPrompt, type GateBlockConfig, type WorkflowGateState } from "@orquester/api";
+import { randomBytes } from "node:crypto";
+
+import { escapePromptVariables, frameUntrustedValue, promptDataNote, type AgentPrompt, type GateBlockConfig, type WorkflowGateState } from "@orquester/api";
 
 /** Text that renders to itself through the agent prompt's `{{…}}` pass and its `{variables}` pass. */
 export function literal(text: string): string {
-  return escapePromptVariables(text).replaceAll("{{", "\\{{");
+  return braces(escapePromptVariables(text));
+}
+
+/** `{{` as the `{{…}}` pass's literal escape (`\{{`). */
+function braces(text: string): string {
+  return text.replaceAll("{{", "\\{{");
 }
 
 const call = (runId: string, gateId: string, rest: string): string => `decide_workflow_gate {"runId": ${JSON.stringify(runId)}, "gateId": ${JSON.stringify(gateId)}, ${rest}}`;
@@ -24,11 +32,13 @@ function minutes(n: number): string {
 /** The reviewer agent's prompt: the decider prompt, then the gate section (§6.3). */
 export function reviewerPrompt(
   decider: Extract<GateBlockConfig["decider"], { kind: "agent" }>,
-  config: Pick<GateBlockConfig, "question" | "details">,
   gate: WorkflowGateState,
   workflowName: string,
-  maxMinutes: number
+  maxMinutes: number,
+  frameId: string = randomBytes(6).toString("hex")
 ): AgentPrompt {
+  // Framed values have their `{variables}` escaped already: only the `{{` pass is left.
+  const framed = (text: string): string => braces(frameUntrustedValue(text, frameId));
   const head = literal(
     [
       "",
@@ -40,7 +50,7 @@ export function reviewerPrompt(
       "Question:"
     ].join("\n")
   );
-  const details = config.details !== undefined && config.details.trim().length > 0 ? `\n\n${literal("Details:")}\n${config.details}` : "";
+  const details = gate.details !== undefined && gate.details.length > 0 ? `\n\n${literal("Details:")}\n${framed(gate.details)}` : "";
   const tail = literal(
     [
       "",
@@ -52,10 +62,12 @@ export function reviewerPrompt(
       `  ${call(gate.runId, gate.gateId, '"choice": "<id>", "comment": "<why>"')}`,
       "If you cannot or should not decide, hand the gate to the person instead:",
       `  ${call(gate.runId, gate.gateId, '"escalate": true, "comment": "<why>"')}`,
-      `Make that call as your last action, then end your turn. You have ${minutes(maxMinutes)}; after that the person decides.`
+      `Make that call as your last action, then end your turn. You have ${minutes(maxMinutes)}; after that the person decides.`,
+      "",
+      promptDataNote(frameId)
     ].join("\n")
   );
-  const section = `${head}\n${config.question}${details}${tail}`;
+  const section = `${head}\n${framed(gate.question)}${details}${tail}`;
   if (decider.prompt.kind === "text") return { kind: "text", text: `${decider.prompt.text}\n${section}` };
   return { kind: "saved", promptId: decider.prompt.promptId, append: `${decider.prompt.append ?? ""}\n${section}` };
 }

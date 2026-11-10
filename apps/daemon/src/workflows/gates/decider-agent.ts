@@ -55,7 +55,7 @@ export function reviewerNode(input: Pick<ReviewerRunInput, "ctx" | "decider" | "
   const { ctx, decider, gate, mode } = input;
   const maxMinutes = minutesLeft(input.deadlineAt, now);
   const config: AgentBlockConfig = agentConfigSchema.parse({
-    prompt: mode === "new" ? reviewerPrompt(decider, ctx.node.config, gate, ctx.workflow.name, maxMinutes) : reviewerReminder(gate),
+    prompt: mode === "new" ? reviewerPrompt(decider, gate, ctx.workflow.name, maxMinutes) : reviewerReminder(gate),
     session: mode === "new" ? { kind: "new" } : { kind: "continue", fromNode: ctx.node.name },
     chain: decider.chain,
     ...(decider.profileId !== undefined ? { profileId: decider.profileId } : {}),

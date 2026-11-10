@@ -15,15 +15,15 @@ follow and pause an agent's own goal; answer the agent's questions and tool appr
 transcripts, a tool call's whole output, subagents and per-turn diffs; search the text of every
 chat; wait until a session needs attention; read quota, cost and one session's token usage; push a
 notification to the user's devices; read files and a project's git state; keep the shared todo lists
-and the saved-prompt library; build, edit, run and debug the daemon's automated workflows (§12);
+and the saved-prompt library; build, edit, run, debug and decide the gates of the daemon's automated workflows (§12);
 manage each agent CLI's own global MCP servers, skills, plugins, marketplaces, hooks, commands and
 instruction file (§13); open desktop tabs — Linux GUI apps on a virtual display on the daemon's
-host (§14); and check a repo's Secret files vault. That is **42 tools** (server version 3.0.0; §6 lists them, and opens with the migration
+host (§14); and check a repo's Secret files vault. That is **44 tools** (server version 3.0.0; §6 lists them, and opens with the migration
 from the 72-tool 2.x surface).
 
 **One catalog, two audiences.** The same tool definitions also serve the agents chatting *inside*
 Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
-these 42 tools plus five chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
+these 44 tools plus five chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
 `push_secret_files`), and — while their plugins allow — the plugin families: temporary boxes,
 the knowledge base, devices (§15) and GPT Image (§16). (`show_image` copies PNG, JPEG, WebP or GIF files — from the
 workspaces, the chat's own attachments or the host's temp folders, or named `recent:N` /

@@ -246,10 +246,14 @@ class GateRun {
 
   private async personPhase(gate: WorkflowGateState): Promise<void> {
     const { ctx, host } = this;
-    await host.notifyPerson(ctx.runId, this.gateId);
     const round = linked(ctx.signal);
     try {
-      const outcome = await this.race(gate, round.controller.signal, null);
+      // Listen before the push's save: a decision made meanwhile is never missed.
+      const change = this.changeOf(round.controller.signal);
+      await host.notifyPerson(ctx.runId, this.gateId);
+      const now = host.get(ctx.runId, this.gateId);
+      if (!now || !isWaiting(now) || now.phase !== "person") return;
+      const outcome = await this.race(gate, round.controller.signal, null, change);
       if (outcome.kind === "deadline") await host.expire(ctx.runId, this.gateId, this.config.timeout?.then ?? { kind: "fail" });
     } finally {
       round.controller.abort();
@@ -353,12 +357,17 @@ class GateRun {
     await escalate(`${gate.decider.label} stopped without deciding.`);
   }
 
+  /** The gate's next change, as a round outcome (register it before any await that could miss one). */
+  private changeOf(signal: AbortSignal): Promise<RoundOutcome> {
+    return this.host.nextChange(this.ctx.runId, this.gateId, signal).then((change): RoundOutcome => (change ? { kind: "change", byDecider: change.byDecider } : { kind: "aborted" }));
+  }
+
   /** Until the gate changes, its phase deadline passes, the run aborts or the decider's work ends. */
-  private race(gate: WorkflowGateState, signal: AbortSignal, task: Promise<TaskOutcome> | null): Promise<RoundOutcome> {
-    const { ctx, host } = this;
+  private race(gate: WorkflowGateState, signal: AbortSignal, task: Promise<TaskOutcome> | null, change: Promise<RoundOutcome> = this.changeOf(signal)): Promise<RoundOutcome> {
+    const { ctx } = this;
     const deadline = new Date(gate.phaseDeadlineAt ?? personDeadline(new Date(gate.phaseStartedAt ?? gate.openedAt), this.config.timeout).toISOString());
     const branches: Promise<RoundOutcome>[] = [
-      host.nextChange(ctx.runId, this.gateId, signal).then((change): RoundOutcome => (change ? { kind: "change", byDecider: change.byDecider } : { kind: "aborted" })),
+      change,
       sleepUntil(ctx.services.clock, deadline, signal).then((reached): RoundOutcome => (reached ? { kind: "deadline" } : { kind: "aborted" }))
     ];
     if (task) branches.push(task.then((outcome): RoundOutcome => ({ kind: "task", outcome })));

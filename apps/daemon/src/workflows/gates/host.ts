@@ -471,14 +471,17 @@ export function createGateHost(deps: GateHostDeps): GateHost {
         if (gate.decision !== undefined) return { kind: "decided", decision: structuredClone(gate.decision), gate: structuredClone(gate) };
         if (gate.expired === true) return { kind: "expired", gate: structuredClone(gate) };
         if (signal.aborted) return { kind: "cancelled" };
-        if (gate.phase === "person") await notifyPerson(runId, gateId);
         const round = new AbortController();
         const onAbort = (): void => round.abort();
         signal.addEventListener("abort", onAbort, { once: true });
         try {
+          // Listen before the push's save: a decision made meanwhile is never missed.
+          const changedNext = nextChange(runId, gateId, round.signal).then(() => "changed" as const);
+          if (gate.phase === "person") await notifyPerson(runId, gateId);
+          if (!isWaiting(record(a, gateId) ?? gate)) continue;
           const deadline = new Date(gate.phaseDeadlineAt ?? personDeadline(new Date(gate.phaseStartedAt ?? gate.openedAt), undefined).toISOString());
           const outcome = await Promise.race([
-            nextChange(runId, gateId, round.signal).then(() => "changed" as const),
+            changedNext,
             sleepUntil(clock, deadline, round.signal).then((reached) => (reached ? ("deadline" as const) : ("aborted" as const)))
           ]);
           if (outcome === "deadline" && gate.phase === "person") await expire(runId, gateId, { kind: "fail" });

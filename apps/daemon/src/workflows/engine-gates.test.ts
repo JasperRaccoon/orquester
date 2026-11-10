@@ -276,6 +276,38 @@ describe("gate: the person decides", () => {
     assert.equal((await second.runStore.load(runId!))!.blocks.No!.status, "succeeded");
   });
 
+  test("a decision made while the push is being recorded is never missed", async () => {
+    // A store whose writes can be held: the push's save waits while the person decides.
+    class HeldRunStore extends InMemoryRunStore {
+      held: Promise<void> | null = null;
+      release: () => void = () => undefined;
+      hold(): void {
+        this.held = new Promise((resolve) => {
+          this.release = () => {
+            this.held = null;
+            resolve();
+          };
+        });
+      }
+      override async save(run: Parameters<InMemoryRunStore["save"]>[0]): Promise<void> {
+        if (this.held) await this.held;
+        return super.save(run);
+      }
+    }
+    const runStore = new HeldRunStore();
+    const notifier: WorkflowNotifier = { runFinished: () => undefined, gateWaiting: () => runStore.hold() };
+    const h = createHarness({ workflows: [gateFlow()], runStore, notifier, executors: { code: scripted("code") }, mintId: sequentialIds("id") });
+    const { runId } = await h.engine.run("w1", { input: { v: "1" } });
+    await flush();
+    assert.ok(runStore.held, "the push's save is held");
+    const gate = (await h.engine.getRun(runId!))!.gates!;
+    const deciding = h.engine.decideGate!(runId!, Object.keys(gate)[0]!, { choice: "approve" }, USER);
+    await flush();
+    runStore.release();
+    await deciding;
+    assert.equal((await h.engine.waitForRun(runId!)).status, "succeeded");
+  });
+
   test("cancelling the run cancels the gate", async () => {
     const e = env([gateFlow()]);
     const h = e.boot();
@@ -582,7 +614,7 @@ describe("gate: a reviewer agent decides", () => {
     assert.equal(config.whenAllBurnt.kind, "fail");
     const text = config.prompt.kind === "text" ? config.prompt.text : "";
     assert.match(text, /^Review the diff\./);
-    assert.match(text, /Ship \{\{ trigger\.input\.v \}\}\?/, "the question as its template (framed by the agent's renderer)");
+    assert.match(text, /<([^>]+)>Ship 3\?<\/\1>/, "the rendered (redacted) question, framed as data");
     assert.match(text, /decide_workflow_gate/);
     const gate = await onlyGate(h, runId!);
     assert.equal(gate.phase, "agent");
