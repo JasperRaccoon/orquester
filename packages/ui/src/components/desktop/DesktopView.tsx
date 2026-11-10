@@ -30,6 +30,7 @@ import { sharpFitAllowed } from "./desktop-viewport.logic";
 import { createDesktopStreamClient } from "./stream/create-stream-client";
 import type { DesktopStreamClient, DesktopStreamEvents, DesktopViewMode } from "./stream/types";
 import { DesktopHandoffControls, DesktopHandoffLayer, useDesktopHandoff } from "./handoff/DesktopHandoff";
+import { takeoverSink } from "../../lib/desktops/handoff.logic";
 
 export interface DesktopViewProps {
   desktop: DesktopSummary;
@@ -494,6 +495,10 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
 
   // ---- Keys & clipboard ----------------------------------------------------
 
+  /** What the touch layer, key bar and soft keyboard send: the client, and the agent handoff's implicit takeover. */
+  const handoffInputRef = useRef<() => void>(() => undefined);
+  const inputSink = useMemo(() => takeoverSink(() => clientRef.current, () => handoffInputRef.current()), []);
+
   /** The latched modifiers apply to one key or click: spend the one-shots. */
   const spendLatches = useCallback(() => {
     const next = consumeLatchSet(latchesRef.current);
@@ -505,18 +510,17 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   /** Press and release `keysym` with the latched (and any extra) modifiers held. */
   const pressKeysym = useCallback(
     (keysym: number, extra: LatchModifier[] = []) => {
-      const client = clientRef.current;
-      if (!client) return;
+      if (!clientRef.current) return;
       const latched = latchedNames(latchesRef.current);
       const mods = LATCH_MODIFIERS.filter((m) => latched.includes(m) || extra.includes(m));
       const key = mods.includes("shift") ? shiftedKeysym(keysym) : keysym;
-      for (const m of mods) client.key(MODIFIER_KEYSYM[m], true);
-      client.key(key, true);
-      client.key(key, false);
-      for (const m of [...mods].reverse()) client.key(MODIFIER_KEYSYM[m], false);
+      for (const m of mods) inputSink.key(MODIFIER_KEYSYM[m], true);
+      inputSink.key(key, true);
+      inputSink.key(key, false);
+      for (const m of [...mods].reverse()) inputSink.key(MODIFIER_KEYSYM[m], false);
       spendLatches();
     },
-    [spendLatches]
+    [spendLatches, inputSink]
   );
 
   const typeText = useCallback(
@@ -545,6 +549,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     viewportRef,
     stageRef,
     client: () => clientRef.current,
+    sink: inputSink,
     displaySize,
     connected: conn === "connected",
     rendering: touchRendering,
@@ -573,12 +578,14 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   }, []);
 
   /** Hand `text` (when there is any) to the desktop's clipboard, then send its paste keystroke. */
-  const pasteIntoDesktop = useCallback((text: string, chord: PasteChord | null) => {
-    const client = clientRef.current;
-    if (!client) return;
-    if (text) client.setClipboard(text);
-    for (const step of pasteKeystroke(chord, APPLE_PLATFORM)) client.key(step.keysym, step.down, step.code);
-  }, []);
+  const pasteIntoDesktop = useCallback(
+    (text: string, chord: PasteChord | null) => {
+      if (!clientRef.current) return;
+      if (text) inputSink.setClipboard(text);
+      for (const step of pasteKeystroke(chord, APPLE_PLATFORM)) inputSink.key(step.keysym, step.down, step.code);
+    },
+    [inputSink]
+  );
 
   // Local paste inside the view (the chord on the display, or the soft
   // keyboard's paste): hand the text to the desktop's clipboard, then Ctrl+V.
@@ -695,7 +702,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   };
 
   // ---- Agent handoff (spec 2026-11-10 §3) ----------------------------------
-  const handoff = useDesktopHandoff(rootRef, desktop, conn === "connected");
+  const handoff = useDesktopHandoff({ root: rootRef, viewport: viewportRef, stage: stageRef }, desktop, conn === "connected");
+  handoffInputRef.current = handoff.inputReachedDesktop;
 
   // ---- Render --------------------------------------------------------------
 
@@ -816,7 +824,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         handoff={<DesktopHandoffControls handoff={handoff} narrow={narrow} />}
       />
       {actionError && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-neutral-800 bg-danger-soft px-3 py-1 text-xs text-danger">
+        <div className="flex shrink-0 items-center gap-2 border-b border-neutral-800 bg-danger-soft px-3 py-1 text-xs text-danger" data-desktop-handoff="">
           <span className="min-w-0 flex-1 truncate" title={actionError}>
             {actionError}
           </span>

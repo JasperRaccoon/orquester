@@ -4,8 +4,10 @@
  * - {@link useDesktopHandoff}: the desktop's control state and recent actions, the handoff calls,
  *   and the **implicit takeover** — the user's first pointer or key input in the view while an
  *   agent controls the desktop takes control once (`PUT control {controller: "user"}`) and raises a
- *   toast with **Give back**. It listens in the capture phase on the view's container, so it sees
- *   input whatever renders the stream.
+ *   toast with **Give back**. Hardware keys and mouse or pen presses over the display are seen in
+ *   the capture phase on the view, whatever renders the stream; touch, the key bar and the soft
+ *   keyboard take over through `inputReachedDesktop` once they send something (a pinch or a pan
+ *   while zoomed stays local, and so does a key bar's Fn or a modifier latch).
  * - {@link DesktopHandoffControls}: the toolbar's control pill, the Activity popover's button and
  *   the size-lock notice.
  * - {@link DesktopHandoffLayer}: over the stream — the agent overlay and the takeover toast.
@@ -30,6 +32,7 @@ import {
   sizeLockNotice,
   takeoverToastText,
   unseenBadge,
+  viewInputReachesDesktop,
   type DesktopActionRing
 } from "../../../lib/desktops/handoff.logic";
 import { useAppStore } from "../../../store/app";
@@ -38,7 +41,7 @@ import { DesktopActionLogPanel } from "./DesktopActionLog";
 import { DesktopAgentOverlay } from "./DesktopAgentOverlay";
 import { canvasShowsWholeDisplay, mapDisplayPoint, unionRect, type Rect, type ViewPoint } from "./overlay.logic";
 
-/** Elements whose input is not desktop input (the toolbar, this UI's own controls). */
+/** Elements whose input is not desktop input (the toolbar, this UI's own controls, local-only controls). */
 const NOT_DESKTOP_INPUT = "[data-desktop-toolbar], [data-desktop-handoff]";
 const TOAST_MS = 6000;
 
@@ -75,13 +78,24 @@ export interface DesktopHandoff {
   dismissToast: () => void;
   /** The view shows the stream (marks draw only then). */
   live: boolean;
+  /** Input went to the desktop through the view's sink (touch, key bar, soft keyboard): the implicit takeover. */
+  inputReachedDesktop: () => void;
+}
+
+/** The view's elements the implicit takeover listens on. */
+export interface DesktopHandoffTargets {
+  /** The view's root: hardware keys anywhere in it. */
+  root: React.RefObject<HTMLElement | null>;
+  /** The view's (untransformed) box and the stage inside it: what counts as "over the display". */
+  viewport: React.RefObject<HTMLElement | null>;
+  stage: React.RefObject<HTMLElement | null>;
 }
 
 /**
- * The handoff state and calls for one desktop view, and the implicit takeover on `containerRef`
- * (the view's root). `live`: the stream is connected, so input reaches the desktop.
+ * The handoff state and calls for one desktop view, and the implicit takeover on `targets`.
+ * `live`: the stream is connected, so input reaches the desktop.
  */
-export function useDesktopHandoff(containerRef: React.RefObject<HTMLElement | null>, desktop: DesktopSummary, live: boolean): DesktopHandoff {
+export function useDesktopHandoff(targets: DesktopHandoffTargets, desktop: DesktopSummary, live: boolean): DesktopHandoff {
   const api = useAppStore((s) => s.api);
   const upsertDesktop = useAppStore((s) => s.upsertDesktop);
   const control = desktop.control ?? null;
@@ -127,17 +141,27 @@ export function useDesktopHandoff(containerRef: React.RefObject<HTMLElement | nu
   latest.current = { control, live, apply };
   /** The `since` of the agent control this view already took over. */
   const tookFrom = React.useRef<string | null>(null);
+  const inputReachedDesktop = React.useCallback(() => {
+    const { control: now, live: streaming, apply: take } = latest.current;
+    if (!streaming || !inputTakesOver(now, tookFrom.current)) return;
+    tookFrom.current = now!.since;
+    take("user", "input", now!.actor);
+  }, []);
+  const { root: rootRef, viewport: viewportRef, stage: stageRef } = targets;
   React.useEffect(() => {
-    const root = containerRef.current;
+    const root = rootRef.current;
     if (!root) return;
     const onInput = (event: Event) => {
-      const { control: now, live: streaming, apply: take } = latest.current;
-      if (!streaming || !inputTakesOver(now, tookFrom.current)) return;
-      if (event instanceof KeyboardEvent && event.repeat) return;
-      const target = event.target as Element | null;
-      if (typeof target?.closest === "function" && target.closest(NOT_DESKTOP_INPUT)) return;
-      tookFrom.current = now!.since;
-      take("user", "input", now!.actor);
+      const target = event.target instanceof Element ? event.target : null;
+      const viewport = viewportRef.current;
+      const reaches = viewInputReachesDesktop({
+        kind: event.type === "keydown" ? "keydown" : "pointerdown",
+        pointerType: (event as Partial<PointerEvent>).pointerType,
+        repeat: (event as Partial<KeyboardEvent>).repeat,
+        onDisplay: target !== null && (target === viewport || stageRef.current?.contains(target) === true),
+        local: target?.closest(NOT_DESKTOP_INPUT) != null
+      });
+      if (reaches) inputReachedDesktop();
     };
     root.addEventListener("pointerdown", onInput, true);
     root.addEventListener("keydown", onInput, true);
@@ -145,7 +169,7 @@ export function useDesktopHandoff(containerRef: React.RefObject<HTMLElement | nu
       root.removeEventListener("pointerdown", onInput, true);
       root.removeEventListener("keydown", onInput, true);
     };
-  }, [containerRef]);
+  }, [rootRef, viewportRef, stageRef, inputReachedDesktop]);
 
   // The toast lasts a while, and never past the user's control.
   React.useEffect(() => {
@@ -158,7 +182,7 @@ export function useDesktopHandoff(containerRef: React.RefObject<HTMLElement | nu
   }, [control?.controller]);
 
   const dismissToast = React.useCallback(() => setToast(null), []);
-  return { desktop, control, ring, busy, changeControl, toast, dismissToast, live };
+  return { desktop, control, ring, busy, changeControl, toast, dismissToast, live, inputReachedDesktop };
 }
 
 // ---------------------------------------------------------------------------

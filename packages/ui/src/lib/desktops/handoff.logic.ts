@@ -18,6 +18,8 @@ import {
   type DesktopController
 } from "@orquester/api";
 
+import type { DesktopInputSink } from "../../components/desktop/stream/types";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -160,6 +162,52 @@ export function sizeLockNotice(control: DesktopControl | null | undefined): stri
  */
 export function inputTakesOver(control: DesktopControl | null | undefined, tookFrom: string | null): boolean {
   return control?.controller === "agent" && control.since !== tookFrom;
+}
+
+/** A DOM input event the view saw, as the implicit takeover weighs it. */
+export interface DesktopViewInput {
+  kind: "pointerdown" | "keydown";
+  /** `PointerEvent.pointerType`. */
+  pointerType?: string;
+  /** `KeyboardEvent.repeat`. */
+  repeat?: boolean;
+  /** Over the display itself (the viewport or the zoomed stage), not a control or notice above it. */
+  onDisplay: boolean;
+  /** In a control that acts locally only: the toolbar, the handoff UI, the key bar, a notice. */
+  local: boolean;
+}
+
+/**
+ * Whether a DOM input reaches the desktop, and so takes control from an agent (R2.2). A hardware
+ * key does, unless it repeats or goes to a local control. A mouse or pen press does over the display
+ * only. A touch never does here: the gesture layer may keep it local (a pinch, a pan while zoomed),
+ * so a touch takes over through {@link takeoverSink} once a gesture sends something.
+ */
+export function viewInputReachesDesktop(input: DesktopViewInput): boolean {
+  if (input.local) return false;
+  if (input.kind === "keydown") return input.repeat !== true;
+  return input.pointerType !== "touch" && input.onDisplay;
+}
+
+/**
+ * The input sink the gesture layer, the key bar and the soft keyboard send through: `target()` (the
+ * client connected at the time), with `onInput` called first whenever something goes to the desktop
+ * — never for `releaseAll` (letting go is not input), never with no client to send it to.
+ */
+export function takeoverSink(target: () => DesktopInputSink | null, onInput: () => void): DesktopInputSink {
+  const input = () => {
+    const sink = target();
+    if (sink) onInput();
+    return sink;
+  };
+  return {
+    pointerMove: (x, y) => input()?.pointerMove(x, y),
+    pointerButton: (button, down) => input()?.pointerButton(button, down),
+    scroll: (dx, dy) => input()?.scroll(dx, dy),
+    key: (keysym, down, code) => input()?.key(keysym, down, code),
+    setClipboard: (text) => input()?.setClipboard(text),
+    releaseAll: () => target()?.releaseAll()
+  };
 }
 
 // ---------------------------------------------------------------------------
