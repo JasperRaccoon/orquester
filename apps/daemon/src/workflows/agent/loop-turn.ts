@@ -74,6 +74,12 @@ function previousSection(loop: NodeLoopContext): string | null {
   if (outputs !== undefined && Object.keys(outputs).length > 0) {
     lines.push(`Its outputs: ${clipUtf8(JSON.stringify(outputs), PREVIOUS_OUTPUTS_BYTES).text}`);
   }
+  // A gate's pass (its reviewer agent's later pass): the decision it ended with.
+  if (typeof output.choice === "string" && output.choice !== "") {
+    const by = isRecord(output.decidedBy) && typeof output.decidedBy.label === "string" ? ` (by ${output.decidedBy.label})` : "";
+    const comment = typeof output.comment === "string" && output.comment.trim() !== "" ? `: ${clipUtf8(output.comment.trim(), PREVIOUS_TEXT_BYTES).text}` : "";
+    lines.push(`The gate's decision then${by}: \`${output.choice}\`${comment}`);
+  }
   if (summary === undefined && typeof output.text === "string" && output.text.trim() !== "") {
     const { text, truncated } = clipUtf8(output.text.trim(), PREVIOUS_TEXT_BYTES);
     lines.push(`Its final answer${truncated ? " (cut)" : ""}:\n${text}`);

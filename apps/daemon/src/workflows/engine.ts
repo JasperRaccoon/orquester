@@ -19,6 +19,7 @@
 //     written or published by this instance, whatever its executors still report.
 
 import {
+  WORKFLOW_LIMITS,
   checkStepReport,
   computeReadiness,
   downstreamOf,
@@ -109,7 +110,7 @@ import {
   EngineStoppedError,
   WorkflowEngineError
 } from "./run-context.ts";
-import { onLoopLimitReached } from "./loops/limit.ts";
+import { LOOP_LIMIT_ALLOW, LOOP_LIMIT_CHOICES, loopLimitDetails, loopLimitError, loopLimitQuestion } from "./loops/limit.ts";
 import {
   applyLoopReset,
   latestPass,
@@ -128,6 +129,7 @@ import { createSlotPool, type SlotPool } from "./scheduler-queue.ts";
 import { overlapSkipDetail } from "./gates/engine-hooks.ts";
 import { createGateHost, type GateHost, type GateRunAccess } from "./gates/host.ts";
 import { createParking } from "./gates/parking.ts";
+import { clipChars, isLoopLimitWait, PERSON_LABEL, personDeadline } from "./gates/state.ts";
 import { createRedactor, type SecretRedactor } from "./sandbox/redact.ts";
 
 /** The services an executor gets, minus what the engine provides itself. */
@@ -1074,22 +1076,44 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
    * Loops (spec 2026-11-10 §7.2): the loop edge a just-finished block's handle carries. Under its
    * limit: counted, its reset set gets a new pass (`applyLoopReset`) and the blocks of the set still
    * running are stopped (after this state is saved: the caller saves synchronously). At its limit:
-   * `onLoopLimitReached` decides (today the pass fails with `loop_limit`). Returns the run event to
-   * record, or null when no loop edge applies. Never in a single-block test, nor once the run ends.
+   * the block waits on a loop-limit gate (`WaitingOn {kind: "gate", loopLimit}` with a gate id minted
+   * now, saved with this finish; `waitAtLoopLimit` then opens and awaits it). Returns the run event
+   * to record, or null when no loop edge applies. Never in a single-block test, nor once the run ends.
    */
   const takeLoopEdge = (a: ActiveRun, node: WorkflowNode, block: PersistedBlockState): Record<string, unknown> | null => {
     if (block.status !== "succeeded" || a.ending !== null || a.run.testNodeOnly) return null;
     const edge = loopEdgeTaken(a.def, node.id, block.handle);
     if (!edge || !a.nodes.has(edge.target)) return null;
+    // A disabled block passed through on its first outcome / choice: looping would only repeat that
+    // (the validator warns, `loop_from_disabled`). The path ends at its loop handle.
+    if (node.disabled === true) {
+      addWarnings(a, block, [`${node.name} is disabled: its loop back to ${a.nodes.get(edge.target)!.name} is not taken.`]);
+      return null;
+    }
     const count = loopCount(a.run, edge.id);
     const limit = loopLimit(a.run, edge);
     const targetName = a.nodes.get(edge.target)!.name;
     if (count >= limit) {
-      const decision = onLoopLimitReached({ edge, sourceName: node.name, targetName, limit });
-      block.status = "failed";
-      block.handle = "error";
-      block.error = a.redactor.value(decision.error);
-      return { type: "loop.limit", edgeId: edge.id, nodeId: node.id, count, limit };
+      // Loops: at its limit — the person decides (loops/limit.ts). The output stays; the block is
+      // in flight again, waiting, until the gate is decided.
+      const gateId = opts.mintId();
+      const now = clock.now();
+      block.status = "waiting";
+      block.waitingOn = {
+        kind: "gate",
+        gateId,
+        openedAt: now.toISOString(),
+        phase: "person",
+        phaseStartedAt: now.toISOString(),
+        phaseDeadlineAt: personDeadline(now, undefined).toISOString(),
+        decider: { kind: "human", label: PERSON_LABEL },
+        loopLimit: { edgeId: edge.id, handle: block.handle! }
+      };
+      // A Gate block keeps naming its own gate; any other block names the one it waits on.
+      if (node.type !== "gate") block.gateId = gateId;
+      delete block.handle;
+      delete block.endedAt;
+      return { type: "loop.limit", edgeId: edge.id, nodeId: node.id, count, limit, gateId };
     }
     const feedback = loopFeedbackOf(node, block, a.outputs.has(node.id) ? a.outputs.get(node.id) : block.output);
     const reset = applyLoopReset({
@@ -1201,11 +1225,89 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     // source finished on a loop handle whose loop was not taken.
     const loop = takeLoopEdge(a, node, block);
     markDirty(a, node.id);
-    appendEvent(a, { type: "block.finished", nodeId: node.id, status: block.status, attempt: block.attempt, error: block.error });
+    // Loops: at its limit the block has not finished — it waits on the person (`waitAtLoopLimit`).
+    const atLimit = loop?.type === "loop.limit";
+    if (!atLimit) appendEvent(a, { type: "block.finished", nodeId: node.id, status: block.status, attempt: block.attempt, error: block.error });
     if (loop !== null) appendEvent(a, loop);
+    if (atLimit) parking.refresh(a);
     void save(a);
     if (block.status === "failed" && result.status !== "stopped" && !hasErrorEdge(a, node.id)) {
       failRun(a, { status: "failed", error: `${node.name}: ${block.error?.message ?? "failed"}` });
+    }
+  };
+
+  /**
+   * Loops (spec 2026-11-10 §7.2): a block whose loop edge was at its limit waits on a person-decided
+   * loop-limit gate (`takeLoopEdge` persisted the wait, gate id included, with the block's finish).
+   * Opens the gate unless it exists (a restart in between), awaits it, then: `allow` raises the edge's
+   * limit for this run by one and takes the loop; `stop` or expiry fails the pass with `loop_limit`.
+   * Returns false when the engine stopped meanwhile (the wait resumes from run.json after a restart).
+   */
+  const waitAtLoopLimit = async (a: ActiveRun, node: WorkflowNode, block: PersistedBlockState, signal: AbortSignal): Promise<boolean> => {
+    const waitingOn = block.waitingOn;
+    if (!isLoopLimitWait(waitingOn)) return true;
+    const { gateId } = waitingOn;
+    const { edgeId, handle } = waitingOn.loopLimit;
+    const runId = a.run.id;
+    const superseded = (): boolean => a.run.blocks[node.id] !== block;
+    const edge = a.def.edges.find((candidate) => candidate.id === edgeId && isLoopEdge(candidate)) as Parameters<typeof loopLimit>[1] | undefined;
+    const targetName = edge ? (a.nodes.get(edge.target)?.name ?? edge.target) : "?";
+    const limit = edge ? loopLimit(a.run, edge) : 0;
+    const facts = { sourceName: node.name, targetName, limit };
+    const fail = async (error: WorkflowBlockError): Promise<void> => finishBlock(a, node, { status: "failed", error }, block);
+    if (!edge) {
+      await fail({ kind: "loop_limit", message: `${node.name}'s loop edge is gone from the run's definition.`, detail: { edgeId } });
+      return true;
+    }
+    try {
+      if (!gateHost.get(runId, gateId)) {
+        await gateHost.openPersonGate(runId, {
+          gateId,
+          nodeId: node.id,
+          pass: block.pass ?? 1,
+          source: "loop_limit",
+          edgeId,
+          question: clipChars(loopLimitQuestion(facts), WORKFLOW_LIMITS.gateQuestionChars).text,
+          details: loopLimitDetails(facts, hasErrorEdge(a, node.id)),
+          choices: structuredClone([...LOOP_LIMIT_CHOICES])
+        });
+      }
+      if (!alive(a)) return false;
+      const outcome = await gateHost.awaitGate(runId, gateId, signal);
+      if (!alive(a)) return false;
+      if (superseded()) {
+        // A loop reset ran this block again (an outer loop): its question is moot.
+        gateHost.cancel(runId, gateId);
+        return true;
+      }
+      if (outcome.kind === "cancelled") {
+        gateHost.cancel(runId, gateId);
+        await finishBlock(a, node, { status: "cancelled" }, block);
+        return true;
+      }
+      if (outcome.kind === "expired" || outcome.decision.choice !== LOOP_LIMIT_ALLOW) {
+        await fail(a.redactor.value(loopLimitError({ edge, ...facts }, outcome.kind === "expired" ? "expired" : "stopped")));
+        return true;
+      }
+      // Allowed: one more loop for this run, taken now (synchronously with its save).
+      a.run.loopLimits = { ...(a.run.loopLimits ?? {}), [edgeId]: Math.max(limit, loopCount(a.run, edgeId)) + 1 };
+      a.loopsDirty = true;
+      delete block.waitingOn;
+      delete block.waitingUntil;
+      block.status = "succeeded";
+      block.handle = handle;
+      block.endedAt = nowIso();
+      const loop = takeLoopEdge(a, node, block);
+      markDirty(a, node.id);
+      appendEvent(a, { type: "block.finished", nodeId: node.id, status: block.status, attempt: block.attempt });
+      if (loop !== null) appendEvent(a, loop);
+      parking.refresh(a);
+      void save(a);
+      return true;
+    } catch (error) {
+      if (error instanceof EngineStoppedError || !alive(a)) return false;
+      gateHost.cancel(runId, gateId);
+      throw error;
     }
   };
 
@@ -1223,9 +1325,18 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     // block — it is unfinished, and resumes from run.json after the restart.
     let unfinished = false;
     try {
-      const result = await attemptLoop(a, node, blockAbort.signal, resume, owned);
-      if (result !== null) await finishBlock(a, node, result, owned);
-      else unfinished = true;
+      if (isLoopLimitWait(resume)) {
+        // Loops: resumed at a loop's limit (after a restart) — the gate, never the block's executor.
+        owned.status = "waiting";
+        if (!(await waitAtLoopLimit(a, node, owned, blockAbort.signal))) unfinished = true;
+      } else {
+        const result = await attemptLoop(a, node, blockAbort.signal, resume, owned);
+        if (result !== null) await finishBlock(a, node, result, owned);
+        else unfinished = true;
+        if (!unfinished && alive(a) && a.run.blocks[nodeId] === owned && isLoopLimitWait(owned.waitingOn)) {
+          if (!(await waitAtLoopLimit(a, node, owned, blockAbort.signal))) unfinished = true;
+        }
+      }
     } catch (error) {
       logger.error("workflow block crashed", { runId: a.run.id, nodeId, error: errorMessage(error) });
       if (alive(a)) await finishBlock(a, node, { status: "failed", error: { kind: "internal", message: errorMessage(error) } }, owned);
@@ -1544,6 +1655,14 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       // pass's attempt base is not needed to stop it.
       const node = a.nodes.get(nodeId);
       const waitingOn = pass.interruptedFrom!;
+      if (isLoopLimitWait(waitingOn)) {
+        // A loop-limit gate's question a reset made moot: nothing runs; its gate is cancelled.
+        gateHost.cancel(a.run.id, waitingOn.gateId);
+        settleInterruptedPass(a.run.blocks[nodeId]);
+        markDirty(a, nodeId);
+        void save(a);
+        continue;
+      }
       if (!node || a.inFlight.has(nodeId)) continue;
       a.inFlight.add(nodeId);
       const { interruptedFrom: _marker, outputFile: _file, ...archived } = structuredClone(pass);
@@ -2436,8 +2555,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         a.run.blocks[node.id] ??= { nodeId: node.id, name: node.name, type: node.type, status: "pending", attempt: 0 };
       }
       for (const [id, block] of Object.entries(a.run.blocks)) {
-        // Loops: a block waiting for its next pass reads as its latest finished one.
-        const state = block.status === "succeeded" || block.status === "failed" ? block : latestPass(block);
+        // Loops: a block waiting for its next pass reads as its latest finished one; one waiting at a
+        // loop's limit has finished its work (its output is its own).
+        const state = block.status === "succeeded" || block.status === "failed" ? block : isLoopLimitWait(block.waitingOn) ? { ...block, status: "succeeded" as const } : latestPass(block);
         if (state && (state.status === "succeeded" || state.status === "failed")) {
           const whole = await readWholeOutput(state);
           if (whole !== undefined) a.outputs.set(id, whole);
