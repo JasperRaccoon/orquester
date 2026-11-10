@@ -98,20 +98,18 @@ export interface DesktopVoxlStreamsOptions {
   stopGraceMs?: number;
   /** How long voxl keeps running after its last viewer left (default 30 s). */
   idleStopMs?: number;
-  /**
-   * How long a viewer waits for voxl in all (its check, its start; default 30 s). The relay adds at
-   * most its 10 s upstream handshake; together they stay below the browser client's 45 s wait for
-   * voxl's `hello` (packages/ui …/stream/voxl/connection.ts), so the relay answers first.
-   */
-  acquireTimeoutMs?: number;
-  /** How long a stream stays `unavailable` after voxl failed before the next viewer may retry (default 30 s). */
-  retryAfterMs?: number;
 }
 
 const READY_TIMEOUT_MS = 15_000;
 const STOP_GRACE_MS = 5_000;
 const IDLE_STOP_MS = 30_000;
+/** How long a stream stays `unavailable` after voxl failed before the next viewer may try again. */
 const RETRY_AFTER_MS = 30_000;
+/**
+ * How long a viewer waits for voxl in all (its check, its start). The relay adds at most its 10 s
+ * upstream handshake (ws-routes.ts); together they stay below the browser client's 45 s wait for
+ * voxl's `hello` (packages/ui …/stream/voxl/connection.ts), so the relay answers first.
+ */
 const ACQUIRE_TIMEOUT_MS = 30_000;
 const EXPIRED = Symbol("expired");
 /** This many voxl failures within FAILURE_WINDOW_MS stop the automatic retries. */
@@ -125,15 +123,11 @@ export class DesktopVoxlStreams {
   private readonly readyTimeoutMs: number;
   private readonly stopGraceMs: number;
   private readonly idleStopMs: number;
-  private readonly retryAfterMs: number;
-  private readonly acquireTimeoutMs: number;
 
   constructor(private readonly options: DesktopVoxlStreamsOptions) {
     this.readyTimeoutMs = options.readyTimeoutMs ?? READY_TIMEOUT_MS;
     this.stopGraceMs = options.stopGraceMs ?? STOP_GRACE_MS;
     this.idleStopMs = options.idleStopMs ?? IDLE_STOP_MS;
-    this.retryAfterMs = options.retryAfterMs ?? RETRY_AFTER_MS;
-    this.acquireTimeoutMs = options.acquireTimeoutMs ?? ACQUIRE_TIMEOUT_MS;
   }
 
   /** The stream state of a desktop the streams follow, else undefined. */
@@ -191,7 +185,7 @@ export class DesktopVoxlStreams {
   async acquire(desktopId: string): Promise<VoxlLease> {
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<typeof EXPIRED>((resolve) => {
-      timer = setTimeout(() => resolve(EXPIRED), this.acquireTimeoutMs);
+      timer = setTimeout(() => resolve(EXPIRED), ACQUIRE_TIMEOUT_MS);
       timer.unref?.();
     });
     try {
@@ -209,7 +203,7 @@ export class DesktopVoxlStreams {
   // ---------------------------------------------------------------------------
 
   private async lease(desktopId: string, expired: Promise<typeof EXPIRED>): Promise<VoxlLease> {
-    const budget = `${Math.round(this.acquireTimeoutMs / 1000)} s`;
+    const budget = `${Math.round(ACQUIRE_TIMEOUT_MS / 1000)} s`;
     let entry = this.entries.get(desktopId);
     // While the machine's voxl is being looked for (`starting`), the viewer waits for the answer.
     while (entry?.probing) {
@@ -456,7 +450,7 @@ export class DesktopVoxlStreams {
         if (!this.current(entry, epoch) || entry.state.state !== "unavailable" || entry.proc || entry.starting) return;
         entry.state = { state: "ready" };
         this.options.changed(entry.desktop.id);
-      }, this.retryAfterMs);
+      }, RETRY_AFTER_MS);
       entry.retryTimer.unref?.();
     }
     this.options.changed(entry.desktop.id);
