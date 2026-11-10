@@ -420,7 +420,8 @@ const OutputPanel: React.FC<{
     const live = block && (block.status === "running" || block.status === "waiting" || block.status === "queued");
     return <Muted>{live ? "No output yet — it arrives when the block finishes." : "This block has no output."}</Muted>;
   }
-  const value = full.status === "loaded" ? full.value : block.output;
+  // A whole output loaded for the latest pass never shows on an earlier one.
+  const value = full.status === "loaded" && onLoadFull ? full.value : block.output;
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-1.5">
       {block.outputTruncated && !onLoadFull ? (
