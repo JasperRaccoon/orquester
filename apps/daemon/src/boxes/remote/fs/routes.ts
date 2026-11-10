@@ -574,6 +574,8 @@ function routes(deps: BoxFsRoutingDeps): Record<string, BoxRoute> {
         }
         const leaf = segments[segments.length - 1]!;
         const fileConflict: FsUploadResponse = { path: "", name: leaf, size: 0, conflict: true, conflictKind: "file" };
+        // A file where the path needs a folder: no other name in that folder can land.
+        const parentConflict: FsUploadResponse = { ...fileConflict, conflictKind: "parent" };
         const isTypeClash = (error: unknown): boolean => {
           const code = errnoOf(error);
           return code === "ENOTDIR" || code === "EEXIST";
@@ -588,7 +590,7 @@ function routes(deps: BoxFsRoutingDeps): Record<string, BoxRoute> {
           } catch (error) {
             if (!isTypeClash(error)) throw error;
             reply.header("connection", "close"); // body unread
-            await reply.send(fileConflict);
+            await reply.send(parentConflict);
             return;
           }
           tmp = uploadTempPath(safeDir);
@@ -600,7 +602,7 @@ function routes(deps: BoxFsRoutingDeps): Record<string, BoxRoute> {
           } catch (error) {
             if (!isTypeClash(error)) throw error;
             await fs.rm(tmp, { force: true }).catch(() => undefined);
-            await reply.send(fileConflict);
+            await reply.send(parentConflict);
             return;
           }
 

@@ -586,13 +586,18 @@ export interface FsUploadResponse {
   /**
    * True when the write did NOT happen because the target — or an intermediate
    * path segment — already existed: either onConflict was "error" and the
-   * target existed, OR a file occupies an intermediate directory in
+   * target existed, OR a file occupies an intermediate directory in destDir or
    * relativePath (reported for ANY onConflict, since mkdir then fails). In this
    * case path is "" and size is 0; see conflictKind.
    */
   conflict?: boolean;
-  /** What already occupied the path (drives the type-clash message). */
-  conflictKind?: "file" | "dir";
+  /**
+   * What already occupied the path (drives the type-clash message): `file` or
+   * `dir` at the target itself (another name for the file can land), `parent`
+   * a file where the path needs a folder (no name in that folder can; an older
+   * daemon said `file`).
+   */
+  conflictKind?: "file" | "dir" | "parent";
 }
 
 /** Server-side file-browser capabilities (GET /api/fs/capabilities). */
