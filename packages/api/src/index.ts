@@ -37,7 +37,8 @@ import type {
   DesktopSuggestionsResponse,
   DesktopSummary,
   DesktopWindowAction,
-  LaunchAppRequest
+  LaunchAppRequest,
+  UpdateDesktopRequest
 } from "./desktops.ts";
 import { desktopRoutes } from "./desktops.ts";
 import {
@@ -2244,6 +2245,8 @@ export interface OrquesterApi {
   createDesktop(request: CreateDesktopRequest): Promise<DesktopSummary>;
   stopDesktop(id: string): Promise<DesktopSummary>;
   restartDesktop(id: string): Promise<DesktopSummary>;
+  /** Switch the video backend (restarts only the stream). */
+  updateDesktop(id: string, request: UpdateDesktopRequest): Promise<DesktopSummary>;
   closeDesktop(id: string): Promise<void>;
   launchDesktopApp(id: string, request: LaunchAppRequest): Promise<DesktopAppSummary>;
   stopDesktopApp(id: string, appId: string, force?: boolean): Promise<void>;
@@ -2302,6 +2305,10 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   restartDesktop(id: string): Promise<DesktopSummary> {
     return this.post(desktopRoutes.restart(id));
+  }
+
+  updateDesktop(id: string, request: UpdateDesktopRequest): Promise<DesktopSummary> {
+    return this.send("PATCH", desktopRoutes.desktop(id), request);
   }
 
   closeDesktop(id: string): Promise<void> {
@@ -2602,7 +2609,7 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.send("PUT", path, body);
   }
 
-  private async send<T>(method: "POST" | "PUT", path: string, body?: unknown): Promise<T> {
+  private async send<T>(method: "POST" | "PUT" | "PATCH", path: string, body?: unknown): Promise<T> {
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
       headers: {

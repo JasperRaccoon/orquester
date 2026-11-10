@@ -154,7 +154,8 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "desktops",
     label: "Desktops (opening needs your approval)",
-    tools: [read("get_desktops"), admin("control_desktop")]
+    // `desktop_action` (desktop agents spec 2026-11-10 §2.5): Read for screenshots, waits and reading the clipboard.
+    tools: [read("get_desktops"), admin("control_desktop"), act("desktop_action")]
   },
   {
     id: "secret-files",

@@ -103,7 +103,9 @@ load_target() {
 # for scp, so every element must be understood identically by ssh and scp —
 # load_target enforces that for ssh_opts ('-o Name=value' only).
 build_ssh_args() {
-  SSH_ARGS=(-o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new)
+  # Keepalives: a step may print nothing for minutes (voxl's first build takes 4-9), and an idle
+  # connection must not be dropped meanwhile. Both are -o options, understood by scp too.
+  SSH_ARGS=(-o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10)
   if [ -n "$T_KEY" ]; then
     SSH_ARGS=("${SSH_ARGS[@]}" -i "$T_KEY" -o IdentitiesOnly=yes)
   fi

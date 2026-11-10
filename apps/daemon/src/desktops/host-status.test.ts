@@ -89,6 +89,23 @@ test("a host without the tools is unavailable with an install hint", async (t) =
   );
 });
 
+test("voxl is reported as an optional tool: a voxl that cannot be checked never makes desktops unavailable", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-desktop-voxl-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const apt = fakeApt(dir, { available: false }).apt;
+  const voxl = { available: true, version: "0.3.4", path: "/usr/local/bin/voxl" };
+  assert.deepEqual((await new DesktopHostProbe({ path: () => dir, apt, voxl: async () => voxl }).status()).voxl, voxl);
+  const failing = await new DesktopHostProbe({
+    path: () => dir,
+    apt,
+    voxl: async () => {
+      throw new Error("EACCES");
+    }
+  }).status();
+  assert.equal(failing.voxl?.available, false);
+  assert.match(failing.voxl?.reason ?? "", /EACCES/);
+});
+
 /** apt-get as root, faked: `install` puts every desktop tool on `dir` unless it is told to fail first. */
 function fakeApt(dir: string, options: { available?: boolean; failingInstalls?: number }) {
   const calls: string[][] = [];

@@ -29,6 +29,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { deviceToolRowLabel, type DeviceNameResolver } from "../devices/chat-rows.logic";
+import { desktopToolRowLabel, type DesktopTitleResolver } from "../desktops/chat-rows.logic";
 import type { ToolGroupSummaryKind, WorkLogEntry } from "./contracts";
 
 // ---------------------------------------------------------------------------
@@ -563,6 +564,7 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   // desktops
   get_desktops: "Checked desktops",
   control_desktop: "Controlled a desktop",
+  desktop_action: "Used a desktop",
   // secret-files
   secret_files_status: "Checked secret files",
   push_secret_files: "Pushed secret files",
@@ -741,7 +743,8 @@ export function sessionToolLabel(name: string): string {
  */
 export function sessionToolEntryLabel(
   entry: WorkLogEntry & { sessionTool: string },
-  resolveDeviceName?: DeviceNameResolver
+  resolveDeviceName?: DeviceNameResolver,
+  resolveDesktopTitle?: DesktopTitleResolver
 ): string {
   const secret = entry.secretRequest;
   if (secret !== undefined) {
@@ -751,6 +754,9 @@ export function sessionToolEntryLabel(
   // §10.3: "Opened Pixel 9", "Tapped “Search”"), from its `deviceRef`.
   const base =
     deviceToolRowLabel(entry.sessionTool, entry.deviceLink, resolveDeviceName) ??
+    // A desktop action reads as what it did on which desktop (spec 2026-11-10
+    // R2.6: "Used Firefox · Clicked at 412, 300"), from its `desktopRef`.
+    desktopToolRowLabel(entry.sessionTool, entry.desktopLink, resolveDesktopTitle) ??
     imageRowLabel(entry) ??
     sessionToolLabel(entry.sessionTool);
   // A call that went through an Orquester card or a grant (unified MCP §7.1):
@@ -763,9 +769,9 @@ export function sessionToolEntryLabel(
 }
 
 /** The label a settled single-tool row shows. *T3: `MessagesTimeline.logic.ts:46-53`.* */
-export function singleToolCallLabel(entry: WorkLogEntry, resolveDeviceName?: DeviceNameResolver): string {
+export function singleToolCallLabel(entry: WorkLogEntry, resolveDeviceName?: DeviceNameResolver, resolveDesktopTitle?: DesktopTitleResolver): string {
   if (entry.sessionTool !== undefined) {
-    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool }, resolveDeviceName);
+    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool }, resolveDeviceName, resolveDesktopTitle);
   }
   const command = entry.command?.trim();
   if (command) {
@@ -784,11 +790,16 @@ export function singleToolCallLabel(entry: WorkLogEntry, resolveDeviceName?: Dev
  * headed like its call's (its command, else its title), else by its own
  * summary, "Tool output".*
  */
-export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot?: string, resolveDeviceName?: DeviceNameResolver): string {
+export function workEntryDisplayLabel(
+  entry: WorkLogEntry,
+  workspaceRoot?: string,
+  resolveDeviceName?: DeviceNameResolver,
+  resolveDesktopTitle?: DesktopTitleResolver
+): string {
   // A session tool's detail is its raw arguments (Claude's `tool: {…}`): its
   // own label reads better (design 2026-10-14 §1.5).
   if (entry.sessionTool !== undefined) {
-    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool }, resolveDeviceName);
+    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool }, resolveDeviceName, resolveDesktopTitle);
   }
   if (entry.command) {
     return entry.command;

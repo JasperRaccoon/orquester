@@ -10,10 +10,12 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { DesktopAppSummary, DesktopSummary } from "@orquester/api";
+import type { DesktopActionResponse, DesktopAppSummary, DesktopSummary } from "@orquester/api";
+import { slimActivityPayload } from "@orquester/api/agent-chat";
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { audienceSchema, executeToolCall } from "../executor.ts";
+import type { DaemonApi } from "../daemon-api.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { desktopPreview, isLoaderEnvKey } from "./desktop-preview.ts";
 import { desktopsFamily } from "./desktops.ts";
@@ -35,7 +37,7 @@ function desktop(overrides: Partial<DesktopSummary> = {}): DesktopSummary {
   return {
     id: "dt-1", projectPath: GAME, title: "Desktop", order: 0, createdAt: stamp, display: 1,
     size: { width: 1280, height: 800 }, renderThreads: 4, status: "running", audio: "available",
-    apps: [app()], windows: [{ id: "0x400001", title: "xterm", appId: "app-1", wmClass: "XTerm", maximized: false }], activeWindowId: "0x400001",
+    apps: [app()], windows: [{ id: "0x400001", title: "xterm", appId: "app-1", wmClass: "XTerm", maximized: false }], activeWindowId: "0x400001", control: null, video: "rfb",
     ...overrides
   };
 }
@@ -279,4 +281,88 @@ test("desktop card: the loader-key warning covers loaders, runtimes, shells, git
   // No env: no Environment section, no warning.
   const plain = desktopPreview({ action: "launch_app", agentId: "claude", projectLabel: "acme/game", command: "xterm" });
   assert.ok(!plain.sections.some((section) => (section.kind === "fields" && section.title === "Environment") || section.kind === "warning"));
+});
+
+// --- desktop_action (desktop agents spec 2026-11-10 §2.5) -------------------------------------
+
+const CLAUDE_ACTOR = { kind: "chat", threadId: "me", label: "Claude" } as const;
+
+function actionResponse(over: Partial<DesktopActionResponse> = {}): DesktopActionResponse {
+  return {
+    desktopId: "dt-1", action: "click", summary: "Clicked at 412, 300", seq: 42, display: { width: 1280, height: 800 }, cursor: { x: 412, y: 300 }, control: null,
+    entry: { id: "e1", at: stamp, actor: CLAUDE_ACTOR, kind: "click", summary: "Clicked at 412, 300", ok: true },
+    ...over
+  };
+}
+
+test("desktop_action: each action's fields are checked before any call; snake_case becomes the request, with the caller as actor", async () => {
+  const api = fakeApi().on("POST", "/api/desktops/dt-1/actions", { status: 200, body: actionResponse() });
+  assert.match(await refused(api, "desktop_action", { desktopId: "dt-1", action: "click", x: 1, y: 1, keys: "Return" }, "INVALID_ARGUMENT"), /click takes no keys/);
+  assert.match(await refused(api, "desktop_action", { desktopId: "dt-1", action: "drag", x: 1, y: 1 }, "INVALID_ARGUMENT"), /needs to_x/);
+  assert.match(await refused(api, "desktop_action", { desktopId: "dt-1", action: "move", x: 1, y: 1, max_size: 640 }, "INVALID_ARGUMENT"), /max_size goes with screenshot/);
+  await refused(api, "desktop_action", { desktopId: "dt-1", action: "screenshot", region: { x: 0, y: 0, width: 9, height: 9 }, window_id: "0x1" }, "INVALID_ARGUMENT");
+  await refused(api, "desktop_action", { desktopId: "dt-1", action: "click", screenshot_id: "s1" }, "INVALID_ARGUMENT");
+  assert.equal(schema("desktop_action").safeParse({ desktopId: "dt-1", action: "click", x: -1, y: 0 }).success, false);
+  assert.ok(!api.calls.some((call) => call.method === "POST"), "nothing reached the daemon");
+
+  await value(api, "desktop_action", { desktopId: "dt-1", action: "click", x: 20, y: 30, screenshot_id: "s1", button: "right", count: 2, modifiers: ["ctrl"], screenshot: true, max_size: 640 }, chat());
+  assert.deepEqual(api.calls.at(-1), {
+    method: "POST", path: "/api/desktops/dt-1/actions",
+    body: { action: "click", actor: CLAUDE_ACTOR, x: 20, y: 30, screenshotId: "s1", button: "right", count: 2, modifiers: ["ctrl"], maxSize: 640, screenshot: true }
+  });
+  await value(api, "desktop_action", { desktopId: "dt-1", action: "wait", for: "change", since: 41, timeout_ms: 5000 });
+  assert.deepEqual(api.calls.at(-1)!.body, { action: "wait", actor: { kind: "external", label: "MCP client" }, for: "change", since: 41, timeoutMs: 5000 });
+  api.on("POST", "/api/desktops/dt-1/actions", { status: 409, body: { code: "DESKTOP_CONTROLLED_BY_USER", message: "The user has control of this desktop." } });
+  assert.match(await refused(api, "desktop_action", { desktopId: "dt-1", action: "type", text: "hi" }, "DESKTOP_CONTROLLED_BY_USER"), /Reads still work/);
+});
+
+test("desktop_action goes through DaemonApi.desktopAction with the call's signal: the call going away aborts a wait or a long type", async () => {
+  const seen: Array<{ desktopId: string; action: string; signal: AbortSignal | undefined }> = [];
+  const desktopAction: NonNullable<DaemonApi["desktopAction"]> = async (desktopId, request, opts) => {
+    seen.push({ desktopId, action: request.action, signal: opts?.signal });
+    return { status: 200, body: actionResponse({ action: "type", summary: "Typed “hi”" }) };
+  };
+  const api = Object.assign(fakeApi(), { desktopAction });
+  const call = new AbortController();
+  const result = await executeToolCall(
+    { approvals: new FakeApprovalPort() },
+    { name: "desktop_action", arguments: { desktopId: "dt-1", action: "type", text: "hi" } },
+    { caller: { kind: "external" }, api, signal: call.signal }
+  );
+  assert.ok(!result.isError, JSON.stringify(result.structuredContent));
+  assert.deepEqual(seen.map(({ desktopId, action }) => [desktopId, action]), [["dt-1", "type"]]);
+  assert.ok(!api.calls.some((entry) => entry.method === "POST"), "not posted to the route");
+  call.abort();
+  assert.equal(seen[0]!.signal?.aborted, true);
+});
+
+test("desktop_action tiers: screenshot, wait and clipboard_get are reads (they run while planning); input is Act, with no card in the own project", async () => {
+  const api = fakeApi().on("POST", "/api/desktops/dt-1/actions", { status: 200, body: actionResponse({ action: "wait", summary: "Waited 1.2 s for the screen to settle", changed: false, timedOut: false, waitedMs: 1200 }) });
+  const port = new FakeApprovalPort();
+  for (const action of ["screenshot", "wait", "clipboard_get"]) await value(api, "desktop_action", { desktopId: "dt-1", action }, chat({ planning: true }), port);
+  assert.match(await refused(api, "desktop_action", { desktopId: "dt-1", action: "key", keys: "ctrl+s" }, "PERMISSION_DENIED", chat({ planning: true }), port), /planning/);
+  const waited = await value(api, "desktop_action", { desktopId: "dt-1", action: "wait" }, chat({ runtimeMode: "approval-required" }), port);
+  assert.deepEqual([waited.changed, waited.timed_out, waited.waited_ms, waited.seq], [false, false, 1200, 42]);
+  await value(api, "desktop_action", { desktopId: "dt-1", action: "key", keys: "ctrl+s" }, chat({ runtimeMode: "approval-required" }), port);
+  assert.equal(port.cards.length, 0);
+});
+
+test("desktop_action screenshot: an image block first, its facts in snake_case, and a desktopRef kept through slimming", async () => {
+  const shot = { screenshotId: "s9", mimeType: "image/png" as const, width: 640, height: 400, scale: 2, origin: { x: 0, y: 0 }, base64: Buffer.from("png").toString("base64") };
+  const api = fakeApi().on("POST", "/api/desktops/dt-1/actions", { status: 200, body: actionResponse({ action: "screenshot", summary: "Took a screenshot", screenshot: shot }) });
+  const result = await executeToolCall(
+    { approvals: new FakeApprovalPort() },
+    { name: "desktop_action", arguments: { desktopId: "dt-1", action: "screenshot" } },
+    { caller: chat(), api, signal: new AbortController().signal }
+  );
+  assert.ok(!result.isError, JSON.stringify(result.structuredContent));
+  assert.deepEqual(result.content[0], { type: "image", data: shot.base64, mimeType: "image/png" });
+  const content = result.structuredContent as Record<string, unknown>;
+  assert.deepEqual(content.screenshot, { screenshot_id: "s9", width: 640, height: 400, scale: 2, origin: { x: 0, y: 0 }, mime_type: "image/png" });
+  assert.deepEqual(content.cursor, { x: 412, y: 300 });
+  const ref = { desktopId: "dt-1", projectPath: GAME, screenshotId: "s9", action: "screenshot", summary: "Took a screenshot" };
+  assert.deepEqual(content.desktopRef, ref);
+  const slimmed = slimActivityPayload({ itemType: "mcp_tool_call", data: { sessionTool: { name: "desktop_action" }, result } }) as { data: { sessionTool: { references?: Record<string, unknown> } } };
+  assert.deepEqual(slimmed.data.sessionTool.references?.desktopRef, ref);
+  assert.ok(!JSON.stringify(slimmed).includes(shot.base64), "the image bytes are not kept");
 });

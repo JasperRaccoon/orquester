@@ -49,6 +49,7 @@ import {
 import { deviceToolReferenceOfActivityData } from "@orquester/api";
 
 import { completeDeviceReference } from "../devices/chat-rows.logic";
+import { desktopRowLinkOfActivityData } from "../desktops/chat-rows.logic";
 import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
 import { goalMarkerOf, goalUpdateOf, isHiddenGoalActivity } from "./goal.logic";
 import { normalizeCompactToolLabel } from "./presentation.logic";
@@ -276,6 +277,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       const deviceLink = deviceToolReferenceOfActivityData(data);
       if (deviceLink && data) {
         entry.deviceLink = completeDeviceReference(deviceLink, data);
+      }
+      // Desktops R2.6: the desktop the call drove ("Show desktop", a kept
+      // screenshot's thumbnail).
+      const desktopLink = desktopRowLinkOfActivityData(data);
+      if (desktopLink) {
+        entry.desktopLink = desktopLink;
       }
       const toolApproval = toolApprovalReferenceOfActivityData(data);
       if (toolApproval) {

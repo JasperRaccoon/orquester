@@ -5,7 +5,11 @@
 // 16 bits of the last request the server processed. Replies and errors are matched to pending
 // requests by widening those 16 bits against the counter. Requests without a reply ("void") are
 // sent "checked": a GetInputFocus follows them, and since the server answers in order, the sync
-// reply arriving without an error for the void request means it succeeded.
+// reply arriving without an error for the void request means it succeeded. `post` sends a void
+// request without its own sync, so a burst (XTEST input) shares one `sync()` barrier.
+//
+// Incoming bytes are gathered as a list of chunks and joined once per message, so a reply of
+// several MiB (GetImage) arriving in many small reads is not copied once per read.
 
 import { EventEmitter } from "node:events";
 import { createConnection } from "node:net";
@@ -14,25 +18,42 @@ import type { Duplex } from "node:stream";
 import {
   AnyPropertyType,
   decodeGetGeometryReply,
+  decodeGetImageReply,
+  decodeGetKeyboardMappingReply,
+  decodeGetModifierMappingReply,
   decodeGetPropertyReply,
+  decodeGetSelectionOwnerReply,
   decodeInternAtomReply,
   decodeQueryExtensionReply,
+  decodeQueryPointerReply,
   decodeServerMessage,
   decodeSetupResponse,
+  decodeTranslateCoordinatesReply,
   encodeGetGeometry,
+  encodeGetImage,
   encodeGetInputFocus,
+  encodeGetKeyboardMapping,
+  encodeGetModifierMapping,
   encodeGetProperty,
+  encodeGetSelectionOwner,
   encodeInternAtom,
   encodeQueryExtension,
+  encodeQueryPointer,
   encodeSelectInput,
   encodeSendEvent,
   encodeSetupRequest,
+  encodeTranslateCoordinates,
+  ImageFormat,
   serverMessageLength,
   setupResponseLength,
   type GeometryReply,
+  type GetImageReply,
   type GetPropertyReply,
+  type KeyboardMapping,
   type QueryExtensionReply,
+  type QueryPointerReply,
   type SetupInfo,
+  type TranslateCoordinatesReply,
   type XAuthData,
   type XErrorInfo,
   type XEvent
@@ -98,7 +119,10 @@ export class X11MessageTooLargeError extends Error {
   }
 }
 
-/** The longest reply or event this client accepts (property reads ask for 64 KiB at a time). */
+/**
+ * The longest reply or event this client accepts (property reads ask for 64 KiB at a time, a
+ * screen capture is read in bands that fit).
+ */
 export const MAX_SERVER_MESSAGE_BYTES = 4 * 1024 * 1024;
 
 export interface X11ConnectionEvents {
@@ -123,9 +147,12 @@ export interface X11ConnectOptions {
 export class X11Connection extends EventEmitter<X11ConnectionEvents> {
   private sequence = 0;
   private readonly pending = new Map<number, Pending>();
-  private buffered: Buffer = Buffer.alloc(0);
+  /** Received bytes not yet dispatched, in arrival order. */
+  private chunks: Buffer[] = [];
+  private bufferedBytes = 0;
   private closed = false;
   private closedByUs = false;
+  private nextResourceId = 1;
 
   private constructor(
     private readonly stream: Duplex,
@@ -227,16 +254,39 @@ export class X11Connection extends EventEmitter<X11ConnectionEvents> {
 
   /** Send a request without a reply, followed by a sync, resolving once the server processed it without error. */
   requestVoid(buf: Buffer): Promise<void> {
-    const done = new Promise<void>((resolve, reject) => {
+    const done = this.post(buf);
+    // The sync's own outcome is irrelevant: a close rejects `done` too.
+    this.sync().catch(() => {});
+    return done;
+  }
+
+  /**
+   * Send a request without a reply and without a sync: it settles once a later reply or error
+   * shows the server processed it (rejecting with its own error), so a `sync()` must follow.
+   */
+  post(buf: Buffer): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       if (this.isClosed) {
         reject(new X11ConnectionClosedError());
         return;
       }
       this.pending.set(this.send(buf), { kind: "void", resolve, reject });
     });
-    // The sync's own outcome is irrelevant: a close rejects `done` too.
-    this.request(encodeGetInputFocus()).catch(() => {});
-    return done;
+  }
+
+  /** A round trip (GetInputFocus): resolves once the server has processed every earlier request. */
+  async sync(): Promise<void> {
+    await this.request(encodeGetInputFocus());
+  }
+
+  /** A new resource id (window, damage, …) from the setup's range. */
+  allocateId(): number {
+    const mask = this.setup.resourceIdMask;
+    const step = mask & -mask;
+    const id = (this.nextResourceId * step) & mask;
+    if (id === 0 || this.nextResourceId * step > mask) throw new Error("X11 resource ids exhausted");
+    this.nextResourceId += 1;
+    return (this.setup.resourceIdBase | id) >>> 0;
   }
 
   async internAtom(name: string, onlyIfExists = false): Promise<number> {
@@ -280,6 +330,33 @@ export class X11Connection extends EventEmitter<X11ConnectionEvents> {
     return this.requestVoid(encodeSendEvent(propagate, destination, eventMask, event));
   }
 
+  async queryPointer(window: number): Promise<QueryPointerReply> {
+    return decodeQueryPointerReply(await this.request(encodeQueryPointer(window)));
+  }
+
+  async translateCoordinates(source: number, destination: number, x: number, y: number): Promise<TranslateCoordinatesReply> {
+    return decodeTranslateCoordinatesReply(await this.request(encodeTranslateCoordinates(source, destination, x, y)));
+  }
+
+  /** GetImage in ZPixmap format with every plane; the reply must fit {@link MAX_SERVER_MESSAGE_BYTES}. */
+  async getImage(drawable: number, rect: { x: number; y: number; width: number; height: number }): Promise<GetImageReply> {
+    return decodeGetImageReply(await this.request(encodeGetImage(ImageFormat.ZPixmap, drawable, rect)));
+  }
+
+  /** The keysyms of every keycode the server has (`setup.minKeycode` … `setup.maxKeycode`). */
+  async getKeyboardMapping(): Promise<KeyboardMapping> {
+    const { minKeycode, maxKeycode } = this.setup;
+    return decodeGetKeyboardMappingReply(await this.request(encodeGetKeyboardMapping(minKeycode, maxKeycode - minKeycode + 1)));
+  }
+
+  async getModifierMapping(): Promise<number[][]> {
+    return decodeGetModifierMappingReply(await this.request(encodeGetModifierMapping()));
+  }
+
+  async getSelectionOwner(selection: number): Promise<number> {
+    return decodeGetSelectionOwnerReply(await this.request(encodeGetSelectionOwner(selection)));
+  }
+
   async xresQueryVersion(majorOpcode: number): Promise<{ major: number; minor: number }> {
     return decodeXResQueryVersionReply(await this.request(encodeXResQueryVersion(majorOpcode)));
   }
@@ -302,20 +379,50 @@ export class X11Connection extends EventEmitter<X11ConnectionEvents> {
   }
 
   private onData(chunk: Buffer): void {
-    this.buffered = this.buffered.length === 0 ? chunk : Buffer.concat([this.buffered, chunk]);
+    if (chunk.length === 0) return;
+    this.chunks.push(chunk);
+    this.bufferedBytes += chunk.length;
     for (;;) {
-      const length = serverMessageLength(this.buffered);
-      if (length !== null && length > MAX_SERVER_MESSAGE_BYTES) {
-        this.buffered = Buffer.alloc(0);
+      if (this.bufferedBytes < 32) return;
+      // The 32-byte header may straddle reads: join just the leading chunks it covers.
+      while (this.chunks[0]!.length < 32) this.chunks.splice(0, 2, Buffer.concat([this.chunks[0]!, this.chunks[1]!]));
+      const length = serverMessageLength(this.chunks[0]!)!;
+      if (length > MAX_SERVER_MESSAGE_BYTES) {
+        this.chunks = [];
+        this.bufferedBytes = 0;
         this.stream.destroy(new X11MessageTooLargeError(length));
         return;
       }
-      if (length === null || this.buffered.length < length) return;
-      const message = Buffer.from(this.buffered.subarray(0, length));
-      this.buffered = this.buffered.subarray(length);
-      this.dispatch(message);
+      if (this.bufferedBytes < length) return;
+      this.dispatch(this.take(length));
       if (this.closed) return;
     }
+  }
+
+  /** The next `length` buffered bytes: a view when one chunk holds them, else one join. */
+  private take(length: number): Buffer {
+    this.bufferedBytes -= length;
+    const first = this.chunks[0]!;
+    if (first.length >= length) {
+      if (first.length === length) this.chunks.shift();
+      else this.chunks[0] = first.subarray(length);
+      return first.subarray(0, length);
+    }
+    const parts: Buffer[] = [];
+    let needed = length;
+    while (needed > 0) {
+      const head = this.chunks[0]!;
+      if (head.length <= needed) {
+        parts.push(head);
+        this.chunks.shift();
+        needed -= head.length;
+      } else {
+        parts.push(head.subarray(0, needed));
+        this.chunks[0] = head.subarray(needed);
+        needed = 0;
+      }
+    }
+    return Buffer.concat(parts, length);
   }
 
   private dispatch(buf: Buffer): void {

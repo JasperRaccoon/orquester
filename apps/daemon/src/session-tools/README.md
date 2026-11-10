@@ -65,12 +65,12 @@ No dynamic `import()` either.
 | `files-git` | `read_file`, `get_git_state` (2) |
 | `workflow-authoring` | `list_workflow_block_types`, `create_workflow`, `update_workflow`, `delete_workflow`, `preview_expression`, `run_workflow`, `cancel_workflow_run`, `list_workflow_secrets`, `set_workflow_secret` (9) |
 | `agent-profile-editing` | `edit_agent_profile` (1) |
-| `desktops` | `get_desktops`, `control_desktop` (2) |
+| `desktops` | `get_desktops`, `control_desktop`, `desktop_action` (3) |
 | `secret-files` | `secret_files_status`, `push_secret_files` (2) |
 | `boxes` | the temporary-box tools (8), advertised only while a box can be rented |
 | `knowledge` | `knowledge_search`, `knowledge_get`, `knowledge_save`, `knowledge_update`, `knowledge_delete`, `knowledge_merge`, `knowledge_collections`, `knowledge_insights`, `knowledge_worker_next_task`, `knowledge_worker_submit` (10), advertised only while the Knowledge Graph plugin is on — search, get, insights, update, delete and merge only to a chat that sees a collection, the worker tools only (and alone) to the plugin's own indexing sessions |
 
-47 chat tools (the 42 external ones plus `html_preview`, `html_render`, `show_image`, `request_secret`, `push_secret_files`), **all
+48 chat tools (the 43 external ones plus `html_preview`, `html_render`, `show_image`, `request_secret`, `push_secret_files`), **all
 advertised to every chat** of every agent. A toolset is only a group: a label in `@orquester/api`
 `TOOLSETS` and the `orquester/toolset` tag external clients see. There is no master switch, no
 per-agent default and no per-chat override, and no `request_toolset`. Older builds kept such

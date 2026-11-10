@@ -166,6 +166,12 @@ test("projectSessionToolData keeps the marker and adds its references", () => {
   assert.equal(projectSessionToolData({ server: "orquester", tool: "echo" }, ["x"]), undefined, "unmarked");
 });
 
+test("a desktop action's desktopRef survives slimming, so its chat row links the desktop after a reload", () => {
+  const desktopRef = { desktopId: "d1", projectPath: "/w/p", screenshotId: "s1", action: "click", summary: "Clicked at 412, 300" };
+  const data = { server: "orquester", tool: "desktop_action", sessionTool: { name: "desktop_action" }, result: { structuredContent: { desktopRef, seq: 4 } } };
+  assert.deepEqual(projectSessionToolData(data), { name: "desktop_action", references: { desktopRef } });
+});
+
 test("a row slimmed before keeps its references: the summary its result became is not re-read", () => {
   const ref = { attachmentId: "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 400 };
   const slimmedOnce = {

@@ -6,15 +6,22 @@
 //   are RFB bytes both ways; client text frames are a control side channel
 //   (`{type:"ping",t}` → `{type:"pong",t}`), never forwarded to the VNC socket.
 // - `/ws-desktop-audio/:id`: the desktop's Opus stream from the audio hub.
+// - `/ws-desktop-voxl/:id` (spec 2026-11-10 §5, R4.4): a `voxl` desktop's voxl `/ws`, frames 1:1
+//   (type and boundaries kept) both ways. The daemon dials voxl itself on 127.0.0.1 (a VM's through
+//   the box link's `tcp` channel) with its password as a Bearer token, a loopback Host and no Origin;
+//   the browser never sees voxl or its password. A viewer's `sz,w,h` is clamped to the desktop size
+//   limits. The first viewer starts voxl, the last one leaving lets it stop.
 //
 // boxes: a VM desktop's RFB socket is in its VM; the relay's upstream is then a
 // stream through the box link (`vncStream`) instead of a local connection.
-import { createConnection } from "node:net";
+import { type Socket, createConnection } from "node:net";
 import type { Duplex } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
 import type { DesktopAudioStateMessage } from "@orquester/api";
 import { desktopAudioState, type DesktopAudioHub, type DesktopAudioSink, type DesktopAudioSpawn } from "./audio.ts";
+import { filterVoxlClientText } from "./voxl.ts";
+import type { VoxlLease } from "./voxl-streams.ts";
 
 export interface DesktopWsDeps {
   /**
@@ -33,6 +40,8 @@ export interface DesktopWsDeps {
    */
   audioSource(desktopId: string): { pulseSocketPath: string; spawn?: DesktopAudioSpawn } | { unavailable: string } | null;
   audio: DesktopAudioHub;
+  /** voxl: how to get a RUNNING `voxl` desktop's voxl (started for the viewer); null when it is not one. */
+  voxlUpstream?(desktopId: string): (() => Promise<VoxlLease>) | null;
 }
 
 // RFB is stateful → never drop bytes; PAUSE/RESUME on a high-water mark instead.
@@ -59,6 +68,25 @@ function parseControl(data: RawData): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/** voxl's own cap on one message. */
+const VOXL_MAX_PAYLOAD = 64 * 1024 * 1024;
+const VOXL_UNAVAILABLE = "voxl unavailable";
+/**
+ * voxl's answer to the relay's upgrade. With the streams' 30 s acquire budget (voxl-streams.ts) the
+ * relay has given up before the browser client's 45 s wait for `hello` ends.
+ */
+const VOXL_HANDSHAKE_TIMEOUT_MS = 10_000;
+
+/**
+ * A close code that may be sent on: voxl's (or the viewer's) own, else 1000 for "no status" and
+ * 1011 for an abnormal end (1005/1006/1015 are never sent on the wire).
+ */
+function relayCloseCode(code: number): number {
+  if (code === 1005) return 1000;
+  if ((code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) || (code >= 3000 && code <= 4999)) return code;
+  return 1011;
 }
 
 function tokenOf(query: unknown): string | undefined {
@@ -185,6 +213,136 @@ export async function registerDesktopWsRoutes(app: FastifyInstance, deps: Deskto
         },
         () => closeBoth(1011, NOT_RUNNING)
       );
+    });
+
+    instance.get<{ Params: { id: string } }>("/ws-desktop-voxl/:id", { websocket: true }, (socket, request) => {
+      if (!deps.authorize(tokenOf(request.query), socket)) {
+        socket.close(1008, "unauthorized");
+        return;
+      }
+
+      let upstream: WebSocket | null = null;
+      let lease: VoxlLease | null = null;
+      let closed = false;
+      let clientPaused = false;
+      let upstreamPaused = false;
+      const pending: Array<{ data: Buffer | string; binary: boolean }> = [];
+      let pendingBytes = 0;
+
+      const closeBoth = (code: number, reason: string) => {
+        if (closed) return;
+        closed = true;
+        try { socket.close(relayCloseCode(code), reason); } catch { /* closing */ }
+        try {
+          if (upstream && upstream.readyState === WebSocket.OPEN) upstream.close(relayCloseCode(code), reason);
+          else upstream?.terminate();
+        } catch { /* closing */ }
+        lease?.release();
+        lease = null;
+      };
+
+      // Viewer → voxl: pause the viewer above the HWM until voxl's socket has flushed.
+      const onUpstreamFlushed = () => {
+        if (clientPaused && !closed && upstream && upstream.bufferedAmount <= SEND_HWM) {
+          clientPaused = false;
+          socket.resume();
+        }
+      };
+      const sendUpstream = (data: Buffer | string, binary: boolean) => {
+        const target = upstream!;
+        try { target.send(data, { binary }, onUpstreamFlushed); } catch { /* closing */ }
+        if (!clientPaused && target.bufferedAmount > SEND_HWM) {
+          clientPaused = true;
+          socket.pause();
+        }
+      };
+
+      // Attach the client listener SYNCHRONOUSLY (fastify-websocket drops messages that arrive
+      // before a listener exists); until voxl answers, messages wait in the bounded queue.
+      socket.on("message", (data: RawData, isBinary: boolean) => {
+        if (closed) return;
+        let payload: Buffer | string = toBuffer(data);
+        if (!isBinary) {
+          const text = filterVoxlClientText(payload.toString("utf8"));
+          if (text === null) return;
+          payload = text;
+        }
+        if (upstream?.readyState === WebSocket.OPEN) {
+          sendUpstream(payload, isBinary);
+          return;
+        }
+        pendingBytes += typeof payload === "string" ? Buffer.byteLength(payload) : payload.length;
+        pending.push({ data: payload, binary: isBinary });
+        if (pending.length > PENDING_MAX_MSGS || pendingBytes > PENDING_MAX_BYTES) closeBoth(1011, "desktop buffer overflow");
+      });
+      socket.on("close", (code: number, reason: Buffer) => closeBoth(code, reason.toString("utf8")));
+      socket.on("error", () => closeBoth(1011, "client error"));
+
+      const acquire = deps.voxlUpstream?.(request.params.id) ?? null;
+      if (acquire === null) {
+        closeBoth(1011, VOXL_UNAVAILABLE);
+        return;
+      }
+      void (async () => {
+        let held: VoxlLease;
+        let stream: Duplex;
+        try {
+          held = await acquire();
+        } catch {
+          closeBoth(1011, VOXL_UNAVAILABLE);
+          return;
+        }
+        if (closed) {
+          held.release();
+          return;
+        }
+        lease = held;
+        try {
+          stream = await held.connect();
+        } catch {
+          closeBoth(1011, VOXL_UNAVAILABLE);
+          return;
+        }
+        if (closed) {
+          stream.destroy();
+          return;
+        }
+        // Host: 127.0.0.1:<port> (voxl answers IPs and localhost); no Origin (any foreign one is refused).
+        const ws = new WebSocket(`ws://127.0.0.1:${held.port}/ws`, {
+          headers: { Authorization: `Bearer ${held.password}` },
+          perMessageDeflate: false,
+          maxPayload: VOXL_MAX_PAYLOAD,
+          handshakeTimeout: VOXL_HANDSHAKE_TIMEOUT_MS,
+          // The stream is already connected (this machine's TCP, or a VM's `tcp` channel).
+          createConnection: (() => stream as Socket) as unknown as typeof createConnection
+        });
+        upstream = ws;
+        // voxl → viewer: pause voxl's socket above the HWM; resume from the send callbacks once the
+        // viewer's socket has flushed below it.
+        const onClientFlushed = () => {
+          if (upstreamPaused && !closed && socket.bufferedAmount <= SEND_HWM) {
+            upstreamPaused = false;
+            ws.resume();
+          }
+        };
+        ws.on("open", () => {
+          if (closed) return;
+          for (const message of pending) sendUpstream(message.data, message.binary);
+          pending.length = 0;
+          pendingBytes = 0;
+        });
+        ws.on("message", (data: RawData, isBinary: boolean) => {
+          if (closed) return;
+          try { socket.send(toBuffer(data), { binary: isBinary }, onClientFlushed); } catch { /* closing */ }
+          if (!upstreamPaused && socket.bufferedAmount > SEND_HWM) {
+            upstreamPaused = true;
+            ws.pause();
+          }
+        });
+        ws.on("close", (code: number, reason: Buffer) => closeBoth(code, reason.toString("utf8") || "voxl closed"));
+        ws.on("unexpected-response", () => closeBoth(1011, VOXL_UNAVAILABLE));
+        ws.on("error", () => closeBoth(1011, VOXL_UNAVAILABLE));
+      })();
     });
 
     instance.get<{ Params: { id: string } }>("/ws-desktop-audio/:id", { websocket: true }, (socket, request) => {

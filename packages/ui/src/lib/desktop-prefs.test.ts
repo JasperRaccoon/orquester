@@ -113,3 +113,14 @@ test("works with no localStorage at all", () => {
   writeDesktopPrefs("d", { muted: true, volume: 1, view: "fit" });
   clearDesktopPrefs("d");
 });
+
+test("touch input mode and text size round-trip; unknown values read as the defaults", () => {
+  install(true);
+  writeDesktopPrefs("t", { muted: false, volume: 1, view: "fit", inputMode: "touch", textSize: "medium" });
+  assert.equal(readDesktopPrefs("t").inputMode, "touch");
+  assert.equal(readDesktopPrefs("t").textSize, "medium");
+  const old = loadStored({ muted: true, volume: 1, view: "fit", inputMode: "stylus", textSize: 3 }, true);
+  assert.equal(old.inputMode, undefined);
+  assert.equal(old.textSize, undefined);
+  assert.equal(old.muted, true, "the other fields survive");
+});
