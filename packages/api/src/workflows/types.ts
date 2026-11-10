@@ -10,6 +10,7 @@ import type {
   AgentChainEntry,
   AgentPrompt,
   CodeBlockConfig,
+  GateBlockConfig,
   GitPullRequestAction,
   GitRepoRef,
   GitTriggerEvent,
@@ -18,11 +19,23 @@ import type {
   SchedulePreset,
   ShellBlockConfig,
   WorkflowEdge,
+  WorkflowEdgeLoop,
+  WorkflowGateChoice,
+  WorkflowGateChoiceColor,
+  WorkflowGateCommentMode,
+  WorkflowGateDecider,
+  WorkflowGateTimeout,
+  WorkflowInputDecl,
+  WorkflowInputType,
   WorkflowKeyValue,
+  WorkflowLoopSessionMode,
   WorkflowNode,
   WorkflowNodeConfig,
   WorkflowNodeOf,
   WorkflowNodeType,
+  WorkflowOutcomeDecl,
+  WorkflowOutputDecl,
+  WorkflowOutputType,
   WorkflowProject,
   WorkflowRecord,
   WorkflowRule,
@@ -44,12 +57,25 @@ export type {
   RuleOperator,
   SchedulePreset,
   ShellBlockConfig,
+  GateBlockConfig,
   WorkflowEdge,
+  WorkflowEdgeLoop,
+  WorkflowGateChoice,
+  WorkflowGateChoiceColor,
+  WorkflowGateCommentMode,
+  WorkflowGateDecider,
+  WorkflowGateTimeout,
+  WorkflowInputDecl,
+  WorkflowInputType,
   WorkflowKeyValue,
+  WorkflowLoopSessionMode,
   WorkflowNode,
   WorkflowNodeConfig,
   WorkflowNodeOf,
   WorkflowNodeType,
+  WorkflowOutcomeDecl,
+  WorkflowOutputDecl,
+  WorkflowOutputType,
   WorkflowProject,
   WorkflowRule,
   WorkflowSettings
@@ -98,7 +124,34 @@ export const WORKFLOW_LIMITS = {
   /** Agent handoff: previous agent's last messages / git status. */
   handoffMessagesBytes: 32 * 1024,
   handoffGitStatusBytes: 8 * 1024,
-  workflowTabRetentionDays: 7
+  workflowTabRetentionDays: 7,
+  // Typed inputs, outcomes, gates and loops (spec 2026-11-10). Enforced by `validateWorkflow` / the daemon.
+  /** Manual-trigger `inputs` (§4.1). */
+  maxInputs: 30,
+  /** An enum input's or output's `values`. */
+  enumValues: { min: 1, max: 50 },
+  /** An input's `description`, in characters. */
+  inputDescriptionChars: 300,
+  /** An agent block's `outcomes` (§5.1). */
+  outcomes: { min: 2, max: 12 },
+  /** An agent block's `outputs` (§5.1). */
+  maxOutputs: 20,
+  /** `report_step_result`'s `summary`, in characters (§5.2). */
+  reportSummaryChars: 2000,
+  /** A gate's `choices` (§6.1). */
+  gateChoices: { min: 2, max: 8 },
+  /** A gate's rendered `question`, in characters. */
+  gateQuestionChars: 300,
+  /** A gate's rendered `details`, in UTF-8 bytes. */
+  gateDetailsBytes: 8 * 1024,
+  /** The agent phase's default length (`decider.maxMinutes`). */
+  gateAgentPhaseDefaultMinutes: 60,
+  /** The person phase's longest length (also `timeout.minutes`' maximum): the existing maximum wait. */
+  gatePersonPhaseMaxMinutes: 7 * 24 * 60,
+  /** A loop edge's `maxLoops` (§7.1). */
+  loops: { min: 1, max: 20 },
+  /** What a new loop edge drawn in the editor gets (§7.4). */
+  defaultLoop: { maxLoops: 2, session: "continue" }
 } as const;
 
 /** Node name pattern — used in `{{nodes.<Name>…}}`. */
@@ -119,6 +172,7 @@ export const WORKFLOW_NODE_CATEGORY: Record<WorkflowNodeType, WorkflowNodeCatego
   merge: "flow",
   stop: "flow",
   wait: "flow",
+  gate: "flow",
   workflow: "flow",
   note: "note"
 };
@@ -220,6 +274,8 @@ export interface WorkflowTriggerSummary {
   nextRunAt?: string | null;
   lastPollAt?: string | null;
   lastError?: string | null;
+  /** A manual trigger's declared inputs (§4.1, §8: `get_workflow` / `list_workflows`). */
+  inputs?: WorkflowInputDecl[];
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +320,13 @@ export type WorkflowBlockErrorKind =
   | "child_run_failed"
   | "stopped"
   | "limit_exceeded"
-  | "internal";
+  | "internal"
+  /** An agent block with declared outcomes/outputs settled twice (turn + one reminder) with no report (§5.3). Retryable. */
+  | "no_report"
+  /** A loop edge reached its limit and the person chose "Stop" (§7.2). Never retried. */
+  | "loop_limit"
+  /** A gate's person phase passed with `timeout.then: fail`, or the 7-day maximum (§6.1). Never retried. */
+  | "gate_expired";
 
 export interface WorkflowBlockError {
   kind: WorkflowBlockErrorKind;
@@ -356,7 +418,184 @@ export interface WorkflowBlockRun {
   childRunId?: string;
   /** Output came from pinned data in a test run. */
   pinned?: boolean;
+  // agent blocks with declared outcomes/outputs (spec 2026-11-10 §5)
+  /** The pass's latest valid `report_step_result` (replaced by a later valid call until the block settles). */
+  report?: WorkflowStepReport;
+  // gates (§6) — also a loop-limit gate opened on a loop edge's source block (§7.2)
+  /** The gate this block waits on (a key of `WorkflowRun.gates`). */
+  gateId?: string;
+  // loops (§7)
+  /** 1-based pass number of this block in the run; absent = 1 (no loop has run it again). */
+  pass?: number;
+  /** Earlier passes of this block, oldest first; the fields above are always the latest pass. */
+  passes?: WorkflowBlockPass[];
+  /** The feedback the loop edge carried into this pass (`{{ loop.feedback }}`, §7.2). */
+  loopFeedback?: string;
+  /**
+   * Set when a loop's `session: "continue"` could not continue this block's previous session and it
+   * started a new chat, e.g. "new chat: previous session unavailable (archived)" (§7.3).
+   */
+  sessionNote?: string;
 }
+
+/** One earlier pass of a block (§7.2): what it ended with, kept when a loop ran the block again. */
+export type WorkflowBlockPass = Omit<WorkflowBlockRun, "nodeId" | "name" | "type" | "passes"> & {
+  /** 1-based. */
+  pass: number;
+};
+
+/** A valid `report_step_result` call, as stored on the pass (§5.2). */
+export interface WorkflowStepReport {
+  /** One of the block's declared outcome ids; absent when only `outputs` are declared. */
+  outcome?: string;
+  summary: string;
+  /** Validated and coerced against the block's declared `outputs`. */
+  outputs?: Record<string, unknown>;
+  /** The chat that made the call. */
+  sessionId: string;
+  reportedAt: string;
+}
+
+/**
+ * An agent block's output (`nodes.<Name>.output`). `outcome` / `summary` / `outputs` are set when
+ * the block declared outcomes or outputs and the agent reported (§5.4).
+ */
+export interface WorkflowAgentBlockOutput {
+  text: string;
+  sessionId: string;
+  agent: string;
+  model: string;
+  accountId: string;
+  durationMs: number;
+  hops: AgentHop[];
+  outcome?: string;
+  summary?: string;
+  outputs?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Gates (spec 2026-11-10 §6)
+// ---------------------------------------------------------------------------
+
+export type WorkflowGateDeciderKind = WorkflowGateDecider["kind"];
+
+/** Who decided: the person in the GUI, an external MCP client (the person's own tooling), an agent decider, or the timeout. */
+export type WorkflowGateDecidedByKind = "human" | "external" | "agent" | "launcher" | "timeout";
+
+export interface WorkflowGateDecidedBy {
+  kind: WorkflowGateDecidedByKind;
+  /** e.g. "you", "Reviewer (claude)", "the launching chat", "timeout". */
+  label: string;
+  /** The deciding chat (agent / launcher). */
+  sessionId?: string;
+}
+
+/** A gate's decision, persisted in the run before the engine moves on. The first decision wins. */
+export interface WorkflowGateDecision {
+  choice: string;
+  comment?: string;
+  decidedBy: WorkflowGateDecidedBy;
+  decidedAt: string;
+}
+
+/** A gate block's output (`nodes.<Name>.output`, §6.2). */
+export interface WorkflowGateOutput extends WorkflowGateDecision {
+  escalated: boolean;
+}
+
+/** "agent": an agent decider (reviewer or launcher) is asked; "person": the person is (decider human, or after escalation). */
+export type WorkflowGatePhase = "agent" | "person";
+
+/** A gate's choice as served (config `comment` default applied). */
+export interface WorkflowGateChoiceView {
+  id: string;
+  label: string;
+  color?: WorkflowGateChoiceColor;
+  comment: WorkflowGateCommentMode;
+}
+
+/**
+ * One gate of a run, as the run detail, the gate list and the decision card read it. `source:
+ * "loop_limit"` is the person-only gate a loop edge opens on its source block at its limit (§7.2;
+ * choices "Allow one more loop" / "Stop").
+ */
+export interface WorkflowGateState {
+  /** Unique within the run (a key of `WorkflowRun.gates`). */
+  gateId: string;
+  runId: string;
+  workflowId: string;
+  /** Rides list rows (`ListWorkflowGatesResponse`); the run detail already names it. */
+  workflowName?: string;
+  /** The run's project, on list rows. */
+  projectPath?: string;
+  /** The top-level run, when this gate is inside a sub-workflow's child run. */
+  rootRunId?: string;
+  nodeId: string;
+  nodeName: string;
+  /** The block's pass the gate belongs to. */
+  pass?: number;
+  source: "gate" | "loop_limit";
+  /** Loop-limit gates: the loop edge that reached its limit. */
+  edgeId?: string;
+  /** Rendered. */
+  question: string;
+  /** Rendered Markdown. */
+  details?: string;
+  choices: WorkflowGateChoiceView[];
+  decider: {
+    kind: WorkflowGateDeciderKind;
+    /** e.g. "you", "Reviewer (claude)", "the launching chat". */
+    label: string;
+    /** The agent decider's chat (reviewer agent, or the launcher's thread). */
+    sessionId?: string;
+  };
+  phase: WorkflowGatePhase;
+  openedAt: string;
+  /** When the current phase started (the person phase's `timeout` counts from it). */
+  phaseStartedAt?: string;
+  /** When the current phase ends (agent: `maxMinutes`; person: `timeout` or the 7-day maximum). */
+  phaseDeadlineAt?: string;
+  /** The person was asked after an agent decider escalated, failed or ran out of time. */
+  escalated: boolean;
+  escalatedAt?: string;
+  /** Set once decided (then the gate no longer waits). */
+  decision?: WorkflowGateDecision;
+  /** Cancelled with its run before a decision. */
+  cancelled?: boolean;
+  /** A test run's gate: answered in the editor's run view only — no push, attention row or agent decider (§7.5). */
+  test?: boolean;
+}
+
+/** Waiting = neither decided nor cancelled. */
+export function isGateWaiting(gate: Pick<WorkflowGateState, "decision" | "cancelled">): boolean {
+  return gate.decision === undefined && gate.cancelled !== true;
+}
+
+/** Waiting for the PERSON (attention rows, push, badges): waiting and in the person phase. */
+export function isGateWaitingForPerson(gate: Pick<WorkflowGateState, "decision" | "cancelled" | "phase">): boolean {
+  return isGateWaiting(gate) && gate.phase === "person";
+}
+
+// ---------------------------------------------------------------------------
+// Typed inputs (spec 2026-11-10 §4.2)
+// ---------------------------------------------------------------------------
+
+/** One problem with a run's input against the manual trigger's declared `inputs`. */
+export interface WorkflowInputError {
+  /** The input's name; absent for the input as a whole ("the input must be an object"). */
+  input?: string;
+  /** Names the input and the fix, e.g. "input `env` must be one of: stg, prd". */
+  message: string;
+}
+
+/** Who started a run (§6.3). A child run carries its top-level run's. */
+export type WorkflowRunStartedBy =
+  /** An agent chat through `run_workflow`; set by the daemon from the in-chat caller, never from a remote client. */
+  | { kind: "thread"; sessionId: string }
+  /** The GUI or the REST API. */
+  | { kind: "human" }
+  /** A schedule or git trigger. */
+  | { kind: "trigger" };
 
 export interface WorkflowRunProgress {
   nodeId: string;
@@ -393,6 +632,17 @@ export interface WorkflowRunSummary {
   tempProject?: { path: string; deleted: boolean; deleteAfter?: string; pending?: boolean };
   parentRunId?: string;
   retryOf?: string;
+  /** Gates of this run (and of its child runs) waiting on a decision (§6.4 badges). Absent = 0. */
+  pendingGates?: number;
+  /** Of those, the ones waiting for the person (attention rows, warn dot). Absent = 0. */
+  pendingPersonGates?: number;
+  /** Every active block waits on a gate, a timer or a parked child run (§6.2). */
+  parked?: boolean;
+  /**
+   * Why a skipped or queued run did not start, in words, e.g. "previous run is waiting on gate
+   * “Deploy?”" (§6.2: never a silent skip).
+   */
+  skipDetail?: string;
 }
 
 export interface WorkflowRun extends WorkflowRunSummary {
@@ -411,6 +661,18 @@ export interface WorkflowRun extends WorkflowRunSummary {
   /** Dead edges (ids). */
   deadEdges: string[];
   finalOutput?: unknown;
+  /** Who started the run (§6.3); absent on runs recorded by an older build. */
+  startedBy?: WorkflowRunStartedBy;
+  /** This run's gates, by gate id, opened order (§6). Decided ones stay as the record. */
+  gates?: Record<string, WorkflowGateState>;
+  /** How many times each loop edge was taken in this run, by edge id (§7.2); absent = 0. */
+  loopCounters?: Record<string, number>;
+  /** A loop edge's limit raised for this run by "Allow one more loop", by edge id (replaces `loop.maxLoops`). */
+  loopLimits?: Record<string, number>;
+  /** Parked time so far, excluded from `runTimeoutMinutes` (§6.2). */
+  parkedMs?: number;
+  /** When the current parked stretch began; absent while not parked. */
+  parkedSince?: string;
 }
 
 export function isRunActive(status: WorkflowRunStatus): boolean {
@@ -476,6 +738,11 @@ export interface WorkflowRunUpdatedPayload {
   blocks: WorkflowBlockRun[];
   takenEdges?: string[];
   deadEdges?: string[];
+  /** Gates opened, decided, escalated or cancelled since the previous event (whole states). */
+  gates?: WorkflowGateState[];
+  /** Loop counters when they changed (the whole map). */
+  loopCounters?: Record<string, number>;
+  loopLimits?: Record<string, number>;
 }
 export interface WorkflowRunFinishedPayload {
   run: WorkflowRunSummary;
@@ -504,6 +771,9 @@ export interface WorkflowSecretName {
 /** A node reference: its id, or its (unique) name. */
 export type WorkflowNodeRef = string;
 
+/** A loop edge's settings as a client may send them (`session` optional, default "continue"). */
+export type WorkflowEdgeLoopInput = { maxLoops: number; session?: WorkflowLoopSessionMode };
+
 export type WorkflowPatchOp =
   | {
       op: "add_node";
@@ -528,7 +798,8 @@ export type WorkflowPatchOp =
     }
   | { op: "remove_node"; node: WorkflowNodeRef }
   | { op: "rename_node"; node: WorkflowNodeRef; to: string }
-  | { op: "connect"; source: WorkflowNodeRef; sourceHandle?: string; target: WorkflowNodeRef }
+  /** `loop`: make it a loop edge (§7.1; `session` defaults to "continue"). */
+  | { op: "connect"; source: WorkflowNodeRef; sourceHandle?: string; target: WorkflowNodeRef; loop?: WorkflowEdgeLoopInput }
   | { op: "disconnect"; edgeId?: string; source?: WorkflowNodeRef; sourceHandle?: string; target?: WorkflowNodeRef }
   | { op: "set_settings"; settings: Partial<WorkflowSettings> }
   | { op: "set_project"; project: WorkflowProject }
@@ -570,7 +841,12 @@ export const workflowRoutes = {
   /** The reference index: every workflow whose agent blocks use a saved prompt. */
   promptReferences: (promptId: string): string => `/api/workflow-references/prompts/${encodeURIComponent(promptId)}`,
   /** The reference index: every workflow whose agent blocks launch with an Agent Profile (`config.profileId`). */
-  profileReferences: (profileId: string): string => `/api/workflow-references/profiles/${encodeURIComponent(profileId)}`
+  profileReferences: (profileId: string): string => `/api/workflow-references/profiles/${encodeURIComponent(profileId)}`,
+  /** GET: gates across projects (`ListWorkflowGatesQuery`), waiting ones by default (spec 2026-11-10 §8). */
+  gates: "/api/workflow-gates",
+  /** POST: decide (or escalate) one gate of a run (`DecideWorkflowGateRequest`). */
+  gateDecide: (runId: string, gateId: string): string =>
+    `/api/workflow-runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateId)}/decide`
 } as const;
 
 export type WorkflowErrorCode =
@@ -585,7 +861,12 @@ export type WorkflowErrorCode =
   | "SECRET_INVALID"
   | "RUN_NOT_ACTIVE"
   | "ENGINE_UNAVAILABLE"
-  | "CALLERS_CHANGED";
+  | "CALLERS_CHANGED"
+  /** The run's input does not fit the manual trigger's declared inputs; `inputErrors` lists every problem (§4.2). */
+  | "INVALID_INPUT"
+  | "GATE_NOT_FOUND"
+  /** An in-chat caller that is not the gate's assigned decider (§6.3). */
+  | "GATE_NOT_DECIDER";
 
 /** Error body: `{ error: { code, message, problems? } }`. */
 export interface WorkflowErrorBody {
@@ -593,7 +874,14 @@ export interface WorkflowErrorBody {
    * `opIndex`: the 0-based op a refused patch failed on (`POST …/patch`), or the entry a refused
    * create failed on (its nodes first, then its edges).
    */
-  error: { code: WorkflowErrorCode; message: string; problems?: WorkflowProblem[]; opIndex?: number };
+  error: {
+    code: WorkflowErrorCode;
+    message: string;
+    problems?: WorkflowProblem[];
+    opIndex?: number;
+    /** `INVALID_INPUT`: every input problem at once. */
+    inputErrors?: WorkflowInputError[];
+  };
 }
 
 /** GET /api/workflows?projectPath= */
@@ -615,7 +903,7 @@ export interface CreateWorkflowRequest {
   project: WorkflowProject;
   settings?: Partial<WorkflowSettings>;
   nodes?: WorkflowPatchNodeInput[];
-  edges?: { id?: string; source: string; sourceHandle?: string; target: string }[];
+  edges?: { id?: string; source: string; sourceHandle?: string; target: string; loop?: WorkflowEdgeLoopInput }[];
   /** Mint names/positions for nodes that lack them (MCP). */
   autoLayout?: boolean;
 }
@@ -679,6 +967,38 @@ export interface RunWorkflowResponse {
   runId: string | null;
   /** Set when the overlap policy skipped the fire. */
   skipped?: WorkflowRunSkipReason;
+  /** Why it was skipped or queued, in words (e.g. "previous run is waiting on gate “Deploy?”"). */
+  skipDetail?: string;
+}
+
+/** POST /api/workflow-runs/:runId/gates/:gateId/decide */
+export interface DecideWorkflowGateRequest {
+  /** A choice id of the gate; required unless `escalate`. */
+  choice?: string;
+  /** Required when the choice's `comment` is "required", and whenever an agent decides or escalates. */
+  comment?: string;
+  /** Agent deciders only: hand the gate to the person instead of deciding. */
+  escalate?: boolean;
+}
+export interface DecideWorkflowGateResponse {
+  /** True when an earlier decision stood: nothing changed, `decision` is that one. */
+  alreadyDecided: boolean;
+  /** The decision that stands (absent after an escalation). */
+  decision?: WorkflowGateDecision;
+  /** The gate after the call. */
+  gate: WorkflowGateState;
+}
+
+/** GET /api/workflow-gates?projectPath=&includeDecided=1 (the query string carries `includeDecided` as "1"). */
+export interface ListWorkflowGatesQuery {
+  /** Only gates of runs in this project. */
+  projectPath?: string;
+  /** Also decided (and cancelled) gates of retained runs; default only waiting ones. */
+  includeDecided?: boolean;
+}
+export interface ListWorkflowGatesResponse {
+  /** Oldest first. */
+  gates: WorkflowGateState[];
 }
 
 /** GET /api/workflows/:id/runs?before=&limit= */

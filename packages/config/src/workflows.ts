@@ -56,6 +56,7 @@ export const WORKFLOW_NODE_TYPES = [
   "merge",
   "stop",
   "wait",
+  "gate",
   "workflow",
   "note"
 ] as const;
@@ -84,9 +85,53 @@ export const schedulePresetSchema = z.discriminatedUnion("kind", [
 ]);
 export type SchedulePreset = z.infer<typeof schedulePresetSchema>;
 
+// ---------------------------------------------------------------------------
+// Typed values: manual-trigger inputs (spec 2026-11-10 §4.1), agent outputs (§5.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * A manual-trigger input or an agent output name: read as `trigger.input.<name>` /
+ * `nodes.<Block>.output.outputs.<name>`, so an identifier (the block-name rule).
+ */
+export const WORKFLOW_VALUE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
+/** An agent outcome id or a gate choice id: it is part of a handle (`outcome:<id>`, `choice:<id>`). */
+export const WORKFLOW_OUTCOME_ID_PATTERN = /^[a-z][a-z0-9_]{0,39}$/;
+export const WORKFLOW_CHOICE_ID_PATTERN = WORKFLOW_OUTCOME_ID_PATTERN;
+
+const valueNameSchema = z
+  .string()
+  .regex(WORKFLOW_VALUE_NAME_PATTERN, "must be a letter, then letters, digits or _ (at most 40)");
+const outcomeIdSchema = z
+  .string()
+  .regex(WORKFLOW_OUTCOME_ID_PATTERN, "must be a lowercase letter, then lowercase letters, digits or _ (at most 40)");
+
+export const WORKFLOW_INPUT_TYPES = ["string", "number", "boolean", "enum"] as const;
+export type WorkflowInputType = (typeof WORKFLOW_INPUT_TYPES)[number];
+
+/**
+ * One declared input of a manual trigger (§4.1). Shape only: uniqueness, counts (≤ 30 inputs, 1–50
+ * enum values), lengths and "the default fits the type" are `validateWorkflow`'s.
+ */
+export const workflowInputDeclSchema = looseObject({
+  name: valueNameSchema,
+  type: z.enum(WORKFLOW_INPUT_TYPES),
+  /** `enum` only. */
+  values: z.array(z.string()).optional(),
+  /** Absent = false. */
+  required: z.boolean().optional(),
+  default: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  /** Help text (≤ 300 characters). */
+  description: z.string().optional(),
+  /** `string` only: a textarea. */
+  multiline: z.boolean().optional()
+});
+export type WorkflowInputDecl = z.infer<typeof workflowInputDeclSchema>;
+
 export const triggerManualConfigSchema = looseObject({
-  /** A JSON example shown in "Run now" (free text; not validated as JSON on read). */
-  inputExample: z.string().optional()
+  /** A JSON example shown in "Run now" (free text; not validated as JSON on read). Used only when `inputs` is absent. */
+  inputExample: z.string().optional(),
+  /** Typed inputs, in form order (§4.1). Absent = any JSON input, as before. */
+  inputs: z.array(workflowInputDeclSchema).optional()
 });
 
 export const triggerScheduleConfigSchema = looseObject({
@@ -212,6 +257,29 @@ export const agentSessionModeSchema = z.discriminatedUnion("kind", [
   looseObject({ kind: z.literal("continue"), fromNode: z.string().min(1) })
 ]);
 
+/** One named outcome of an agent block (§5.1): its handle is `outcome:<id>`. */
+export const workflowOutcomeDeclSchema = looseObject({
+  id: outcomeIdSchema,
+  label: z.string().optional(),
+  description: z.string().optional()
+});
+export type WorkflowOutcomeDecl = z.infer<typeof workflowOutcomeDeclSchema>;
+
+export const WORKFLOW_OUTPUT_TYPES = ["string", "number", "boolean", "enum", "json"] as const;
+export type WorkflowOutputType = (typeof WORKFLOW_OUTPUT_TYPES)[number];
+
+/** One typed output an agent block reports (§5.1). Counts and uniqueness are `validateWorkflow`'s. */
+export const workflowOutputDeclSchema = looseObject({
+  name: valueNameSchema,
+  type: z.enum(WORKFLOW_OUTPUT_TYPES),
+  /** `enum` only. */
+  values: z.array(z.string()).optional(),
+  /** Absent = TRUE (unlike inputs). */
+  required: z.boolean().optional(),
+  description: z.string().optional()
+});
+export type WorkflowOutputDecl = z.infer<typeof workflowOutputDeclSchema>;
+
 export const agentConfigSchema = looseObject({
   prompt: agentPromptSchema,
   session: agentSessionModeSchema.default({ kind: "new" }),
@@ -230,7 +298,14 @@ export const agentConfigSchema = looseObject({
       looseObject({ kind: z.literal("wait-for-reset"), maxWaitHours: z.number().positive().max(168) })
     ])
     .default({ kind: "fail" }),
-  maxMinutes: z.number().int().positive().default(240)
+  maxMinutes: z.number().int().positive().default(240),
+  /**
+   * Named outcomes (§5.1, 2–12): when declared the block's handles are `outcome:<id>` (declared
+   * order) plus `error` — no `success` — and the agent must report one with `report_step_result`.
+   */
+  outcomes: z.array(workflowOutcomeDeclSchema).optional(),
+  /** Typed outputs the agent reports (§5.1, ≤ 20); declared alone, a report is required with no outcome. */
+  outputs: z.array(workflowOutputDeclSchema).optional()
 });
 export type AgentBlockConfig = z.infer<typeof agentConfigSchema>;
 
@@ -340,6 +415,66 @@ export const waitConfigSchema = z.discriminatedUnion("kind", [
   looseObject({ kind: z.literal("until"), time: z.string().regex(HHMM), timezone: z.string().optional() })
 ]);
 
+// ---------------------------------------------------------------------------
+// Gate (spec 2026-11-10 §6.1)
+// ---------------------------------------------------------------------------
+
+export const WORKFLOW_GATE_CHOICE_COLORS = ["default", "primary", "success", "warning", "danger"] as const;
+export type WorkflowGateChoiceColor = (typeof WORKFLOW_GATE_CHOICE_COLORS)[number];
+export const WORKFLOW_GATE_COMMENT_MODES = ["none", "optional", "required"] as const;
+export type WorkflowGateCommentMode = (typeof WORKFLOW_GATE_COMMENT_MODES)[number];
+
+/** One choice of a gate: its handle is `choice:<id>`. */
+export const gateChoiceSchema = looseObject({
+  id: outcomeIdSchema,
+  label: z.string().min(1),
+  color: z.enum(WORKFLOW_GATE_CHOICE_COLORS).optional(),
+  comment: z.enum(WORKFLOW_GATE_COMMENT_MODES).default("none")
+});
+export type WorkflowGateChoice = z.infer<typeof gateChoiceSchema>;
+
+/** Default minutes of a gate's agent phase (`decider.maxMinutes`). */
+export const WORKFLOW_GATE_AGENT_PHASE_DEFAULT_MINUTES = 60;
+
+/** Who may decide a gate: the person (default), an assigned reviewer agent, or the chat that launched the run. */
+export const gateDeciderSchema = z.discriminatedUnion("kind", [
+  looseObject({ kind: z.literal("human") }),
+  looseObject({
+    kind: z.literal("agent"),
+    prompt: agentPromptSchema,
+    chain: z.array(agentChainEntrySchema).min(1),
+    profileId: z.string().min(1).max(128).optional(),
+    maxMinutes: z.number().int().positive().default(WORKFLOW_GATE_AGENT_PHASE_DEFAULT_MINUTES)
+  }),
+  looseObject({
+    kind: z.literal("launcher"),
+    maxMinutes: z.number().int().positive().default(WORKFLOW_GATE_AGENT_PHASE_DEFAULT_MINUTES)
+  })
+]);
+export type WorkflowGateDecider = z.infer<typeof gateDeciderSchema>;
+
+/** The person phase's deadline (≤ 7 days, `validateWorkflow`) and what happens when it passes. */
+export const gateTimeoutSchema = looseObject({
+  minutes: z.number().positive(),
+  then: z.discriminatedUnion("kind", [
+    looseObject({ kind: z.literal("choice"), choice: z.string().min(1) }),
+    looseObject({ kind: z.literal("fail") })
+  ])
+});
+export type WorkflowGateTimeout = z.infer<typeof gateTimeoutSchema>;
+
+export const gateConfigSchema = looseObject({
+  /** A template (≤ 300 characters rendered). */
+  question: z.string(),
+  /** A template, Markdown (≤ 8 KB rendered). */
+  details: z.string().optional(),
+  /** 2–8 (`validateWorkflow`), ids unique. */
+  choices: z.array(gateChoiceSchema),
+  decider: gateDeciderSchema.default({ kind: "human" }),
+  timeout: gateTimeoutSchema.optional()
+});
+export type GateBlockConfig = z.infer<typeof gateConfigSchema>;
+
 export const subWorkflowConfigSchema = looseObject({
   workflowId: z.string().min(1),
   /** A template whose rendered value is the child's `trigger.input`. */
@@ -381,6 +516,7 @@ export const workflowNodeSchema = z.discriminatedUnion("type", [
   nodeOf("merge", mergeConfigSchema),
   nodeOf("stop", stopConfigSchema),
   nodeOf("wait", waitConfigSchema),
+  nodeOf("gate", gateConfigSchema),
   nodeOf("workflow", subWorkflowConfigSchema),
   nodeOf("note", noteConfigSchema)
 ]);
@@ -388,15 +524,35 @@ export type WorkflowNode = z.infer<typeof workflowNodeSchema>;
 export type WorkflowNodeOf<T extends WorkflowNodeType> = Extract<WorkflowNode, { type: T }>;
 export type WorkflowNodeConfig<T extends WorkflowNodeType> = WorkflowNodeOf<T>["config"];
 
-/** Handle ids: success | error | true | false | case:<n> | default. */
-export const WORKFLOW_HANDLE_PATTERN = /^(success|error|true|false|default|case:(0|[1-9]\d{0,2}))$/;
+/**
+ * Handle ids: success | error | true | false | case:<n> | default | outcome:<id> (an agent block's
+ * declared outcome) | choice:<id> (a gate's choice); `<id>` is {@link WORKFLOW_OUTCOME_ID_PATTERN}.
+ */
+export const WORKFLOW_HANDLE_PATTERN =
+  /^(success|error|true|false|default|case:(0|[1-9]\d{0,2})|outcome:[a-z][a-z0-9_]{0,39}|choice:[a-z][a-z0-9_]{0,39})$/;
+
+export const WORKFLOW_LOOP_SESSION_MODES = ["continue", "new"] as const;
+export type WorkflowLoopSessionMode = (typeof WORKFLOW_LOOP_SESSION_MODES)[number];
+export const WORKFLOW_MAX_LOOPS = 20;
+
+/**
+ * A loop edge's settings (§7.1): the edge points back to an ancestor and is followed at most
+ * `maxLoops` times per run; `session` applies to every agent block the loop runs again.
+ */
+export const workflowEdgeLoopSchema = looseObject({
+  maxLoops: z.number().int().min(1).max(WORKFLOW_MAX_LOOPS),
+  session: z.enum(WORKFLOW_LOOP_SESSION_MODES).default("continue")
+});
+export type WorkflowEdgeLoop = z.infer<typeof workflowEdgeLoopSchema>;
 
 export const workflowEdgeSchema = z
   .object({
     id: graphIdSchema,
     source: graphIdSchema,
     sourceHandle: z.string().regex(WORKFLOW_HANDLE_PATTERN),
-    target: graphIdSchema
+    target: graphIdSchema,
+    /** Present = a loop edge (§7.1); absent = an ordinary forward edge. */
+    loop: workflowEdgeLoopSchema.optional()
   })
   .passthrough();
 export type WorkflowEdge = z.infer<typeof workflowEdgeSchema>;

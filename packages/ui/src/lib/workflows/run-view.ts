@@ -191,6 +191,7 @@ const BLOCK_TYPE_LABEL: Record<WorkflowNodeType, string> = {
   merge: "Merge",
   stop: "Stop",
   wait: "Wait",
+  gate: "Gate",
   workflow: "Run workflow",
   note: "Note"
 };
@@ -216,7 +217,10 @@ const ERROR_KIND_LABEL: Record<WorkflowBlockErrorKind, string> = {
   child_run_failed: "Sub-workflow failed",
   stopped: "Stopped",
   limit_exceeded: "Limit exceeded",
-  internal: "Internal error"
+  internal: "Internal error",
+  no_report: "No result reported",
+  loop_limit: "Loop limit reached",
+  gate_expired: "Gate expired"
 };
 
 export function blockErrorKindLabel(kind: WorkflowBlockErrorKind | string): string {

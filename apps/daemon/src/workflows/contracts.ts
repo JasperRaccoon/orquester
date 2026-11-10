@@ -12,6 +12,8 @@ import type {
   Workflow,
   WorkflowBlockError,
   WorkflowBlockRun,
+  WorkflowGateDeciderKind,
+  WorkflowGatePhase,
   WorkflowNode,
   WorkflowNodeType,
   WorkflowRun,
@@ -101,7 +103,28 @@ export type WaitingOn =
   | { kind: "process"; pid: number; starttime: number; attemptDir: string; deadlineAt: string; spawning?: true }
   | { kind: "timer"; until: string; purpose: "wait" | "retry-delay" | "wait-for-reset" }
   | { kind: "child-run"; runId: string }
-  | { kind: "http"; method: string; startedAt: string };
+  | { kind: "http"; method: string; startedAt: string }
+  /**
+   * A gate (spec 2026-11-10 §6.2) — a gate block's, or a loop-limit gate on a loop edge's source
+   * block (§7.2). Persisted BEFORE any notification or decider launch; a wait state (no agent or
+   * process slot). The gate's full record is `PersistedRun.gates[gateId]`.
+   */
+  | {
+      kind: "gate";
+      gateId: string;
+      openedAt: string;
+      phase: WorkflowGatePhase;
+      /** When the current phase started (the person phase's `timeout.minutes` count from it). */
+      phaseStartedAt: string;
+      /** The current phase's persisted deadline, re-armed after a restart. */
+      phaseDeadlineAt: string;
+      decider: { kind: WorkflowGateDeciderKind; label: string };
+      /** The reviewer agent's chat, or the launcher's thread, once known. */
+      deciderSessionId?: string;
+      escalatedAt?: string;
+      /** The decider agent's resume state (agent decider; same vocabulary as the agent block's). */
+      agent?: Omit<Extract<WaitingOn, { kind: "agent" }>, "kind">;
+    };
 
 export interface PersistedBlockState extends WorkflowBlockRun {
   waitingOn?: WaitingOn;
@@ -269,6 +292,8 @@ export interface NodeExecutionContext<T extends WorkflowNodeType = WorkflowNodeT
     run: { id: string; startedAt: string; workflowId: string; workflowName: string; attempt: number };
     project: { path: string; name: string; workspace: string; branch?: string };
     workflow: { id: string; name: string };
+    /** The `loop` namespace (spec 2026-11-10 §7.2); absent until loops set it. */
+    loop?: { pass: number; feedback?: string };
   };
   /** Resolved secret values (name -> value); never persist these. */
   secrets: Record<string, string>;
@@ -277,7 +302,14 @@ export interface NodeExecutionContext<T extends WorkflowNodeType = WorkflowNodeT
   /** Persist what the block waits on BEFORE the side effect. `undefined` clears. */
   setWaitingOn(waitingOn: WaitingOn | undefined): Promise<void>;
   /** Live fields for the run view (throttled broadcast; persisted). */
-  update(patch: Partial<Pick<WorkflowBlockRun, "activity" | "selection" | "hops" | "sessionId" | "logs" | "waitingUntil" | "childRunId" | "warnings">>): void;
+  update(
+    patch: Partial<
+      Pick<
+        WorkflowBlockRun,
+        "activity" | "selection" | "hops" | "sessionId" | "logs" | "waitingUntil" | "childRunId" | "warnings" | "report" | "gateId" | "sessionNote"
+      >
+    >
+  ): void;
   /** `<runsDir>/<runId>/nodes/<nodeId>/<attempt>/` */
   attemptDir(): Promise<string>;
   /** The node's timeout in ms (per-type default and max applied). */

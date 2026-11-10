@@ -181,6 +181,25 @@ export const WORKFLOW_BLOCK_CATALOG: Record<WorkflowNodeType, WorkflowBlockCatal
     output: "Its input, passed through.",
     example: { kind: "until", time: "09:00" }
   },
+  gate: {
+    type: "gate",
+    title: "Gate",
+    description:
+      "Pauses the run until a decision between named choices; each choice is an output (`choice:<id>`). The decider is the person (default), an assigned reviewer agent, or the chat that launched the run.",
+    category: WORKFLOW_NODE_CATEGORY.gate,
+    output:
+      "{ choice, comment?, decidedBy: { kind: \"human\" | \"external\" | \"agent\" | \"launcher\" | \"timeout\", label, sessionId? }, decidedAt, escalated }.",
+    example: {
+      question: "Deploy {{ nodes.Build.output.version }} to production?",
+      details: "{{ nodes.Review.output.summary }}",
+      choices: [
+        { id: "approve", label: "Approve", color: "primary", comment: "none" },
+        { id: "reject", label: "Reject", color: "danger", comment: "optional" }
+      ],
+      decider: { kind: "human" },
+      timeout: { minutes: 1440, then: { kind: "fail" } }
+    }
+  },
   workflow: {
     type: "workflow",
     title: "Run workflow",
@@ -245,6 +264,14 @@ export function defaultNodeConfig<T extends WorkflowNodeType>(type: T): Workflow
     merge: { mode: "all" },
     stop: { as: "success" },
     wait: { kind: "duration", minutes: 5 },
+    gate: {
+      question: "",
+      choices: [
+        { id: "approve", label: "Approve", color: "primary", comment: "none" },
+        { id: "reject", label: "Reject", color: "danger", comment: "optional" }
+      ],
+      decider: { kind: "human" }
+    },
     workflow: { workflowId: UNSET_SUBWORKFLOW_ID },
     note: { text: "", color: "yellow" }
   };
@@ -265,6 +292,7 @@ const DEFAULT_NAME_BASE: Record<WorkflowNodeType, string> = {
   merge: "Merge",
   stop: "Stop",
   wait: "Wait",
+  gate: "Gate",
   workflow: "Workflow",
   note: "Note"
 };

@@ -8,6 +8,33 @@ import { isTriggerType, type Workflow, type WorkflowEdge, type WorkflowNode } fr
 type NodeLike = Pick<WorkflowNode, "id" | "type"> & { config?: unknown };
 type GraphLike = { nodes: readonly NodeLike[]; edges: readonly Pick<WorkflowEdge, "id" | "source" | "sourceHandle" | "target">[] };
 
+/** The ids of a config list's entries (`outcomes`, `choices`) that are strings, in order; malformed ones are left out. */
+function declaredIds(list: unknown, key: "id"): string[] {
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((entry) => {
+    const id = entry !== null && typeof entry === "object" ? (entry as Record<string, unknown>)[key] : undefined;
+    return typeof id === "string" && id.length > 0 ? [id] : [];
+  });
+}
+
+/** An agent block's declared outcome ids (`config.outcomes`), in order; [] when none are declared. */
+export function agentOutcomeIds(node: NodeLike): string[] {
+  return node.type === "agent" ? declaredIds(((node.config ?? {}) as { outcomes?: unknown }).outcomes, "id") : [];
+}
+
+/** A gate's choice ids (`config.choices`), in order. */
+export function gateChoiceIds(node: NodeLike): string[] {
+  return node.type === "gate" ? declaredIds(((node.config ?? {}) as { choices?: unknown }).choices, "id") : [];
+}
+
+export function outcomeHandle(id: string): string {
+  return `outcome:${id}`;
+}
+
+export function choiceHandle(id: string): string {
+  return `choice:${id}`;
+}
+
 /** The output handles a block exposes, in the order the editor draws them. */
 export function outputHandles(node: NodeLike): string[] {
   switch (node.type) {
@@ -15,7 +42,13 @@ export function outputHandles(node: NodeLike): string[] {
     case "trigger.schedule":
     case "trigger.git":
       return ["success"];
-    case "agent":
+    case "agent": {
+      // Declared outcomes replace `success` (spec 2026-11-10 §5.1).
+      const outcomes = agentOutcomeIds(node);
+      return outcomes.length > 0 ? [...outcomes.map(outcomeHandle), "error"] : ["success", "error"];
+    }
+    case "gate":
+      return [...gateChoiceIds(node).map(choiceHandle), "error"];
     case "code":
     case "shell":
     case "http":
@@ -44,9 +77,27 @@ export function outputHandles(node: NodeLike): string[] {
   }
 }
 
-/** Human label of a handle: "success", "failure", "true", "case 1 · Label", "default". */
+/** The `label` of the config list entry (`outcomes`, `choices`) with this id, trimmed, when it has one. */
+function declaredLabel(list: unknown, id: string): string | undefined {
+  if (!Array.isArray(list)) return undefined;
+  for (const entry of list) {
+    if (entry === null || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    if (record.id !== id) continue;
+    return typeof record.label === "string" && record.label.trim().length > 0 ? record.label.trim() : undefined;
+  }
+  return undefined;
+}
+
+/** Human label of a handle: "success", "failure", "true", "case 1 · Label", "default", an outcome's or a choice's label (else its id). */
 export function workflowHandleLabel(node: NodeLike, handle: string): string {
   if (handle === "error") return "failure";
+  const declared = /^(outcome|choice):(.+)$/.exec(handle);
+  if (declared) {
+    const config = (node.config ?? {}) as { outcomes?: unknown; choices?: unknown };
+    const label = declaredLabel(declared[1] === "outcome" ? config.outcomes : config.choices, declared[2]!);
+    return label ?? declared[2]!;
+  }
   const match = /^case:(\d+)$/.exec(handle);
   if (match) {
     const index = Number(match[1]);
@@ -55,6 +106,25 @@ export function workflowHandleLabel(node: NodeLike, handle: string): string {
     return typeof label === "string" && label.trim().length > 0 ? label.trim() : `case ${index + 1}`;
   }
   return handle;
+}
+
+/** A loop edge (spec 2026-11-10 §7.1): it carries `loop` settings and points back to an ancestor. */
+export function isLoopEdge(edge: { loop?: unknown }): boolean {
+  return edge.loop !== undefined && edge.loop !== null;
+}
+
+/**
+ * The graph without its loop edges: the forward graph every order, readiness and reachability
+ * helper is meant to read (§7.1). The helpers here do not apply it yet; callers pass this graph.
+ */
+export function withoutLoopEdges<G extends { edges: readonly { loop?: unknown }[] }>(graph: G): G {
+  if (!graph.edges.some(isLoopEdge)) return graph;
+  return { ...graph, edges: graph.edges.filter((edge) => !isLoopEdge(edge)) };
+}
+
+/** The loop edges of a graph, in definition order. */
+export function loopEdges<E extends { loop?: unknown }>(graph: { edges: readonly E[] }): E[] {
+  return graph.edges.filter(isLoopEdge);
 }
 
 /** Triggers start runs and notes never run: neither takes an input edge. */

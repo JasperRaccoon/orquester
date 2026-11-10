@@ -3,10 +3,20 @@ import { describe, it } from "node:test";
 
 import type { WorkflowBlockStatus, WorkflowNodeType } from "./types.ts";
 import {
+  agentOutcomeIds,
+  choiceHandle,
   computeReadiness,
   downstreamOf,
+  gateChoiceIds,
+  isLoopEdge,
+  loopEdges,
+  outcomeHandle,
+  outputHandles,
   reachableFromTriggers,
+  topologicalOrder,
   upstreamOf,
+  withoutLoopEdges,
+  workflowHandleLabel,
   type ReadinessState
 } from "./graph.ts";
 
@@ -319,5 +329,83 @@ describe("computeReadiness", () => {
     const before = computeReadiness(g, state({}));
     assert.deepEqual(before.ready, []);
     assert.deepEqual(before.skip, []);
+  });
+});
+
+describe("outcome and choice handles (spec 2026-11-10 §5.1, §6.1)", () => {
+  it("an agent block without outcomes keeps success and error", () => {
+    assert.deepEqual(outputHandles({ id: "a", type: "agent", config: {} }), ["success", "error"]);
+    assert.deepEqual(outputHandles({ id: "a", type: "agent", config: { outcomes: [] } }), ["success", "error"]);
+    // Outputs alone keep the handles (a report is required, with no outcome).
+    assert.deepEqual(
+      outputHandles({ id: "a", type: "agent", config: { outputs: [{ name: "pr_url", type: "string" }] } }),
+      ["success", "error"]
+    );
+  });
+
+  it("declared outcomes replace success, in declared order, plus error", () => {
+    const node = {
+      id: "a",
+      type: "agent" as const,
+      config: { outcomes: [{ id: "approved", label: "Approved" }, { id: "changes_requested" }] }
+    };
+    assert.deepEqual(outputHandles(node), ["outcome:approved", "outcome:changes_requested", "error"]);
+    assert.deepEqual(agentOutcomeIds(node), ["approved", "changes_requested"]);
+    assert.equal(workflowHandleLabel(node, "outcome:approved"), "Approved");
+    assert.equal(workflowHandleLabel(node, "outcome:changes_requested"), "changes_requested");
+  });
+
+  it("a gate exposes one choice handle per choice, plus error", () => {
+    const node = {
+      id: "g",
+      type: "gate" as const,
+      config: { question: "Ship?", choices: [{ id: "approve", label: "Approve" }, { id: "reject", label: " Reject " }] }
+    };
+    assert.deepEqual(outputHandles(node), ["choice:approve", "choice:reject", "error"]);
+    assert.deepEqual(gateChoiceIds(node), ["approve", "reject"]);
+    assert.equal(workflowHandleLabel(node, "choice:reject"), "Reject");
+    assert.deepEqual(outputHandles({ id: "g", type: "gate", config: {} }), ["error"]);
+  });
+
+  it("malformed declarations are left out, never thrown on", () => {
+    const node = { id: "a", type: "agent" as const, config: { outcomes: [null, { id: 3 }, { id: "ok" }, "x"] } };
+    assert.deepEqual(outputHandles(node), ["outcome:ok", "error"]);
+    assert.equal(outcomeHandle("ok"), "outcome:ok");
+    assert.equal(choiceHandle("go"), "choice:go");
+  });
+});
+
+describe("loop edges (spec 2026-11-10 §7.1)", () => {
+  const g = {
+    nodes: [
+      { id: "t", type: "trigger.manual" as const, config: {} },
+      { id: "fix", type: "agent" as const, config: {} },
+      { id: "review", type: "agent" as const, config: { outcomes: [{ id: "approved" }, { id: "changes" }] } }
+    ],
+    edges: [
+      { id: "e1", source: "t", sourceHandle: "success", target: "fix" },
+      { id: "e2", source: "fix", sourceHandle: "success", target: "review" },
+      { id: "back", source: "review", sourceHandle: "outcome:changes", target: "fix", loop: { maxLoops: 3, session: "continue" as const } }
+    ]
+  };
+
+  it("isLoopEdge tells a loop edge by its settings", () => {
+    assert.equal(isLoopEdge(g.edges[2]!), true);
+    assert.equal(isLoopEdge(g.edges[0]!), false);
+    assert.equal(isLoopEdge({ loop: null }), false);
+  });
+
+  it("withoutLoopEdges drops only loop edges, and returns the same graph when there are none", () => {
+    const forward = withoutLoopEdges(g);
+    assert.deepEqual(forward.edges.map((edge) => edge.id), ["e1", "e2"]);
+    assert.equal(forward.nodes, g.nodes);
+    assert.deepEqual(loopEdges(g).map((edge) => edge.id), ["back"]);
+    const plain = { nodes: g.nodes, edges: g.edges.slice(0, 2) };
+    assert.equal(withoutLoopEdges(plain), plain);
+    assert.notEqual(topologicalOrder(forward), null);
+  });
+
+  it("the existing helpers still read every edge as a forward edge (unchanged until the loop engine)", () => {
+    assert.equal(topologicalOrder(g), null);
   });
 });

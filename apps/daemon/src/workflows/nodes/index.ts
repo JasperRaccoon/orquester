@@ -2,6 +2,7 @@
 
 import type { NodeExecutor, NodeExecutorRegistry } from "../contracts.ts";
 import { createCodeExecutor } from "./code.ts";
+import { createGateExecutor } from "./gate.ts";
 import { createIfExecutor, createMergeExecutor, createStopExecutor, createSwitchExecutor, createTriggerExecutors } from "./flow.ts";
 import { createHttpExecutor } from "./http.ts";
 import { createShellExecutor } from "./shell.ts";
@@ -27,6 +28,8 @@ export function createNodeExecutors(options: NodeExecutorsOptions = {}): NodeExe
     merge: createMergeExecutor(),
     stop: createStopExecutor(),
     wait: createWaitExecutor(),
+    // Placeholder (nodes/gate.ts): replaced by the gate executor.
+    gate: createGateExecutor(),
     workflow: createSubWorkflowExecutor()
   };
   if (options.agent) registry.agent = options.agent;

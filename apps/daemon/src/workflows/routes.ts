@@ -59,6 +59,7 @@ import {
 import {
   agentConfigSchema,
   codeConfigSchema,
+  gateConfigSchema,
   httpConfigSchema,
   ifConfigSchema,
   mergeConfigSchema,
@@ -151,6 +152,7 @@ const CONFIG_SCHEMAS: Record<WorkflowNodeType, ZodTypeAny> = {
   merge: mergeConfigSchema,
   stop: stopConfigSchema,
   wait: waitConfigSchema,
+  gate: gateConfigSchema,
   workflow: subWorkflowConfigSchema,
   note: noteConfigSchema
 };

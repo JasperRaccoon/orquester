@@ -20,6 +20,7 @@ import {
   MousePointerClick,
   OctagonX,
   Route,
+  ShieldCheck,
   Split,
   SquareTerminal,
   StickyNote,
@@ -58,6 +59,7 @@ const ACCENT: Record<WorkflowNodeType, BlockAccent> = {
   merge: "flow",
   stop: "flow",
   wait: "flow",
+  gate: "flow",
   workflow: "flow",
   note: "note"
 };
@@ -84,6 +86,7 @@ export const BLOCK_ICONS: Record<WorkflowNodeType, LucideIcon> = {
   merge: GitMerge,
   stop: OctagonX,
   wait: Hourglass,
+  gate: ShieldCheck,
   workflow: WorkflowIcon,
   note: StickyNote
 };
@@ -136,6 +139,7 @@ const KEYWORDS: Partial<Record<WorkflowNodeType, string>> = {
   merge: "join combine wait all",
   stop: "end finish fail exit",
   wait: "delay sleep pause until",
+  gate: "approval approve review decision human person confirm choice",
   workflow: "subworkflow sub child call",
   note: "sticky comment annotation"
 };
@@ -378,6 +382,12 @@ export function nodeSummary(node: WorkflowNode, ctx: NodeSummaryContext = {}): s
       return node.config.kind === "duration"
         ? `Wait ${formatMinutes(node.config.minutes)}`
         : `Until ${node.config.time}${node.config.timezone ? ` ${node.config.timezone}` : ""}`;
+    case "gate": {
+      // A plain line until the gate's editor lands with the gate UI.
+      const question = node.config.question.trim();
+      const count = node.config.choices.length;
+      return question ? truncate(question, 48) : `${count} ${count === 1 ? "choice" : "choices"}`;
+    }
     case "workflow": {
       if (!node.config.workflowId || node.config.workflowId === UNSET_SUBWORKFLOW_ID) return "Pick a workflow";
       const name = ctx.workflowName?.(node.config.workflowId);

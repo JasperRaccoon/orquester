@@ -73,6 +73,16 @@ function candidatePaths(node: WorkflowNode): { path: Path; role: TemplateFieldRo
     case "workflow":
       add("value", "input");
       break;
+    case "gate": {
+      const config = node.config;
+      add("value", "question");
+      add("value", "details");
+      if (config.decider.kind === "agent") {
+        if (config.decider.prompt.kind === "text") add("prompt", "decider", "prompt", "text");
+        else add("prompt", "decider", "prompt", "append");
+      }
+      break;
+    }
     case "trigger.manual":
     case "trigger.schedule":
     case "trigger.git":

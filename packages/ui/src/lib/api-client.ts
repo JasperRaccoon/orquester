@@ -289,6 +289,10 @@ import type {
   AccountPreviewRequest,
   AccountPreviewResponse,
   CreateWorkflowRequest,
+  DecideWorkflowGateRequest,
+  DecideWorkflowGateResponse,
+  ListWorkflowGatesQuery,
+  ListWorkflowGatesResponse,
   GetWorkflowNodeOutputResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
@@ -1813,6 +1817,19 @@ export class ApiClient {
     return this.workflowSend("POST", workflowRoutes.runDeleteTempProject(runId));
   }
 
+  /** Decide (or, for agent deciders, escalate) a gate; a gate decided earlier answers `alreadyDecided: true` (spec 2026-11-10 §6.2). */
+  decideWorkflowGate(runId: string, gateId: string, req: DecideWorkflowGateRequest): Promise<DecideWorkflowGateResponse> {
+    return this.workflowSend("POST", workflowRoutes.gateDecide(runId, gateId), { body: req });
+  }
+
+  /** Gates across projects, waiting ones unless `includeDecided` (spec 2026-11-10 §8). */
+  listWorkflowGates(query: ListWorkflowGatesQuery = {}, signal?: AbortSignal): Promise<ListWorkflowGatesResponse> {
+    return this.workflowSend("GET", workflowRoutes.gates, {
+      query: { projectPath: query.projectPath, includeDecided: query.includeDecided ? "1" : undefined },
+      signal
+    });
+  }
+
   /** A block's whole output (a run summary carries only a preview). */
   getWorkflowNodeOutput(runId: string, nodeId: string, signal?: AbortSignal): Promise<GetWorkflowNodeOutputResponse> {
     return this.workflowSend("GET", workflowRoutes.nodeOutput(runId, nodeId), { signal });
@@ -2743,7 +2760,10 @@ const WORKFLOW_ERROR_CODES: ReadonlySet<string> = new Set<WorkflowErrorCode>([
   "LIMIT_EXCEEDED",
   "SECRET_INVALID",
   "RUN_NOT_ACTIVE",
-  "ENGINE_UNAVAILABLE"
+  "ENGINE_UNAVAILABLE",
+  "INVALID_INPUT",
+  "GATE_NOT_FOUND",
+  "GATE_NOT_DECIDER"
 ]);
 
 /** One validation problem off the wire, field by field; `null` when unusable. */

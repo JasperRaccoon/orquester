@@ -408,6 +408,8 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
       ]
     }
   ],
+  // The gate's contract (phases, deciders, timeout, output) is written with the gate executor.
+  gate: [],
   workflow: [
     {
       title: "Child run",
