@@ -586,8 +586,16 @@ describe("DesktopAutomation damage and waits", () => {
     assert.equal(settled, false, "still 300 ms after the change inside the region");
     mock.timers.tick(200);
     assert.deepEqual(await waited, { changed: true, timedOut: false, seq: 2, waitedMs: 700 });
-    // Already still: at once.
-    assert.deepEqual(await engine.wait({ for: "idle", idleMs: 100, timeoutMs: 1_000 }), { changed: false, timedOut: false, seq: 2, waitedMs: 0 });
+    // Already still: still for idleMs from the wait's start, not from the last change long before.
+    let still = false;
+    const fromNow = engine.wait({ for: "idle", idleMs: 100, timeoutMs: 1_000 }).finally(() => (still = true));
+    mock.timers.tick(99);
+    await roundTrip(engine);
+    assert.equal(still, false, "an already still screen still waits idleMs");
+    mock.timers.tick(1);
+    assert.deepEqual(await fromNow, { changed: false, timedOut: false, seq: 2, waitedMs: 100 });
+    // A notBefore earlier than the last change counts from that change.
+    assert.deepEqual(await engine.wait({ for: "idle", idleMs: 100, notBefore: 0, timeoutMs: 1_000 }), { changed: false, timedOut: false, seq: 2, waitedMs: 0 });
     await engine.close();
   });
 

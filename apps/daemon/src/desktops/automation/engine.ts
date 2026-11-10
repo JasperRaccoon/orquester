@@ -409,6 +409,7 @@ class X11DesktopAutomation implements DesktopAutomation {
     if (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0) throw new DesktopAutomationError("INVALID_ARGUMENT", "timeoutMs must be a non-negative number");
     if (options.for === "idle" && (!Number.isFinite(options.idleMs) || options.idleMs < 0)) throw new DesktopAutomationError("INVALID_ARGUMENT", "idleMs must be a non-negative number");
     if (options.since !== undefined && !Number.isFinite(options.since)) throw new DesktopAutomationError("INVALID_ARGUMENT", "since must be a screen sequence");
+    if (options.notBefore !== undefined && !Number.isFinite(options.notBefore)) throw new DesktopAutomationError("INVALID_ARGUMENT", "notBefore must be a time");
     const region = options.region ? this.clip(options.region) : null;
     const start = Date.now();
     const deadline = start + options.timeoutMs;
@@ -451,14 +452,16 @@ class X11DesktopAutomation implements DesktopAutomation {
         timer = setTimeout(() => finish(true), options.timeoutMs);
       } else {
         // Damage only marks the wait as changed; the one timer re-checks the region's last change
-        // when the idle period (or the timeout) would be over, and re-arms if it moved.
+        // when the idle period (or the timeout) would be over, and re-arms if it moved. Stillness
+        // before `notBefore` (default: now) does not count.
         waiter.changed = () => {
           changed = true;
         };
+        const notBefore = options.notBefore ?? start;
         const check = (): void => {
           timer = null;
           const now = Date.now();
-          const idleAt = this.regionTime(region) + options.idleMs;
+          const idleAt = Math.max(this.regionTime(region), notBefore) + options.idleMs;
           if (idleAt <= now) return finish(false);
           if (deadline <= now) return finish(true);
           timer = setTimeout(check, Math.min(idleAt, deadline) - now);

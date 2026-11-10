@@ -33,6 +33,13 @@ export interface DesktopWaitOptions {
   for: "idle" | "change";
   /** idle: how long the region must stay still. */
   idleMs: number;
+  /**
+   * idle: the stillness is counted from this time (`Date.now()` ms) or from the region's last
+   * change, whichever is later; default the wait's start. So a screen that is already still waits
+   * `idleMs` more ("still for N ms from now"), and a wait right after input gives the app that long
+   * to start redrawing before it counts as settled.
+   */
+  notBefore?: number;
   /** change: a change after this sequence (default: the current one). */
   since?: number;
   region?: DesktopRect;

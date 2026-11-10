@@ -113,7 +113,7 @@ interface ActionOutcome {
 }
 
 const IDLE_CLOSE_MS = 5 * 60_000;
-/** `screenshot: true`: the screen must be still this long, waited for at most this long. */
+/** `screenshot: true`: the screen must be still this long after the input, waited for at most this long. */
 const SETTLE_IDLE_MS = 300;
 const SETTLE_TIMEOUT_MS = 3_000;
 const DEFAULT_SCROLL_AMOUNT = 3;
@@ -274,7 +274,9 @@ export class DesktopAutomationService {
     };
     const settled = async (outcome: ActionOutcome): Promise<ActionOutcome> => {
       if (request.screenshot !== true) return outcome;
-      await automation.wait({ for: "idle", idleMs: SETTLE_IDLE_MS, timeoutMs: SETTLE_TIMEOUT_MS, ...(signal ? { signal } : {}) });
+      // Still for 300 ms counted from the end of the input (the engine's clock), not from the last
+      // change before it: an app that has not redrawn yet must get the time to start.
+      await automation.wait({ for: "idle", idleMs: SETTLE_IDLE_MS, notBefore: Date.now(), timeoutMs: SETTLE_TIMEOUT_MS, ...(signal ? { signal } : {}) });
       const shot = await this.takeScreenshot(desktopId, state, epoch, automation, undefined, request.maxSize);
       return { ...outcome, screenshot: shot.screenshot, seq: shot.seq, cursor: shot.cursor };
     };
