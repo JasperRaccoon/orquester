@@ -16,6 +16,7 @@
 
 import { z } from "zod";
 import {
+  boundImageToolReference,
   chatImageMarkdown,
   GENERATE_IMAGE_TOOL_NAME,
   IMAGE_CAPTION_MAX_LENGTH,
@@ -119,7 +120,8 @@ const generateImage = defineTool({
     );
     const { attachmentId } = await storeChatImage(api, caller, { bytes: made.bytes, mimeType: made.mimeType, name: made.name });
     const text = caption(args.prompt);
-    const imageRef: ImageToolReference = {
+    // Within the size a row keeps (a long prompt and path would drop the whole row).
+    const imageRef: ImageToolReference = boundImageToolReference({
       images: [
         {
           attachmentId,
@@ -130,7 +132,7 @@ const generateImage = defineTool({
         }
       ],
       ...(made.revisedPrompt ? { revisedPrompt: made.revisedPrompt } : {})
-    };
+    });
     const inline = made.bytes.length <= INLINE_IMAGE_MAX_BYTES;
     const notes = [made.note, inline ? undefined : "The image is too large to return inline; the user sees it in the chat."].filter(Boolean);
     const value: Record<string, unknown> = {

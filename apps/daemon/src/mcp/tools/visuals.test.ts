@@ -13,7 +13,13 @@ import { describe, it } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  boundSessionToolData,
   HTML_RENDER_MAX_HTML_CHARS,
+  IMAGE_CAPTION_MAX_LENGTH,
+  IMAGE_TITLE_MAX_LENGTH,
+  IMAGE_TOOL_MAX_IMAGES,
+  imageToolReferenceOfActivityPayload,
+  sessionToolMarkedData,
   type HtmlRenderReference
 } from "@orquester/api/agent-chat";
 
@@ -45,6 +51,13 @@ const call = (api: FakeDaemonApi, name: string, args: unknown, opts: { signal?: 
     { name, arguments: args },
     { caller: opts.caller ?? chatCaller(), api, signal: opts.signal ?? new AbortController().signal }
   );
+
+/** The image row a chat shows for a completed call: its result as a Claude row, marked and slimmed as ingestion does. */
+function imageRowRef(tool: string, result: CallToolResult) {
+  const text = JSON.stringify(result.structuredContent);
+  const data = sessionToolMarkedData({ toolName: `mcp__orquester__${tool}`, result: { type: "tool_result", content: [{ type: "text", text }] } }, new Set([tool]));
+  return imageToolReferenceOfActivityPayload({ itemType: "mcp_tool_call", status: "completed", data: boundSessionToolData(data) });
+}
 
 function errorOf(result: CallToolResult): { code: string; message: string } {
   assert.equal(result.isError, true);
@@ -259,6 +272,19 @@ describe("show_image", () => {
     assert.equal(body.shown, 2);
     assert.ok(result.content.every((block) => block.type === "text"), "no image content goes back to the model");
     assert.ok(!JSON.stringify(result).includes(PNG.toString("base64")), "no bytes are echoed");
+  });
+
+  it("six images with long captions and paths still make an image row: what gives way is text, then paths, never an image", async (t) => {
+    const s = await sandbox(t);
+    const dir = join(s.ws, "acme", "app", "画像".repeat(40), "撮影".repeat(40), "保存".repeat(40));
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "shot.png"), PNG);
+    const images = Array.from({ length: IMAGE_TOOL_MAX_IMAGES }, () => ({ path: join(dir, "shot.png"), caption: "猫".repeat(IMAGE_CAPTION_MAX_LENGTH) }));
+    const result = await call(s.api, "show_image", { title: "題".repeat(IMAGE_TITLE_MAX_LENGTH), images }, { caller: s.inProject });
+    assert.equal(result.isError, undefined, JSON.stringify(result).slice(0, 300));
+    const row = imageRowRef("show_image", result);
+    assert.deepEqual(row?.images.map((image) => image.attachmentId), s.api.uploads.map((_, index) => `${THREAD}-att-${index + 1}`));
+    assert.equal(row?.images.length, IMAGE_TOOL_MAX_IMAGES);
   });
 
   it("stores nothing when any image is refused", async (t) => {

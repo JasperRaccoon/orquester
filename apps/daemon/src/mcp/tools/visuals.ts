@@ -28,6 +28,7 @@ import {
   IMAGE_TITLE_MAX_LENGTH,
   IMAGE_TOOL_MAX_IMAGES,
   MAX_TURN_IMAGE_BYTES,
+  boundImageToolReference,
   readImageToolReference,
   SHOW_IMAGE_TOOL_NAME,
   type ChatImageReference
@@ -219,8 +220,9 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
         });
         shown.push({ attachmentId, markdown: chatImageMarkdown(attachmentId, caption ?? image.name.replace(/\.[^.]*$/, "")) });
       }
-      // Through the one reader the timeline uses, so what is stored is what renders.
-      const imageRef = readImageToolReference({ ...(args.title !== undefined ? { title: args.title } : {}), images });
+      // Through the one reader the timeline uses, so what is stored is what renders, and within the size a row keeps.
+      const read = readImageToolReference({ ...(args.title !== undefined ? { title: args.title } : {}), images });
+      const imageRef = read && boundImageToolReference(read);
       return { imageRef, images: shown, shown: shown.length, message: IMAGE_SHOWN_MESSAGE };
     }
   })

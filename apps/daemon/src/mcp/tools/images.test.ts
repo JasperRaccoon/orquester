@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { boundSessionToolData, imageToolReferenceOfActivityPayload, sessionToolMarkedData } from "@orquester/api/agent-chat";
 
 import type { GptImageToolInput, GptImageToolResult } from "../../gpt-image/tool-port.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
@@ -36,6 +37,13 @@ const caller: ThreadCaller = {
 
 const call = (api: FakeDaemonApi, args: unknown, as: ThreadCaller = caller): Promise<CallToolResult> =>
   executeToolCall({ approvals: null }, { name: "generate_image", arguments: args }, { caller: as, api, signal: new AbortController().signal });
+
+/** The image row a chat shows for a completed call: its result as a Claude row, marked and slimmed as ingestion does. */
+function imageRowRef(tool: string, result: CallToolResult) {
+  const text = JSON.stringify(result.structuredContent);
+  const data = sessionToolMarkedData({ toolName: `mcp__orquester__${tool}`, result: { type: "tool_result", content: [{ type: "text", text }] } }, new Set([tool]));
+  return imageToolReferenceOfActivityPayload({ itemType: "mcp_tool_call", status: "completed", data: boundSessionToolData(data) });
+}
 
 async function setup(t: { after(fn: () => Promise<void>): void }, made: GptImageToolResult) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "generate-image-")));
@@ -105,6 +113,14 @@ describe("generate_image", () => {
     }
     assert.equal(s.sent.length, 0);
     assert.equal(s.api.uploads.length, 0);
+  });
+
+  it("a long prompt, revised prompt and project path still make an image row", async (t) => {
+    const path = join("/w", "ws", "p", "生成".repeat(150), "画像.png");
+    const s = await setup(t, { ...made, revisedPrompt: "液体ガラス".repeat(240), path, relativePath: path.slice(9) });
+    const result = await call(s.api, { prompt: "リキッドグラス風のアイコン".repeat(100) });
+    assert.equal(result.isError, undefined, JSON.stringify(result).slice(0, 300));
+    assert.deepEqual(imageRowRef("generate_image", result)?.images.map((image) => image.attachmentId), [`${THREAD}-att-1`]);
   });
 
   it("sends nothing upstream when a reference is refused", async (t) => {
