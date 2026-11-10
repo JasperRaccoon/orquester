@@ -402,19 +402,22 @@ export interface DesktopToolbarProps {
   onRestart: () => void;
   onStop: () => void;
   onCloseTab: () => void;
+  /** The agent handoff's controls (`handoff/DesktopHandoff.tsx`), beside the View menu. */
+  handoff?: React.ReactNode;
 }
 
 export const DesktopToolbar: React.FC<DesktopToolbarProps> = (props) => {
   const { desktop, narrow, prefs, onPrefs, audio } = props;
   const runningApps = desktop.apps.filter((a) => a.status !== "exited").length;
   return (
-    <div className="flex h-9 shrink-0 items-center gap-1 border-b border-neutral-800 bg-neutral-900/40 px-2">
+    <div data-desktop-toolbar="" className="flex h-9 shrink-0 items-center gap-1 border-b border-neutral-800 bg-neutral-900/40 px-2">
       <DesktopWindows desktop={desktop} narrow={narrow} onAction={props.onWindowAction} />
       {narrow && <div className="flex-1" />}
       <IconButton label="Launch app in this desktop" onClick={props.onLaunchApp}>
         <Plus size={14} />
       </IconButton>
       <DesktopSound desktop={desktop} audio={audio} prefs={prefs} onPrefs={onPrefs} compact={narrow} />
+      {props.handoff}
       <DesktopViewMenu prefs={prefs} onPrefs={onPrefs} />
       {props.touch && (
         // Focusing inside a button CLICK is the trusted-gesture path iOS

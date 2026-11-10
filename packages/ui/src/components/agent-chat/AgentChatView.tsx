@@ -126,6 +126,7 @@ import { useUsageLimitNotices } from "./banners/use-usage-limit-notices";
 import { useScheduledPromptNotices } from "./banners/use-scheduled-prompt-notices";
 import { markSecretRequestClosed } from "../../lib/agent-chat/secret-requests";
 import { ChatComposer } from "./composer/ChatComposer";
+import { DesktopFollowChip } from "../desktop/handoff/DesktopFollowChip";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
 import { FullOutputPane } from "./FullOutputPane";
 import { ChatStatusLine } from "./status/ChatStatusLine";
@@ -1550,6 +1551,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 when empty): on this always-present wrapper it dragged the
                 composer 17px up over the status line on every idle thread.
                 (D's reference §1.5, T3 `ComposerBanner.tsx:55`.) */}
+            {/* Desktops R2.5: this chat's agent works on a desktop that is not on screen. */}
+            {paintOnly ? null : <DesktopFollowChip sessionId={sessionId} />}
             <div className="pointer-events-auto relative z-0 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
               <ChatBannerDock
                 sessionId={sessionId}

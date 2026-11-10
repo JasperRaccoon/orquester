@@ -35,6 +35,7 @@ import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/work
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
 import { observePushEvent } from "../lib/desktop-host";
 import { clearDesktopPrefs } from "../lib/desktop-prefs";
+import { applyDesktopActionEvent, dropDesktopActions, resetDesktopActions } from "../lib/desktops/actions-store";
 import {
   applyDesktopWindows,
   parseDesktopList,
@@ -2168,6 +2169,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     resetSessionProfiles();
     resetWorkflows();
     resetWorkflowNotifications();
+    resetDesktopActions();
     // Reset all daemon-scoped state: a different server has its own data.
     set({
       api: new ApiClient(connection, buildTransporter(connection)),
@@ -3972,10 +3974,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (desktop) get().upsertDesktop(desktop);
       } else if (event.type === "desktop.closed") {
         const id = (event.payload as { id?: unknown } | null)?.id;
-        if (typeof id === "string") get().removeDesktop(id);
+        if (typeof id === "string") {
+          get().removeDesktop(id);
+          dropDesktopActions(id);
+        }
       } else if (event.type === "desktop.windows") {
         const payload = parseDesktopWindowsPayload(event.payload);
         if (payload) set((state) => ({ desktops: applyDesktopWindows(state.desktops, payload) }));
+      } else if (event.type === "desktop.action") {
+        // Agent automation (spec 2026-11-10 §3.2): the overlay's and the Activity popover's ring.
+        applyDesktopActionEvent(event.payload);
       }
       return;
     }

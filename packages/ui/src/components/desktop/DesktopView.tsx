@@ -21,6 +21,7 @@ import { DesktopAppsDialog, DesktopInfoDialog } from "./DesktopDialogs";
 import { DesktopKeyStrip, useDesktopHiddenInput } from "./DesktopKeyboard";
 import { exitPoint } from "./desktop-pointer";
 import { MODIFIER_KEYSYM, keysymsForText, pasteKeystroke, type LatchModifier, type PasteChord } from "./desktop-keys";
+import { DesktopHandoffControls, DesktopHandoffLayer, useDesktopHandoff } from "./handoff/DesktopHandoff";
 
 export interface DesktopViewProps {
   desktop: DesktopSummary;
@@ -655,6 +656,9 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     api.desktopWindowAction(desktop.id, win.id, action).catch((err: unknown) => setActionError(errorText(err)));
   };
 
+  // ---- Agent handoff (spec 2026-11-10 §3) ----------------------------------
+  const handoff = useDesktopHandoff(rootRef, desktop, conn === "connected");
+
   // ---- Render --------------------------------------------------------------
 
   let overlay: React.ReactNode = null;
@@ -769,6 +773,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         onRestart={restart}
         onStop={stop}
         onCloseTab={onCloseTab}
+        handoff={<DesktopHandoffControls handoff={handoff} narrow={narrow} />}
       />
       {actionError && (
         <div className="flex shrink-0 items-center gap-2 border-b border-neutral-800 bg-danger-soft px-3 py-1 text-xs text-danger">
@@ -783,6 +788,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       <div className="relative min-h-0 flex-1 overflow-hidden">
         {/* noVNC appends its own screen + canvas here; React renders no children into it. */}
         <div ref={targetRef} className="absolute inset-0 touch-none" />
+        <DesktopHandoffLayer handoff={handoff} streamRoot={targetRef} display={desktop.size} />
         {overlay && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 overflow-y-auto bg-neutral-950/90 px-4 py-6 text-center text-sm text-neutral-400">
             {overlay}
