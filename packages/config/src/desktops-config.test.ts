@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  appBinDir,
+  desktopRecordVideo,
   desktopRuntimeDir,
   desktopScreenshotsDir,
   desktopsIndexPath,
   desktopsRuntimeDir,
   parseDesktopsFile,
-  serializeDesktopsFile
+  serializeDesktopsFile,
+  voxlBinaryPath
 } from "./index.ts";
 
 const desktop = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -30,6 +33,19 @@ test("desktop paths live under the daemon dir", () => {
   assert.equal(desktopsRuntimeDir("/appdir"), "/appdir/daemon/desktops");
   assert.equal(desktopRuntimeDir("/appdir", "abc"), "/appdir/daemon/desktops/abc");
   assert.equal(desktopScreenshotsDir("/appdir", "abc"), "/appdir/daemon/desktop-screenshots/abc");
+  assert.equal(appBinDir("/appdir"), "/appdir/bin");
+  assert.equal(voxlBinaryPath("/appdir"), "/appdir/bin/voxl");
+});
+
+test("a record's video backend is voxl only when it says so; anything else reads as rfb and is kept", () => {
+  const file = parseDesktopsFile({
+    version: 1,
+    desktops: [desktop({ id: "a", video: "voxl" }), desktop({ id: "b" }), desktop({ id: "c", video: "h264" }), desktop({ id: "d", video: 7 })]
+  });
+  assert.deepEqual(file.desktops.map(desktopRecordVideo), ["voxl", "rfb", "rfb", "rfb"]);
+  assert.equal(file.rejected.length, 0, "a malformed video never rejects the record");
+  const out = serializeDesktopsFile(file).desktops as Array<Record<string, unknown>>;
+  assert.deepEqual(out.map((record) => record.video), ["voxl", undefined, "h264", 7]);
 });
 
 test("defaults are applied to desktop and app records", () => {
