@@ -11,6 +11,7 @@ import type {
   DesktopWindow,
   DesktopWindowsPayload
 } from "@orquester/api";
+import { parseDesktopControl } from "./desktops/handoff.logic";
 
 const DESKTOP_STATUSES = new Set(["starting", "running", "stopped", "error"]);
 const APP_STATUSES = new Set(["starting", "running", "exited"]);
@@ -78,7 +79,9 @@ export function parseDesktopSummary(value: unknown): DesktopSummary | null {
     ...(rest as unknown as DesktopSummary),
     activeWindowId: (value.activeWindowId as string | null) ?? null,
     ...(vm ? { box: vm } : {}),
-    ...(typeof statusDetail === "string" ? { statusDetail } : {})
+    ...(typeof statusDetail === "string" ? { statusDetail } : {}),
+    // Automation (spec 2026-11-10 §3.1): absent from older daemons, read as nobody.
+    control: parseDesktopControl(value.control)
   };
 }
 
