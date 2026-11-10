@@ -11,7 +11,7 @@
  * | 3-finger tap        | middle click at the cursor                 | same                           |
  * | long press (400 ms) | left button down, drag moves, lift ends it | right click (haptic)           |
  * | 1-finger drag       | relative move × 1.5 × display px per css px | left drag from the touch point |
- * | 2-finger drag       | natural scroll in display px (pans while zoomed) | same                     |
+ * | 2-finger drag       | natural scroll in display px at the cursor (pans while zoomed) | at the fingers |
  * | pinch (> 15 %)      | local zoom 1–5× around the midpoint, snaps to 1× below 1.05× | same         |
  * | double tap          | double click (the second tap lands on the first's point) | same             |
  *
@@ -292,6 +292,11 @@ export class DesktopGestureRecognizer {
   private beginPhase(g: Gesture, kind: "scroll" | "pan" | "pinch"): void {
     g.kind = kind;
     g.ref = this.twoFingerRef(g);
+    const geo = this.host.geometry();
+    if (kind !== "scroll" || !geo || !g.ref) return;
+    // The wheel goes to the window under the pointer: under the fingers (Touch), or the cursor.
+    if (this.inputMode === "touch") this.moveTo(this.displayAt(geo, g.ref.mid));
+    else if (!this.cursorAt) this.moveTo(this.displayCenter(geo));
   }
 
   private oneFingerMove(g: Gesture, prev: GesturePointer, p: GesturePointer): void {

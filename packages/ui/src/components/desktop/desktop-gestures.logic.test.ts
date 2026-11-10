@@ -164,7 +164,7 @@ test("touch: a one-finger drag is a left drag from where the finger touched down
   assert.deepEqual(calls, ["move 200,100", "down 1", "move 240,100", "move 300,120", "up 1"]);
 });
 
-test("two-finger drag scrolls naturally in display pixels", () => {
+test("two-finger drag scrolls naturally in display pixels, under the fingers in Touch mode", () => {
   const { calls, down, move, up } = setup("touch");
   down(1, 400, 300);
   down(2, 500, 300);
@@ -174,6 +174,7 @@ test("two-finger drag scrolls naturally in display pixels", () => {
   move(2, 500, 270);
   up(1, 400, 270);
   up(2, 500, 270);
+  assert.equal(calls[0], "move 900,585", "the pointer goes to the fingers' midpoint first");
   const scrolls = calls.filter((c) => c.startsWith("scroll")).map((c) => c.slice(7).split(",").map(Number));
   // From where scrolling began (midpoint at y 292.5) the midpoint rose 22.5 css px: the content
   // moves up with the fingers (scroll down), 2 display px per css px.
