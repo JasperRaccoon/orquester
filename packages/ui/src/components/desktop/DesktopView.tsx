@@ -1,6 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Power, RotateCw } from "lucide-react";
-import { desktopRoutes, type DesktopSize, type DesktopSummary, type DesktopWindow, type DesktopWindowAction } from "@orquester/api";
+import {
+  desktopRoutes,
+  type DesktopSize,
+  type DesktopSummary,
+  type DesktopVideoBackend,
+  type DesktopVoxlStatus,
+  type DesktopWindow,
+  type DesktopWindowAction
+} from "@orquester/api";
 import { useAppStore } from "../../store/app";
 import { cn } from "../../lib/cn";
 import { useMediaQuery } from "../../hooks/use-media-query";
@@ -27,7 +35,8 @@ import {
 } from "./desktop-keys";
 import { TEXT_SIZE_DEBOUNCE_MS, textSizeDisplaySize } from "./desktop-text-size";
 import { sharpFitAllowed } from "./desktop-viewport.logic";
-import { createDesktopStreamClient } from "./stream/create-stream-client";
+import { createDesktopStreamClient, voxlViewerSupport } from "./stream/create-stream-client";
+import { desktopVideo, viewerUnsupportedReason, voxlStreamUsable } from "./stream/backend-choice.logic";
 import type { DesktopStreamClient, DesktopStreamEvents, DesktopViewMode } from "./stream/types";
 import { DesktopHandoffControls, DesktopHandoffLayer, useDesktopHandoff } from "./handoff/DesktopHandoff";
 import { takeoverSink } from "../../lib/desktops/handoff.logic";
@@ -116,6 +125,18 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   const latchesRef = useRef(latches);
   latchesRef.current = latches;
   const [installHint, setInstallHint] = useState<string | null>(null);
+  /** The backend of the current connection attempt, and why a voxl desktop fell back to RFB. */
+  const [stream, setStream] = useState<{ backend: DesktopVideoBackend; fallback: string | null } | null>(null);
+  /**
+   * Consecutive voxl connections that closed before their `hello` (spec R4.6): kept across
+   * reconnects, so the third failure falls back to RFB; reset when voxl connects or the desktop's
+   * stream changes.
+   */
+  const voxlFailuresRef = useRef(0);
+  const voxlUsable = voxlStreamUsable(desktop);
+  useEffect(() => {
+    voxlFailuresRef.current = 0;
+  }, [desktop.id, voxlUsable]);
 
   // ---- Touch -----------------------------------------------------------------
 
@@ -261,9 +282,20 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     const start = async () => {
       retryTimer = null;
       // A new client per attempt: the factory picks the backend each time.
-      const c = createDesktopStreamClient(desktopRef.current, { socketUrl: (path) => api.desktopSocketUrl(path) });
+      const plan = await createDesktopStreamClient(desktopRef.current, {
+        socketUrl: (path) => api.desktopSocketUrl(path),
+        voxlFailures: voxlFailuresRef.current
+      });
+      if (disposed) return;
+      const c = plan.client;
       client = c;
       clientRef.current = c;
+      setStream({ backend: c.backend, fallback: plan.choice.backend === "rfb" ? plan.choice.reason : null });
+      let reachedConnected = false;
+      /** A voxl client that ends before its `hello` counts toward the RFB fallback. */
+      const failed = () => {
+        if (c.backend === "voxl" && !reachedConnected) voxlFailuresRef.current += 1;
+      };
       c.setNativeInput(!touchRef.current);
       c.setViewMode(clientViewMode());
       const current = () => !disposed && client === c;
@@ -272,6 +304,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
           if (!current()) return;
           if (state === "connected") {
             attempt = 0;
+            reachedConnected = true;
+            if (c.backend === "voxl") voxlFailuresRef.current = 0;
             setConn("connected");
             setConnError(null);
             // Opening/activating the tab in a focused window counts as local
@@ -285,6 +319,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
             // once `conn` flips to "connected".
           } else if (state === "disconnected") {
             if (reason) setConnError(reason);
+            failed();
             drop();
             scheduleRetry();
           }
@@ -309,6 +344,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       } catch (err) {
         if (!current()) return;
         setConnError(errorText(err));
+        failed();
         drop();
         scheduleRetry();
       }
@@ -322,7 +358,9 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       drop();
       setConn("idle");
     };
-  }, [shouldConnect, api, desktop.id, setDriving, clientViewMode]);
+    // A new video backend, or a voxl stream that became usable or unusable, reconnects with the
+    // factory's new choice (only the stream restarts, not the desktop).
+  }, [shouldConnect, api, desktop.id, desktop.video, voxlUsable, setDriving, clientViewMode]);
 
   // Re-apply the view whenever it changes. A fixed size or a preset is
   // requested only when what it depends on changes (a choice, a connection, an
@@ -492,6 +530,51 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     );
     return () => ctrl.abort();
   }, [desktop.status, api, desktop.box?.id, desktop.projectPath]);
+
+  // ---- Video backend (spec 2026-11-10 R4.1) ---------------------------------
+
+  // The View menu's Video choice shows once the daemon knows about voxl (it reports `video`); Fast
+  // is offered when this host's (or VM's) voxl works and this browser can decode it.
+  const voxlKnown = desktop.video !== undefined || desktop.voxl !== undefined;
+  const [hostVoxl, setHostVoxl] = useState<DesktopVoxlStatus | null>(null);
+  const [viewerReason, setViewerReason] = useState<string | null>(null);
+  useEffect(() => {
+    if (!voxlKnown || !api) return;
+    const ctrl = new AbortController();
+    api.desktopHostStatus(ctrl.signal, desktop.box?.id ? desktop.projectPath : undefined).then(
+      (host) => setHostVoxl(host.voxl ?? null),
+      () => undefined
+    );
+    let live = true;
+    void voxlViewerSupport().then((support) => {
+      if (live) setViewerReason(viewerUnsupportedReason(support));
+    });
+    return () => {
+      live = false;
+      ctrl.abort();
+    };
+  }, [voxlKnown, api, desktop.box?.id, desktop.projectPath]);
+  const voxlUnavailable =
+    viewerReason ??
+    (desktop.voxl?.state === "unavailable"
+      ? desktop.voxl.reason ?? "voxl is not available for this desktop"
+      : hostVoxl && !hostVoxl.available && desktop.voxl === undefined
+        ? hostVoxl.reason ?? "voxl is not installed on this host"
+        : null);
+  const [videoBusy, setVideoBusy] = useState(false);
+  const setVideo = (video: DesktopVideoBackend) => {
+    if (!api || video === desktopVideo(desktop)) return;
+    setVideoBusy(true);
+    setActionError(null);
+    // The daemon restarts only the stream; the view reconnects when `desktop.video` changes.
+    api.updateDesktop(desktop.id, { video }).then(
+      () => setVideoBusy(false),
+      (err: unknown) => {
+        setVideoBusy(false);
+        setActionError(`Could not switch the video: ${errorText(err)}`);
+      }
+    );
+  };
 
   // ---- Keys & clipboard ----------------------------------------------------
 
@@ -805,6 +888,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         panAvailable={!touchRendering}
         prefs={prefs}
         onPrefs={updatePrefs}
+        video={voxlKnown ? { current: desktopVideo(desktop), busy: videoBusy, fastUnavailable: voxlUnavailable, onChange: setVideo } : null}
         audio={audio}
         connected={conn === "connected"}
         remoteClipboard={remoteClipboard}
@@ -889,7 +973,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         desktop={desktop}
         prefs={prefs}
         audio={audio}
-        connection={{ state: conn, rttMs, qualityLevel, desktopName }}
+        connection={{ state: conn, rttMs, qualityLevel, desktopName, backend: stream?.backend ?? null, fallback: stream?.fallback ?? null }}
       />
     </div>
   );

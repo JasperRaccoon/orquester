@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, FileText, Loader2, Power, RefreshCw, RotateCw, Skull } from "lucide-react";
-import type { DesktopAppSummary, DesktopSummary } from "@orquester/api";
+import type { DesktopAppSummary, DesktopSummary, DesktopVideoBackend } from "@orquester/api";
 import type { ApiClient } from "../../lib/api-client";
 import type { DesktopAudioState } from "../../lib/desktop-audio";
 import type { DesktopPrefs } from "../../lib/desktop-prefs";
@@ -180,6 +180,10 @@ export interface DesktopConnectionInfo {
   rttMs: number | null;
   qualityLevel: number;
   desktopName: string | null;
+  /** The current connection attempt's video backend (null before the first). */
+  backend: DesktopVideoBackend | null;
+  /** Why a voxl desktop is shown over RFB instead (one line), if it is. */
+  fallback: string | null;
 }
 
 /** ⋯ → Info: display, size, connection, video quality and audio jitter-buffer stats. */
@@ -204,7 +208,9 @@ export const DesktopInfoDialog: React.FC<{
     ["Render threads", String(desktop.renderThreads)],
     ["Connection", connection.state],
     ["Round trip", connection.rttMs === null ? "—" : `${Math.round(connection.rttMs)} ms`],
-    ["Video quality", `${connection.qualityLevel} / 9`],
+    ["Video", connection.backend === "voxl" ? "Fast (H.264)" : connection.backend === "rfb" ? "Compatible (VNC)" : "—"],
+    ...(connection.fallback ? ([["Video note", connection.fallback]] as [string, string][]) : []),
+    ...(connection.backend !== "voxl" ? ([["Video quality", `${connection.qualityLevel} / 9`]] as [string, string][]) : []),
     ["Audio", desktop.audio],
     ["Audio stream", audio.serverState ? `${audio.serverState.audio}${audio.serverState.reason ? ` — ${audio.serverState.reason}` : ""}` : "not connected"],
     ["Decoder", audio.decoder],
