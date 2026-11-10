@@ -1,7 +1,7 @@
 /**
  * A workflow's decisions in its rail card, mounted: "Open run" hands over the
  * gate itself, so a sub-workflow's gate opens its own (child) run in its own
- * workflow.
+ * workflow, and the title of a loop-limit gate reads the run's live limits.
  */
 
 import assert from "node:assert/strict";
@@ -10,7 +10,9 @@ import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
-import type { WorkflowGateState } from "@orquester/api";
+import type { WorkflowGateState, WorkflowRun } from "@orquester/api";
+
+import { loopEdge, node, workflow } from "../../../lib/workflows/testing";
 
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
@@ -139,5 +141,22 @@ describe("a workflow's decisions in its rail card", () => {
     assert.equal(opened.length, 1);
     assert.equal(opened[0]?.runId, "child-run");
     assert.equal(opened[0]?.workflowId, "wf-child", "not the rail card's workflow");
+  });
+
+  it("a loop-limit gate's title reads the limit the run raised since it loaded", () => {
+    const definition = workflow([node("fix", "agent", {}, { name: "Fix" }), node("rev", "if", {}, { name: "Review" })], [loopEdge("rev", "fix", "false")]);
+    const edgeId = definition.edges[0]!.id;
+    const limitGate = gate({ source: "loop_limit", edgeId, question: "", nodeId: "rev", nodeName: "Review" });
+    const detail = { ...summary("r1", "wf-1"), definition, triggerPayload: null, blocks: {}, takenEdges: [], deadEdges: [], loopLimits: { [edgeId]: 2 } } as unknown as WorkflowRun;
+    store.workflowsStore.setState({
+      runs: {
+        // Loaded at limit 2; "Allow one more loop" raised it to 3 since (an update's live `loopLimits`).
+        r1: { summary: summary("r1", "wf-1"), detail, blocks: {}, takenEdges: [], deadEdges: [], loopLimits: { [edgeId]: 3 }, error: null }
+      },
+      gates: { r1: { g1: limitGate } }
+    });
+    render();
+    assert.match(mount.textContent ?? "", /\(3\)/);
+    assert.doesNotMatch(mount.textContent ?? "", /\(2\)/);
   });
 });

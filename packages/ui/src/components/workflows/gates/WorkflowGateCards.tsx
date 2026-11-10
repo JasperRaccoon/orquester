@@ -63,7 +63,7 @@ const DockedGate: React.FC<{ gate: WorkflowGateState; now: number; onOpenRun: ()
   const definition = entry?.detail?.definition ?? null;
   return (
     <div className="space-y-1">
-      <GateDecision gate={gate} definition={definition} loopLimits={entry?.detail?.loopLimits} variant="docked" now={now} context={gate.nodeName} />
+      <GateDecision gate={gate} definition={definition} loopLimits={entry?.loopLimits} variant="docked" now={now} context={gate.nodeName} />
       <div className="flex justify-end">
         <OpenRunButton onClick={onOpenRun} disabledReason={disabledReason} sheet={false} />
       </div>
@@ -82,7 +82,7 @@ const SheetGate: React.FC<{
   const [open, setOpen] = React.useState(false);
   const entry = useWorkflowRun(open ? gate.runId : null);
   const definition = entry?.detail?.definition ?? null;
-  const title = gateTitle(gate, definition, entry?.detail?.loopLimits);
+  const title = gateTitle(gate, definition, entry?.loopLimits);
   const close = React.useCallback(() => setOpen(false), []);
   const person = gate.phase === "person";
   return (
@@ -108,7 +108,7 @@ const SheetGate: React.FC<{
       </button>
       <BottomSheet open={open} onClose={close} title={workflowName}>
         <div className="space-y-2 px-3 pb-3 pt-1">
-          <GateDecision gate={gate} definition={definition} loopLimits={entry?.detail?.loopLimits} variant="sheet" now={now} context={gate.nodeName} />
+          <GateDecision gate={gate} definition={definition} loopLimits={entry?.loopLimits} variant="sheet" now={now} context={gate.nodeName} />
           <div className="flex justify-end">
             <OpenRunButton
               onClick={() => {

@@ -271,7 +271,7 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
       ) : null}
 
       {/* A gate's decision (spec 2026-11-10 §6.4) — also a loop-limit gate on any block. */}
-      <GateRunSection runId={runId} nodeId={nodeId} definition={definition} loopLimits={entry.detail?.loopLimits} now={now} variant={variant} />
+      <GateRunSection runId={runId} nodeId={nodeId} definition={definition} loopLimits={entry.loopLimits} now={now} variant={variant} />
 
       {/* Sub-workflow. */}
       {type === "workflow" && block?.childRunId ? (

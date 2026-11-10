@@ -46,6 +46,11 @@ describe("loop words", () => {
       "Review loops back to Fix on false, at most 2 times, in a new chat; used 2 of 2, its limit"
     );
     assert.equal(loopEdgeDescription("Review", null, "Fix", { maxLoops: 1, session: "continue" }), "Review loops back to Fix, at most once, in the same chat");
+    // A run that raised the limit ("Allow one more loop"): at most the raised limit, as the label's used/max.
+    assert.equal(
+      loopEdgeDescription("Review", null, "Fix", { maxLoops: 2, session: "continue" }, { used: 2, max: 3, exhausted: false }),
+      "Review loops back to Fix, at most 3 times, in the same chat; used 2 of 3"
+    );
   });
 
   it("the edge view names both ends and the handle", () => {

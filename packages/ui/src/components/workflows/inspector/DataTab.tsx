@@ -341,7 +341,7 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
                     runId={latest.id}
                     nodeId={node.id}
                     definition={run?.detail?.definition ?? null}
-                    loopLimits={run?.detail?.loopLimits}
+                    loopLimits={run?.loopLimits}
                     now={now}
                     variant={variant}
                   />

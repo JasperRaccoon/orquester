@@ -85,19 +85,22 @@ const EdgeTools: React.FC<{ id: string; loop: boolean }> = ({ id, loop }) => {
   );
 };
 
-/** The validator's problem on an edge, as a marker that opens the edge (when it can be edited). */
-const ProblemMarker: React.FC<{ id: string; problem: NonNullable<EdgeData["problem"]> }> = ({ id, problem }) => {
+/**
+ * The validator's problem on an edge, as a marker that opens the edge (when it can be edited).
+ * On a touch screen the 20 px dot sits in a 40 px target.
+ */
+export const ProblemMarker: React.FC<{ id: string; problem: NonNullable<EdgeData["problem"]> }> = ({ id, problem }) => {
   const actions = useCanvasActions();
   const error = problem.severity === "error";
   const Icon = error ? AlertCircle : AlertTriangle;
-  const className = cn(
+  const dot = cn(
     "flex h-5 w-5 items-center justify-center rounded-full shadow-md shadow-black/30",
     error ? "bg-danger-600 text-white" : "bg-warn-500 text-neutral-950"
   );
   const label = `${error ? "Problem" : "Warning"}: ${problem.message}`;
   if (actions.readOnly || !actions.openEdge) {
     return (
-      <span role="img" aria-label={label} title={problem.message} className={className}>
+      <span role="img" aria-label={label} title={problem.message} className={dot}>
         <Icon size={11} aria-hidden />
       </span>
     );
@@ -111,9 +114,14 @@ const ProblemMarker: React.FC<{ id: string; problem: NonNullable<EdgeData["probl
         event.stopPropagation();
         actions.openEdge?.(id);
       }}
-      className={cn(className, "focus:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300")}
+      className={cn(
+        "flex shrink-0 items-center justify-center rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300",
+        actions.touch ? "h-10 w-10" : "h-5 w-5"
+      )}
     >
-      <Icon size={11} aria-hidden />
+      <span aria-hidden className={dot}>
+        <Icon size={11} />
+      </span>
     </button>
   );
 };
