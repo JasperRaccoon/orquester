@@ -261,3 +261,14 @@ test("a desktop's seq only rises, across an engine reopen and a daemon restart; 
   const restarted = await harness(t, () => new Date(clock));
   assert.ok((await act(restarted, { action: "screenshot" })).seq > reopened, "a restarted daemon numbers above the run before");
 });
+
+test("an engine that owns the clipboard is not closed when idle; once another client takes it, it is", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await harness(t);
+  await act(h, { action: "clipboard_set", text: "copied" });
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(h.engine().closes, 0, "closing would lose the clipboard");
+  h.engine().ownsClipboard = false;
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(h.engine().closes, 1);
+});

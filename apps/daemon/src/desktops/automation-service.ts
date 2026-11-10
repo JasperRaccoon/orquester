@@ -1,6 +1,7 @@
 // Desktop automation for agents (spec 2026-11-10 §2.3–§3): one DesktopAutomation per running
-// desktop, opened on the first action and closed after 5 idle minutes, when the desktop stops or
-// its X connection drops (the next action opens a new one); who controls each desktop's input
+// desktop, opened on the first action and closed after 5 idle minutes (unless it owns the
+// clipboard: closing would lose what the agent copied, so it stays open while it does), when the
+// desktop stops or its X connection drops (the next action opens a new one); who controls each desktop's input
 // (`control.ts`, runtime only) with the agent's control lapsing 2 minutes after its last action;
 // the action log (`action-log.ts`); and the kept screenshots (`screenshots.ts`). The manager owns
 // one and delegates to it; the routes reach it through the manager.
@@ -538,14 +539,20 @@ export class DesktopAutomationService {
     state.lapseTimer.unref?.();
   }
 
-  /** No action running: the automation closes after idleCloseMs unless another comes. */
+  /**
+   * No action running: the automation closes after idleCloseMs unless another comes. One that owns
+   * the clipboard is looked at again after another idle period instead (it closes once another
+   * client took the clipboard, or when the desktop stops).
+   */
   private armIdleClose(desktopId: string, state: DesktopAutomationState): void {
     if (state.idleTimer) clearTimeout(state.idleTimer);
     state.idleTimer = null;
     if (state.inFlight > 0 || (!state.automation && !state.opening)) return;
     state.idleTimer = setTimeout(() => {
       state.idleTimer = null;
-      if (state.inFlight === 0) this.release(desktopId);
+      if (state.inFlight > 0) return;
+      if (state.automation?.ownsClipboard) this.armIdleClose(desktopId, state);
+      else void this.release(desktopId);
     }, this.idleCloseMs);
     state.idleTimer.unref?.();
   }

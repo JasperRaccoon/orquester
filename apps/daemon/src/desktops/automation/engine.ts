@@ -360,6 +360,10 @@ class X11DesktopAutomation implements DesktopAutomation {
     return this.dropped || this.closing !== null;
   }
 
+  get ownsClipboard(): boolean {
+    return this.clipboard !== null && !this.closed;
+  }
+
   size(): DesktopSize {
     return { ...this.display };
   }

@@ -767,8 +767,10 @@ describe("DesktopAutomation clipboard", () => {
 
     // Reading back what we own needs no conversion.
     assert.equal(await engine.getClipboard(), text);
+    assert.equal(engine.ownsClipboard, true);
     await engine.close();
     assert.equal(server.owners.get(clipboard)!.owner, 0, "close gives the selection up");
+    assert.equal(engine.ownsClipboard, false);
   });
 
   test("getClipboard converts from the owner, falls back to STRING, refuses INCR, times out after 2 s", async (t) => {

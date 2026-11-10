@@ -96,6 +96,11 @@ export interface DesktopAutomation {
   close(): Promise<void>;
   /** The connection dropped (the engine is unusable; open a new one). */
   readonly closed: boolean;
+  /**
+   * It owns the CLIPBOARD selection (from setClipboard until another client takes it or it
+   * closes): closing it loses what was copied, so the idle close leaves it open.
+   */
+  readonly ownsClipboard: boolean;
 }
 
 export type DesktopAutomationErrorCode =

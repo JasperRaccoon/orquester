@@ -20,6 +20,7 @@ export type FakeAutomationCall =
 export class FakeDesktopAutomation implements DesktopAutomation {
   closed = false;
   closes = 0;
+  ownsClipboard = false;
   display: DesktopSize = { width: 1280, height: 800 };
   cursor = { x: 5, y: 5 };
   sequence = 41;
@@ -102,6 +103,7 @@ export class FakeDesktopAutomation implements DesktopAutomation {
     signal?.throwIfAborted();
     this.calls.push({ kind: "setClipboard", text });
     this.clipboard = text;
+    this.ownsClipboard = true;
   }
 
   onResize(): () => void {
