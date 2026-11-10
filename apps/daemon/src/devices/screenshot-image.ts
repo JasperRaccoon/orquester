@@ -1,18 +1,19 @@
 /**
- * Device screenshots for an MCP image block (devices spec §9): the PNG agent-device saves, kept as
- * PNG when its base64 fits the cap, else re-encoded as JPEG and halved until it does (as
- * `html-preview`'s `MAX_SCREENSHOT_BASE64_CHARS`). No image library ships with the daemon, so this
- * holds a small PNG decoder (8-bit, non-interlaced) and a baseline JPEG encoder (4:4:4, the
- * standard tables). The daemon runs these in its image workers (`image-pool.ts`), never on the
- * event loop.
+ * Screenshots for an MCP image block. Devices (devices spec §9): the PNG agent-device saves, kept
+ * as PNG when its base64 fits the cap, else re-encoded as JPEG and halved until it does (as
+ * `html-preview`'s `MAX_SCREENSHOT_BASE64_CHARS`). Desktops (desktop agents spec R1.8): a raw RGB
+ * capture, scaled (area average) to a long-edge bound, then the same PNG-else-JPEG fit. No image
+ * library ships with the daemon, so this holds a small PNG decoder (8-bit, non-interlaced) and
+ * encoder, and a baseline JPEG encoder (4:4:4, the standard tables). The daemon runs these in its
+ * image workers (`image-pool.ts`), never on the event loop.
  */
 
-import { inflateSync } from "node:zlib";
+import { crc32, deflateSync, inflateSync } from "node:zlib";
 
 /** As `html-preview`'s `MAX_SCREENSHOT_BASE64_CHARS`: the largest image an MCP result inlines. */
 export const DEVICE_SCREENSHOT_MAX_BASE64_CHARS = 4 * 1024 * 1024;
 
-interface RgbImage {
+export interface RgbImage {
   width: number;
   height: number;
   /** RGB, 3 bytes per pixel, row-major. */
@@ -160,6 +161,15 @@ function base64Length(bytes: number): number {
   return Math.ceil(bytes / 3) * 4;
 }
 
+/** JPEG (quality 80), halved until its base64 fits (at worst 1/16 scale). */
+function jpegToFit(image: RgbImage, maxBase64Chars: number): FittedScreenshot {
+  for (let factor = 1; ; factor *= 2) {
+    const scaled = downscale(image, factor);
+    const jpeg = encodeJpeg(scaled, 80);
+    if (base64Length(jpeg.length) <= maxBase64Chars || factor >= 16) return { mimeType: "image/jpeg", data: jpeg, width: scaled.width, height: scaled.height };
+  }
+}
+
 /**
  * The PNG as-is when its base64 fits `maxBase64Chars`; else JPEG (quality 80), halved until it
  * fits (at worst 1/16 scale).
@@ -168,12 +178,152 @@ export function fitScreenshot(png: Buffer, maxBase64Chars: number): FittedScreen
   const size = pngSize(png);
   if (!size) throw new Error("not a PNG");
   if (base64Length(png.length) <= maxBase64Chars) return { mimeType: "image/png", data: png, width: size.width, height: size.height };
-  const image = decodePng(png);
-  for (let factor = 1; ; factor *= 2) {
-    const scaled = downscale(image, factor);
-    const jpeg = encodeJpeg(scaled, 80);
-    if (base64Length(jpeg.length) <= maxBase64Chars || factor >= 16) return { mimeType: "image/jpeg", data: jpeg, width: scaled.width, height: scaled.height };
+  return jpegToFit(decodePng(png), maxBase64Chars);
+}
+
+/**
+ * Raw RGB scaled down (area average, never up) so its long edge is at most `maxLongEdge`, as PNG
+ * when its base64 fits `maxBase64Chars`, else as {@link fitScreenshot}'s halving JPEG.
+ */
+export function fitRgbScreenshot(image: RgbImage, maxLongEdge: number, maxBase64Chars: number): FittedScreenshot {
+  if (image.data.length !== image.width * image.height * 3) throw new Error(`RGB data is ${image.data.length} bytes, not ${image.width}×${image.height}×3`);
+  const longEdge = Math.max(image.width, image.height);
+  const ratio = Math.min(1, maxLongEdge / longEdge);
+  const fitted = ratio < 1 ? resizeArea(image, Math.max(1, Math.round(image.width * ratio)), Math.max(1, Math.round(image.height * ratio))) : image;
+  const png = encodePng(fitted);
+  if (base64Length(png.length) <= maxBase64Chars) return { mimeType: "image/png", data: png, width: fitted.width, height: fitted.height };
+  return jpegToFit(fitted, maxBase64Chars);
+}
+
+/** For each output index along one axis: the source indexes it covers and their (normalised) coverage. */
+function areaTaps(source: number, target: number): Array<{ from: number; weights: Float64Array }> {
+  const span = source / target;
+  const taps: Array<{ from: number; weights: Float64Array }> = [];
+  for (let i = 0; i < target; i += 1) {
+    const lo = i * span;
+    const hi = Math.min(source, (i + 1) * span);
+    const from = Math.floor(lo);
+    const to = Math.ceil(hi);
+    const weights = new Float64Array(to - from);
+    for (let s = from; s < to; s += 1) weights[s - from] = (Math.min(hi, s + 1) - Math.max(lo, s)) / (hi - lo);
+    taps.push({ from, weights });
   }
+  return taps;
+}
+
+/** Shrink to any size by area averaging (each output pixel is the mean of the source area it covers), rows then columns. */
+function resizeArea(image: RgbImage, width: number, height: number): RgbImage {
+  const columns = areaTaps(image.width, width);
+  const rows = areaTaps(image.height, height);
+  const across = new Float32Array(width * image.height * 3);
+  for (let y = 0; y < image.height; y += 1) {
+    const row = y * image.width * 3;
+    for (let x = 0; x < width; x += 1) {
+      const { from, weights } = columns[x]!;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let k = 0; k < weights.length; k += 1) {
+        const i = row + (from + k) * 3;
+        const w = weights[k]!;
+        r += image.data[i]! * w;
+        g += image.data[i + 1]! * w;
+        b += image.data[i + 2]! * w;
+      }
+      const o = (y * width + x) * 3;
+      across[o] = r;
+      across[o + 1] = g;
+      across[o + 2] = b;
+    }
+  }
+  const data = Buffer.alloc(width * height * 3);
+  for (let y = 0; y < height; y += 1) {
+    const { from, weights } = rows[y]!;
+    for (let x = 0; x < width; x += 1) {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let k = 0; k < weights.length; k += 1) {
+        const i = ((from + k) * width + x) * 3;
+        const w = weights[k]!;
+        r += across[i]! * w;
+        g += across[i + 1]! * w;
+        b += across[i + 2]! * w;
+      }
+      const o = (y * width + x) * 3;
+      data[o] = Math.min(255, Math.round(r));
+      data[o + 1] = Math.min(255, Math.round(g));
+      data[o + 2] = Math.min(255, Math.round(b));
+    }
+  }
+  return { width, height, data };
+}
+
+/** zlib's default (6) takes about three times as long on a screen-sized image for about a quarter less output. */
+const PNG_DEFLATE_LEVEL = 4;
+
+/** Encode RGB as an 8-bit truecolour PNG, each row with the filter whose output is smallest in absolute sum (libpng's heuristic). */
+function encodePng(image: RgbImage): Buffer {
+  const { width, height, data } = image;
+  const stride = width * 3;
+  const raw = Buffer.alloc(height * (stride + 1));
+  const sub = Buffer.alloc(stride);
+  const up = Buffer.alloc(stride);
+  const average = Buffer.alloc(stride);
+  const paeth = Buffer.alloc(stride);
+  const magnitude = (value: number): number => (value < 128 ? value : 256 - value);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * stride;
+    const above = row - stride;
+    let sums0 = 0;
+    let sums1 = 0;
+    let sums2 = 0;
+    let sums3 = 0;
+    let sums4 = 0;
+    for (let x = 0; x < stride; x += 1) {
+      const value = data[row + x]!;
+      const a = x >= 3 ? data[row + x - 3]! : 0;
+      const b = y > 0 ? data[above + x]! : 0;
+      const c = x >= 3 && y > 0 ? data[above + x - 3]! : 0;
+      const p = a + b - c;
+      const pa = p > a ? p - a : a - p;
+      const pb = p > b ? p - b : b - p;
+      const pc = p > c ? p - c : c - p;
+      const f1 = (value - a) & 0xff;
+      const f2 = (value - b) & 0xff;
+      const f3 = (value - ((a + b) >> 1)) & 0xff;
+      const f4 = (value - (pa <= pb && pa <= pc ? a : pb <= pc ? b : c)) & 0xff;
+      sub[x] = f1;
+      up[x] = f2;
+      average[x] = f3;
+      paeth[x] = f4;
+      sums0 += magnitude(value);
+      sums1 += magnitude(f1);
+      sums2 += magnitude(f2);
+      sums3 += magnitude(f3);
+      sums4 += magnitude(f4);
+    }
+    const sums = [sums0, sums1, sums2, sums3, sums4];
+    const best = sums.indexOf(Math.min(...sums));
+    const out = y * (stride + 1);
+    raw[out] = best;
+    if (best === 0) data.copy(raw, out + 1, row, row + stride);
+    else [sub, up, average, paeth][best - 1]!.copy(raw, out + 1);
+  }
+  const chunk = (type: string, body: Buffer): Buffer => {
+    const out = Buffer.alloc(12 + body.length);
+    out.writeUInt32BE(body.length, 0);
+    out.write(type, 4, "latin1");
+    body.copy(out, 8);
+    out.writeUInt32BE(crc32(out.subarray(4, 8 + body.length)), 8 + body.length);
+    return out;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8; // bit depth
+  header[9] = 2; // truecolour
+  return Buffer.concat([PNG_SIGNATURE, chunk("IHDR", header), chunk("IDAT", deflateSync(raw, { level: PNG_DEFLATE_LEVEL })), chunk("IEND", Buffer.alloc(0))]);
 }
 
 /** The fleet view's thumbnail quality. */
