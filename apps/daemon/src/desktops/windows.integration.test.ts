@@ -267,6 +267,11 @@ describe("DesktopWindowTracker against Xvnc + Openbox", { skip: missing.length >
     assert.equal(two.title, "orq-two");
     assert.equal(one.wmClass, "XTerm");
     assert.equal(one.maximized, false);
+    // The frame, decorations included, is on the 1024×768 screen.
+    for (const w of [one, two]) {
+      assert.ok(w.bounds && w.bounds.width > 0 && w.bounds.height > 0, JSON.stringify(w.bounds));
+      assert.ok(w.bounds.x >= 0 && w.bounds.y >= 0 && w.bounds.x + w.bounds.width <= 1024 && w.bounds.y + w.bounds.height <= 768, JSON.stringify(w.bounds));
+    }
     first = one.id;
     second = two.id;
 
@@ -274,6 +279,15 @@ describe("DesktopWindowTracker against Xvnc + Openbox", { skip: missing.length >
     const xres = await probe.queryExtension(XRES_EXTENSION_NAME);
     assert.ok(xres.present);
     assert.equal(await probe.xresClientPid(xres.majorOpcode, parseWindowId(first)!), firstXterm.pid);
+  });
+
+  test("moving a window updates its bounds", async () => {
+    const before = tracker.snapshot().windows.find((w) => w.id === first)!.bounds!;
+    // _NET_MOVERESIZE_WINDOW: x and y given, the frame's top-left (NorthWest gravity), from a pager.
+    const moveResize = await probe.internAtom("_NET_MOVERESIZE_WINDOW");
+    await probe.sendEvent(false, probe.root, EventMask.SubstructureRedirect | EventMask.SubstructureNotify, encodeClientMessage(parseWindowId(first)!, moveResize, [(1 << 8) | (1 << 9) | (2 << 12), 100, 120, 0, 0]));
+    const snapshot = await waitForSnapshot(tracker, (s) => s.windows.find((w) => w.id === first)?.bounds?.x === 100, "bounds after the move");
+    assert.deepEqual(snapshot.windows.find((w) => w.id === first)!.bounds, { x: 100, y: 120, width: before.width, height: before.height });
   });
 
   test("activate switches the active window", async () => {

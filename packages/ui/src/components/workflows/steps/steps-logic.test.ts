@@ -3,15 +3,17 @@ import { describe, it } from "node:test";
 
 import type { Workflow } from "@orquester/api";
 
-import { edge, node, sequentialIds, workflow } from "../../../lib/workflows/testing.ts";
+import { edge, loopEdge, node, sequentialIds, workflow } from "../../../lib/workflows/testing.ts";
 import {
   addFirstStep,
   addStepAfter,
   connectCandidates,
   deleteStep,
+  deriveSteps,
   duplicateStepAfter,
   moveCandidates,
   moveStepToOutput,
+  outputTone,
   setStepsDisabled
 } from "./steps-logic.ts";
 
@@ -58,14 +60,15 @@ describe("addStepAfter", () => {
 describe("connect and move", () => {
   it("connect candidates: connectable first, with why the rest cannot", () => {
     const candidates = connectCandidates(chain(), { nodeId: "b", handle: "success" });
+    // Review runs before Report: connecting back to it makes a loop (spec 2026-11-10 §7.1).
     const review = candidates.find((c) => c.nodeId === "a")!;
-    assert.notEqual(review.refusal, null);
+    assert.equal(review.refusal, null);
+    assert.equal(review.loop, true);
     assert.equal(candidates.some((c) => c.nodeId === "t"), false, "a trigger takes no input");
     assert.equal(candidates.some((c) => c.nodeId === "b"), false, "not itself");
     const extra = workflow([...chain().nodes, node("s", "stop", {}, { name: "Stop" })], chain().edges);
     const list = connectCandidates(extra, { nodeId: "b", handle: "success" });
-    assert.equal(list[0]!.nodeId, "s");
-    assert.equal(list[0]!.refusal, null);
+    assert.deepEqual(list.map((c) => [c.nodeId, c.loop]), [["a", true], ["s", false]], "connectable ones in outline order");
   });
 
   it("move to another output: re-hangs the row's edge; loops are refused", () => {
@@ -117,5 +120,100 @@ describe("delete, duplicate, disable", () => {
     assert.deepEqual(off.nodes.filter((n) => n.disabled).map((n) => n.id), ["a"]);
     const on = setStepsDisabled(off, ["a"], false);
     assert.equal(on.nodes.some((n) => n.disabled), false);
+  });
+});
+
+describe("loops in the step list", () => {
+  // Start → Fix → Check(if) ─true→ Ship; Check.false loops back to Fix.
+  const looped = () =>
+    workflow(
+      [
+        node("t", "trigger.manual", {}, { name: "Start" }),
+        node("fix", "agent", {}, { name: "Fix" }),
+        node("chk", "if", {}, { name: "Check" }),
+        node("ship", "code", {}, { name: "Ship" })
+      ],
+      [edge("t", "fix"), edge("fix", "chk"), edge("chk", "ship", "true"), loopEdge("chk", "fix", "false", { maxLoops: 3, session: "new" })]
+    );
+
+  it("a loop is a row of its source, not a step of its own", () => {
+    const model = deriveSteps(looped(), [{ severity: "warning", code: "loop_x", message: "Mind the loop", edgeId: "chk-false-loop-fix" }], () => "");
+    assert.deepEqual(
+      model.rows.map((row) => `${row.kind}:${row.nodeId}`),
+      ["node:t", "node:fix", "node:chk", "node:ship"],
+      "no join-ref back to Fix"
+    );
+    const check = model.rows.find((row) => row.nodeId === "chk")!;
+    assert.equal(check.loops.length, 1);
+    assert.equal(check.loops[0]!.text, "↺ back to Fix (max 3, new chat)");
+    assert.equal(check.loops[0]!.handleLabel, "false");
+    assert.deepEqual(check.loops[0]!.problem, { severity: "warning", message: "Mind the loop" });
+    const falseOut = check.outputs.find((output) => output.handle === "false")!;
+    assert.equal(falseOut.loop, true);
+    assert.deepEqual(falseOut.targets, [], "the loop is not one of the places it leads to");
+    assert.equal(model.rows.find((row) => row.nodeId === "fix")!.loops.length, 0);
+  });
+
+  it("connecting to a block that runs before makes a loop; the candidate says so", () => {
+    const wf = workflow(looped().nodes, looped().edges.filter((e) => !e.loop));
+    const candidates = connectCandidates(wf, { nodeId: "chk", handle: "false" });
+    const fix = candidates.find((candidate) => candidate.nodeId === "fix")!;
+    assert.equal(fix.refusal, null);
+    assert.equal(fix.loop, true);
+    assert.equal(candidates.find((candidate) => candidate.nodeId === "ship")!.loop, false);
+    const failure = connectCandidates(wf, { nodeId: "chk", handle: "error" }).find((candidate) => candidate.nodeId === "fix")!;
+    assert.match(failure.refusal!, /failure output/);
+  });
+
+  it("moving never makes a loop and never drops a loop edge; a looping output takes nothing", () => {
+    const wf = looped();
+    const toShip = moveCandidates(wf, "fix", { nodeId: "t", handle: "success" });
+    assert.match(toShip.find((c) => c.nodeId === "chk" && c.handle === "true")!.refusal!, /one direction/);
+    assert.match(toShip.find((c) => c.nodeId === "chk" && c.handle === "false")!.refusal!, /one direction|loops back/);
+    const shipMoves = moveCandidates(wf, "ship", { nodeId: "chk", handle: "true" });
+    assert.match(shipMoves.find((c) => c.nodeId === "chk" && c.handle === "false")!.refusal!, /It loops back to Fix/);
+    assert.equal(shipMoves.find((c) => c.nodeId === "fix" && c.handle === "success")!.refusal, null, "ancestors are not below it");
+    // Fix hangs from Start and is a loop's target: moving it keeps the loop edge into it.
+    const wide = workflow([...wf.nodes, node("pre", "code", {}, { name: "Pre" })], [...wf.edges, edge("t", "pre")]);
+    const moved = moveStepToOutput(wide, "fix", null, { nodeId: "pre", handle: "success" }, sequentialIds());
+    assert.deepEqual(edgesOf(moved), ["chk:false>fix", "chk:true>ship", "fix:success>chk", "pre:success>fix", "t:success>pre"]);
+    assert.deepEqual(moved.edges.find((e) => e.loop)?.loop, { maxLoops: 3, session: "new" });
+    assert.equal(moveStepToOutput(wf, "ship", { nodeId: "chk", handle: "true" }, { nodeId: "chk", handle: "false" }, sequentialIds()), wf);
+  });
+
+  it("deleting a loop's target heals over ordinary edges; its loop edge goes with it", () => {
+    const next = deleteStep(looped(), "fix", sequentialIds());
+    assert.deepEqual(edgesOf(next), ["chk:true>ship", "t:success>chk"]);
+    assert.equal(next.edges.some((e) => e.loop), false);
+  });
+
+  it("a duplicate after the loop's source leaves the loop on the original", () => {
+    const result = duplicateStepAfter(looped(), "chk", sequentialIds("c"))!;
+    const loops = result.workflow.edges.filter((e) => e.loop);
+    assert.equal(loops.length, 1);
+    assert.equal(loops[0]!.source, "chk");
+  });
+});
+
+describe("an agent with outcomes on the phone's step list (spec 2026-11-10 §5)", () => {
+  it("lists one output per outcome, labelled, in declared order, then failure", () => {
+    const wf = workflow(
+      [
+        node("t", "trigger.manual", {}, { name: "Start" }),
+        node("a", "agent", { outcomes: [{ id: "approved", label: "Approved" }, { id: "changes_requested" }] }, { name: "Review" }),
+        node("b", "code", {}, { name: "Ship" })
+      ],
+      [edge("t", "a"), edge("a", "b", "outcome:approved")]
+    );
+    const review = deriveSteps(wf, [], () => "").rows.find((row) => row.nodeId === "a")!;
+    assert.deepEqual(
+      review.outputs.map((output) => [output.handle, output.label, output.tone, output.connected]),
+      [
+        ["outcome:approved", "Approved", "info", true],
+        ["outcome:changes_requested", "changes_requested", "info", false],
+        ["error", "failure", "danger", false]
+      ]
+    );
+    assert.equal(outputTone("outcome:x"), "info");
   });
 });

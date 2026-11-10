@@ -2,6 +2,7 @@
 
 import type { NodeExecutor, NodeExecutorRegistry } from "../contracts.ts";
 import { createCodeExecutor } from "./code.ts";
+import { createGateExecutor } from "./gate.ts";
 import { createIfExecutor, createMergeExecutor, createStopExecutor, createSwitchExecutor, createTriggerExecutors } from "./flow.ts";
 import { createHttpExecutor } from "./http.ts";
 import { createShellExecutor } from "./shell.ts";
@@ -27,6 +28,8 @@ export function createNodeExecutors(options: NodeExecutorsOptions = {}): NodeExe
     merge: createMergeExecutor(),
     stop: createStopExecutor(),
     wait: createWaitExecutor(),
+    // The reviewer agent decider runs on the agent block's executor.
+    gate: createGateExecutor(options.agent ? { agent: options.agent } : {}),
     workflow: createSubWorkflowExecutor()
   };
   if (options.agent) registry.agent = options.agent;

@@ -170,6 +170,155 @@ describe("edges", () => {
     );
     const cycle = only(problemsOf(wf), "cycle");
     assert.equal(cycle.length, 1);
+    // An ordinary edge back to an earlier block is named, with the fix.
+    assert.equal(cycle[0]!.edgeId, "b-success-a");
+    assert.match(cycle[0]!.message, /^B → A goes back to an earlier block \(.*\): make it a loop edge with a limit/);
+  });
+});
+
+describe("loop edges (spec 2026-11-10 §7.1)", () => {
+  const loop = (source: string, target: string, handle: string, maxLoops = 2, id?: string) => ({
+    ...testEdge(source, target, handle, id),
+    loop: { maxLoops, session: "continue" as const }
+  });
+  const reviewer = () =>
+    testNode("review", "agent", { prompt: { kind: "text", text: "Review" }, outcomes: [{ id: "approved" }, { id: "changes" }] }, { name: "Review" });
+  const fixer = () => agent("Fix", "Fix it. {{ loop.feedback | default(\"\") }} (pass {{ loop.pass }})");
+  const base = (extra: ReturnType<typeof testEdge>[] = []) =>
+    testWorkflow(
+      [manual(), fixer(), reviewer(), testNode("done", "stop", { as: "success" }, { name: "Done" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), testEdge("review", "done", "outcome:approved"), ...extra]
+    );
+
+  it("a loop edge back to an ancestor is valid, and the forward graph has no cycle", () => {
+    const problems = problemsOf(base([loop("review", "Fix", "outcome:changes")]));
+    assert.deepEqual(problems.filter((problem) => problem.severity === "error"), []);
+    assert.deepEqual(only(problems, "cycle"), []);
+    assert.deepEqual(only(problems, "unknown_reference"), [], "loop is an expression root");
+  });
+
+  it("an if/switch branch and a plain success output may loop too", () => {
+    const wf = testWorkflow(
+      [manual(), testNode("a", "code", {}, { name: "A" }), testNode("chk", "if", { combine: "all", rules: [{ left: "{{ input }}", op: "isTrue" }] }, { name: "Check" }), testNode("b", "code", {}, { name: "B" })],
+      [testEdge("t", "a"), testEdge("a", "chk"), loop("chk", "a", "false"), testEdge("chk", "b", "true"), loop("b", "a", "success")]
+    );
+    assert.deepEqual(problemsOf(wf).filter((problem) => problem.severity === "error"), []);
+  });
+
+  it("a loop edge may not leave the error output", () => {
+    const problems = problemsOf(base([loop("review", "Fix", "error")]));
+    assert.deepEqual(only(problems, "loop_from_error").map((problem) => problem.edgeId), ["review-error-Fix"]);
+  });
+
+  it("a loop edge must go back to an ancestor of its source", () => {
+    // Forward, to a block after the source.
+    let problems = problemsOf(
+      testWorkflow(
+        [manual(), fixer(), reviewer(), testNode("done", "code", {}, { name: "Done" })],
+        [testEdge("t", "Fix"), testEdge("Fix", "review"), loop("review", "done", "outcome:approved")]
+      )
+    );
+    assert.deepEqual(only(problems, "loop_not_ancestor").map((problem) => problem.edgeId), ["review-outcome:approved-done"]);
+    // Sideways, to a parallel branch.
+    problems = problemsOf(
+      testWorkflow(
+        [manual(), fixer(), reviewer(), testNode("side", "code", {}, { name: "Side" })],
+        [testEdge("t", "Fix"), testEdge("t", "side"), testEdge("Fix", "review"), loop("review", "side", "outcome:changes")]
+      )
+    );
+    assert.deepEqual(only(problems, "loop_not_ancestor").map((problem) => problem.edgeId), ["review-outcome:changes-side"]);
+  });
+
+  it("a loop edge cannot go back to a trigger", () => {
+    const problems = problemsOf(base([loop("review", "t", "outcome:changes")]));
+    const refused = only(problems, "edge_target_no_input");
+    assert.equal(refused.length, 1);
+    assert.match(refused[0]!.message, /loop edge cannot go back to a trigger/);
+  });
+
+  it("a handle with a loop edge carries nothing else", () => {
+    const problems = problemsOf(base([loop("review", "Fix", "outcome:changes"), testEdge("review", "done", "outcome:changes")]));
+    assert.deepEqual(only(problems, "loop_handle_shared").map((problem) => problem.edgeId), ["review-outcome:changes-Fix"]);
+    const twoLoops = problemsOf(
+      testWorkflow(
+        [manual(), testNode("a", "code", {}, { name: "A" }), fixer(), reviewer()],
+        [testEdge("t", "a"), testEdge("a", "Fix"), testEdge("Fix", "review"), loop("review", "Fix", "outcome:changes"), loop("review", "a", "outcome:changes")]
+      )
+    );
+    assert.equal(only(twoLoops, "loop_handle_shared").length, 2);
+  });
+
+  it("maxLoops is a whole number from 1 to 20", () => {
+    for (const maxLoops of [0, 21, 1.5, "2"]) {
+      const wf = base([loop("review", "Fix", "outcome:changes")]);
+      const raw = { ...wf, edges: wf.edges.map((edge) => (edge.loop ? { ...edge, loop: { maxLoops, session: "new" } } : edge)) };
+      const problems = only(problemsOf(raw), "loop_limit_range");
+      assert.equal(problems.length, 1, String(maxLoops));
+      assert.equal(problems[0]!.edgeId, "review-outcome:changes-Fix");
+    }
+    const wf = base([loop("review", "Fix", "outcome:changes")]);
+    const badSession = { ...wf, edges: wf.edges.map((edge) => (edge.loop ? { ...edge, loop: { maxLoops: 2, session: "sometimes" } } : edge)) };
+    assert.equal(only(problemsOf(badSession), "schema").length, 1);
+  });
+
+  it("an ordinary edge back next to a loop edge is still a cycle naming the edge", () => {
+    const problems = problemsOf(base([loop("review", "Fix", "outcome:changes"), testEdge("done", "Fix", "success")]));
+    // `done` is a Stop (no outputs): the back edge fails on its handle first.
+    assert.equal(only(problems, "edge_invalid_handle").length, 1);
+    const wf = testWorkflow(
+      [manual(), fixer(), reviewer(), testNode("after", "code", {}, { name: "After" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), loop("review", "Fix", "outcome:changes"), testEdge("review", "after", "outcome:approved"), testEdge("after", "Fix")]
+    );
+    const cycle = only(problemsOf(wf), "cycle");
+    assert.equal(cycle.length, 1);
+    assert.equal(cycle[0]!.edgeId, "after-success-Fix");
+  });
+
+  it("{{ loop.* }}: only pass and feedback; outside a loop, or feedback off the target, warns", () => {
+    const wf = testWorkflow(
+      [manual(), agent("Pre", "{{ loop.pass }}"), fixer(), reviewer(), agent("Done", "{{ loop.feedback }} {{ loop.count }}")],
+      [testEdge("t", "Pre"), testEdge("Pre", "Fix"), testEdge("Fix", "review"), testEdge("review", "Done", "outcome:approved"), loop("review", "Fix", "outcome:changes")]
+    );
+    const problems = problemsOf(wf);
+    assert.deepEqual(only(problems, "loop_outside_loop").map((problem) => problem.nodeId), ["Pre"]);
+    assert.deepEqual(only(problems, "loop_feedback_not_target").map((problem) => problem.nodeId), ["Done"]);
+    assert.deepEqual(only(problems, "unknown_reference").map((problem) => problem.nodeId), ["Done"]);
+  });
+
+  it("a gate choice may loop; an outcome block's absent success handle may not, loop or not", () => {
+    const gate = testNode("g", "gate", { question: "Ship?", choices: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }] }, { name: "Gate" });
+    const wf = testWorkflow(
+      [manual(), fixer(), reviewer(), gate, testNode("done", "stop", { as: "success" }, { name: "Done" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), loop("review", "Fix", "outcome:changes"), testEdge("review", "g", "outcome:approved"), loop("g", "Fix", "choice:reject"), testEdge("g", "done", "choice:approve")]
+    );
+    assert.deepEqual(problemsOf(wf).filter((problem) => problem.severity === "error"), []);
+    const shared = problemsOf(testWorkflow(wf.nodes, [...wf.edges, testEdge("g", "done", "choice:reject")]));
+    assert.deepEqual(only(shared, "loop_handle_shared").map((problem) => problem.edgeId), ["g-choice:reject-Fix"]);
+    assert.equal(only(problemsOf(base([loop("review", "Fix", "success")])), "edge_invalid_handle").length, 1);
+    assert.equal(only(problemsOf(base([loop("review", "Fix", "choice:changes")])), "edge_invalid_handle").length, 1, "an agent has no choice handles");
+  });
+
+  it("a disabled block whose pass-through handle carries a loop edge warns that the loop is not taken", () => {
+    const disabledFirst = testWorkflow(
+      [manual(), fixer(), testNode("review", "agent", { prompt: { kind: "text", text: "Review" }, outcomes: [{ id: "changes" }, { id: "approved" }] }, { name: "Review", disabled: true }), testNode("done", "stop", { as: "success" }, { name: "Done" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), testEdge("review", "done", "outcome:approved"), loop("review", "Fix", "outcome:changes")]
+    );
+    const warned = only(problemsOf(disabledFirst), "loop_from_disabled");
+    assert.deepEqual(warned.map((problem) => [problem.severity, problem.edgeId]), [["warning", "review-outcome:changes-Fix"]]);
+    // Its first outcome is not the loop's: nothing to say beyond the pass-through warning.
+    const disabledOther = testWorkflow(base([loop("review", "Fix", "outcome:changes")]).nodes.map((n) => (n.id === "review" ? { ...n, disabled: true } : n)), base([loop("review", "Fix", "outcome:changes")]).edges);
+    assert.deepEqual(only(problemsOf(disabledOther), "loop_from_disabled"), []);
+    assert.equal(only(problemsOf(disabledOther), "disabled_takes_first_outcome").length, 1);
+  });
+
+  it("a block reading a later block of its loop is told it reads the previous pass", () => {
+    const wf = testWorkflow(
+      [manual(), agent("Fix", "Fix: {{ nodes.Review.output.summary }}"), reviewer(), testNode("done", "stop", { as: "success" }, { name: "Done" })],
+      [testEdge("t", "Fix"), testEdge("Fix", "review"), testEdge("review", "done", "outcome:approved"), loop("review", "Fix", "outcome:changes")]
+    );
+    const warned = only(problemsOf(wf), "reference_not_upstream");
+    assert.equal(warned.length, 1);
+    assert.match(warned[0]!.message, /previous loop pass/);
   });
 });
 
@@ -538,5 +687,136 @@ describe("workflowSummaryErrors", () => {
     assert.equal(many.errorCount, 8);
     assert.deepEqual(many.errors?.map((p) => p.code), ["c0", "c1", "c2", "c3", "c4"]);
     assert.equal(many.errorsOmitted, 3);
+  });
+});
+
+describe("agent outcomes and outputs (spec 2026-11-10 §5.1, §7.5)", () => {
+  const outcomes = [{ id: "approved", label: "Approved" }, { id: "changes_requested" }];
+  const reviewer = (extra: Record<string, unknown> = {}, nodeExtra: Record<string, unknown> = {}) =>
+    testNode("Review", "agent", { prompt: { kind: "text", text: "Review it" }, ...extra }, { name: "Review", ...nodeExtra });
+  const post = () => testNode("Post", "http", { url: "https://x.test" });
+
+  it("accepts 2–12 unique outcomes with edges from their handles", () => {
+    const wf = testWorkflow([manual(), reviewer({ outcomes }), post()], [testEdge("t", "Review"), testEdge("Review", "Post", "outcome:approved")]);
+    assert.deepEqual(problemsOf(wf), []);
+  });
+
+  it("refuses one outcome, thirteen, and duplicate ids", () => {
+    const one = testWorkflow([manual(), reviewer({ outcomes: [{ id: "a" }] })], [testEdge("t", "Review")]);
+    assert.match(only(problemsOf(one), "outcomes_count")[0]!.message, /declare 2–12 outcomes \(it has 1\)/);
+    const many = Array.from({ length: 13 }, (_, i) => ({ id: `o${i}` }));
+    assert.equal(only(problemsOf(testWorkflow([manual(), reviewer({ outcomes: many })], [testEdge("t", "Review")])), "outcomes_count").length, 1);
+    const dup = testWorkflow([manual(), reviewer({ outcomes: [{ id: "a" }, { id: "a" }] })], [testEdge("t", "Review")]);
+    const [problem] = only(problemsOf(dup), "duplicate_outcome");
+    assert.equal(problem!.field, "config.outcomes.1.id");
+  });
+
+  it("an outcome's label is at most 80 characters", () => {
+    const at = (label: string) => testWorkflow([manual(), reviewer({ outcomes: [{ id: "a", label }, { id: "b" }] })], [testEdge("t", "Review")]);
+    assert.deepEqual(only(problemsOf(at("x".repeat(80))), "label_too_long"), []);
+    const [problem] = only(problemsOf(at("x".repeat(81))), "label_too_long");
+    assert.equal(problem!.severity, "error");
+    assert.equal(problem!.field, "config.outcomes.0.label");
+    assert.match(problem!.message, /at most 80 characters/);
+  });
+
+  it("refuses a malformed outcome id through the schema", () => {
+    const wf = testWorkflow([manual()], [], {});
+    const raw = { ...wf, nodes: [...wf.nodes, { ...reviewer(), config: { ...reviewer().config, outcomes: [{ id: "Approved" }, { id: "x" }] } }] };
+    assert.ok(only(problemsOf(raw), "schema").some((p) => (p.field ?? "").startsWith("config.outcomes.0.id")));
+  });
+
+  it("an edge from an agent with outcomes must leave an outcome or error handle — never success", () => {
+    const wf = testWorkflow([manual(), reviewer({ outcomes }), post()], [testEdge("t", "Review"), testEdge("Review", "Post")]);
+    const [problem] = only(problemsOf(wf), "edge_invalid_handle");
+    assert.match(problem!.message, /declares outcomes, so it has no "success" output: connect from one of outcome:approved, outcome:changes_requested, error/);
+    const viaError = testWorkflow([manual(), reviewer({ outcomes }), post()], [testEdge("t", "Review"), testEdge("Review", "Post", "error")]);
+    assert.deepEqual(only(problemsOf(viaError), "edge_invalid_handle"), []);
+    const unknown = testWorkflow([manual(), reviewer({ outcomes }), post()], [testEdge("t", "Review"), testEdge("Review", "Post", "outcome:nope")]);
+    assert.match(only(problemsOf(unknown), "edge_invalid_handle")[0]!.message, /has no "outcome:nope" output/);
+  });
+
+  it("outputs only: success and error stay", () => {
+    const wf = testWorkflow([manual(), reviewer({ outputs: [{ name: "pr_url", type: "string" }] }), post()], [testEdge("t", "Review"), testEdge("Review", "Post")]);
+    assert.deepEqual(problemsOf(wf), []);
+  });
+
+  it("checks output counts, unique names and enum values", () => {
+    const tooMany = Array.from({ length: 21 }, (_, i) => ({ name: `o${i}`, type: "string" }));
+    const at = (outputs: unknown[]) => problemsOf(testWorkflow([manual(), reviewer({ outputs })], [testEdge("t", "Review")]));
+    assert.equal(only(at(tooMany), "outputs_count").length, 1);
+    assert.equal(only(at([{ name: "a", type: "string" }, { name: "a", type: "number" }]), "duplicate_output")[0]!.field, "config.outputs.1.name");
+    assert.match(only(at([{ name: "env", type: "enum" }]), "enum_values")[0]!.message, /needs 1–50 values \(it has 0\)/);
+    assert.match(only(at([{ name: "env", type: "enum", values: ["a", "a"] }]), "enum_values")[0]!.message, /twice/);
+    assert.deepEqual(only(at([{ name: "env", type: "enum", values: ["stg", "prd"] }]), "enum_values"), []);
+    const ignored = only(at([{ name: "n", type: "number", values: ["1"] }]), "enum_values");
+    assert.equal(ignored[0]!.severity, "warning");
+  });
+
+  it("warns about a disabled agent with outcomes: it passes through on its first outcome", () => {
+    const wf = testWorkflow([manual(), reviewer({ outcomes }, { disabled: true }), post()], [testEdge("t", "Review"), testEdge("Review", "Post", "outcome:approved")]);
+    const [problem] = only(problemsOf(wf), "disabled_takes_first_outcome");
+    assert.equal(problem!.severity, "warning");
+    assert.match(problem!.message, /first outcome, "approved"/);
+  });
+
+  it("a pin on an agent with outcomes must name a declared outcome", () => {
+    const nodes = [manual(), reviewer({ outcomes }), post()];
+    const edges = [testEdge("t", "Review"), testEdge("Review", "Post", "outcome:approved")];
+    const missing = problemsOf(testWorkflow(nodes, edges, { pinned: { Review: { text: "ok" } } }));
+    assert.match(only(missing, "pinned_outcome_missing")[0]!.message, /must include "outcome": one of `approved` or `changes_requested`/);
+    const wrong = problemsOf(testWorkflow(nodes, edges, { pinned: { Review: { outcome: "nope" } } }));
+    assert.equal(only(wrong, "pinned_outcome_missing").length, 1);
+    assert.deepEqual(problemsOf(testWorkflow(nodes, edges, { pinned: { Review: { outcome: "approved", text: "ok" } } })), []);
+  });
+});
+
+describe("manual-trigger inputs (spec 2026-11-10 §4)", () => {
+  const typed = (inputs: unknown[]) => testNode("t", "trigger.manual", { inputs }, { name: "Manual" });
+  const ENV = { name: "env", type: "enum", values: ["stg", "prd"], required: true };
+
+  it("reports the declaration rules with their fields", () => {
+    const wf = testWorkflow([typed([ENV, { ...ENV }, { name: "n", type: "number", default: "x" }]), agent("A", "Deploy {{ trigger.input.env }}")], [testEdge("t", "A")]);
+    const problems = problemsOf(wf);
+    assert.deepEqual(only(problems, "duplicate_input").map((p) => p.field), ["config.inputs.1.name"]);
+    assert.deepEqual(only(problems, "input_default").map((p) => p.field), ["config.inputs.2.default"]);
+    assert.equal(only(problems, "duplicate_input")[0]!.nodeId, "t");
+    assert.equal(hasWorkflowErrors(problems), true);
+  });
+
+  it("warns when an expression reads an input the trigger does not declare", () => {
+    const wf = testWorkflow(
+      [
+        typed([ENV]),
+        agent("A", "{{ trigger.input.env }} {{ trigger.input.target }} {{ input.input.region }} {{ input.input.env }}"),
+        agent("B", "{{ nodes.Manual.output.input.envv }} {{ nodes.Manual.output.input.env }} {{ trigger.input }}")
+      ],
+      [testEdge("t", "A"), testEdge("A", "B")]
+    );
+    const warned = only(problemsOf(wf), "undeclared_input");
+    assert.deepEqual(
+      warned.map((p) => [p.nodeId, p.severity, p.field]),
+      [
+        ["A", "warning", "config.prompt.text"],
+        ["A", "warning", "config.prompt.text"],
+        ["B", "warning", "config.prompt.text"]
+      ]
+    );
+    assert.match(warned[0]!.message, /\{\{ trigger\.input\.target \}\} reads the input "target", which the manual trigger does not declare \(it declares env\)/);
+    assert.match(warned[1]!.message, /input\.input\.region/);
+    assert.match(warned[2]!.message, /envv/);
+  });
+
+  it("no declared inputs: any input reference is fine", () => {
+    const wf = testWorkflow([manual(), agent("A", "{{ trigger.input.anything }} {{ input.input.x }}")], [testEdge("t", "A")]);
+    assert.deepEqual(only(problemsOf(wf), "undeclared_input"), []);
+  });
+
+  it("`input.input.x` is checked only in a block wired straight from a typed trigger", () => {
+    const wf = testWorkflow(
+      [typed([ENV]), agent("A", "x"), agent("B", "{{ input.input.other }}")],
+      [testEdge("t", "A"), testEdge("A", "B")]
+    );
+    assert.deepEqual(only(problemsOf(wf), "undeclared_input"), []);
   });
 });

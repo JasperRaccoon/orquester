@@ -63,10 +63,9 @@ function previewOutput(output: unknown): { output: unknown; truncated: boolean }
  * `waitingOn` and `outputFile`) is dropped and every block output is cut to the inline preview.
  */
 export function persistedRunToWire(run: PersistedRun): WorkflowRun {
-  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, subWorkflows: _frozen, parentAttempt: _attempt, blocks, ...rest } = run;
+  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, subWorkflows: _frozen, parentAttempt: _attempt, gateNotices: _notices, blocks, ...rest } = run;
   const wireBlocks: Record<string, WorkflowBlockRun> = {};
-  for (const [nodeId, block] of Object.entries(blocks)) {
-    const { waitingOn: _waitingOn, outputFile, ...wire } = block;
+  const previewed = <T extends { output?: unknown; outputTruncated?: boolean }>(wire: T, outputFile: string | undefined): T => {
     if (wire.output !== undefined) {
       const preview = previewOutput(wire.output);
       wire.output = preview.output;
@@ -74,7 +73,17 @@ export function persistedRunToWire(run: PersistedRun): WorkflowRun {
     } else if (outputFile !== undefined) {
       wire.outputTruncated = true;
     }
-    wireBlocks[nodeId] = wire;
+    return wire;
+  };
+  for (const [nodeId, block] of Object.entries(blocks)) {
+    // Loops: earlier passes cross without their file paths and interruption markers, and the
+    // pass bookkeeping (`passAttemptBase`, `loopEdgeId`) stays in the store.
+    const { waitingOn: _waitingOn, outputFile, passes, passAttemptBase: _base, loopEdgeId: _edge, ...wire } = block;
+    const out: WorkflowBlockRun = previewed(wire, outputFile);
+    if (passes !== undefined) {
+      out.passes = passes.map(({ outputFile: passFile, interruptedFrom: _interrupted, ...pass }) => previewed(pass, passFile));
+    }
+    wireBlocks[nodeId] = out;
   }
   const revisions = subWorkflowRevisionsOf(run);
   return { ...(rest as Omit<WorkflowRun, "blocks">), blocks: wireBlocks, ...(revisions !== undefined ? { subWorkflowRevisions: revisions } : {}) };

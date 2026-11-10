@@ -20,6 +20,7 @@ import {
   MousePointerClick,
   OctagonX,
   Route,
+  ShieldCheck,
   Split,
   SquareTerminal,
   StickyNote,
@@ -58,6 +59,7 @@ const ACCENT: Record<WorkflowNodeType, BlockAccent> = {
   merge: "flow",
   stop: "flow",
   wait: "flow",
+  gate: "flow",
   workflow: "flow",
   note: "note"
 };
@@ -84,6 +86,7 @@ export const BLOCK_ICONS: Record<WorkflowNodeType, LucideIcon> = {
   merge: GitMerge,
   stop: OctagonX,
   wait: Hourglass,
+  gate: ShieldCheck,
   workflow: WorkflowIcon,
   note: StickyNote
 };
@@ -118,7 +121,7 @@ export const PALETTE_GROUPS: readonly PaletteGroup[] = [
   { id: "triggers", label: "Triggers", types: ["trigger.manual", "trigger.schedule", "trigger.git"] },
   { id: "agents", label: "Agents", types: ["agent"] },
   { id: "code", label: "Code", types: ["code", "shell"] },
-  { id: "flow", label: "Flow", types: ["if", "switch", "merge", "wait", "stop", "workflow", "note"] },
+  { id: "flow", label: "Flow", types: ["if", "switch", "gate", "merge", "wait", "stop", "workflow", "note"] },
   { id: "integrations", label: "Integrations", types: ["http"] }
 ];
 
@@ -136,6 +139,7 @@ const KEYWORDS: Partial<Record<WorkflowNodeType, string>> = {
   merge: "join combine wait all",
   stop: "end finish fail exit",
   wait: "delay sleep pause until",
+  gate: "approval approve review decision human person confirm choice",
   workflow: "subworkflow sub child call",
   note: "sticky comment annotation"
 };
@@ -330,11 +334,40 @@ function formatMinutes(minutes: number): string {
   return restHours === 0 ? `${days} d` : `${days} d ${restHours} h`;
 }
 
+/** Who decides a gate, in a few words: "You decide", "Claude decides", "The launching chat decides". */
+export function gateDeciderText(node: Extract<WorkflowNode, { type: "gate" }>, ctx: NodeSummaryContext = {}): string {
+  const decider = node.config.decider;
+  if (decider.kind === "agent") {
+    const first = decider.chain[0];
+    return first ? `${ctx.agentLabel?.(first.agent) ?? defaultAgentLabel(first.agent)} decides` : "A reviewer agent decides";
+  }
+  if (decider.kind === "launcher") return "The launching chat decides";
+  return "You decide";
+}
+
+/**
+ * A gate's line (spec 2026-11-10 §6.1): its question when it has one, else its
+ * choices ("Approve / Reject"), after who decides when that is not the user.
+ */
+function gateSummary(node: Extract<WorkflowNode, { type: "gate" }>, ctx: NodeSummaryContext): string {
+  const question = node.config.question.trim().replace(/\s+/g, " ");
+  const choices = node.config.choices.map((choice) => choice.label.trim() || choice.id).filter(Boolean);
+  const body = question || (choices.length > 0 ? choices.join(" / ") : "No choices yet");
+  if (node.config.decider.kind === "human") return truncate(body, 48);
+  return truncate(`${gateDeciderText(node, ctx)} · ${body}`, 48);
+}
+
 /** The one line under a block's name. */
 export function nodeSummary(node: WorkflowNode, ctx: NodeSummaryContext = {}): string {
   switch (node.type) {
-    case "trigger.manual":
+    case "trigger.manual": {
+      const inputs = node.config.inputs ?? [];
+      if (inputs.length > 0) {
+        const names = inputs.slice(0, 3).map((decl) => decl.name).join(", ");
+        return `Run now · ${inputs.length === 1 ? "1 input" : `${inputs.length} inputs`}: ${names}${inputs.length > 3 ? ", …" : ""}`;
+      }
       return node.config.inputExample?.trim() ? "Run now · with input" : "Run now";
+    }
     case "trigger.schedule":
       return describeSchedule(node.config.preset, node.config.cron);
     case "trigger.git":
@@ -378,6 +411,8 @@ export function nodeSummary(node: WorkflowNode, ctx: NodeSummaryContext = {}): s
       return node.config.kind === "duration"
         ? `Wait ${formatMinutes(node.config.minutes)}`
         : `Until ${node.config.time}${node.config.timezone ? ` ${node.config.timezone}` : ""}`;
+    case "gate":
+      return gateSummary(node, ctx);
     case "workflow": {
       if (!node.config.workflowId || node.config.workflowId === UNSET_SUBWORKFLOW_ID) return "Pick a workflow";
       const name = ctx.workflowName?.(node.config.workflowId);

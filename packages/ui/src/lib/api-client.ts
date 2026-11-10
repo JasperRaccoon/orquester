@@ -260,12 +260,16 @@ import type {
 } from "@orquester/api";
 import type {
   CreateDesktopRequest,
+  DesktopActionLogResponse,
   DesktopAppSummary,
+  DesktopController,
+  DesktopControlRequest,
   DesktopHostStatus,
   DesktopSuggestionsResponse,
   DesktopSummary,
   DesktopWindowAction,
-  LaunchAppRequest
+  LaunchAppRequest,
+  UpdateDesktopRequest
 } from "@orquester/api";
 import type {
   AgentProfileAgentId,
@@ -289,6 +293,10 @@ import type {
   AccountPreviewRequest,
   AccountPreviewResponse,
   CreateWorkflowRequest,
+  DecideWorkflowGateRequest,
+  DecideWorkflowGateResponse,
+  ListWorkflowGatesQuery,
+  ListWorkflowGatesResponse,
   GetWorkflowNodeOutputResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
@@ -303,6 +311,7 @@ import type {
   ValidateWorkflowRequest,
   ValidateWorkflowResponse,
   WorkflowErrorCode,
+  WorkflowInputError,
   WorkflowProblem,
   WorkflowWriteResponse
 } from "@orquester/api";
@@ -1813,6 +1822,19 @@ export class ApiClient {
     return this.workflowSend("POST", workflowRoutes.runDeleteTempProject(runId));
   }
 
+  /** Decide (or, for agent deciders, escalate) a gate; a gate decided earlier answers `alreadyDecided: true` (spec 2026-11-10 §6.2). */
+  decideWorkflowGate(runId: string, gateId: string, req: DecideWorkflowGateRequest): Promise<DecideWorkflowGateResponse> {
+    return this.workflowSend("POST", workflowRoutes.gateDecide(runId, gateId), { body: req });
+  }
+
+  /** Gates across projects, waiting ones unless `includeDecided` (spec 2026-11-10 §8). */
+  listWorkflowGates(query: ListWorkflowGatesQuery = {}, signal?: AbortSignal): Promise<ListWorkflowGatesResponse> {
+    return this.workflowSend("GET", workflowRoutes.gates, {
+      query: { projectPath: query.projectPath, includeDecided: query.includeDecided ? "1" : undefined },
+      signal
+    });
+  }
+
   /** A block's whole output (a run summary carries only a preview). */
   getWorkflowNodeOutput(runId: string, nodeId: string, signal?: AbortSignal): Promise<GetWorkflowNodeOutputResponse> {
     return this.workflowSend("GET", workflowRoutes.nodeOutput(runId, nodeId), { signal });
@@ -2528,6 +2550,11 @@ export class ApiClient {
     return this.send("POST", desktopRoutes.create, { body });
   }
 
+  /** Change a desktop's settings (its video backend: only the stream restarts, spec 2026-11-10 R4.1). */
+  updateDesktop(id: string, body: UpdateDesktopRequest): Promise<DesktopSummary> {
+    return this.send("PATCH", desktopRoutes.desktop(id), { body });
+  }
+
   stopDesktop(id: string): Promise<DesktopSummary> {
     return this.send("POST", desktopRoutes.stop(id));
   }
@@ -2561,6 +2588,32 @@ export class ApiClient {
 
   desktopWindowAction(id: string, windowId: string, action: DesktopWindowAction): Promise<void> {
     return this.send("POST", desktopRoutes.windowAction(id, windowId, action));
+  }
+
+  /** The desktop's last agent actions (spec 2026-11-10 §3.3); validated by `lib/desktops/actions-store.ts`. */
+  desktopActionLog(id: string, signal?: AbortSignal): Promise<DesktopActionLogResponse> {
+    return this.send("GET", desktopRoutes.actionLog(id), { signal });
+  }
+
+  /** Hand control of a desktop's input over: `user` takes over, `agent` gives back, `null` clears (§3.1). */
+  setDesktopControl(id: string, controller: DesktopController | null): Promise<DesktopSummary> {
+    const body: DesktopControlRequest = { controller };
+    return this.send("PUT", desktopRoutes.control(id), { body });
+  }
+
+  /**
+   * Authenticated http(s):// URL of a kept desktop screenshot for an `<img>` (chat rows, the
+   * Activity popover), or null off HTTP. As {@link deviceImageUrl}: the bearer rides as `?token=`
+   * because an `<img>` cannot send a header.
+   */
+  desktopScreenshotUrl(id: string, screenshotId: string): string | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const path = desktopRoutes.screenshot(id, screenshotId);
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    const token = this.connection.password ? `?token=${encodeURIComponent(this.connection.password)}` : "";
+    return `${base}${path}${token}`;
   }
 
   /**
@@ -2743,7 +2796,12 @@ const WORKFLOW_ERROR_CODES: ReadonlySet<string> = new Set<WorkflowErrorCode>([
   "LIMIT_EXCEEDED",
   "SECRET_INVALID",
   "RUN_NOT_ACTIVE",
-  "ENGINE_UNAVAILABLE"
+  "ENGINE_UNAVAILABLE",
+  "INVALID_INPUT",
+  "GATE_NOT_FOUND",
+  "GATE_NOT_DECIDER",
+  "NOT_A_WORKFLOW_STEP",
+  "INVALID_REPORT"
 ]);
 
 /** One validation problem off the wire, field by field; `null` when unusable. */
@@ -2796,6 +2854,20 @@ export class WorkflowApiError extends ApiError {
   get code(): WorkflowErrorCode | null {
     const code = this.errorObject?.code ?? (this.body as { code?: unknown } | undefined)?.code;
     return typeof code === "string" && WORKFLOW_ERROR_CODES.has(code) ? (code as WorkflowErrorCode) : null;
+  }
+
+  /** `INVALID_INPUT`'s input errors (sanitized, field by field); `[]` otherwise. */
+  get inputErrors(): WorkflowInputError[] {
+    const raw = this.errorObject?.inputErrors;
+    if (!Array.isArray(raw)) return [];
+    const errors: WorkflowInputError[] = [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.message !== "string") continue;
+      errors.push(typeof record.input === "string" ? { input: record.input, message: record.message } : { message: record.message });
+    }
+    return errors;
   }
 
   /** `INVALID_WORKFLOW`'s problems (sanitized); `[]` otherwise. */

@@ -64,6 +64,9 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   run_workflow: { required: ["workflowId", "revision"], annotations: WRITE },
   get_workflow_runs: { required: [], annotations: READ },
   cancel_workflow_run: { required: ["runId"], annotations: WRITE_IDEMPOTENT },
+  // Gates (spec 2026-11-10 §8): a repeated decision answers alreadyDecided.
+  decide_workflow_gate: { required: ["runId"], annotations: WRITE_IDEMPOTENT },
+  list_workflow_gates: { required: [], annotations: READ },
   list_workflow_secrets: { required: [], annotations: READ },
   // Deletes too (delete: true), and replacing a value loses the old one.
   set_workflow_secret: { required: ["name"], annotations: DESTROY },
@@ -74,6 +77,8 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   // Desktops (desktop tab spec §7.4): launching an app runs anything, so no write claims a closed world.
   get_desktops: { required: [], annotations: READ },
   control_desktop: { required: ["action"], annotations: { ...WRITE, destructiveHint: true } },
+  // Input can do anything an app lets a person do.
+  desktop_action: { required: ["desktopId", "action"], annotations: { ...WRITE, destructiveHint: true } },
   secret_files_status: { required: [], annotations: READ }
 };
 

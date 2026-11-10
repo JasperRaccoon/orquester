@@ -95,6 +95,17 @@ fi
 if [ -n "$BOX_AGENT_WARNING" ]; then
   echo "[provision] WARNING: $BOX_AGENT_WARNING (see above) — continuing; deploy again to retry." >&2
 fi
+# voxl, the optional H.264 desktop streamer (best-effort: desktops fall back to RFB without it).
+VOXL_STATUS="skipped"
+if [ -f deploy/install-voxl.sh ]; then
+  if bash deploy/install-voxl.sh </dev/null; then
+    VOXL_STATUS="$(/usr/local/bin/voxl --version 2>/dev/null | sed -n 's/^voxl //p' | head -n1)"
+    [ -n "$VOXL_STATUS" ] || VOXL_STATUS="ok"
+  else
+    VOXL_STATUS="FAILED: deploy/install-voxl.sh (see above)"
+    echo "[provision] WARNING: voxl not installed — continuing; desktops stream with RFB. Deploy again to retry." >&2
+  fi
+fi
 # The daemon loads better-sqlite3 and node-pty under /usr/bin/node (the unit's
 # ExecStart interpreter): prove they load there, rebuilding any that don't,
 # before the service is started below.
@@ -154,6 +165,7 @@ ufw allow 443/tcp
 ufw --force enable
 
 log "DONE — https://$DOMAIN"
+echo "[provision] voxl=$VOXL_STATUS"
 if [ -n "$BOX_AGENT_WARNING" ]; then
   echo "[provision] WARNING: $BOX_AGENT_WARNING — boxes fall back to an on-demand build; deploy again to retry." >&2
 fi

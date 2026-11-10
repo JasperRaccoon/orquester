@@ -56,6 +56,7 @@ export function expandVars(value: string, vars: ConfigVars): string {
 //              desktops.json, desktops/<id>/ (per-desktop runtime dir, 0700),
 //              plugins.json, plugins/<id>/ (built-in plugin runtime files),
 //              logs/<yyyy-mm-dd>.log
+//     bin/     optional tool binaries the daemon looks for before PATH (voxl)
 //
 // Workspaces live wherever daemon.json `workspacesDir` points (default
 // `$userhome/workspaces`; the stage sandbox uses `$appdir/workspaces`).
@@ -387,6 +388,25 @@ export function desktopsRuntimeDir(baseDir: string): string {
 
 export function desktopRuntimeDir(baseDir: string, desktopId: string): string {
   return joinPath(desktopsRuntimeDir(baseDir), desktopId);
+}
+
+/** `<appdir>/bin`: optional tool binaries the daemon prefers over PATH. */
+export function appBinDir(baseDir: string): string {
+  return joinPath(baseDir, "bin");
+}
+
+/** `<appdir>/bin/voxl`: the voxl H.264 streamer, looked for after `ORQUESTER_VOXL_BIN` and before PATH. */
+export function voxlBinaryPath(baseDir: string): string {
+  return joinPath(appBinDir(baseDir), "voxl");
+}
+
+/**
+ * A desktop's kept automation screenshots (`<id>.<png|jpg>` + `<id>.json`; 0700), on the daemon's
+ * host for every desktop. Outside {@link desktopRuntimeDir}, which a stop clears: chat thumbnails
+ * outlive a stop and go only when the desktop closes.
+ */
+export function desktopScreenshotsDir(baseDir: string, desktopId: string): string {
+  return joinPath(daemonConfigDir(baseDir), "desktop-screenshots", desktopId);
 }
 
 export function todosIndexPath(baseDir: string): string {
@@ -2914,6 +2934,12 @@ export const desktopRecordSchema = z
     /** The host was started with PulseAudio (decided at create time). */
     audio: z.boolean().optional(),
     /**
+     * The video backend (spec 2026-11-10 §5): `rfb` or `voxl`. Kept as written (another version's
+     * value survives a rewrite); read it with {@link desktopRecordVideo}, which takes anything else
+     * (or nothing, in older records) as `rfb`.
+     */
+    video: z.unknown().optional(),
+    /**
      * boxes: where the desktop runs when it is not this machine — a Linux box (Ephemeral AI VMs),
      * with the desktop's directory there. Null (or absent, in records from before VM desktops): this
      * machine. A malformed value rejects the record (kept verbatim) rather than reading it as a host desktop.
@@ -2951,6 +2977,11 @@ export const recentLaunchSchema = z
   .passthrough();
 
 export type DesktopRecord = z.infer<typeof desktopRecordSchema>;
+
+/** A record's video backend: `voxl` only when it says so, else `rfb` (absent, unknown, malformed). */
+export function desktopRecordVideo(record: { video?: unknown }): "rfb" | "voxl" {
+  return record.video === "voxl" ? "voxl" : "rfb";
+}
 export type RecentLaunchRecord = z.infer<typeof recentLaunchSchema>;
 
 /**

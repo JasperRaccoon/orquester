@@ -7,6 +7,7 @@ import { isGlobalPluginEnabled } from "../../lib/plugins-state";
 import { useAppStore } from "../../store/app";
 import { useAgentSessions } from "../attention";
 import { RIGHT_RAIL_PANEL_REGISTRY } from "../right-rail/panels";
+import { useGateAttention } from "../../lib/workflows/gate-hooks";
 import { useWorkflowAttention } from "../workflows/runs/WorkflowAttention";
 import { setSidebarView, useSidebarView, type SidebarView } from "./sidebar-view";
 
@@ -58,7 +59,8 @@ const ActivityButton: React.FC<{
  * sidebar view: each shows its server-level view in the main area (pressed
  * while it shows; a second click goes back to the project).
  * A view that is not showing carries a dot when it holds something that wants
- * the user: an agent blocked on them, a failed workflow run.
+ * the user: an agent blocked on them, a failed workflow run, a workflow gate
+ * waiting for their decision.
  */
 export const ActivityBar: React.FC = () => {
   const view = useSidebarView();
@@ -70,11 +72,14 @@ export const ActivityBar: React.FC = () => {
   const usageOpen = useAppStore((s) => s.usageViewOpen);
   const agentWaiting = useAgentSessions().some((entry) => entry.bucket === "attention");
   const workflowFailed = useWorkflowAttention().length > 0;
+  // A gate waiting for the user (spec 2026-11-10 §6.4): a decision only they can make.
+  const gateWaiting = useGateAttention().length > 0;
 
   const badgeOf = (id: SidebarView): "warn" | "danger" | null => {
     if (id === view) return null;
     if (id === "projects" && agentWaiting) return "warn";
     if (id === "workflows" && workflowFailed) return "danger";
+    if (id === "workflows" && gateWaiting) return "warn";
     return null;
   };
 

@@ -107,7 +107,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "reads",
     label: "Workflows, agent config & prompts (read)",
-    tools: [read("list_workflows"), read("get_workflow"), read("get_workflow_runs"), read("get_agent_profile"), read("list_saved_prompts")]
+    tools: [read("list_workflows"), read("get_workflow"), read("get_workflow_runs"), read("list_workflow_gates"), read("get_agent_profile"), read("list_saved_prompts")]
   },
   {
     id: "notes",
@@ -123,7 +123,8 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       read("get_turn_diff"),
       read("read_tool_output"),
       read("list_conversations"),
-      act("notify_user")
+      act("notify_user"),
+      act("report_step_result")
     ]
   },
   {
@@ -142,6 +143,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       read("preview_expression"),
       admin("run_workflow"),
       act("cancel_workflow_run"),
+      act("decide_workflow_gate"),
       read("list_workflow_secrets"),
       admin("set_workflow_secret")
     ]
@@ -154,7 +156,8 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "desktops",
     label: "Desktops (opening needs your approval)",
-    tools: [read("get_desktops"), admin("control_desktop")]
+    // `desktop_action` (desktop agents spec 2026-11-10 §2.5): Read for screenshots, waits and reading the clipboard.
+    tools: [read("get_desktops"), admin("control_desktop"), act("desktop_action")]
   },
   {
     id: "secret-files",

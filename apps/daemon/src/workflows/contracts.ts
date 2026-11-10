@@ -7,19 +7,33 @@ import type {
   AccountSelectionDecision,
   AgentChainEntry,
   ListWorkflowRunsResponse,
+  ReportWorkflowStepRequest,
+  ReportWorkflowStepResponse,
   RunWorkflowRequest,
   RunWorkflowResponse,
   Workflow,
   WorkflowBlockError,
+  WorkflowBlockPass,
   WorkflowBlockRun,
+  DecideWorkflowGateRequest,
+  DecideWorkflowGateResponse,
+  ListWorkflowGatesResponse,
+  WorkflowGateDecision,
+  WorkflowGateDeciderKind,
+  WorkflowGatePhase,
+  WorkflowGateState,
+  WorkflowRunStartedBy,
+  WorkflowLoopSessionMode,
   WorkflowNode,
   WorkflowNodeType,
   WorkflowRun,
+  WorkflowStepReport,
   WorkflowRunSummary,
   WorkflowSecretName,
   WorkflowSummary,
   WorkflowTriggerPayload
 } from "@orquester/api";
+import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import type { AccountCooldown } from "@orquester/config";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 
@@ -101,12 +115,96 @@ export type WaitingOn =
   | { kind: "process"; pid: number; starttime: number; attemptDir: string; deadlineAt: string; spawning?: true }
   | { kind: "timer"; until: string; purpose: "wait" | "retry-delay" | "wait-for-reset" }
   | { kind: "child-run"; runId: string }
-  | { kind: "http"; method: string; startedAt: string };
+  | { kind: "http"; method: string; startedAt: string }
+  /**
+   * A gate (spec 2026-11-10 §6.2) — a gate block's, or a loop-limit gate on a loop edge's source
+   * block (§7.2). Persisted BEFORE any notification or decider launch; a wait state (no agent or
+   * process slot). The gate's full record is `PersistedRun.gates[gateId]`.
+   */
+  | {
+      kind: "gate";
+      gateId: string;
+      openedAt: string;
+      phase: WorkflowGatePhase;
+      /** When the current phase started (the person phase's `timeout.minutes` count from it). */
+      phaseStartedAt: string;
+      /** The current phase's persisted deadline, re-armed after a restart. */
+      phaseDeadlineAt: string;
+      decider: { kind: WorkflowGateDeciderKind; label: string };
+      /** The reviewer agent's chat, or the launcher's thread, once known. */
+      deciderSessionId?: string;
+      escalatedAt?: string;
+      /** The decider agent's resume state (agent decider; same vocabulary as the agent block's). */
+      agent?: Omit<Extract<WaitingOn, { kind: "agent" }>, "kind">;
+      /** Reminders the reviewer agent got after a turn that settled without a decision (at most one). */
+      reminders?: number;
+      /**
+       * The reviewer's current turn ended (its agent state cleared in this same write) and the gate
+       * has not acted on it yet: a restart then reminds or escalates — never a new reviewer chat.
+       */
+      turnEnded?: true;
+      /**
+       * The launcher's queued message: its command id is minted and persisted BEFORE the first post
+       * (the host's receipt dedupes a re-post after a restart); `delivered` once the chat took it.
+       */
+      launcher?: { commandId: string; delivered?: true };
+      /**
+       * A loop-limit gate (§7.2), engine-owned: the block finished (its output kept) on `handle`,
+       * whose loop edge `edgeId` was at its limit. Its gate id is minted and persisted here with the
+       * block's finish, BEFORE the record is stored and the person pushed; a restart re-opens or
+       * re-awaits exactly that gate. The block's executor never resumes this wait.
+       */
+      loopLimit?: { edgeId: string; handle: string };
+    };
 
 export interface PersistedBlockState extends WorkflowBlockRun {
   waitingOn?: WaitingOn;
   /** The whole output, when it is bigger than the inline preview (the file under the attempt dir). */
   outputFile?: string;
+  // Loops (spec 2026-11-10 §7.2; engine-internal, never on the wire)
+  /** Earlier passes, as persisted (their output files; an interruption still to settle). */
+  passes?: PersistedBlockPass[];
+  /**
+   * Attempts the block's earlier passes used. `attempt` counts within the pass (the retry policy
+   * and `{{ run.attempt }}` read it); storage — attempt directories, output files, a Run workflow
+   * block's child-run id — is keyed by `passAttemptBase + attempt`, unique across passes.
+   */
+  passAttemptBase?: number;
+  /** The loop edge whose reset started this pass. */
+  loopEdgeId?: string;
+}
+
+/** One earlier pass of a block, as `run.json` keeps it. */
+export type PersistedBlockPass = WorkflowBlockPass & {
+  outputFile?: string;
+  /**
+   * The pass was running when a loop reset it: what it waited on (an agent turn, a process, a child
+   * run…). Cleared once its executor has been stopped; a restart before that stops it then.
+   */
+  interruptedFrom?: WaitingOn;
+};
+
+/**
+ * What an executor knows of the loop that ran its block again (spec 2026-11-10 §7.3): set on
+ * `NodeExecutionContext.loop` from a block's second pass on.
+ */
+export interface NodeLoopContext {
+  /** This block's pass (≥ 2). */
+  pass: number;
+  /** The loop edge whose reset started this pass. */
+  edgeId: string;
+  /** "Workflow loop: pass `loopPass` of up to `maxPasses`" — the edge's count + 1, its limit + 1. */
+  loopPass: number;
+  maxPasses: number;
+  /** The edge's session option: it applies to every agent block of the reset set. */
+  session: WorkflowLoopSessionMode;
+  /** This block is the loop edge's target (only the target receives the feedback). */
+  target: boolean;
+  sourceName: string;
+  targetName: string;
+  feedback?: string;
+  /** This block's previous pass (its session, report and output preview), when it ran one. */
+  previous?: WorkflowBlockPass;
 }
 
 /** `run.json`. */
@@ -144,6 +242,11 @@ export interface PersistedRun extends Omit<WorkflowRun, "blocks"> {
    * from parent run, block and attempt). Absent on a child recorded by an older build.
    */
   parentAttempt?: number;
+  /**
+   * Gates whose person-phase push went out, by gate id → that phase's start (spec 2026-11-10 §6.4):
+   * a restart never pushes the same phase twice. Engine bookkeeping, never on the wire.
+   */
+  gateNotices?: Record<string, string>;
 }
 
 export interface RunStore {
@@ -187,9 +290,23 @@ export interface FireRequest {
   text?: string;
 }
 
+/** Who asks for a run, as the DAEMON knows it (the route's principal) — never a request field. */
+export interface RunCaller {
+  /** Absent: `{kind: "human"}`. */
+  startedBy?: WorkflowRunStartedBy;
+}
+
 export interface WorkflowEngine {
   /** Manual / test / retry runs (routes, MCP). Applies the overlap policy unless `force`. */
-  run(workflowId: string, request: RunWorkflowRequest): Promise<RunWorkflowResponse>;
+  run(workflowId: string, request: RunWorkflowRequest, caller?: RunCaller): Promise<RunWorkflowResponse>;
+  /**
+   * Decide (or, for an agent decider, escalate) a waiting gate (spec 2026-11-10 §6.2, §6.3): the
+   * first decision wins and is persisted before the run moves on. `principal` is the route's —
+   * who decides is the daemon's record, never an argument.
+   */
+  decideGate?(runId: string, gateId: string, request: DecideWorkflowGateRequest, principal: CallerPrincipal): Promise<DecideWorkflowGateResponse>;
+  /** Gates across runs: waiting ones (active runs), and with `includeDecided` the retained runs' too. */
+  listGates?(query: { projectPath?: string; includeDecided?: boolean }): Promise<ListWorkflowGatesResponse>;
   /** Test one block (upstream from pins, else the last run). */
   testNode(workflowId: string, nodeId: string): Promise<RunWorkflowResponse>;
   cancel(runId: string): Promise<boolean>;
@@ -203,6 +320,12 @@ export interface WorkflowEngine {
   /** Whether the block's log may still grow (follow mode ends when false). */
   isNodeLogLive(runId: string, nodeId: string): boolean;
   deleteTempProject(runId: string): Promise<boolean>;
+  /**
+   * `report_step_result` (spec 2026-11-10 §5.2): record `report` on the running pass of the agent
+   * block whose recorded sessions include `sessionId` (the calling chat), persisted before it
+   * resolves. Throws `WorkflowEngineError` NOT_A_WORKFLOW_STEP / INVALID_REPORT.
+   */
+  reportStepResult(sessionId: string, report: ReportWorkflowStepRequest): Promise<ReportWorkflowStepResponse>;
   accountPreview(chain: AgentChainEntry[], projectPath?: string): Promise<AccountSelectionDecision>;
   /** Summary rows for the rail (trigger texts, last run, active runs). */
   summarize(workflow: Workflow): WorkflowSummary;
@@ -269,15 +392,26 @@ export interface NodeExecutionContext<T extends WorkflowNodeType = WorkflowNodeT
     run: { id: string; startedAt: string; workflowId: string; workflowName: string; attempt: number };
     project: { path: string; name: string; workspace: string; branch?: string };
     workflow: { id: string; name: string };
+    /** The `loop` namespace (spec 2026-11-10 §7.2); absent until loops set it. */
+    loop?: { pass: number; feedback?: string };
   };
   /** Resolved secret values (name -> value); never persist these. */
   secrets: Record<string, string>;
   /** Present when resuming after a restart. */
   resumeFrom?: WaitingOn;
+  /** Set from a block's second pass on: the loop that ran it again (spec 2026-11-10 §7.3). */
+  loop?: NodeLoopContext;
   /** Persist what the block waits on BEFORE the side effect. `undefined` clears. */
   setWaitingOn(waitingOn: WaitingOn | undefined): Promise<void>;
   /** Live fields for the run view (throttled broadcast; persisted). */
-  update(patch: Partial<Pick<WorkflowBlockRun, "activity" | "selection" | "hops" | "sessionId" | "logs" | "waitingUntil" | "childRunId" | "warnings">>): void;
+  update(
+    patch: Partial<
+      Pick<
+        WorkflowBlockRun,
+        "activity" | "selection" | "hops" | "sessionId" | "logs" | "waitingUntil" | "childRunId" | "warnings" | "report" | "gateId" | "sessionNote"
+      >
+    >
+  ): void;
   /** `<runsDir>/<runId>/nodes/<nodeId>/<attempt>/` */
   attemptDir(): Promise<string>;
   /** The node's timeout in ms (per-type default and max applied). */
@@ -294,6 +428,12 @@ export interface NodeExecutionContext<T extends WorkflowNodeType = WorkflowNodeT
    * order. Always set by the engine (optional only so hand-built test contexts need not).
    */
   liveInputs?(): { nodeId: string; name: string; output: unknown }[];
+  /**
+   * The current pass's latest valid `report_step_result` (spec 2026-11-10 §5.2), as the run holds it
+   * (persisted before the tool acknowledged it); undefined until the agent reports. Always set by the
+   * engine (optional only so hand-built test contexts need not).
+   */
+  stepReport?(): WorkflowStepReport | undefined;
   services: EngineServices;
   log: WorkflowLogger;
 }
@@ -395,6 +535,49 @@ export interface ProjectOps {
 
 export interface WorkflowNotifier {
   runFinished(run: WorkflowRunSummary, workflow: Workflow): void;
+  /** A gate now waits for the person (decider human, or escalated; never a test run's): its push. */
+  gateWaiting?(gate: WorkflowGateState, workflow: Workflow): void;
+}
+
+// ---------------------------------------------------------------------------
+// Gates (spec 2026-11-10 §6; gates/host.ts implements this for the gate executor)
+// ---------------------------------------------------------------------------
+
+/** What changed a waiting gate. `byDecider`: the assigned agent decider did it itself. */
+export interface GateChange {
+  kind: "decided" | "escalated" | "expired" | "cancelled";
+  byDecider: boolean;
+}
+
+/** The engine's gate records as the gate executor (nodes/gate.ts) reads and changes them. */
+export interface GateServices {
+  /** The gate's live record (a copy), or undefined. */
+  get(runId: string, gateId: string): WorkflowGateState | undefined;
+  /**
+   * Store (or replace) a record, redacted — in memory only: persisted with the caller's next save
+   * (a Gate block's `setWaitingOn`), published. Ignored once the engine is stopping or the run ended.
+   */
+  put(runId: string, gate: WorkflowGateState): void;
+  /** Resolves on the gate's next change, or null once `signal` aborts. */
+  nextChange(runId: string, gateId: string, signal: AbortSignal): Promise<GateChange | null>;
+  /** Hand the gate to the person (persisted; the block's WaitingOn follows); null when it no longer waits. */
+  escalate(runId: string, gateId: string, reason: string, opts: { byDecider: boolean }): Promise<WorkflowGateState | null>;
+  /** Persist a decision (first wins). */
+  decide(runId: string, gateId: string, decision: WorkflowGateDecision, opts: { byDecider: boolean }): Promise<{ decision: WorkflowGateDecision; alreadyDecided: boolean }>;
+  /** The person phase passed: `timeout.then` (a choice, decided by "timeout") or expired. Persisted. */
+  expire(runId: string, gateId: string, then: { kind: "choice"; choice: string } | { kind: "fail" }): Promise<WorkflowGateState | null>;
+  /** Mark it cancelled (its run is ending). */
+  cancel(runId: string, gateId: string): void;
+  /** Push to the person once per person phase (none for a test run's gate); after the gate is on disk. */
+  notifyPerson(runId: string, gateId: string): Promise<void>;
+  /** The top-level run's `startedBy` (a child run asks its top-level run's launcher). */
+  startedBy(runId: string): WorkflowRunStartedBy | undefined;
+  /** The top-level run's id (the run itself at depth 0). */
+  rootRunId(runId: string): string;
+  /** A test run (its gates are answered by the person in the editor only, §7.5). */
+  isTest(runId: string): boolean;
+  /** The top-level run's workflow name (a sub-workflow's gate names it to the launcher). */
+  rootWorkflowName(runId: string): string | undefined;
 }
 
 /** Renders saved-prompt `{variables}` daemon-side (packages/api prompt-variables + GitService). */
@@ -433,5 +616,7 @@ export interface EngineServices {
   runChild(input: { workflowId: string; input: unknown; parentRunId: string; parentNodeId: string; depth: number; signal: AbortSignal; attempt?: number; untrusted?: boolean }): Promise<{ runId: string; wait: Promise<WorkflowRunSummary & { finalOutput?: unknown }> }>;
   /** Re-attach to a child run after a restart. */
   awaitRun(runId: string, signal: AbortSignal): Promise<WorkflowRunSummary & { finalOutput?: unknown }>;
+  /** The run's gates (the engine's; absent in hand-built test contexts). */
+  gates?: GateServices;
   logger: WorkflowLogger;
 }

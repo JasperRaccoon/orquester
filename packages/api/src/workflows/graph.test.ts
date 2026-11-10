@@ -3,10 +3,23 @@ import { describe, it } from "node:test";
 
 import type { WorkflowBlockStatus, WorkflowNodeType } from "./types.ts";
 import {
+  agentOutcomeIds,
+  choiceHandle,
   computeReadiness,
   downstreamOf,
+  gateChoiceIds,
+  findCycles,
+  isLoopEdge,
+  loopEdgeFrom,
+  loopEdges,
+  loopResetSet,
+  outcomeHandle,
+  outputHandles,
   reachableFromTriggers,
+  topologicalOrder,
   upstreamOf,
+  withoutLoopEdges,
+  workflowHandleLabel,
   type ReadinessState
 } from "./graph.ts";
 
@@ -319,5 +332,143 @@ describe("computeReadiness", () => {
     const before = computeReadiness(g, state({}));
     assert.deepEqual(before.ready, []);
     assert.deepEqual(before.skip, []);
+  });
+});
+
+describe("outcome and choice handles (spec 2026-11-10 §5.1, §6.1)", () => {
+  it("an agent block without outcomes keeps success and error", () => {
+    assert.deepEqual(outputHandles({ id: "a", type: "agent", config: {} }), ["success", "error"]);
+    assert.deepEqual(outputHandles({ id: "a", type: "agent", config: { outcomes: [] } }), ["success", "error"]);
+    // Outputs alone keep the handles (a report is required, with no outcome).
+    assert.deepEqual(
+      outputHandles({ id: "a", type: "agent", config: { outputs: [{ name: "pr_url", type: "string" }] } }),
+      ["success", "error"]
+    );
+  });
+
+  it("declared outcomes replace success, in declared order, plus error", () => {
+    const node = {
+      id: "a",
+      type: "agent" as const,
+      config: { outcomes: [{ id: "approved", label: "Approved" }, { id: "changes_requested" }] }
+    };
+    assert.deepEqual(outputHandles(node), ["outcome:approved", "outcome:changes_requested", "error"]);
+    assert.deepEqual(agentOutcomeIds(node), ["approved", "changes_requested"]);
+    assert.equal(workflowHandleLabel(node, "outcome:approved"), "Approved");
+    assert.equal(workflowHandleLabel(node, "outcome:changes_requested"), "changes_requested");
+  });
+
+  it("a gate exposes one choice handle per choice, plus error", () => {
+    const node = {
+      id: "g",
+      type: "gate" as const,
+      config: { question: "Ship?", choices: [{ id: "approve", label: "Approve" }, { id: "reject", label: " Reject " }] }
+    };
+    assert.deepEqual(outputHandles(node), ["choice:approve", "choice:reject", "error"]);
+    assert.deepEqual(gateChoiceIds(node), ["approve", "reject"]);
+    assert.equal(workflowHandleLabel(node, "choice:reject"), "Reject");
+    assert.deepEqual(outputHandles({ id: "g", type: "gate", config: {} }), ["error"]);
+  });
+
+  it("malformed declarations are left out, never thrown on", () => {
+    const node = { id: "a", type: "agent" as const, config: { outcomes: [null, { id: 3 }, { id: "ok" }, "x"] } };
+    assert.deepEqual(outputHandles(node), ["outcome:ok", "error"]);
+    assert.equal(outcomeHandle("ok"), "outcome:ok");
+    assert.equal(choiceHandle("go"), "choice:go");
+  });
+});
+
+describe("loop edges (spec 2026-11-10 §7.1)", () => {
+  const g = {
+    nodes: [
+      { id: "t", type: "trigger.manual" as const, config: {} },
+      { id: "fix", type: "agent" as const, config: {} },
+      { id: "review", type: "agent" as const, config: { outcomes: [{ id: "approved" }, { id: "changes" }] } }
+    ],
+    edges: [
+      { id: "e1", source: "t", sourceHandle: "success", target: "fix" },
+      { id: "e2", source: "fix", sourceHandle: "success", target: "review" },
+      { id: "back", source: "review", sourceHandle: "outcome:changes", target: "fix", loop: { maxLoops: 3, session: "continue" as const } }
+    ]
+  };
+
+  it("isLoopEdge tells a loop edge by its settings", () => {
+    assert.equal(isLoopEdge(g.edges[2]!), true);
+    assert.equal(isLoopEdge(g.edges[0]!), false);
+    assert.equal(isLoopEdge({ loop: null }), false);
+  });
+
+  it("withoutLoopEdges drops only loop edges, and returns the same graph when there are none", () => {
+    const forward = withoutLoopEdges(g);
+    assert.deepEqual(forward.edges.map((edge) => edge.id), ["e1", "e2"]);
+    assert.equal(forward.nodes, g.nodes);
+    assert.deepEqual(loopEdges(g).map((edge) => edge.id), ["back"]);
+    const plain = { nodes: g.nodes, edges: g.edges.slice(0, 2) };
+    assert.equal(withoutLoopEdges(plain), plain);
+    assert.notEqual(topologicalOrder(forward), null);
+  });
+
+  it("order, cycles and up/downstream read the forward graph only", () => {
+    assert.deepEqual(topologicalOrder(g), ["t", "fix", "review"]);
+    assert.deepEqual(findCycles(g), []);
+    assert.deepEqual([...upstreamOf(g, "fix")], ["t"], "the loop source is not an input of its target");
+    assert.deepEqual([...downstreamOf(g, "review")], [], "the loop target is not after its source");
+    assert.deepEqual([...downstreamOf(g, "fix")], ["review"]);
+    assert.deepEqual([...reachableFromTriggers(g)].sort(), ["fix", "review", "t"]);
+  });
+
+  it("a loop edge is never a pending incoming edge; its own state is still reported", () => {
+    // Pass 1: the target is ready as soon as its forward input finished, though the loop's source is pending.
+    let r = computeReadiness(g, state({ t: "succeeded" }));
+    assert.deepEqual(r.ready, ["fix"]);
+    assert.equal(r.edgeStates.back, "pending");
+    // The source finishing on another handle kills the loop edge and skips nothing.
+    r = computeReadiness(g, state({ t: "succeeded", fix: "succeeded", review: "succeeded" }, { review: "outcome:approved" }));
+    assert.deepEqual(r.ready, []);
+    assert.deepEqual(r.skip, []);
+    assert.equal(r.edgeStates.back, "dead");
+    // A reset pass: the target is ready again from its forward inputs alone.
+    r = computeReadiness(g, state({ t: "succeeded", fix: "pending", review: "pending" }));
+    assert.deepEqual(r.ready, ["fix"]);
+  });
+
+  it("a loop target with no forward input is skipped like any unconnected block (the engine forces roots)", () => {
+    const rootless = { nodes: g.nodes.slice(1), edges: g.edges.slice(1) };
+    assert.deepEqual(computeReadiness(rootless, state({})).skip, ["fix", "review"]);
+  });
+
+  it("loopEdgeFrom finds the loop edge of a handle; loopResetSet is the target and its forward downstream", () => {
+    assert.equal(loopEdgeFrom(g, "review", "outcome:changes")?.id, "back");
+    assert.equal(loopEdgeFrom(g, "review", "outcome:approved"), undefined);
+    assert.equal(loopEdgeFrom(g, "fix", "success"), undefined, "an ordinary edge is not a loop edge");
+    assert.deepEqual([...loopResetSet(g, g.edges[2]!)].sort(), ["fix", "review"]);
+  });
+
+  it("reset sets cover parallel branches and merges, never what comes before the target", () => {
+    const wide = {
+      nodes: [
+        { id: "t", type: "trigger.manual" as const, config: {} },
+        { id: "prep", type: "code" as const, config: {} },
+        { id: "a", type: "agent" as const, config: {} },
+        { id: "b", type: "shell" as const, config: {} },
+        { id: "m", type: "merge" as const, config: {} },
+        { id: "check", type: "if" as const, config: {} },
+        { id: "side", type: "http" as const, config: {} },
+        { id: "note", type: "note" as const, config: {} }
+      ],
+      edges: [
+        { id: "1", source: "t", sourceHandle: "success", target: "prep" },
+        { id: "2", source: "prep", sourceHandle: "success", target: "a" },
+        { id: "3", source: "prep", sourceHandle: "success", target: "b" },
+        { id: "4", source: "a", sourceHandle: "success", target: "m" },
+        { id: "5", source: "b", sourceHandle: "success", target: "m" },
+        { id: "6", source: "m", sourceHandle: "success", target: "check" },
+        { id: "7", source: "a", sourceHandle: "success", target: "side" },
+        { id: "back", source: "check", sourceHandle: "false", target: "a", loop: { maxLoops: 2, session: "new" as const } }
+      ]
+    };
+    assert.deepEqual([...loopResetSet(wide, { target: "a" })].sort(), ["a", "check", "m", "side"], "b is not after a: it keeps its result");
+    assert.deepEqual([...loopResetSet(wide, { target: "prep" })].sort(), ["a", "b", "check", "m", "prep", "side"]);
+    assert.deepEqual([...loopResetSet(wide, { target: "note" })], [], "a note is never in a reset set");
   });
 });

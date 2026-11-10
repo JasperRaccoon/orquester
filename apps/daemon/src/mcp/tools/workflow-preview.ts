@@ -36,6 +36,8 @@ import {
   type PromptReferencesResponse,
   type SavedPrompt,
   type Workflow,
+  type WorkflowInputDecl,
+  type WorkflowInputError,
   type WorkflowNode,
   type WorkflowProblem,
   type WorkflowProject,
@@ -64,8 +66,50 @@ const ERROR_HINTS: Record<string, string> = {
   REVISION_CONFLICT: " The workflow changed since you read it: re-read it with get_workflow (its current revision), then send your ops again.",
   INVALID_WORKFLOW: " Fix the problems listed; list_workflow_block_types shows each block's config.",
   RUN_NOT_ACTIVE: " The run already ended: get_workflow_runs {runId} shows how.",
-  SECRET_INVALID: " A secret name is A-Z, 0-9 and _, starting with a letter; a value is at most 64 KiB."
+  SECRET_INVALID: " A secret name is A-Z, 0-9 and _, starting with a letter; a value is at most 64 KiB.",
+  INVALID_REPORT: " Fix what is listed and call report_step_result again.",
+  INVALID_INPUT: " Fix every input listed and call again: get_workflow shows the declared inputs (name, type, required, values, default).",
+  GATE_NOT_FOUND: " list_workflow_gates lists the waiting gates with their runId and gateId.",
+  GATE_NOT_DECIDER: " Do not retry: the person (or the assigned agent) decides this gate."
 };
+
+/** At most this many input errors in an error's detail (a workflow declares at most 30 inputs). */
+const MAX_INPUT_ERRORS = 50;
+
+/** Input errors from a daemon body, kept only when they have the shape. */
+export function sanitizeInputErrors(raw: unknown): WorkflowInputError[] {
+  if (!Array.isArray(raw)) return [];
+  const errors: WorkflowInputError[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry) || typeof entry.message !== "string") continue;
+    const error: WorkflowInputError = { message: clipText(entry.message, 400) };
+    if (typeof entry.input === "string") error.input = clipText(entry.input, 60);
+    errors.push(error);
+    if (errors.length >= MAX_INPUT_ERRORS) break;
+  }
+  return errors;
+}
+
+/** INVALID_INPUT before anything starts (a run's card): every problem in the text and in `detail.inputErrors`. */
+export function invalidInputError(errors: readonly WorkflowInputError[]): ToolError {
+  const shown = errors.slice(0, 10).map((error) => error.message);
+  const more = errors.length > shown.length ? `; … (${errors.length - shown.length} more in detail.inputErrors)` : "";
+  return new ToolError("INVALID_INPUT", `The input does not fit the workflow's inputs: ${shown.join("; ")}${more}.${ERROR_HINTS.INVALID_INPUT}`, {
+    inputErrors: errors.slice(0, MAX_INPUT_ERRORS)
+  });
+}
+
+/** Declared inputs as an agent reads them (`get_workflow`, `list_workflows`): what to pass, compactly. */
+export function inputsView(inputs: readonly WorkflowInputDecl[]): Record<string, unknown>[] {
+  return inputs.map((decl) => {
+    const view: Record<string, unknown> = { name: decl.name, type: decl.type, required: decl.required === true };
+    if (decl.type === "enum") view.values = decl.values ?? [];
+    if (decl.default !== undefined) view.default = decl.default;
+    if (decl.description) view.description = clipText(decl.description, WORKFLOW_LIMITS.inputDescriptionChars);
+    if (decl.multiline === true && decl.type === "string") view.multiline = true;
+    return view;
+  });
+}
 
 /** Problems listed in a result / an error's detail, and quoted in an error's text. */
 const MAX_PROBLEMS = 100;
@@ -141,6 +185,8 @@ export function workflowError(res: DaemonResponse): ToolError {
   }
   const detail: Record<string, unknown> = {};
   if (problems.length > 0) Object.assign(detail, problemsView(problems));
+  const inputErrors = sanitizeInputErrors(env.inputErrors);
+  if (inputErrors.length > 0) detail.inputErrors = inputErrors;
   const opIndex = opIndexOf(env);
   if (opIndex !== undefined) detail.opIndex = opIndex;
   return new ToolError(code, message, Object.keys(detail).length > 0 ? detail : undefined);
@@ -785,7 +831,15 @@ export function triggerSection(workflow: Pick<Workflow, "nodes">): ApprovalPrevi
 /** Every edge in block names: "HasTickets (true) → FixTickets" — `(success)` left implicit. */
 export function connectionsOf(workflow: Pick<Workflow, "nodes" | "edges">): string[] {
   const names = new Map(workflow.nodes.map((n) => [n.id, n.name]));
-  return workflow.edges.map((e) => `${names.get(e.source) ?? e.source}${e.sourceHandle === "success" ? "" : ` (${e.sourceHandle})`} → ${names.get(e.target) ?? e.target}`);
+  return workflow.edges.map((e) => connectionText(names, e));
+}
+
+/** One edge in block names; a loop edge says so with its settings: "Review (outcome:changes) ↺ Fix (loop: at most 3, same chat)". */
+export function connectionText(names: ReadonlyMap<string, string>, e: Workflow["edges"][number]): string {
+  const from = `${names.get(e.source) ?? e.source}${e.sourceHandle === "success" ? "" : ` (${e.sourceHandle})`}`;
+  const to = names.get(e.target) ?? e.target;
+  if (!e.loop) return `${from} → ${to}`;
+  return `${from} ↺ ${to} (loop: at most ${e.loop.maxLoops}, ${e.loop.session === "new" ? "new chat" : "same chat"})`;
 }
 
 function settingsRows(workflow: Pick<Workflow, "settings" | "enabled" | "description">): { label: string; value: string; state?: "flagged" }[] {
@@ -940,13 +994,23 @@ export function graphDiff(before: Workflow, after: Workflow, workspacesDir: stri
     const labels = connectionsOf(workflow);
     return new Map(workflow.edges.map((e, i) => [`${e.source}|${e.sourceHandle}|${e.target}`, labels[i]!]));
   };
+  const loopOf = (workflow: Workflow) => new Map(workflow.edges.map((e) => [`${e.source}|${e.sourceHandle}|${e.target}`, JSON.stringify(e.loop ?? null)]));
   const [edgesBefore, edgesAfter] = [edgeKeys(before), edgeKeys(after)];
+  const [loopsBefore, loopsAfter] = [loopOf(before), loopOf(after)];
   for (const [key, label] of edgesAfter) {
     if (edgesBefore.has(key)) continue;
     items.push({ label: `connection ${label}`, change: "added" });
     withDownstream(key.split("|")[2]!);
   }
-  for (const [key, label] of edgesBefore) if (!edgesAfter.has(key)) items.push({ label: `connection ${label}`, change: "removed" });
+  for (const [key, label] of edgesBefore) {
+    const now = edgesAfter.get(key);
+    if (now === undefined) items.push({ label: `connection ${label}`, change: "removed" });
+    // Same blocks and output, other loop settings (set_loop): what the loop runs again is part of the change.
+    else if (loopsBefore.get(key) !== loopsAfter.get(key)) {
+      items.push({ label: `connection ${now}`, change: "changed", detail: `was ${label}` });
+      withDownstream(key.split("|")[2]!);
+    }
+  }
   if (!same(before.project, after.project)) {
     items.push({ label: "project", change: "changed", detail: `${workflowProjectLabel(before.project, workspacesDir)} → ${workflowProjectLabel(after.project, workspacesDir)}` });
   }

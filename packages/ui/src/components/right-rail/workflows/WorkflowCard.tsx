@@ -69,6 +69,8 @@ export interface WorkflowCardProps {
   onDuplicate: () => void;
   onDelete: () => void;
   onRetryRuns: () => void;
+  /** Its runs' decisions waiting on the user (spec 2026-11-10 §6.4), under the live line. */
+  gates?: React.ReactNode;
 }
 
 const FOCUS_RING = "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500";
@@ -272,6 +274,8 @@ export const WorkflowCard: React.FC<WorkflowCardProps> = (props) => {
             ) : null}
           </div>
         )}
+
+        {props.gates ? <div className="space-y-2">{props.gates}</div> : null}
 
         {/* Actions. */}
         <div className="flex items-center gap-1.5 pt-0.5">

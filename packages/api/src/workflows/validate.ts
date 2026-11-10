@@ -17,7 +17,20 @@ import {
 import { UNSET_SUBWORKFLOW_ID } from "./block-types.ts";
 import { parseTemplate, templateReferences, hasTemplate, type TemplateReference } from "./expressions.ts";
 import { nodeTemplateFields } from "./fields.ts";
-import { acceptsInput, findCycles, outputHandles, reachableFromTriggers, upstreamOf } from "./graph.ts";
+import {
+  acceptsInput,
+  agentOutcomeIds,
+  findCycles,
+  gateChoiceIds,
+  isLoopEdge,
+  loopResetSet,
+  outputHandles,
+  reachableFromTriggers,
+  upstreamOf,
+  withoutLoopEdges
+} from "./graph.ts";
+import { createUndeclaredInputCheck, inputDeclarationProblems } from "./inputs.ts";
+import { passThroughHandle, pinnedOutcomeProblem } from "./outcomes.ts";
 import { presetToCron, scheduleIntervalProblem, validateCron, isValidTimeZone } from "./schedule.ts";
 import {
   isTriggerType,
@@ -137,6 +150,42 @@ function sizeOf(value: unknown): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The edges a depth-first walk (from the triggers, then every other block, in definition order) finds
+ * pointing back to a block still on its path: in a cycle, the connection that goes "back".
+ */
+function forwardBackEdges(graph: { nodes: readonly WorkflowNode[]; edges: readonly WorkflowEdge[] }): WorkflowEdge[] {
+  const outs = new Map<string, WorkflowEdge[]>(graph.nodes.map((node) => [node.id, []]));
+  for (const edge of graph.edges) if (outs.has(edge.source) && outs.has(edge.target)) outs.get(edge.source)!.push(edge);
+  const state = new Map<string, "open" | "done">();
+  const back: WorkflowEdge[] = [];
+  const roots = [...graph.nodes.filter((node) => isTriggerType(node.type)), ...graph.nodes.filter((node) => !isTriggerType(node.type))];
+  for (const root of roots) {
+    if (state.has(root.id)) continue;
+    // Iterative: no recursion depth limit on hostile input.
+    const stack: { id: string; next: number }[] = [{ id: root.id, next: 0 }];
+    state.set(root.id, "open");
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]!;
+      const list = outs.get(frame.id)!;
+      if (frame.next >= list.length) {
+        state.set(frame.id, "done");
+        stack.pop();
+        continue;
+      }
+      const edge = list[frame.next]!;
+      frame.next += 1;
+      const seen = state.get(edge.target);
+      if (seen === "open") back.push(edge);
+      else if (seen === undefined) {
+        state.set(edge.target, "open");
+        stack.push({ id: edge.target, next: 0 });
+      }
+    }
+  }
+  return back;
 }
 
 /** Validate a definition. Never throws. */
@@ -265,6 +314,21 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
   rawEdges.forEach((raw, index) => {
     const parsed = workflowEdgeSchema.safeParse(raw);
     const rawId = isRecord(raw) && typeof raw.id === "string" ? raw.id : undefined;
+    const rawLoop = isRecord(raw) ? raw.loop : undefined;
+    if (isRecord(rawLoop)) {
+      const { min, max } = WORKFLOW_LIMITS.loops;
+      const limit = rawLoop.maxLoops;
+      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < min || limit > max) {
+        push({
+          severity: "error",
+          code: "loop_limit_range",
+          message: `Connection ${rawId ?? `#${index + 1}`}: a loop edge's maxLoops is a whole number from ${min} to ${max}`,
+          edgeId: rawId,
+          field: "loop.maxLoops"
+        });
+        return;
+      }
+    }
     if (!parsed.success) {
       for (const issue of parsed.error.issues) {
         push({
@@ -302,7 +366,9 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         message:
           handles.length === 0
             ? `${source.name} has no outputs`
-            : `${source.name} has no "${edge.sourceHandle}" output (it has ${handles.join(", ")})`,
+            : edge.sourceHandle === "success" && agentOutcomeIds(source).length > 0
+              ? `${source.name} declares outcomes, so it has no "success" output: connect from one of ${handles.join(", ")}`
+              : `${source.name} has no "${edge.sourceHandle}" output (it has ${handles.join(", ")})`,
         edgeId: edge.id,
         nodeId: source.id
       });
@@ -312,9 +378,22 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
       push({
         severity: "error",
         code: "edge_target_no_input",
-        message: `${target.name} takes no input (${isTriggerType(target.type) ? "a trigger starts the run" : "a note never runs"})`,
+        message:
+          isLoopEdge(edge) && isTriggerType(target.type)
+            ? `A loop edge cannot go back to a trigger (${target.name}): point it at the first block after it`
+            : `${target.name} takes no input (${isTriggerType(target.type) ? "a trigger starts the run" : "a note never runs"})`,
         edgeId: edge.id,
         nodeId: target.id
+      });
+      valid = false;
+    }
+    if (isLoopEdge(edge) && edge.sourceHandle === "error") {
+      push({
+        severity: "error",
+        code: "loop_from_error",
+        message: `${label(edge.source)} → ${label(edge.target)}: a loop edge cannot leave the error output — loop from an outcome, a choice or an If/Switch branch, and let retry handle failures`,
+        edgeId: edge.id,
+        nodeId: edge.source
       });
       valid = false;
     }
@@ -337,16 +416,73 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
   });
 
   const graph = { nodes, edges };
+  // The forward graph: what every order, readiness and reachability helper reads (§7.1).
+  const forward = withoutLoopEdges(graph);
 
-  // -- Cycles --------------------------------------------------------------------------------------
-  for (const cycle of findCycles(graph)) {
-    push({
-      severity: "error",
-      code: "cycle",
-      message: `These blocks form a loop: ${[...cycle, cycle[0]!].map(label).join(" → ")} — use a sub-workflow or an agent that loops itself`,
-      nodeId: cycle[0]
-    });
+  // -- Cycles (of the forward graph) and loop edges ------------------------------------------------
+  const backEdges = forwardBackEdges(forward);
+  for (const cycle of findCycles(forward)) {
+    const members = new Set(cycle);
+    const back = backEdges.find((edge) => members.has(edge.source) && members.has(edge.target));
+    const path = [...cycle, cycle[0]!].map(label).join(" → ");
+    push(
+      back
+        ? {
+            severity: "error",
+            code: "cycle",
+            message: `${label(back.source)} → ${label(back.target)} goes back to an earlier block (${path}): make it a loop edge with a limit (\`loop: { maxLoops: 1–${WORKFLOW_LIMITS.loops.max} }\`), or remove it`,
+            nodeId: back.target,
+            edgeId: back.id
+          }
+        : {
+            severity: "error",
+            code: "cycle",
+            message: `These blocks form a loop: ${path} — connections run one way; to repeat steps, make the connection back to the earlier block a loop edge with a limit`,
+            nodeId: cycle[0]
+          }
+    );
   }
+  const handleEdgeCount = new Map<string, number>();
+  for (const edge of edges) {
+    const key = `${edge.source}\u0000${edge.sourceHandle}`;
+    handleEdgeCount.set(key, (handleEdgeCount.get(key) ?? 0) + 1);
+  }
+  const loops = edges.filter(isLoopEdge);
+  for (const loop of loops) {
+    if (!upstreamOf(forward, loop.source).has(loop.target)) {
+      push({
+        severity: "error",
+        code: "loop_not_ancestor",
+        message: `${label(loop.source)} → ${label(loop.target)}: a loop edge goes back to a block that runs before its source, and ${label(loop.target)} does not`,
+        edgeId: loop.id,
+        nodeId: loop.source
+      });
+    }
+    if ((handleEdgeCount.get(`${loop.source}\u0000${loop.sourceHandle}`) ?? 0) > 1) {
+      push({
+        severity: "error",
+        code: "loop_handle_shared",
+        message: `${label(loop.source)}: its "${loop.sourceHandle}" output has a loop edge, so it can carry no other connection (a block there would be reset at once)`,
+        edgeId: loop.id,
+        nodeId: loop.source
+      });
+    }
+    // A disabled block passes through on its first outcome / choice (§7.5): were that a loop's
+    // handle, the loop would only repeat itself — the engine never takes it.
+    const source = byId.get(loop.source);
+    if (source?.disabled === true && passThroughHandle(source) === loop.sourceHandle) {
+      push({
+        severity: "warning",
+        code: "loop_from_disabled",
+        message: `${source.name} is disabled and passes through on "${loop.sourceHandle}", which has a loop edge: the loop is not taken, so this path ends there`,
+        edgeId: loop.id,
+        nodeId: loop.source
+      });
+    }
+  }
+  /** Whether `reader` and `read` run again together in some loop: `read`'s previous pass is then readable. */
+  const resetSets = loops.map((loop) => loopResetSet(forward, loop));
+  const loopsBack = (reader: string, read: string): boolean => resetSets.some((set) => set.has(reader) && set.has(read));
 
   // -- Per block -----------------------------------------------------------------------------------
   const nameToNode = new Map(nodes.map((node) => [node.name, node]));
@@ -364,12 +500,98 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
     node.type === "trigger.git" && (node.config.event.kind === "pull_request" || node.config.event.kind === "release");
   const triggers = nodes.filter((node) => isTriggerType(node.type));
   const reachable = reachableFromTriggers(graph);
+  const undeclaredInput = createUndeclaredInputCheck(graph);
   const timeoutMax = (minutes: number | undefined, max: number, node: WorkflowNode, field: string, what: string): void => {
     if (minutes !== undefined && minutes > max) {
       push({
         severity: "error",
         code: "timeout_too_long",
         message: `${node.name}: ${what} is at most ${max >= 60 && max % 60 === 0 ? `${max / 60} h` : `${max} min`}`,
+        nodeId: node.id,
+        field
+      });
+    }
+  };
+
+  /** An agent chain (an agent block's, a gate's reviewer agent's): its length and the host's catalogue. */
+  const checkChain = (node: WorkflowNode, chain: readonly { agent: string; model: string }[], base: string): void => {
+    if (chain.length > WORKFLOW_LIMITS.maxAgentChain) {
+      push({
+        severity: "error",
+        code: "chain_too_long",
+        message: `${node.name}: at most ${WORKFLOW_LIMITS.maxAgentChain} agents in a fallback chain`,
+        nodeId: node.id,
+        field: base
+      });
+    }
+    if (!opts.catalog) return;
+    const known = new Map(opts.catalog.agents.map((agent) => [agent.id, agent]));
+    chain.forEach((entry, index) => {
+      const where = `${base}.${index}`;
+      const agent = known.get(entry.agent);
+      if (agent === undefined) {
+        const valid = opts.catalog!.agents.map((a) => a.id);
+        push({
+          severity: "error",
+          code: "unknown_agent",
+          message: `${node.name}: "${entry.agent.slice(0, 60)}" is not a chat agent on this host${valid.length ? ` (known: ${valid.slice(0, 20).join(", ")})` : ""}`,
+          nodeId: node.id,
+          field: `${where}.agent`
+        });
+        return;
+      }
+      if (agent.enabled === false) {
+        push({
+          severity: "warning",
+          code: "unknown_agent",
+          message: `${node.name}: ${entry.agent} is not available on this host right now — the chain passes over it`,
+          nodeId: node.id,
+          field: `${where}.agent`
+        });
+      }
+      const models = agent.models ?? [];
+      if (models.includes(entry.model)) return;
+      if (models.length === 0) {
+        push({
+          severity: "warning",
+          code: "unknown_model",
+          message: `${node.name}: ${entry.agent}'s models are not known yet — "${entry.model.slice(0, 80)}" could not be checked`,
+          nodeId: node.id,
+          field: `${where}.model`
+        });
+        return;
+      }
+      push({
+        severity: "error",
+        code: "unknown_model",
+        message: `${node.name}: ${entry.agent} has no model "${entry.model.slice(0, 80)}" (it has ${models.slice(0, 20).join(", ")}${models.length > 20 ? ", …" : ""})`,
+        nodeId: node.id,
+        field: `${where}.model`
+      });
+    });
+  };
+  /** An agent prompt: not empty; a saved prompt that still exists. */
+  const checkPrompt = (node: WorkflowNode, prompt: { kind: "text"; text: string } | { kind: "saved"; promptId: string }, base: string): void => {
+    if (prompt.kind === "text" && prompt.text.trim().length === 0) {
+      push({ severity: "error", code: "empty_prompt", message: `${node.name}: the prompt is empty`, nodeId: node.id, field: `${base}.text` });
+    }
+    if (prompt.kind === "saved" && opts.savedPromptIds && !opts.savedPromptIds.includes(prompt.promptId)) {
+      push({
+        severity: "warning",
+        code: "unknown_saved_prompt",
+        message: `${node.name}: the saved prompt it uses no longer exists`,
+        nodeId: node.id,
+        field: `${base}.promptId`
+      });
+    }
+  };
+  /** An Agent Profile id that still exists. */
+  const checkProfile = (node: WorkflowNode, profileId: string | undefined, field: string): void => {
+    if (profileId !== undefined && opts.sessionProfileIds && !opts.sessionProfileIds.includes(profileId)) {
+      push({
+        severity: "warning",
+        code: "unknown_profile",
+        message: `${node.name}: the Agent Profile it launches with no longer exists — its runs fail until another is picked`,
         nodeId: node.id,
         field
       });
@@ -403,6 +625,16 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
       const titleSecrets = new Set<string>();
       let untrustedWarned = false;
       for (const ref of templateReferences(field.value)) {
+        const undeclared = undeclaredInput(node, ref);
+        if (undeclared !== null) {
+          push({
+            severity: "warning",
+            code: "undeclared_input",
+            message: `${node.name}: {{ ${ref.source} }} reads the input "${undeclared.name.slice(0, 60)}", which the manual trigger does not declare (it declares ${undeclared.declared.join(", ")}) — declare it, or the value is always empty`,
+            nodeId: node.id,
+            field: field.field
+          });
+        }
         if (ref.root === "nodes") {
           const name = ref.path[0];
           if (typeof name !== "string") {
@@ -428,7 +660,36 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
             push({
               severity: "warning",
               code: "reference_not_upstream",
-              message: `${node.name}: "${name}" does not run before this block, so {{ ${ref.source} }} may be empty`,
+              message: loopsBack(node.id, referenced.id)
+                ? `${node.name}: "${name}" runs after this block, so {{ ${ref.source} }} reads its previous loop pass and is empty on the first pass`
+                : `${node.name}: "${name}" does not run before this block, so {{ ${ref.source} }} may be empty`,
+              nodeId: node.id,
+              field: field.field
+            });
+          }
+        } else if (ref.root === "loop") {
+          const key = ref.path[0];
+          if (key !== undefined && key !== "pass" && key !== "feedback") {
+            push({
+              severity: "error",
+              code: "unknown_reference",
+              message: `${node.name}: {{ ${ref.source} }} reads nothing — loop has \`pass\` and \`feedback\``,
+              nodeId: node.id,
+              field: field.field
+            });
+          } else if (!resetSets.some((set) => set.has(node.id))) {
+            push({
+              severity: "warning",
+              code: "loop_outside_loop",
+              message: `${node.name}: no loop edge runs this block again, so {{ ${ref.source} }} is always ${key === "pass" ? "1" : "empty"}`,
+              nodeId: node.id,
+              field: field.field
+            });
+          } else if (key === "feedback" && !loops.some((loop) => loop.target === node.id)) {
+            push({
+              severity: "warning",
+              code: "loop_feedback_not_target",
+              message: `${node.name}: only the block a loop edge points back to receives feedback, so {{ ${ref.source} }} is always empty here`,
               nodeId: node.id,
               field: field.field
             });
@@ -530,6 +791,10 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         }
         break;
       }
+      case "trigger.manual": {
+        for (const problem of inputDeclarationProblems(node)) push(problem);
+        break;
+      }
       case "trigger.git": {
         if (node.config.event.kind === "release" && node.config.repo.kind === "url" && !/github\.com[/:]/i.test(node.config.repo.url)) {
           push({
@@ -544,82 +809,9 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
       }
       case "agent": {
         const config = node.config;
-        if (config.chain.length > WORKFLOW_LIMITS.maxAgentChain) {
-          push({
-            severity: "error",
-            code: "chain_too_long",
-            message: `${node.name}: at most ${WORKFLOW_LIMITS.maxAgentChain} agents in a fallback chain`,
-            nodeId: node.id,
-            field: "config.chain"
-          });
-        }
-        if (opts.catalog) {
-          const known = new Map(opts.catalog.agents.map((agent) => [agent.id, agent]));
-          config.chain.forEach((entry, index) => {
-            const where = `config.chain.${index}`;
-            const agent = known.get(entry.agent);
-            if (agent === undefined) {
-              const valid = opts.catalog!.agents.map((a) => a.id);
-              push({
-                severity: "error",
-                code: "unknown_agent",
-                message: `${node.name}: "${entry.agent.slice(0, 60)}" is not a chat agent on this host${valid.length ? ` (known: ${valid.slice(0, 20).join(", ")})` : ""}`,
-                nodeId: node.id,
-                field: `${where}.agent`
-              });
-              return;
-            }
-            if (agent.enabled === false) {
-              push({
-                severity: "warning",
-                code: "unknown_agent",
-                message: `${node.name}: ${entry.agent} is not available on this host right now — the chain passes over it`,
-                nodeId: node.id,
-                field: `${where}.agent`
-              });
-            }
-            const models = agent.models ?? [];
-            if (models.includes(entry.model)) return;
-            if (models.length === 0) {
-              push({
-                severity: "warning",
-                code: "unknown_model",
-                message: `${node.name}: ${entry.agent}'s models are not known yet — "${entry.model.slice(0, 80)}" could not be checked`,
-                nodeId: node.id,
-                field: `${where}.model`
-              });
-              return;
-            }
-            push({
-              severity: "error",
-              code: "unknown_model",
-              message: `${node.name}: ${entry.agent} has no model "${entry.model.slice(0, 80)}" (it has ${models.slice(0, 20).join(", ")}${models.length > 20 ? ", …" : ""})`,
-              nodeId: node.id,
-              field: `${where}.model`
-            });
-          });
-        }
-        if (config.prompt.kind === "text" && config.prompt.text.trim().length === 0) {
-          push({ severity: "error", code: "empty_prompt", message: `${node.name}: the prompt is empty`, nodeId: node.id, field: "config.prompt.text" });
-        }
-        if (config.prompt.kind === "saved" && opts.savedPromptIds && !opts.savedPromptIds.includes(config.prompt.promptId)) {
-          push({
-            severity: "warning",
-            code: "unknown_saved_prompt",
-            message: `${node.name}: the saved prompt it uses no longer exists`,
-            nodeId: node.id,
-            field: "config.prompt.promptId"
-          });
-        }
-        if (config.profileId !== undefined && opts.sessionProfileIds && !opts.sessionProfileIds.includes(config.profileId)) {
-          push({
-            severity: "warning",
-            code: "unknown_profile",
-            message: `${node.name}: the Agent Profile it launches with no longer exists — its runs fail until another is picked`,
-            nodeId: node.id,
-            field: "config.profileId"
-          });
-        }
+        checkChain(node, config.chain, "config.chain");
+        checkPrompt(node, config.prompt, "config.prompt");
+        checkProfile(node, config.profileId, "config.profileId");
         if (config.session.kind === "continue") {
           const from = nameToNode.get(config.session.fromNode);
           const reason =
@@ -641,6 +833,7 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
           }
         }
         timeoutMax(config.maxMinutes, WORKFLOW_LIMITS.agentMaxMinutes.max, node, "config.maxMinutes", "the working time");
+        checkAgentReport(node, config, push);
         break;
       }
       case "code": {
@@ -730,6 +923,86 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         }
         break;
       }
+      case "gate": {
+        // Spec 2026-11-10 §6.1: 2–8 unique choices, a question, a bounded person phase, a valid
+        // reviewer agent. Edges leave `choice:<id>` / `error` only (`outputHandles`, checked above).
+        const config = node.config;
+        const { min, max } = WORKFLOW_LIMITS.gateChoices;
+        if (config.choices.length < min || config.choices.length > max) {
+          push({ severity: "error", code: "gate_choices", message: `${node.name}: a gate has ${min}–${max} choices`, nodeId: node.id, field: "config.choices" });
+        }
+        const choiceIds = new Set<string>();
+        config.choices.forEach((choice, index) => {
+          if (choiceIds.has(choice.id)) {
+            push({ severity: "error", code: "gate_choice_duplicate", message: `${node.name}: two choices share the id "${choice.id}"`, nodeId: node.id, field: `config.choices.${index}.id` });
+          }
+          choiceIds.add(choice.id);
+          if (choice.label.trim().length === 0) {
+            push({ severity: "error", code: "gate_choice_label", message: `${node.name}: the choice "${choice.id}" has no label`, nodeId: node.id, field: `config.choices.${index}.label` });
+          } else if ([...choice.label].length > WORKFLOW_LIMITS.labelChars) {
+            push({
+              severity: "error",
+              code: "label_too_long",
+              message: `${node.name}: the choice "${choice.id}"'s label is at most ${WORKFLOW_LIMITS.labelChars} characters`,
+              nodeId: node.id,
+              field: `config.choices.${index}.label`
+            });
+          }
+        });
+        if (config.question.trim().length === 0) {
+          push({ severity: "error", code: "gate_question_empty", message: `${node.name}: the question is empty`, nodeId: node.id, field: "config.question" });
+        } else if (config.question.length > WORKFLOW_LIMITS.gateQuestionChars) {
+          push({
+            severity: "error",
+            code: "gate_question_too_long",
+            message: `${node.name}: the question is at most ${WORKFLOW_LIMITS.gateQuestionChars} characters (put the rest in details)`,
+            nodeId: node.id,
+            field: "config.question"
+          });
+        }
+        if (config.details !== undefined && utf8ByteLength(config.details) > WORKFLOW_LIMITS.gateDetailsBytes) {
+          push({
+            severity: "error",
+            code: "gate_details_too_large",
+            message: `${node.name}: the details are at most ${WORKFLOW_LIMITS.gateDetailsBytes / 1024} KB`,
+            nodeId: node.id,
+            field: "config.details"
+          });
+        }
+        if (config.timeout !== undefined) {
+          if (config.timeout.minutes > WORKFLOW_LIMITS.gatePersonPhaseMaxMinutes) {
+            push({ severity: "error", code: "timeout_too_long", message: `${node.name}: a gate's timeout is at most 7 days`, nodeId: node.id, field: "config.timeout.minutes" });
+          }
+          const then = config.timeout.then;
+          if (then.kind === "choice" && !choiceIds.has(then.choice)) {
+            push({
+              severity: "error",
+              code: "gate_timeout_choice",
+              message: `${node.name}: the timeout takes "${then.choice.slice(0, 60)}", which is not one of its choices (${[...choiceIds].join(", ") || "none"})`,
+              nodeId: node.id,
+              field: "config.timeout.then.choice"
+            });
+          }
+        }
+        const decider = config.decider;
+        if (decider.kind === "agent") {
+          checkChain(node, decider.chain, "config.decider.chain");
+          checkPrompt(node, decider.prompt, "config.decider.prompt");
+          checkProfile(node, decider.profileId, "config.decider.profileId");
+        }
+        if (decider.kind === "agent" || decider.kind === "launcher") {
+          timeoutMax(decider.maxMinutes, WORKFLOW_LIMITS.agentMaxMinutes.max, node, "config.decider.maxMinutes", "the agent's time to decide");
+        }
+        if (node.disabled === true && config.choices.length > 0) {
+          push({
+            severity: "warning",
+            code: "gate_disabled",
+            message: `${node.name} is disabled: it asks nobody and takes its first choice (${config.choices[0]!.label.slice(0, 60)})`,
+            nodeId: node.id
+          });
+        }
+        break;
+      }
       case "workflow": {
         const target = node.config.workflowId;
         if (target === UNSET_SUBWORKFLOW_ID) {
@@ -768,6 +1041,25 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         push({ severity: "warning", code: "pinned_unknown_node", message: `Pinned data for a missing block (${nodeId})`, field: `pinned.${nodeId}` });
         continue;
       }
+      const pinnedNode = byId.get(nodeId);
+      const outcomeProblem = pinnedNode ? pinnedOutcomeProblem(pinnedNode, value) : null;
+      if (outcomeProblem !== null) {
+        push({ severity: "error", code: "pinned_outcome_missing", message: `${label(nodeId)}: ${outcomeProblem}`, nodeId, field: `pinned.${nodeId}` });
+      }
+      if (pinnedNode?.type === "gate") {
+        // A pinned gate takes the choice its pin names (§7.5): one of its own.
+        const choice = isRecord(value) ? value.choice : undefined;
+        const ids = gateChoiceIds(pinnedNode);
+        if (typeof choice !== "string" || !ids.includes(choice)) {
+          push({
+            severity: "error",
+            code: "pinned_gate_choice",
+            message: `${pinnedNode.name}: pinned data for a gate needs a "choice" — one of ${ids.join(", ") || "its choices"}`,
+            nodeId,
+            field: `pinned.${nodeId}`
+          });
+        }
+      }
       const size = sizeOf(value);
       if (size === null || size > WORKFLOW_LIMITS.maxPinnedBytes) {
         push({
@@ -787,6 +1079,79 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
 
   const full = workflowRecordSchema.safeParse(input);
   return { workflow: full.success ? full.data : null, problems };
+}
+
+type Push = (problem: WorkflowProblem) => void;
+
+/**
+ * An agent block's declared outcomes and outputs (spec 2026-11-10 §5.1): 2–12 outcomes with unique
+ * ids, at most `maxOutputs` outputs with unique names, enum outputs with 1–50 unique values; a
+ * disabled block with outcomes passes through on its first one (§7.5), which is worth a warning.
+ */
+function checkAgentReport(node: Extract<WorkflowNode, { type: "agent" }>, config: Extract<WorkflowNode, { type: "agent" }>["config"], push: Push): void {
+  const where = (field: string) => ({ nodeId: node.id, field });
+  const describeLimit = WORKFLOW_LIMITS.inputDescriptionChars;
+  if (config.outcomes !== undefined) {
+    const { min, max } = WORKFLOW_LIMITS.outcomes;
+    if (config.outcomes.length < min || config.outcomes.length > max) {
+      push({
+        severity: "error",
+        code: "outcomes_count",
+        message: `${node.name}: declare ${min}–${max} outcomes (it has ${config.outcomes.length})${config.outcomes.length < min ? " — remove the list for a block without outcomes" : ""}`,
+        ...where("config.outcomes")
+      });
+    }
+    const seen = new Set<string>();
+    config.outcomes.forEach((outcome, index) => {
+      if (seen.has(outcome.id)) {
+        push({ severity: "error", code: "duplicate_outcome", message: `${node.name}: two outcomes share the id "${outcome.id}"`, ...where(`config.outcomes.${index}.id`) });
+      }
+      seen.add(outcome.id);
+      if ([...(outcome.label ?? "")].length > WORKFLOW_LIMITS.labelChars) {
+        push({ severity: "error", code: "label_too_long", message: `${node.name}: the outcome "${outcome.id}"'s label is at most ${WORKFLOW_LIMITS.labelChars} characters`, ...where(`config.outcomes.${index}.label`) });
+      }
+      if ((outcome.description?.length ?? 0) > describeLimit) {
+        push({ severity: "error", code: "description_too_long", message: `${node.name}: the outcome "${outcome.id}"'s description is longer than ${describeLimit} characters`, ...where(`config.outcomes.${index}.description`) });
+      }
+    });
+    if (node.disabled === true && config.outcomes.length > 0) {
+      push({
+        severity: "warning",
+        code: "disabled_takes_first_outcome",
+        message: `${node.name} is disabled: it passes its input on through its first outcome, "${config.outcomes[0]!.id}"`,
+        ...where("disabled")
+      });
+    }
+  }
+  if (config.outputs !== undefined) {
+    if (config.outputs.length > WORKFLOW_LIMITS.maxOutputs) {
+      push({ severity: "error", code: "outputs_count", message: `${node.name}: at most ${WORKFLOW_LIMITS.maxOutputs} outputs (it has ${config.outputs.length})`, ...where("config.outputs") });
+    }
+    const seen = new Set<string>();
+    config.outputs.forEach((output, index) => {
+      const field = `config.outputs.${index}`;
+      if (seen.has(output.name)) {
+        push({ severity: "error", code: "duplicate_output", message: `${node.name}: two outputs are named "${output.name}"`, ...where(`${field}.name`) });
+      }
+      seen.add(output.name);
+      if ((output.description?.length ?? 0) > describeLimit) {
+        push({ severity: "error", code: "description_too_long", message: `${node.name}: the output "${output.name}"'s description is longer than ${describeLimit} characters`, ...where(`${field}.description`) });
+      }
+      if (output.type === "enum") {
+        const values = output.values ?? [];
+        const { min, max } = WORKFLOW_LIMITS.enumValues;
+        if (values.length < min || values.length > max) {
+          push({ severity: "error", code: "enum_values", message: `${node.name}: the enum output "${output.name}" needs ${min}–${max} values (it has ${values.length})`, ...where(`${field}.values`) });
+        } else if (new Set(values).size !== values.length) {
+          push({ severity: "error", code: "enum_values", message: `${node.name}: the enum output "${output.name}" lists a value twice`, ...where(`${field}.values`) });
+        } else if (values.some((value) => value.length === 0)) {
+          push({ severity: "error", code: "enum_values", message: `${node.name}: the enum output "${output.name}" has an empty value`, ...where(`${field}.values`) });
+        }
+      } else if (output.values !== undefined) {
+        push({ severity: "warning", code: "enum_values", message: `${node.name}: "${output.name}" is a ${output.type} output, so its values are ignored`, ...where(`${field}.values`) });
+      }
+    });
+  }
 }
 
 /** A block's own `timeoutMinutes` cap (§5.9). */

@@ -9,6 +9,10 @@
  * and the frames of a Tidy up animation. The same component draws the run
  * view: pass a frozen definition, an `overlay` and `readOnly`.
  *
+ * A connection dragged onto a block that runs before its source makes a loop
+ * edge (spec 2026-11-10 §7.4), selected at once so its settings open; one the
+ * rules refuse says why while it is dragged and once it is dropped.
+ *
  * `WorkflowCanvas` needs a `ReactFlowProvider` above it (the editor tab has one
  * so its toolbar can zoom); `StandaloneWorkflowCanvas` brings its own.
  */
@@ -35,6 +39,8 @@ import { Map as MapIcon } from "lucide-react";
 
 import { outputHandles, workflowHandleLabel, type Workflow, type WorkflowNodeType, type WorkflowProblem } from "@orquester/api";
 
+import { loopEdgeDescription, loopEdgeLabel } from "../../../lib/workflows/loops";
+
 import { cn } from "../../../lib/cn";
 import { canvasFitOptions, phoneOpeningViewport } from "../../../lib/workflows/canvas-fit";
 import { blockAccent, nodeSummary, type NodeSummaryContext } from "../../../lib/workflows/catalog-ui";
@@ -48,7 +54,8 @@ import {
   type CanvasActions,
   type EdgeData
 } from "./canvas-context";
-import { connectBlocks, connectionRefusal } from "./connection";
+import { classifyConnection, connectBlocks, connectionRefusal } from "./connection";
+import { loopLevels } from "./loop-path";
 import { NoteNode, noteSize, type NoteFlowNode } from "./NoteNode";
 import { GRID, moveNodes, removeElements, updateNode } from "./ops";
 import { useLongPress } from "../../../hooks/use-long-press";
@@ -102,6 +109,8 @@ export interface WorkflowCanvasProps {
   onTapConnect?: (event: TapConnectEvent) => void;
   /** Triggers whose last poll failed, by node id (`triggerErrorsOf`). */
   triggerErrors?: ReadonlyMap<string, string>;
+  /** A loop's label (or an edge's problem marker) was clicked: open its settings. Default: select the edge. */
+  onOpenEdge?: (edgeId: string) => void;
   className?: string;
 }
 
@@ -121,6 +130,18 @@ function problemsByNode(problems: readonly WorkflowProblem[]): Map<string, Workf
     map.set(problem.nodeId, list);
   }
   for (const list of map.values()) list.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1));
+  return map;
+}
+
+/** Each edge's worst problem (errors first). */
+function problemsByEdge(problems: readonly WorkflowProblem[]): Map<string, { severity: "error" | "warning"; message: string }> {
+  const map = new Map<string, { severity: "error" | "warning"; message: string }>();
+  for (const problem of problems) {
+    if (!problem.edgeId || problem.severity === "info") continue;
+    const held = map.get(problem.edgeId);
+    if (held && (held.severity === "error" || problem.severity !== "error")) continue;
+    map.set(problem.edgeId, { severity: problem.severity === "error" ? "error" : "warning", message: problem.message });
+  }
   return map;
 }
 
@@ -157,6 +178,7 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
     tapConnect,
     onTapConnect,
     triggerErrors,
+    onOpenEdge,
     className
   },
   ref
@@ -189,6 +211,14 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
   // -------------------------------------------------------------------------
 
   const byNode = useMemo(() => problemsByNode(problems), [problems]);
+  const byEdge = useMemo(() => problemsByEdge(problems), [problems]);
+  /** Why the last dropped connection was refused (shown for a moment). */
+  const [refusal, setRefusal] = useState<string | null>(null);
+  useEffect(() => {
+    if (!refusal) return;
+    const timer = setTimeout(() => setRefusal(null), 3200);
+    return () => clearTimeout(timer);
+  }, [refusal]);
   const connected = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const edge of workflow.edges) {
@@ -294,16 +324,39 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
 
   const edges = useMemo(() => {
     const byId = new Map(workflow.nodes.map((node) => [node.id, node]));
+    const at = (id: string): { x: number; y: number } => dragPositions?.[id] ?? byId.get(id)?.position ?? { x: 0, y: 0 };
+    // Nested loops: an outer one's lane runs above the loops it wraps.
+    const levels = loopLevels(
+      workflow.edges.filter((edge) => edge.loop).map((edge) => ({ id: edge.id, from: at(edge.source).x + 240, to: at(edge.target).x }))
+    );
     return workflow.edges.map((edge): WorkflowFlowEdge => {
       const source = byId.get(edge.source);
       // Branch edges carry their label (a failure edge is red and dashed instead).
       const branch =
         source !== undefined && outputHandles(source).length > 1 && edge.sourceHandle !== "success" && edge.sourceHandle !== "error";
+      const handleLabel = source ? workflowHandleLabel(source, edge.sourceHandle) : edge.sourceHandle;
+      const counter = overlay?.loops?.[edge.id] ?? null;
       const data: EdgeData = {
         handle: edge.sourceHandle,
         label: branch && source ? workflowHandleLabel(source, edge.sourceHandle) : null,
         overlay: overlay?.edges[edge.id] ?? null,
-        runView
+        runView,
+        problem: byEdge.get(edge.id) ?? null,
+        loop: edge.loop
+          ? {
+              label: loopEdgeLabel(branch ? handleLabel : null, edge.loop, counter),
+              description: loopEdgeDescription(
+                source?.name ?? edge.source,
+                branch ? handleLabel : null,
+                byId.get(edge.target)?.name ?? edge.target,
+                edge.loop,
+                counter
+              ),
+              counter,
+              level: levels[edge.id] ?? 0,
+              newChat: edge.loop.session === "new"
+            }
+          : null
       };
       return {
         id: edge.id,
@@ -318,7 +371,7 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
         zIndex: overlay?.edges[edge.id] === "active" ? 1 : 0
       };
     });
-  }, [workflow.nodes, workflow.edges, overlay, runView, selectedEdges]);
+  }, [workflow.nodes, workflow.edges, overlay, runView, selectedEdges, byEdge, dragPositions]);
 
   // -------------------------------------------------------------------------
   // Changes from React Flow
@@ -424,6 +477,12 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
   const onConnect = useCallback(
     (connection: Connection) => {
       if (!mintId) return;
+      // A loop edge is selected at once: its settings (limit, chat) open beside it.
+      if (classifyConnection(workflowRef.current, connection).kind === "loop") {
+        const id = mintId();
+        change((draft) => connectBlocks(draft, connection, () => id), { select: { nodeIds: [], edgeIds: [id] } });
+        return;
+      }
       change((draft) => connectBlocks(draft, connection, mintId));
     },
     [change, mintId]
@@ -432,6 +491,16 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
   const onConnectEnd: OnConnectEnd = useCallback(
     (event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
       if (!editable || state.isValid || !state.fromNode || !state.fromHandle || state.fromHandle.type !== "source") return;
+      // Dropped on a block it may not feed: say why.
+      if (state.toNode && state.toNode.id !== state.fromNode.id) {
+        const verdict = classifyConnection(workflowRef.current, {
+          source: state.fromNode.id,
+          sourceHandle: state.fromHandle.id ?? null,
+          target: state.toNode.id
+        });
+        if (verdict.kind === "refused") setRefusal(verdict.reason);
+        return;
+      }
       const target = event.target as Element | null;
       if (!target?.classList?.contains("react-flow__pane")) return;
       const point = "changedTouches" in event ? event.changedTouches[0] : (event as MouseEvent);
@@ -528,9 +597,16 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
       setHoveredEdgeId,
       clearHoveredEdge: (edgeId) => setHoveredEdgeId((current) => (current === edgeId ? null : current)),
       touch: coarse || phone,
-      startTapConnect: editable && onTapConnect ? (from) => onTapConnect({ type: "start", from }) : null
+      startTapConnect: editable && onTapConnect ? (from) => onTapConnect({ type: "start", from }) : null,
+      openEdge: editable
+        ? (edgeId) => {
+            if (onOpenEdge) onOpenEdge(edgeId);
+            else onSelectionChange?.({ nodeIds: [], edgeIds: [edgeId] });
+          }
+        : null,
+      classifyConnection: (request) => (editable ? classifyConnection(workflowRef.current, request) : null)
     }),
-    [editable, onOpenAddMenu, change, hoveredEdgeId, coarse, phone, onTapConnect]
+    [editable, onOpenAddMenu, change, hoveredEdgeId, coarse, phone, onTapConnect, onOpenEdge, onSelectionChange]
   );
 
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -711,6 +787,16 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
             />
           ) : null}
         </ReactFlow>
+        {refusal ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-14 z-20 flex justify-center px-4">
+            <div
+              role="status"
+              className="max-w-md rounded-lg border border-danger/40 bg-neutral-900/95 px-3 py-1.5 text-[12.5px] text-danger shadow-lg shadow-black/40"
+            >
+              {refusal}
+            </div>
+          </div>
+        ) : null}
       </div>
     </CanvasActionsContext.Provider>
   );

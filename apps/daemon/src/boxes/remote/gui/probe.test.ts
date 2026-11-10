@@ -160,6 +160,14 @@ test("the install plan names packages per package manager, plus a terminal and f
   assert.deepEqual(desktopInstallPlan(complete, [], "apt").missing, []);
 });
 
+test("voxl's missing runtime libraries join the optional packages; an older probe without them installs none", () => {
+  const withLibs = facts(`${FRESH}lib:libx264.so.164=0\nlib:libyuv.so.0=0\nlib:libopus.so.0=1\nlib:libpulse-simple.so.0=0\n`);
+  const { missingPackages } = evaluateBoxDesktop(withLibs);
+  assert.deepEqual(desktopInstallPlan(withLibs, missingPackages, "apt").optional.slice(-3), [["libx264-164"], ["libyuv0"], ["libpulse0"]]);
+  assert.deepEqual(desktopInstallPlan(withLibs, missingPackages, "dnf").optional.slice(-3), [["x264-libs"], ["libyuv"], ["pulseaudio-libs"]]);
+  assert.deepEqual(desktopInstallPlan(facts(INSTALLED), [], "apt").missing, []);
+});
+
 test("package managers and Chrome architectures", () => {
   assert.equal(packageManagerOf({ packageCommand: "apt-get" }), "apt");
   assert.equal(packageManagerOf({ packageCommand: "dnf" }), "dnf");

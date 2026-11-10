@@ -38,6 +38,7 @@ import { StatusGlyph, useNow } from "../runs/shared";
 import { Callout, CopyChip, Disclosure, HelpTip, Pill, Section, SmallButton, TextArea } from "../ui/controls";
 import { GuideItems, GuideSections, GuideText } from "../ui/GuideText";
 import { fieldMessages, useInspector } from "./inspector-context";
+import { GateRunSection } from "../gates/GateDecision";
 
 const MUTED = "text-[12px] leading-5 text-neutral-500";
 
@@ -184,7 +185,7 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
   const outputPath = `nodes.${node.name}.output`;
   const pinnedMessages = fieldMessages(problems, `pinned.${node.id}`);
   // Parsed once per edit, not per render (the text can be up to 1 MiB).
-  const draft = useMemo(() => (editing === null ? null : parsePinnedText(editing)), [editing]);
+  const draft = useMemo(() => (editing === null ? null : parsePinnedText(editing, node)), [editing, node]);
 
   const pinnedSection =
     !trigger && (pinnable || hasPin || node.type === "if" || node.type === "switch") ? (
@@ -333,6 +334,18 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
                   {block.attempt > 1 ? <span className="text-neutral-500">· after {block.attempt} tries</span> : null}
                   {block.pinned ? <span className="text-neutral-500">· used its pinned output</span> : null}
                 </div>
+
+                {/* A test run's gate is answered here and in the run view (spec 2026-11-10 §7.5). */}
+                {latest ? (
+                  <GateRunSection
+                    runId={latest.id}
+                    nodeId={node.id}
+                    definition={run?.detail?.definition ?? null}
+                    loopLimits={run?.loopLimits}
+                    now={now}
+                    variant={variant}
+                  />
+                ) : null}
 
                 {!trigger ? (
                   <Disclosure

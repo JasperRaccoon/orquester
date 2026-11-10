@@ -23,7 +23,19 @@ export interface DesktopPrefs {
   view: "fit" | "fixed";
   fixedSize?: { width: number; height: number };
   fixedMode?: "scale" | "pan";
+  /** Touch devices: how a finger drives the pointer (spec 2026-11-10 R3.1). Absent: `trackpad`. */
+  inputMode?: DesktopInputMode;
+  /** Touch devices: a display size derived from the tab instead of `view` (R3.5). Absent: `fit`. */
+  textSize?: DesktopTextSize;
 }
+
+/** `trackpad`: the finger moves a cursor and taps click at it. `touch`: taps click under the finger. */
+export type DesktopInputMode = "trackpad" | "touch";
+
+/** `fit`: `view` applies. The others size the display from the tab (see `desktop-text-size.ts`). */
+export type DesktopTextSize = "fit" | "large" | "medium" | "more";
+
+const TEXT_SIZES: readonly DesktopTextSize[] = ["fit", "large", "medium", "more"];
 
 const KEY_PREFIX = "orq.desktop.prefs.";
 
@@ -81,6 +93,9 @@ function sanitizeDesktopPrefs(raw: unknown, coarsePointer: boolean): DesktopPref
     if (fixedSize) out.fixedSize = fixedSize;
     if (fixedMode) out.fixedMode = fixedMode;
   }
+  // Touch fields are optional: an invalid or unknown value reads as absent (the default).
+  if (raw.inputMode === "trackpad" || raw.inputMode === "touch") out.inputMode = raw.inputMode;
+  if (TEXT_SIZES.includes(raw.textSize as DesktopTextSize)) out.textSize = raw.textSize as DesktopTextSize;
   return out;
 }
 

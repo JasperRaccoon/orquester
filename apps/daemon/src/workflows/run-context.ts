@@ -6,6 +6,7 @@ import {
   WORKFLOW_LIMITS,
   type WorkflowBlockRun,
   type WorkflowErrorCode,
+  type WorkflowInputError,
   type WorkflowNode,
   type WorkflowProblem,
   type WorkflowRun,
@@ -18,13 +19,14 @@ import type { Clock, PersistedBlockState, PersistedRun } from "./contracts.ts";
 // Errors the engine throws at its callers (routes, MCP)
 // ---------------------------------------------------------------------------
 
-/** A refusal with a wire code and an HTTP status; `problems` for INVALID_WORKFLOW. */
+/** A refusal with a wire code and an HTTP status; `problems` for INVALID_WORKFLOW, `inputErrors` for INVALID_INPUT. */
 export class WorkflowEngineError extends Error {
   constructor(
     readonly statusCode: number,
     readonly code: WorkflowErrorCode,
     message: string,
-    readonly problems?: WorkflowProblem[]
+    readonly problems?: WorkflowProblem[],
+    readonly inputErrors?: WorkflowInputError[]
   ) {
     super(message);
     this.name = "WorkflowEngineError";
@@ -110,6 +112,9 @@ export function blockTimeoutMs(node: WorkflowNode): number {
       return WORKFLOW_LIMITS.waitMaxMinutes * MINUTE;
     case "workflow":
       return nodeMinutes !== undefined ? nodeMinutes * MINUTE : Number.POSITIVE_INFINITY;
+    case "gate":
+      // Exempt from the 5-minute default (spec 2026-11-10 §6.1): its phases carry their own deadlines.
+      return Number.POSITIVE_INFINITY;
     default:
       return (nodeMinutes ?? 5) * MINUTE;
   }
@@ -238,13 +243,22 @@ export function toRunSummary(run: PersistedRun): WorkflowRunSummary {
   if (run.tempProject !== undefined) summary.tempProject = structuredClone(run.tempProject);
   if (run.parentRunId !== undefined) summary.parentRunId = run.parentRunId;
   if (run.retryOf !== undefined) summary.retryOf = run.retryOf;
+  // gates (spec 2026-11-10 §6.2, §6.4)
+  if (typeof run.pendingGates === "number" && run.pendingGates > 0) summary.pendingGates = run.pendingGates;
+  if (typeof run.pendingPersonGates === "number" && run.pendingPersonGates > 0) summary.pendingPersonGates = run.pendingPersonGates;
+  if (run.parked === true) summary.parked = true;
+  if (typeof run.skipDetail === "string") summary.skipDetail = run.skipDetail;
   return summary;
 }
 
-/** A block as it crosses the wire: no `waitingOn`, no output file path. */
+/** A block as it crosses the wire: no `waitingOn`, no output file paths, no loop bookkeeping. */
 export function publicBlock(block: PersistedBlockState): WorkflowBlockRun {
-  const { waitingOn: _waitingOn, outputFile: _outputFile, ...rest } = block;
-  return structuredClone(rest);
+  const { waitingOn: _waitingOn, outputFile: _outputFile, passes, passAttemptBase: _base, loopEdgeId: _edge, ...rest } = block;
+  const out: WorkflowBlockRun = structuredClone(rest);
+  if (passes !== undefined) {
+    out.passes = passes.map(({ outputFile: _file, interruptedFrom: _interrupted, ...pass }) => structuredClone(pass));
+  }
+  return out;
 }
 
 export function publicRun(run: PersistedRun): WorkflowRun {
@@ -259,6 +273,13 @@ export function publicRun(run: PersistedRun): WorkflowRun {
     deadEdges: [...run.deadEdges]
   };
   if (run.finalOutput !== undefined) out.finalOutput = structuredClone(run.finalOutput);
+  // gates (spec 2026-11-10 §6)
+  if (run.startedBy !== undefined) out.startedBy = structuredClone(run.startedBy);
+  if (run.gates !== undefined) out.gates = structuredClone(run.gates);
+  if (run.parkedMs !== undefined) out.parkedMs = run.parkedMs;
+  if (run.parkedSince !== undefined) out.parkedSince = run.parkedSince;
+  if (run.loopCounters !== undefined) out.loopCounters = { ...run.loopCounters };
+  if (run.loopLimits !== undefined) out.loopLimits = { ...run.loopLimits };
   const revisions = subWorkflowRevisionsOf(run);
   if (revisions !== undefined) out.subWorkflowRevisions = revisions;
   return out;

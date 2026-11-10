@@ -12,10 +12,26 @@
  * handle is dead), so a run loaded before its edge lists caught up still draws
  * the path it took.
  *
+ * Loop edges (spec 2026-11-10 §7.4) are read off the run's loop counters
+ * instead: `taken` once the run went back along one (`active` while its
+ * target runs again), else `dead` when its source finished on another
+ * handle. Each carries its counter (`loops`), which the canvas labels
+ * "used/max". A block a loop ran again carries its pass and pass count.
+ *
  * Pure: the caller passes `now` for a running block's elapsed time.
  */
 
-import type { Workflow, WorkflowBlockRun, WorkflowBlockStatus, WorkflowRunStatus } from "@orquester/api";
+import {
+  isLoopEdge,
+  workflowHandleLabel,
+  type Workflow,
+  type WorkflowBlockRun,
+  type WorkflowBlockStatus,
+  type WorkflowNode,
+  type WorkflowRunStatus
+} from "@orquester/api";
+
+import { loopCounterOf, type LoopCounter } from "./loops";
 
 export type OverlayEdgeState = "taken" | "dead" | "active" | "idle";
 
@@ -38,12 +54,22 @@ export interface OverlayNodeState {
   pinned?: boolean;
   /** A Wait block or a wait-for-reset: until when. */
   waitingUntil?: string;
+  /** A loop ran it again: its current pass (1-based) and how many passes it has had. */
+  pass?: number;
+  passCount?: number;
+  /**
+   * An agent block with outcomes (spec 2026-11-10 §5): the outcome it finished on, or — still
+   * running — the one its agent reported so far (`final: false`, a later report may replace it).
+   */
+  outcome?: { id: string; label: string; final: boolean };
 }
 
 export interface RunOverlay {
   runStatus: WorkflowRunStatus;
   nodes: Record<string, OverlayNodeState>;
   edges: Record<string, OverlayEdgeState>;
+  /** Every loop edge's counter in this run, by edge id. */
+  loops: Record<string, LoopCounter>;
 }
 
 export interface RunOverlayInput {
@@ -51,6 +77,9 @@ export interface RunOverlayInput {
   blocks: Readonly<Record<string, WorkflowBlockRun>>;
   takenEdges: readonly string[];
   deadEdges: readonly string[];
+  /** How often each loop edge was taken (absent = 0), and limits raised for this run. */
+  loopCounters?: Readonly<Record<string, number>>;
+  loopLimits?: Readonly<Record<string, number>>;
 }
 
 const FINISHED: ReadonlySet<WorkflowBlockStatus> = new Set(["succeeded", "failed", "skipped", "cancelled"]);
@@ -72,7 +101,16 @@ function finishedHandle(block: WorkflowBlockRun): string | null {
   return null;
 }
 
-function nodeState(block: WorkflowBlockRun, now: number): OverlayNodeState {
+/** The outcome chip of an agent block: the outcome handle it took, else a running pass's report. */
+function outcomeOf(block: WorkflowBlockRun, node: Pick<WorkflowNode, "id" | "type" | "config">): OverlayNodeState["outcome"] | undefined {
+  const taken = block.handle?.startsWith("outcome:") ? block.handle.slice("outcome:".length) : undefined;
+  const reported = LIVE.has(block.status) ? block.report?.outcome : undefined;
+  const id = taken ?? reported;
+  if (id === undefined) return undefined;
+  return { id, label: workflowHandleLabel(node, `outcome:${id}`), final: taken !== undefined };
+}
+
+function nodeState(block: WorkflowBlockRun, now: number, node: Pick<WorkflowNode, "id" | "type" | "config">): OverlayNodeState {
   const state: OverlayNodeState = { status: block.status, attempt: block.attempt };
   const duration = durationOf(block, now);
   if (duration !== undefined) state.durationMs = duration;
@@ -90,6 +128,13 @@ function nodeState(block: WorkflowBlockRun, now: number): OverlayNodeState {
   if (block.error?.message) state.errorMessage = block.error.message;
   if (block.pinned) state.pinned = true;
   if (block.waitingUntil) state.waitingUntil = block.waitingUntil;
+  const passCount = Math.max(block.pass ?? 1, (block.passes?.length ?? 0) + 1);
+  if (passCount > 1) {
+    state.pass = block.pass ?? passCount;
+    state.passCount = passCount;
+  }
+  const outcome = outcomeOf(block, node);
+  if (outcome) state.outcome = outcome;
   return state;
 }
 
@@ -101,25 +146,40 @@ export function deriveRunOverlay(
   const nodes: Record<string, OverlayNodeState> = {};
   for (const node of workflow.nodes) {
     const block = run.blocks[node.id];
-    if (block) nodes[node.id] = nodeState(block, now);
+    if (block) nodes[node.id] = nodeState(block, now, node);
   }
   const taken = new Set(run.takenEdges);
   const dead = new Set(run.deadEdges);
   const edges: Record<string, OverlayEdgeState> = {};
+  const loops: Record<string, LoopCounter> = {};
   for (const edge of workflow.edges) {
     const target = run.blocks[edge.target];
+    const source = run.blocks[edge.source];
     let state: OverlayEdgeState = "idle";
+    const counter = isLoopEdge(edge) ? loopCounterOf(edge, run) : null;
+    if (counter) {
+      loops[edge.id] = counter;
+      // A loop edge: taken once the run went back along it; else closed when its source left by another handle.
+      if (counter.used > 0 || taken.has(edge.id)) state = "taken";
+      else if (dead.has(edge.id)) state = "dead";
+      else if (source && FINISHED.has(source.status)) state = finishedHandle(source) === edge.sourceHandle ? "taken" : "dead";
+      if (state === "taken" && target && LIVE.has(target.status) && (target.pass ?? 1) > 1) state = "active";
+      edges[edge.id] = state;
+      continue;
+    }
     if (taken.has(edge.id)) state = "taken";
-    else if (dead.has(edge.id)) state = "dead";
-    else {
-      const source = run.blocks[edge.source];
-      if (source && FINISHED.has(source.status)) {
-        const handle = finishedHandle(source);
-        state = handle !== null && handle === edge.sourceHandle ? "taken" : "dead";
-      }
+    else if (dead.has(edge.id) && !rerunning(source)) state = "dead";
+    else if (source && FINISHED.has(source.status)) {
+      const handle = finishedHandle(source);
+      state = handle !== null && handle === edge.sourceHandle ? "taken" : "dead";
     }
     if (state === "taken" && target && LIVE.has(target.status)) state = "active";
     edges[edge.id] = state;
   }
-  return { runStatus: run.status, nodes, edges };
+  return { runStatus: run.status, nodes, edges, loops };
+}
+
+/** A loop is running the block again: its edges are open until this pass settles. */
+function rerunning(block: WorkflowBlockRun | undefined): boolean {
+  return block !== undefined && (block.pass ?? 1) > 1 && !FINISHED.has(block.status);
 }

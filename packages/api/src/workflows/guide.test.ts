@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { runInNewContext } from "node:vm";
 
 import { toWorkflowAgentCatalog } from "./agent-catalog.ts";
-import { WORKFLOW_RECIPES } from "./guide.ts";
+import { outputHandles } from "./graph.ts";
+import { WORKFLOW_BLOCK_GUIDES, WORKFLOW_EXPRESSION_RULES, WORKFLOW_RECIPES } from "./guide.ts";
 import { createWorkflowFromRequest } from "./patch.ts";
 import { sequentialIds } from "./testing.ts";
 import { validateWorkflow } from "./validate.ts";
@@ -15,13 +15,6 @@ const liveCatalog = toWorkflowAgentCatalog([
 /** Every secret a published recipe reads must be available to its validation context. */
 function secretNamesIn(value: unknown): string[] {
   return [...new Set([...JSON.stringify(value).matchAll(/secrets\.([A-Z][A-Z0-9_]*)/g)].map((match) => match[1]!))];
-}
-
-/** The module's default export as a callable, in a fresh VM context (the sandbox's ESM, minus the `export`). */
-function loadDefaultExport(source: string): (arg: Record<string, unknown>) => Promise<unknown> {
-  const context: Record<string, unknown> = {};
-  runInNewContext(source.replace(/\bexport\s+default\s+/, "globalThis.main = "), context);
-  return context.main as (arg: Record<string, unknown>) => Promise<unknown>;
 }
 
 describe("workflow recipes", () => {
@@ -47,11 +40,27 @@ describe("workflow recipes", () => {
     }
   });
 
-  it("the JSON-parsing recipe turns an agent's chatty reply into an object, and throws on a reply without JSON", async () => {
-    const parse = WORKFLOW_RECIPES.find((recipe) => recipe.id === "agent-json")!.nodes.find((node) => node.name === "Parse")!;
-    const main = loadDefaultExport((parse.config as { source: string }).source);
-    // The VM's objects come from another realm: compare their JSON.
-    assert.equal(JSON.stringify(await main({ input: { text: "Sure:\n{\"severity\": \"high\", \"summary\": \"disk full\"}" } })), "{\"severity\":\"high\",\"summary\":\"disk full\"}");
-    await assert.rejects(main({ input: { text: "no idea" } }), /No JSON/);
+  it("the outcomes recipe branches on the reported outcome, with no Code block to parse a reply", () => {
+    const recipe = WORKFLOW_RECIPES.find((entry) => entry.id === "agent-outcomes")!;
+    assert.equal(recipe.nodes.some((node) => node.type === "code"), false);
+    const triage = recipe.nodes.find((node) => node.name === "Triage")!;
+    assert.deepEqual(outputHandles({ id: "x", type: "agent", config: triage.config }), ["outcome:high", "outcome:low", "error"]);
+    assert.deepEqual(recipe.edges.filter((edge) => edge.source === "Triage").map((edge) => edge.sourceHandle), ["outcome:high", "outcome:low"]);
+  });
+
+  it("the worked loop recipe is fix → review → loop back on changes_requested → a person's gate before merge", () => {
+    const recipe = WORKFLOW_RECIPES.find((entry) => entry.id === "loop-until-approved")!;
+    const loops = recipe.edges.filter((edge) => edge.loop !== undefined);
+    assert.deepEqual(loops, [{ source: "Review", sourceHandle: "outcome:changes_requested", target: "Fix", loop: { maxLoops: 3, session: "continue" } }]);
+    const gate = recipe.nodes.find((node) => node.type === "gate")!;
+    assert.deepEqual(outputHandles({ id: "x", type: "gate", config: gate.config }), ["choice:approve", "choice:reject", "error"]);
+    assert.deepEqual(recipe.edges.filter((edge) => edge.source === "Review" && edge.loop === undefined).map((edge) => [edge.sourceHandle, edge.target]), [["outcome:approved", gate.name]]);
+    assert.deepEqual(recipe.edges.filter((edge) => edge.source === gate.name).map((edge) => edge.sourceHandle), ["choice:approve", "choice:reject"]);
+  });
+
+  it("no guide text still tells an agent to parse a reply in a Code block", () => {
+    const text = JSON.stringify({ WORKFLOW_BLOCK_GUIDES, WORKFLOW_EXPRESSION_RULES, WORKFLOW_RECIPES });
+    assert.doesNotMatch(text, /parse it in a Code block/i);
+    assert.doesNotMatch(text, /JSON\.parse/);
   });
 });

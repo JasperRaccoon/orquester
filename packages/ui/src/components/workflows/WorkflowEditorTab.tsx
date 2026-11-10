@@ -22,6 +22,8 @@ import {
   isRunActive,
   outputHandles,
   placeNewNodes,
+  withoutLoopEdges,
+  workflowRunInputs,
   type WorkflowNodeType
 } from "@orquester/api";
 
@@ -63,9 +65,11 @@ import type { AddMenuRequest } from "./canvas/canvas-context";
 import { addBlock, moveNodes, nudgeNodes, removeElements } from "./canvas/ops";
 import { WorkflowCanvas, type WorkflowCanvasHandle } from "./canvas/WorkflowCanvas";
 import { EditorToolbar, type EditorMode } from "./EditorToolbar";
+import { EdgeInspector } from "./inspector/EdgeSettings";
 import { Inspector } from "./inspector/Inspector";
 import { PhoneEditor } from "./phone/PhoneEditor";
 import { PhoneLayoutContext, useIsPhoneLayout } from "./phone/phone-context";
+import { RunInputsDialog } from "./RunInputsDialog";
 import { RunNowPopover, type RunNowResult } from "./RunNowPopover";
 import { WorkflowRunsMode } from "./RunsMode";
 import { useWorkflowEditor } from "./use-workflow-editor";
@@ -264,7 +268,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
         newId = added.nodeId;
         if (!wired && request.flowPoint) return added.workflow;
         // Wired, or no point: place it beside what it connects to, clear of other blocks.
-        const positions = placeNewNodes(added.workflow, [added.nodeId]);
+        const positions = placeNewNodes(withoutLoopEdges(added.workflow), [added.nodeId]);
         let placed = added.workflow;
         const at = positions[added.nodeId];
         if (at) {
@@ -374,7 +378,8 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
   const tidy = useCallback(() => {
     if (!editor.state.draft) return;
     const selected = editor.state.selection.nodeIds;
-    const positions = autoLayout(editor.state.draft, selected.length > 1 ? { onlyNodeIds: selected } : {});
+    // Loop edges point back; they never rank a block (spec 2026-11-10 §7.4).
+    const positions = autoLayout(withoutLoopEdges(editor.state.draft), selected.length > 1 ? { onlyNodeIds: selected } : {});
     if (canvasRef.current) {
       canvasRef.current.animateTo(positions);
       setTimeout(() => fit(320), 360);
@@ -494,22 +499,37 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
     return manual && manual.type === "trigger.manual" ? (manual.config.inputExample ?? "") : "";
   }, [draft]);
 
+  /** The declared inputs Run now's form is built from (the first enabled manual trigger's), when there are any. */
+  const manualInputs = useMemo(() => (draft ? workflowRunInputs(draft) : undefined), [draft]);
+
   const runNow = useCallback(
     async (input: unknown, options: { force: boolean }): Promise<RunNowResult> => {
       await editor.flush();
-      const result = await runWorkflowNow(api, workflowId, {
-        ...(input !== undefined ? { input } : {}),
-        ...(options.force ? { force: true } : {})
-      });
-      if (!result.ok) return { ok: false, error: result.error };
+      const result = await runWorkflowNow(
+        api,
+        workflowId,
+        {
+          ...(input !== undefined ? { input } : {}),
+          ...(options.force ? { force: true } : {})
+        },
+        // Both Run now surfaces show the refusal and the overlap "Run anyway" themselves (the typed
+        // form beside its fields), so the rail posts neither a second time.
+        { quiet: true }
+      );
+      if (!result.ok) return { ok: false, error: result.error, ...(result.inputErrors ? { inputErrors: result.inputErrors } : {}) };
       const answer = result.value;
       if (answer.runId) {
         selectRun(answer.runId);
         setMode("runs");
       }
-      return { ok: true, runId: answer.runId, ...(answer.skipped ? { skipped: answer.skipped } : {}) };
+      return {
+        ok: true,
+        runId: answer.runId,
+        ...(answer.skipped ? { skipped: answer.skipped } : {}),
+        ...(typeof answer.skipDetail === "string" && answer.skipDetail.trim() ? { skipDetail: answer.skipDetail.trim() } : {})
+      };
     },
-    [api, editor, workflowId, selectRun]
+    [api, editor, workflowId, selectRun, manualInputs]
   );
 
   const toggleEnabled = useCallback(
@@ -533,6 +553,16 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
   );
 
   const selection = state.selection;
+  // One loop edge (or a flagged edge) selected — its label, its marker, a click on it: its settings in the
+  // inspector column. A plain connection keeps its on-canvas tools only.
+  const selectedEdge =
+    selection.nodeIds.length === 0 && selection.edgeIds.length === 1
+      ? draft?.edges.find((edge) => edge.id === selection.edgeIds[0])
+      : undefined;
+  const inspectedEdge =
+    selectedEdge && (selectedEdge.loop || state.problems.some((problem) => problem.edgeId === selectedEdge.id && problem.severity !== "info"))
+      ? selectedEdge.id
+      : null;
   const emptyHint = draft !== null && draft.nodes.filter((node) => node.type !== "note").length <= 1 && draft.edges.length === 0;
   const fromNode = addMenu?.from ? draft?.nodes.find((node) => node.id === addMenu.from!.nodeId) : undefined;
   const addContext = fromNode
@@ -641,14 +671,26 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
           })
         }
       />
-      <RunNowPopover
-        open={runNowOpen}
-        anchor={runButton.current}
-        onClose={() => setRunNowOpen(false)}
-        example={manualExample}
-        blockingErrors={errorCount}
-        onRun={runNow}
-      />
+      {manualInputs !== undefined ? (
+        <RunInputsDialog
+          open={runNowOpen}
+          onClose={() => setRunNowOpen(false)}
+          workflowName={draft.name}
+          inputs={manualInputs}
+          blockingErrors={errorCount}
+          phone={phone}
+          onRun={runNow}
+        />
+      ) : (
+        <RunNowPopover
+          open={runNowOpen}
+          anchor={runButton.current}
+          onClose={() => setRunNowOpen(false)}
+          example={manualExample}
+          blockingErrors={errorCount}
+          onRun={runNow}
+        />
+      )}
       <WorkflowSettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
@@ -707,6 +749,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
                   onLongPressPane={hooks.onLongPressPane}
                   tapConnect={hooks.tapConnect}
                   onTapConnect={hooks.onTapConnect}
+                  onOpenEdge={hooks.onOpenEdge}
                 />
               </div>
             )}
@@ -802,6 +845,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
               problems={state.problems}
               nodeName={(nodeId) => draft.nodes.find((node) => node.id === nodeId)?.name}
               onSelectNode={(nodeId) => editor.select({ nodeIds: [nodeId], edgeIds: [] })}
+              onSelectEdge={(edgeId) => editor.select({ nodeIds: [], edgeIds: [edgeId] })}
             />
             {emptyHint && !readOnly ? (
               <div className="pointer-events-none absolute inset-x-0 top-5 flex justify-center">
@@ -811,7 +855,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
               </div>
             ) : null}
           </div>
-          {selection.nodeIds.length > 0 ? (
+          {selection.nodeIds.length > 0 || inspectedEdge ? (
             <div
               className="relative flex shrink-0 flex-col border-l border-neutral-800 bg-neutral-950"
               style={{ width: layout.inspectorWidth || INSPECTOR_DEFAULT_WIDTH }}
@@ -826,23 +870,36 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
                 onCommit={(next) => setLayout({ inspectorWidth: clampInspectorWidth(-next) })}
                 onReset={() => setLayout({ inspectorWidth: INSPECTOR_DEFAULT_WIDTH })}
               />
-              <Inspector
-                editor={editor}
-                workflow={draft}
-                selectedIds={selection.nodeIds}
-                problems={state.problems}
-                summaryContext={summaryContext}
-                readOnly={readOnly}
-                projectPath={workflowProject}
-                secretNames={secretNames}
-                onOpenSecrets={() => setSecretsOpen(true)}
-                onOpenRun={openRun}
-                onClose={() => editor.select(EMPTY_SELECTION)}
-                onDeleteSelection={deleteSelection}
-                onDuplicateSelection={duplicateSelection}
-                onToggleDisabled={toggleDisabledSelection}
-                onSelectNode={(nodeId) => editor.select({ nodeIds: [nodeId], edgeIds: [] })}
-              />
+              {inspectedEdge ? (
+                <EdgeInspector
+                  workflow={draft}
+                  edgeId={inspectedEdge}
+                  problems={state.problems}
+                  readOnly={readOnly}
+                  onChange={(recipe) => editor.change(recipe)}
+                  onDelete={() => editor.change((current) => removeElements(current, [], [inspectedEdge]), { select: EMPTY_SELECTION })}
+                  onSelectNode={(nodeId) => editor.select({ nodeIds: [nodeId], edgeIds: [] })}
+                  onClose={() => editor.select(EMPTY_SELECTION)}
+                />
+              ) : (
+                <Inspector
+                  editor={editor}
+                  workflow={draft}
+                  selectedIds={selection.nodeIds}
+                  problems={state.problems}
+                  summaryContext={summaryContext}
+                  readOnly={readOnly}
+                  projectPath={workflowProject}
+                  secretNames={secretNames}
+                  onOpenSecrets={() => setSecretsOpen(true)}
+                  onOpenRun={openRun}
+                  onClose={() => editor.select(EMPTY_SELECTION)}
+                  onDeleteSelection={deleteSelection}
+                  onDuplicateSelection={duplicateSelection}
+                  onToggleDisabled={toggleDisabledSelection}
+                  onSelectNode={(nodeId) => editor.select({ nodeIds: [nodeId], edgeIds: [] })}
+                />
+              )}
             </div>
           ) : null}
         </div>

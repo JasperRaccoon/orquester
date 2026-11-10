@@ -2,13 +2,22 @@
  * The sheets a step opens on a phone (workflows spec §7.4): its ⋯ menu
  * (settings, rename, duplicate, disable, connect, move, delete), a rename
  * field, and the pickers "Connect to…" (an output — when it has several —
- * then the block it should feed) and "Move to another output".
+ * then the block it should feed; a block that runs before it makes a loop)
+ * and "Move to another output".
  */
 
 import React, { useEffect, useMemo, useState } from "react";
 import { ArrowRightLeft, Cable, Copy, Pencil, Power, Settings2, Trash2 } from "lucide-react";
 
-import { acceptsInput, outputHandles, WORKFLOW_NODE_NAME_PATTERN, workflowHandleLabel, type Workflow, type WorkflowNode } from "@orquester/api";
+import {
+  acceptsInput,
+  outputHandles,
+  WORKFLOW_LIMITS,
+  WORKFLOW_NODE_NAME_PATTERN,
+  workflowHandleLabel,
+  type Workflow,
+  type WorkflowNode
+} from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
 import { blockAgent } from "../../../lib/workflows/catalog-ui";
@@ -244,6 +253,11 @@ export const ConnectSheet: React.FC<{
                   {candidate.name}
                 </span>
                 {candidate.refusal ? <span className="block text-xs leading-4 text-neutral-500">{candidate.refusal}</span> : null}
+                {candidate.loop && !candidate.refusal ? (
+                  <span className="block text-xs leading-4 text-info">
+                    ↺ Runs before it: loops back, at most {WORKFLOW_LIMITS.defaultLoop.maxLoops} times
+                  </span>
+                ) : null}
               </span>
             </PickRow>
           ))

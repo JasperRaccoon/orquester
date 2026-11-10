@@ -21,7 +21,7 @@ import {
 /** What clicking a notification opens. */
 export type DesktopNotificationTarget =
   | { kind: "session"; sessionId: string }
-  | { kind: "workflow"; workflowId: string; runId: string | null };
+  | { kind: "workflow"; workflowId: string; runId: string | null; gateId?: string };
 
 /** One system notification, as the renderer asks the shell to show it. */
 export interface DesktopNotificationRequest {
@@ -100,7 +100,11 @@ export function parsePushNotificationEvent(payload: unknown): PushNotificationEv
   if (workflowId) {
     event.workflowId = workflowId;
     const runId = idOf(payload.runId);
-    if (runId) event.runId = runId;
+    if (runId) {
+      event.runId = runId;
+      const gateId = idOf(payload.gateId);
+      if (gateId) event.gateId = gateId;
+    }
   }
   return event;
 }
@@ -114,7 +118,10 @@ export function parseNotificationTarget(raw: unknown): DesktopNotificationTarget
   }
   if (raw.kind === "workflow") {
     const workflowId = idOf(raw.workflowId);
-    return workflowId ? { kind: "workflow", workflowId, runId: idOf(raw.runId) } : null;
+    if (!workflowId) return null;
+    const runId = idOf(raw.runId);
+    const gateId = runId ? idOf(raw.gateId) : null;
+    return gateId ? { kind: "workflow", workflowId, runId, gateId } : { kind: "workflow", workflowId, runId };
   }
   return null;
 }
@@ -139,7 +146,9 @@ export interface NotificationContext {
 
 function targetOf(event: PushNotificationEvent): DesktopNotificationTarget | null {
   if (event.kind === "workflow" && event.workflowId) {
-    return { kind: "workflow", workflowId: event.workflowId, runId: event.runId ?? null };
+    const target: Extract<DesktopNotificationTarget, { kind: "workflow" }> = { kind: "workflow", workflowId: event.workflowId, runId: event.runId ?? null };
+    if (event.runId && event.gateId) target.gateId = event.gateId;
+    return target;
   }
   return event.sessionId ? { kind: "session", sessionId: event.sessionId } : null;
 }

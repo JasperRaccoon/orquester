@@ -15,6 +15,7 @@ import type { Workflow, WorkflowSummary } from "@orquester/api";
 
 import { useApi } from "../../../context/orquester-context";
 import { filterWorkflows, normalizeWorkflowProjectPath, type WorkflowListFilter } from "../../../lib/workflows/format";
+import { summaryRunInputs } from "../../../lib/workflows/run-inputs";
 import { useWorkflowRuns, useWorkflows } from "../../../lib/workflows/hooks";
 import {
   createWorkflow,
@@ -29,7 +30,10 @@ import {
 import { createFromTemplate, type WorkflowTemplateId } from "../../../lib/workflows/templates";
 import { useAppStore } from "../../../store/app";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
+import { WorkflowGateCards } from "../../workflows/gates/WorkflowGateCards";
 import { openWorkflowRunInEditor } from "../../workflows/runs/open-run";
+import { RunInputsDialog } from "../../workflows/RunInputsDialog";
+import type { RunNowResult } from "../../workflows/RunNowPopover";
 import type { RightRailPanelProps } from "../types";
 import { NewWorkflowDialog } from "./NewWorkflowDialog";
 import { WorkflowSecretsDialog } from "./WorkflowSecretsDialog";
@@ -106,11 +110,14 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
     [openWorkflowTab, projectAvailable, projectPath, onDelivered]
   );
 
+  /** The workflow whose typed Run now form is open (its manual trigger declares inputs). */
+  const [inputsFor, setInputsFor] = useState<WorkflowSummary | null>(null);
+
   const run = useCallback(
-    async (workflow: WorkflowSummary, force = false) => {
+    async (workflow: WorkflowSummary, force = false, input?: unknown) => {
       setStartingIds((current) => new Set(current).add(workflow.id));
       try {
-        await runWorkflowNow(api, workflow.id, force ? { force: true } : {});
+        await runWorkflowNow(api, workflow.id, { ...(force ? { force: true } : {}), ...(input !== undefined ? { input } : {}) });
       } finally {
         setStartingIds((current) => {
           const next = new Set(current);
@@ -126,7 +133,8 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
     () => ({
       toggleExpanded: (workflow) => setExpanded(remembered.expandedId === workflow.id ? null : workflow.id),
       setEnabled: (workflow, enabled) => void setWorkflowEnabled(api, workflow.id, enabled),
-      run: (workflow) => void run(workflow),
+      // Declared inputs: the form first (spec 2026-11-10 §4.3); else a run at once, as before.
+      run: (workflow) => (summaryRunInputs(workflow.triggers) ? setInputsFor(workflow) : void run(workflow)),
       edit: (workflow) => openEditor(workflow.id, { title: workflow.name }),
       // The one "open a run" path (a toast's, the Attention Center's): it also
       // switches an editor tab that is already open to this run.
@@ -170,7 +178,7 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
   const noticeAction = useCallback(() => {
     const target = notice?.workflowId ? view.workflows.find((w) => w.id === notice.workflowId) : undefined;
     dismissWorkflowsNotice();
-    if (target && notice?.action === "run-anyway") void run(target, true);
+    if (target && notice?.action === "run-anyway") void run(target, true, notice.input);
   }, [notice, run, view.workflows]);
 
   return (
@@ -201,7 +209,55 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
         onSecrets={() => setSecretsFor({ workflowId: null })}
         onTemplate={(id) => void fromTemplate(id)}
         creatingTemplate={creatingTemplate}
+        renderGates={(workflow) => (
+          <WorkflowGateCards
+            workflow={workflow}
+            variant={variant}
+            now={now}
+            openRunDisabledReason={projectAvailable ? null : NO_PROJECT_REASON}
+            onOpenRun={(gate) => {
+              if (!projectAvailable) return;
+              // The gate's own run in its own workflow: a sub-workflow's gate opens the child run in the child workflow.
+              const own = gate.workflowId === workflow.id;
+              const workflowName = own ? workflow.name : gate.workflowName;
+              const target = {
+                runId: gate.runId,
+                gateId: gate.gateId,
+                workflowId: gate.workflowId,
+                ...(workflowName ? { workflowName } : {}),
+                ...(projectPath ? { projectPath } : {})
+              };
+              if (openWorkflowRunInEditor(target)) onDelivered?.();
+            }}
+          />
+        )}
       />
+      {inputsFor !== null ? (
+        <RunInputsDialog
+          open
+          onClose={() => setInputsFor(null)}
+          workflowName={inputsFor.name}
+          inputs={summaryRunInputs(inputsFor.triggers) ?? []}
+          blockingErrors={inputsFor.errorCount}
+          phone={variant === "sheet"}
+          onRun={async (input, { force }): Promise<RunNowResult> => {
+            const result = await runWorkflowNow(
+              api,
+              inputsFor.id,
+              { ...(input !== undefined ? { input } : {}), ...(force ? { force: true } : {}) },
+              { quiet: true }
+            );
+            if (!result.ok) return { ok: false, error: result.error, ...(result.inputErrors ? { inputErrors: result.inputErrors } : {}) };
+            const skipDetail = typeof result.value.skipDetail === "string" ? result.value.skipDetail.trim() : "";
+            return {
+              ok: true,
+              runId: result.value.runId,
+              ...(result.value.skipped ? { skipped: result.value.skipped } : {}),
+              ...(skipDetail ? { skipDetail } : {})
+            };
+          }}
+        />
+      ) : null}
       {newOpen ? (
         <NewWorkflowDialog projectPath={projectPath} onClose={() => setNewOpen(false)} onCreated={created} />
       ) : null}

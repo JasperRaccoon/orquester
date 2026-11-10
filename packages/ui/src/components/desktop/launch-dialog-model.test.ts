@@ -113,7 +113,7 @@ test("the launch request trims, and omits an empty cwd and env", () => {
   }
 });
 
-test("a new desktop sends size and render threads only when not the defaults", () => {
+test("a new desktop sends size, render threads and video only when not the defaults", () => {
   const app = { command: "xterm" };
   assert.deepEqual(buildCreateRequest("/w/p", app, { sizeId: "fit", renderThreads: 4 }), {
     projectPath: "/w/p",
@@ -125,6 +125,9 @@ test("a new desktop sends size and render threads only when not the defaults", (
     size: { width: 1600, height: 900 },
     renderThreads: 8
   });
+  // The Video choice is sent only when picked; the default leaves it to the daemon.
+  assert.equal("video" in buildCreateRequest("/w/p", app, { sizeId: "fit", renderThreads: 4, video: "default" }), false);
+  assert.equal(buildCreateRequest("/w/p", app, { sizeId: "fit", renderThreads: 4, video: "rfb" }).video, "rfb");
   assert.equal(clampRenderThreads(0), 1);
   assert.equal(clampRenderThreads(99), 16);
   assert.equal(clampRenderThreads(Number.NaN), 4);

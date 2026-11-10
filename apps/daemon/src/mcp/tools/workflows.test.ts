@@ -17,6 +17,7 @@ import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { ToolError } from "../errors.ts";
 import { executeToolCall, type ExecutorDeps } from "../executor.ts";
+import { MAX_RESULT_BYTES } from "../result.ts";
 import { busEvent, FakeDaemonApi, serveWorkflowReferences } from "../testing.ts";
 import { changesSecretUse, workflowsReferencingPrompt, workflowUnion } from "./workflow-preview.ts";
 
@@ -435,6 +436,22 @@ test("get_workflow_runs {runId} fits outputs and {runId, nodeId} pages whole Uni
   await rejects(call(api, "get_workflow_runs", { runId: "run-1", nodeId: "Ghost" }), "NODE_NOT_FOUND", /Work/);
   api.on("GET", "/api/workflow-runs/run-9", failure(404, "RUN_NOT_FOUND", "Missing"));
   await rejects(call(api, "get_workflow_runs", { runId: "run-9" }), "RUN_NOT_FOUND", /get_workflow_runs \{workflowId\}/);
+});
+
+test("get_workflow_runs {runId}: a block's report shows its outcome and summary, never its outputs again (they are in its fitted output)", async (t) => {
+  const api = await sandbox(t);
+  const run = runRecord(definition(api), "succeeded");
+  const big = { notes: "x".repeat(900 * 1024) };
+  run.blocks = {
+    a: { nodeId: "a", name: "Work", type: "agent", status: "succeeded", attempt: 1, output: { text: "done", summary: "ok", outputs: big }, report: { outcome: "approved", summary: "ok", outputs: big, sessionId: "s", reportedAt: stamp } },
+    b: { nodeId: "b", name: "Finish", type: "code", status: "succeeded", attempt: 1, output: { done: true } }
+  };
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run } });
+  const result = await exec(api, "get_workflow_runs", { runId: "run-1" });
+  assert.ok(Buffer.byteLength(JSON.stringify(result.structuredContent)) <= MAX_RESULT_BYTES, "the result stays within its budget");
+  const blocks = (result.structuredContent as { blocks: { report?: Record<string, unknown>; outputTruncated?: boolean }[] }).blocks;
+  assert.deepEqual(blocks[0]!.report, { outcome: "approved", summary: "ok", reportedAt: stamp });
+  assert.equal(blocks[0]!.outputTruncated, true, "the outputs ride the fitted output");
 });
 
 test("get_workflow_runs {workflowId} pages a workflow's runs (was list_workflow_runs); runId-only fields need a runId", async (t) => {
@@ -1236,6 +1253,70 @@ test("create_workflow's stale pins name the sub-workflow that changed", async (t
 });
 
 // ---------------------------------------------------------------------------
+// Typed inputs (spec 2026-11-10 §4, §8)
+// ---------------------------------------------------------------------------
+
+const TYPED_INPUTS = [
+  { name: "env", type: "enum", values: ["stg", "prd"], required: true, description: "Where to deploy" },
+  { name: "count", type: "number", default: 2 }
+];
+
+function typedDefinition(api: FakeDaemonApi): Workflow {
+  const plain = definition(api);
+  return { ...plain, nodes: plain.nodes.map((n) => (n.type === "trigger.manual" ? { ...n, config: { inputs: TYPED_INPUTS } } : n)) } as Workflow;
+}
+
+test("get_workflow and list_workflows show the declared inputs run_workflow takes", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api, typedDefinition(api));
+  const read = await call(api, "get_workflow", { workflowId: "wf-1" });
+  assert.deepEqual(read.inputs, [
+    { name: "env", type: "enum", required: true, values: ["stg", "prd"], description: "Where to deploy" },
+    { name: "count", type: "number", required: false, default: 2 }
+  ]);
+  assert.match(String(read.inputsNote), /object of these inputs/);
+  const plain = await sandbox(t);
+  serveDefinition(plain);
+  assert.equal("inputs" in (await call(plain, "get_workflow", { workflowId: "wf-1" })), false, "no inputs declared: no inputs key");
+  api.on("GET", "/api/workflows", { status: 200, body: { workflows: [{
+    id: "wf-1", name: "Demo", enabled: false, revision: 7, project: { kind: "existing", projectPath: api.own },
+    triggers: [{ nodeId: "t", type: "trigger.manual", text: "On demand", inputs: TYPED_INPUTS }], nodeCount: 3, errorCount: 0, activeRuns: [], updatedAt: stamp
+  }] } });
+  const listed = (await call(api, "list_workflows", { project: "acme/api" })).workflows as Result[];
+  assert.deepEqual(listed[0]!.inputs, read.inputs);
+});
+
+test("run_workflow: the daemon's INVALID_INPUT lists every input error, in the text and in detail", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api, typedDefinition(api));
+  const inputErrors = [
+    { input: "env", message: "input `env` must be one of: stg, prd (got \"dev\")" },
+    { input: "extra", message: "unknown input `extra`: remove it (this workflow takes env, count)" }
+  ];
+  api.on("POST", "/api/workflows/wf-1/run", failure(400, "INVALID_INPUT", "The input does not fit the workflow's inputs: input `env` must be one of: stg, prd (got \"dev\"); unknown input `extra`: remove it (this workflow takes env, count).", { inputErrors }));
+  const error = await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { env: "dev", extra: 1 } }), "INVALID_INPUT", /input `env` must be one of: stg, prd.*unknown input `extra`.*get_workflow shows the declared inputs/);
+  assert.deepEqual((error.detail as { inputErrors: unknown }).inputErrors, inputErrors);
+});
+
+test("run_workflow in a chat: an input the declared inputs refuse never opens a card; a good one shows its defaults", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api, typedDefinition(api));
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(typedDefinition(api)) } });
+  const port = new FakeApprovalPort();
+  const refused = await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { count: "many" } }, { who: chat(api), port }), "INVALID_INPUT", /input `env` is required: pass one of: stg, prd; input `count` must be a number \(got "many"\)/);
+  assert.deepEqual((refused.detail as { inputErrors: { input?: string }[] }).inputErrors.map((e) => e.input), ["env", "count"]);
+  assert.equal(port.cards.length, 0, "no card for a run the daemon would refuse");
+  assert.ok(!api.calls.some((c) => c.path === "/api/workflows/wf-1/run"));
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { env: "prd" } }, { who: chat(api), port });
+  const card = port.cards[0]!;
+  const input = card.sections.find((s) => s.kind === "code" && /defaults applied/.test(s.title));
+  assert.ok(input && input.kind === "code");
+  assert.equal(input.text, JSON.stringify({ env: "prd", count: 2 }, null, 2));
+  assert.deepEqual(api.calls.find((c) => c.path === "/api/workflows/wf-1/run")!.body, { expectedRevision: 7, input: { env: "prd" } }, "the daemon validates and defaults it again");
+});
+
+// ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
 
@@ -1257,4 +1338,58 @@ test("workflowsReferencingPrompt (for Task 12): every workflow whose agent block
   assert.equal((await workflowsReferencingPrompt(api, "p1"))?.length, 1, "a prompt it does not mention stays known");
   api.on("GET", "/api/workflow-references/prompts/*", { status: 503, body: { error: { code: "WORKFLOWS_UNAVAILABLE", message: "x" } } });
   assert.equal(await workflowsReferencingPrompt(api, "p1"), null, "an unreadable index: unknown");
+});
+
+test("loop edges: connect and create edges take loop, set_loop edits one, connections and run views show them", async (t) => {
+  const api = await sandbox(t);
+  api.on("POST", "/api/workflows/wf-1/patch", { status: 200, body: { workflow: definition(api), problems: [] } });
+  for (const ops of [
+    [{ op: "connect", source: "Finish", target: "Work", loop: { maxLoops: 0 } }],
+    [{ op: "connect", source: "Finish", target: "Work", loop: { maxLoops: 2, session: "sometimes" } }],
+    [{ op: "set_loop", edgeId: "ab" }]
+  ]) {
+    await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops }), "INVALID_ARGUMENT");
+  }
+  await call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "connect", source: "Finish", target: "Work", loop: { maxLoops: 3, session: "new" } }, { op: "set_loop", edgeId: "ab", loop: null }] });
+  assert.deepEqual(api.calls.at(-1)!.body, { revision: 7, ops: [{ op: "connect", source: "Finish", target: "Work", loop: { maxLoops: 3, session: "new" } }, { op: "set_loop", edgeId: "ab", loop: null }] });
+
+  const looped = definition(api, { edges: [...definition(api).edges, { id: "back", source: "b", sourceHandle: "success", target: "a", loop: { maxLoops: 3, session: "new" } }] });
+  serveDefinition(api, looped);
+  const read = await call(api, "get_workflow", { workflowId: "wf-1" });
+  assert.deepEqual(read.connections, ["Start → Work", "Work → Finish", "Finish ↺ Work (loop: at most 3, new chat)"]);
+
+  const run = runRecord(looped, "running");
+  run.loopCounters = { back: 2 };
+  run.blocks = {
+    a: {
+      nodeId: "a", name: "Work", type: "code", status: "running", attempt: 1, pass: 3, loopFeedback: "again",
+      passes: [
+        { pass: 1, status: "succeeded", attempt: 1, handle: "success", output: { big: "x".repeat(1_000) } },
+        { pass: 2, status: "cancelled", attempt: 1, error: { kind: "interrupted", message: "A loop ran this block again before it finished." } }
+      ]
+    }
+  };
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run } });
+  const view = await call(api, "get_workflow_runs", { runId: "run-1" });
+  assert.deepEqual(view.loops, [{ edgeId: "back", from: "Finish", handle: "success", to: "Work", used: 2, max: 3, session: "new" }]);
+  const work = (view.blocks as Record<string, unknown>[]).find((block) => block.name === "Work")!;
+  assert.equal(work.pass, 3);
+  assert.equal(work.loopFeedback, "again");
+  assert.deepEqual(work.passes, [
+    { pass: 1, status: "succeeded", handle: "success" },
+    { pass: 2, status: "cancelled", error: { kind: "interrupted", message: "A loop ran this block again before it finished." } }
+  ], "earlier passes without their outputs");
+});
+
+test("an update card lists a loop edge's added and changed settings as connection changes", async (t) => {
+  const api = await sandbox(t);
+  const looped = definition(api, { edges: [...definition(api).edges, { id: "back", source: "b", sourceHandle: "success", target: "a", loop: { maxLoops: 2, session: "continue" } }] });
+  serveDefinition(api, looped);
+  api.on("POST", "/api/workflows/wf-1/patch", { status: 200, body: { workflow: definition(api, { revision: 8 }), problems: [] } });
+  const port = new FakeApprovalPort();
+  await call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_loop", edgeId: "back", loop: { maxLoops: 5, session: "new" } }] }, { who: chat(api), port });
+  const changes = port.cards[0]!.sections.find((s) => s.kind === "changes") as { items: { label: string; change: string; detail?: string }[] };
+  assert.deepEqual(changes.items, [
+    { label: "connection Finish ↺ Work (loop: at most 5, new chat)", change: "changed", detail: "was Finish ↺ Work (loop: at most 2, same chat)" }
+  ]);
 });

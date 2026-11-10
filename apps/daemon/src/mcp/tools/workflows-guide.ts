@@ -11,6 +11,7 @@ import {
   WORKFLOW_BLOCK_GUIDES,
   WORKFLOW_CODE_SIGNATURE,
   WORKFLOW_FAILURE_GUIDE,
+  WORKFLOW_LOOP_GUIDE,
   WORKFLOW_RECIPES
 } from "@orquester/api";
 import { WORKFLOW_NODE_TYPES } from "@orquester/config";
@@ -42,9 +43,10 @@ const JIRA_FIXER_EXAMPLE = {
       config: {
         prompt: {
           kind: "text",
-          text: "Fix these Jira tickets in {project} on {branch}, one commit per ticket (\"KEY: …\"). Do not push.\n{{ nodes.FetchTickets.output.tickets | json }}\nReply with ONLY this JSON: {\"fixed\": [\"KEY-1\"]}"
+          text: "Fix these Jira tickets in {project} on {branch}, one commit per ticket (\"KEY: …\"). Do not push.\n{{ nodes.FetchTickets.output.tickets | json }}"
         },
-        chain: [{ agent: "claude", model: "default" }]
+        chain: [{ agent: "claude", model: "default" }],
+        outputs: [{ name: "fixed", type: "json", description: "The keys of the tickets you fixed, e.g. [\"KEY-1\"]." }]
       }
     },
     {
@@ -52,7 +54,7 @@ const JIRA_FIXER_EXAMPLE = {
       name: "MarkDone",
       config: {
         source:
-          "export default async function ({ nodes, secrets }) {\n  const { fixed } = JSON.parse(/\\{[\\s\\S]*\\}/.exec(nodes.FixTickets.output.text)[0]);\n  for (const key of fixed) {\n    await fetch(`${secrets.JIRA_BASE_URL}/rest/api/3/issue/${key}/transitions`, { method: \"POST\", headers: { Authorization: `Basic ${secrets.JIRA_AUTH}`, \"Content-Type\": \"application/json\" }, body: JSON.stringify({ transition: { id: secrets.JIRA_DONE_ID } }) });\n  }\n  return { moved: fixed };\n}\n"
+          "export default async function ({ nodes, secrets }) {\n  const fixed = nodes.FixTickets.output.outputs.fixed ?? [];\n  for (const key of fixed) {\n    await fetch(`${secrets.JIRA_BASE_URL}/rest/api/3/issue/${key}/transitions`, { method: \"POST\", headers: { Authorization: `Basic ${secrets.JIRA_AUTH}`, \"Content-Type\": \"application/json\" }, body: JSON.stringify({ transition: { id: secrets.JIRA_DONE_ID } }) });\n  }\n  return { moved: fixed };\n}\n"
       }
     }
   ],
@@ -107,8 +109,11 @@ function blockContracts(): string {
 
 /** The MCP's own hints on a recipe, after its shared notes. */
 const RECIPE_MCP_NOTES: Record<string, readonly string[]> = {
-  "agent-json": [
-    "After a run, preview_expression {workflowId, node: \"Urgent\", template: \"{{ input.severity }}\"} shows the value the If compares; at node \"Parse\", \"{{ input.text.severity }}\" returns the reads-nothing warning — the reason Parse exists."
+  "loop-until-approved": [
+    "list_workflow_gates lists a waiting gate; decide_workflow_gate {runId, nodeName: \"Approve\", choice: \"approve\"} decides it (an external client as the person; a chat only a gate assigned to it)."
+  ],
+  "agent-outcomes": [
+    "After a run, get_workflow_runs {runId} shows Triage's `report` (outcome, summary, outputs) and which connection was taken; preview_expression {workflowId, node: \"Page\", template: \"{{ input.outputs.summary_line }}\"} shows the value Page sends."
   ]
 };
 
@@ -117,10 +122,11 @@ const bullets = (items: readonly { term?: string; text: string }[]): string =>
 
 export const WORKFLOW_AUTHORING_GUIDE = `# Authoring workflows through the MCP
 
-1. A workflow is a directed acyclic graph of blocks (nodes). An edge goes from one block's output
+1. A workflow is a graph of blocks (nodes). An edge goes from one block's output
    handle to the next block. A run starts at a trigger (trigger.manual, trigger.schedule,
    trigger.git); run_workflow starts one by hand, from any trigger, even while the workflow is
-   disabled. There are no loops: see the recipe "Process a list of items".
+   disabled. Edges run one way; a loop edge (point 4b) is the only way back to an earlier block,
+   and it repeats steps until a check passes, never once per item (see "Process a list of items").
 2. Every block has a unique name ([A-Za-z][A-Za-z0-9_]*, at most 40). Edges and patch ops name
    blocks by name (or id). A block reads an earlier block's output with
    {{ nodes.<Name>.output… }} (e.g. {{ nodes.FetchTickets.output.tickets | json }}); {{ input }}
@@ -130,20 +136,29 @@ export const WORKFLOW_AUTHORING_GUIDE = `# Authoring workflows through the MCP
    against the latest run's data (usePinned: pinned outputs) without running anything; a warning
    "… is empty: nothing at <path>" means the path reads nothing, and \`available\` lists the keys.
 3. Output handles: triggers \`success\`; agent, code, shell, http, merge, wait and workflow
-   \`success\` and \`error\`; if \`true\` / \`false\` / \`error\`; switch \`case:0\`, \`case:1\`, …,
-   \`default\`, \`error\`; stop and note have none. An edge without sourceHandle is \`success\`.
+   \`success\` and \`error\`; an agent with \`outcomes\` \`outcome:<id>\` per outcome and \`error\`
+   (no \`success\`); gate \`choice:<id>\` per choice and \`error\`; if \`true\` / \`false\` /
+   \`error\`; switch \`case:0\`, \`case:1\`, …, \`default\`, \`error\`; stop and note have none. An edge without sourceHandle is \`success\`.
    A block runs once all its incoming edges are settled and at least one is live; a block whose
    incoming edges are all dead (an if's other branch) is skipped.
 4. Failures and retries:
 ${bullets(WORKFLOW_FAILURE_GUIDE)}
+4b. Loop edges: connect {source, sourceHandle, target, loop: {maxLoops, session}} (or a
+   create_workflow edge with \`loop\`); set_loop {edgeId, loop} changes one's settings in place
+   (null: an ordinary edge again).
+${bullets(WORKFLOW_LOOP_GUIDE)}
 5. Shell: NEVER put {{ }} in \`script\` (validation refuses it). Map values to environment
    variables in \`env\`, e.g. [{"name":"TICKETS","value":"{{ nodes.Fetch.output.tickets | compact }}"}],
    and read "$TICKETS" in the script.
 6. Code: an ES module, \`${WORKFLOW_CODE_SIGNATURE} { … }\`;
    its return value (JSON) is the output. "Block contracts" below has every argument and limit.
-7. Agent: output \`text\` is always a string: ask for JSON in the prompt and parse it in a Code
-   block (see the recipes). \`chain\` is the agent/model fallback order on usage limits
-   (list_agents names each agent's models).
+7. Agent: output \`text\` is always a string, never parsed. To branch on the agent's judgment,
+   declare \`outcomes\` (2–12 ids; each is a handle \`outcome:<id>\`); for values to pass on, declare
+   typed \`outputs\` (read \`{{ nodes.<Name>.output.outputs.<name> }}\`). The agent then reports
+   them with report_step_result, refused until the call fits; a turn with no report gets one
+   reminder, then the block fails \`no_report\`. Pinned data of a block with outcomes needs
+   \`outcome\`. \`chain\` is the agent/model fallback order on usage limits (list_agents names
+   each agent's models).
 8. Secrets: see the expression guide. list_workflow_secrets names them; set_workflow_secret sets
    one. In an Orquester chat you never send the value: the user types it into the approval card;
    an external client's value lands in its transcript — prefer asking the user.

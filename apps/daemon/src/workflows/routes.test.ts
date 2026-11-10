@@ -20,6 +20,8 @@ import { WorkflowEngineError } from "./run-context.ts";
 import { WorkflowSecretsService } from "./secrets.ts";
 import { WorkflowService } from "./service.ts";
 import { buildWorkflowSummary } from "./summary.ts";
+import { mintPrincipalToken, registerPrincipalHook } from "../mcp/principal.ts";
+import { PRINCIPAL_TOKEN_HEADER } from "@orquester/api/agent-chat";
 
 const roots: string[] = [];
 const apps: FastifyInstance[] = [];
@@ -43,7 +45,7 @@ interface Harness {
   setEngine(engine: WorkflowEngine | null): void;
 }
 
-async function harness(options: { engine?: WorkflowEngine | null; projects?: WorkflowRouteDeps["projects"] } = {}): Promise<Harness> {
+async function harness(options: { engine?: WorkflowEngine | null; projects?: WorkflowRouteDeps["projects"]; principals?: boolean } = {}): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "orq-wf-routes-"));
   roots.push(dir);
   const secrets = new WorkflowSecretsService({ file: join(dir, "workflow-secrets.json"), logger: quiet });
@@ -59,6 +61,7 @@ async function harness(options: { engine?: WorkflowEngine | null; projects?: Wor
   await runStore.init();
   let engine: WorkflowEngine | null = options.engine ?? null;
   const app = Fastify({ logger: false });
+  if (options.principals) registerPrincipalHook(app);
   const deps: WorkflowRouteDeps = {
     service,
     secrets,
@@ -154,6 +157,10 @@ function fakeEngine(h: () => Harness): FakeEngine {
     },
     async deleteTempProject() {
       return true;
+    },
+    async reportStepResult(sessionId, report) {
+      engine.calls.push(`report:${sessionId}`);
+      return { recorded: true, runId: "run-1", workflowId: "wf", nodeId: "n", nodeName: "Review", replaced: false, report: { ...report, summary: report.summary, sessionId, reportedAt: "2026-11-10T00:00:00.000Z" } };
     },
     async accountPreview() {
       return { chosen: null, reason: "none", skipped: [] };
@@ -449,6 +456,20 @@ test("an engine refusal keeps its status, code and problems (never a generic 500
   const tested = await h.app.inject({ method: "POST", url: `/api/workflows/${workflow.id}/nodes/c/test` });
   assert.equal(tested.statusCode, 503);
   assert.equal(tested.json().error.code, "ENGINE_UNAVAILABLE");
+});
+
+test("an INVALID_INPUT refusal carries every input error (spec 2026-11-10 §4.2)", async () => {
+  const h = await harness();
+  const workflow = await createWorkflow(h);
+  const engine = fakeEngine(() => h);
+  const inputErrors = [{ input: "env", message: "input `env` must be one of: stg, prd (got \"dev\")" }, { message: "1 more" }];
+  engine.run = async () => {
+    throw new WorkflowEngineError(400, "INVALID_INPUT", "The input does not fit the workflow's inputs: …", undefined, inputErrors);
+  };
+  h.setEngine(engine);
+  const run = await h.app.inject({ method: "POST", url: `/api/workflows/${workflow.id}/run`, payload: { input: { env: "dev" } } });
+  assert.equal(run.statusCode, 400);
+  assert.deepEqual(run.json(), { error: { code: "INVALID_INPUT", message: "The input does not fit the workflow's inputs: …", inputErrors } });
 });
 
 test("DELETE of a secret refuses prototype names and unknown workflows", async () => {
@@ -807,4 +828,39 @@ test("expression preview: without a block, a queued newest run gives way to the 
   assert.equal(res.body.source.runId, "run-1");
   assert.equal(res.body.source.run, "latest");
   assert.equal(res.body.results[0].text, "42");
+});
+
+test("report_step_result's route: only an in-chat agent principal reports, as itself; the engine judges the rest", async () => {
+  const h = await harness({ principals: true });
+  const engine = fakeEngine(() => h);
+  h.setEngine(engine);
+  const body = { outcome: "approved", summary: "ok", sessionId: "someone-else" };
+  // The GUI / a REST client / any caller without an agent principal is not a workflow step.
+  const asUser = await h.app.inject({ method: "POST", url: workflowRoutes.stepReport, payload: body });
+  assert.equal(asUser.statusCode, 403);
+  assert.deepEqual(asUser.json().error, { code: "NOT_A_WORKFLOW_STEP", message: "This chat is not a workflow step that reports a result." });
+  const external = mintPrincipalToken({ kind: "external", credentialId: "cred_x" });
+  const asExternal = await h.app.inject({ method: "POST", url: workflowRoutes.stepReport, payload: body, headers: { [PRINCIPAL_TOKEN_HEADER]: external.token } });
+  external.release();
+  assert.equal(asExternal.statusCode, 403);
+  assert.deepEqual(engine.calls, []);
+  const agent = mintPrincipalToken({ kind: "agent", threadId: "thread-7", projectPath: "/w/ws/app" });
+  const asAgent = await h.app.inject({ method: "POST", url: workflowRoutes.stepReport, payload: body, headers: { [PRINCIPAL_TOKEN_HEADER]: agent.token } });
+  agent.release();
+  assert.equal(asAgent.statusCode, 200, asAgent.body);
+  assert.deepEqual(engine.calls, ["report:thread-7"], "the session is the principal's, never the body's");
+  assert.equal(asAgent.json().report.sessionId, "thread-7");
+  const bad = mintPrincipalToken({ kind: "agent", threadId: "thread-7", projectPath: "/w/ws/app" });
+  const notObject = await h.app.inject({ method: "POST", url: workflowRoutes.stepReport, payload: [1], headers: { [PRINCIPAL_TOKEN_HEADER]: bad.token } });
+  bad.release();
+  assert.equal(notObject.json().error.code, "INVALID_REQUEST");
+});
+
+test("report_step_result's route without the engine: 503", async () => {
+  const h = await harness({ principals: true });
+  const agent = mintPrincipalToken({ kind: "agent", threadId: "thread-7", projectPath: "/w/ws/app" });
+  const res = await h.app.inject({ method: "POST", url: workflowRoutes.stepReport, payload: { summary: "x" }, headers: { [PRINCIPAL_TOKEN_HEADER]: agent.token } });
+  agent.release();
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.json().error.code, "ENGINE_UNAVAILABLE");
 });

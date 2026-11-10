@@ -167,3 +167,11 @@ test("an observer that throws is logged and never stops the push", async (t) => 
   assert.equal(sent.length, 1);
   assert.equal(errors.length, 1);
 });
+
+test("a workflow gate's push carries the gate for its deep link (kind workflow)", async (t) => {
+  const seen: PushNotificationEvent[] = [];
+  const { push, sent } = await rig(t, (event) => seen.push(event));
+  await push.notifyWorkflowGate({ title: "Needs you: Deploy", body: "Ship?", tag: "workflow-gate-r1-g1", workflowId: "w1", runId: "r1", gateId: "g1" });
+  assert.deepEqual(seen, [{ kind: "workflow", title: "Needs you: Deploy", body: "Ship?", tag: "workflow-gate-r1-g1", workflowId: "w1", runId: "r1", gateId: "g1" }]);
+  assert.deepEqual(sent.at(-1), { title: "Needs you: Deploy", body: "Ship?", tag: "workflow-gate-r1-g1", workflowId: "w1", runId: "r1", gateId: "g1", sessionId: "" });
+});

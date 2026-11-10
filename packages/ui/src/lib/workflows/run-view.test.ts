@@ -4,7 +4,10 @@ import { describe, it } from "node:test";
 import type { AgentHop, WorkflowBlockRun, WorkflowNode, WorkflowRunSummary } from "@orquester/api";
 
 import {
+  blockErrorKindHint,
+  blockErrorKindLabel,
   blockInput,
+  blockReportView,
   defaultSelectedStep,
   filterRuns,
   mergeRunPages,
@@ -12,6 +15,8 @@ import {
   retryRunRequest,
   runActions,
   runFilterCounts,
+  agentLiveLine,
+  runOutcomeText,
   runTimeline
 } from "./run-view.ts";
 
@@ -182,6 +187,37 @@ describe("the timeline", () => {
     assert.deepEqual(input.value, { A: 1, B: 2 });
     assert.equal(input.truncated, true);
   });
+
+  it("a loop edge is neither order, outline nor input (spec 2026-11-10 §7.1)", () => {
+    // Start → Fix → Check(if) ─true→ Done; false loops back to Fix.
+    const wf = {
+      nodes: [node("Start", "trigger.manual"), node("Fix", "agent"), node("Check", "if"), node("Done", "code")],
+      edges: [
+        edge("Start", "Fix"),
+        edge("Fix", "Check"),
+        edge("Check", "Done", "true"),
+        { ...edge("Check", "Fix", "false"), loop: { maxLoops: 2, session: "continue" as const } }
+      ]
+    };
+    const blocks = {
+      Start: block("Start", { output: { kind: "manual", input: {} } }),
+      Fix: block("Fix", { status: "running", pass: 2 }),
+      Check: block("Check", { status: "pending", pass: 2, passes: [{ pass: 1, status: "succeeded", attempt: 1, handle: "false", output: false }] })
+    };
+    const items = runTimeline({ status: "running", blocks }, wf, NOW);
+    assert.deepEqual(
+      items.map((item) => [item.kind, item.nodeId, item.step]),
+      [
+        ["step", "Start", 1],
+        ["step", "Fix", 2],
+        ["step", "Check", 3],
+        ["step", "Done", 4]
+      ],
+      "a topological order exists and no 'continues at Fix' row"
+    );
+    const input = blockInput({ blocks: { ...blocks, Check: block("Check", { handle: "false", output: "feedback" }) } }, wf, "Fix");
+    assert.deepEqual(input.from.map((source) => source.name), ["Start"], "the loop's source is no input of its target");
+  });
 });
 
 describe("actions", () => {
@@ -285,5 +321,61 @@ describe("runs mode", () => {
     assert.equal(pickRunId(null, runs), "r2");
     assert.equal(pickRunId(null, [runs[0]!, runs[2]!]), "r3");
     assert.equal(pickRunId(undefined, []), null);
+  });
+});
+
+describe("agent outcomes in the run view (spec 2026-11-10 §5)", () => {
+  const review = node("r", "agent", {
+    config: { outcomes: [{ id: "approved", label: "Approved" }, { id: "changes_requested" }], outputs: [{ name: "pr_url", type: "string" }, { name: "count", type: "number" }] }
+  });
+  const report = { outcome: "approved", summary: "Fixed  the\nnits.", outputs: { count: 2, pr_url: "https://x/1" }, sessionId: "s1", reportedAt: at(14, 2) };
+
+  it("the details show the outcome's label, the summary and the outputs in declared order", () => {
+    const view = blockReportView(review, block("r", { type: "agent", handle: "outcome:approved", report }));
+    assert.deepEqual(view, {
+      outcome: "Approved",
+      summary: "Fixed  the\nnits.",
+      outputs: [{ name: "pr_url", value: "https://x/1" }, { name: "count", value: 2 }],
+      provisional: false
+    });
+    assert.equal(blockReportView(review, block("r", { type: "agent", status: "running", report }))!.provisional, true);
+    assert.equal(blockReportView(review, block("r", { type: "agent" })), null);
+  });
+
+  it("the timeline names the outcome taken, with the summary on one line", () => {
+    const wf = { nodes: [node("t", "trigger.manual"), review, node("s", "stop")], edges: [edge("t", "r"), edge("r", "s", "outcome:approved")] };
+    const items = runTimeline({ status: "succeeded", blocks: { t: block("t"), r: block("r", { type: "agent", handle: "outcome:approved", report }) } }, wf, NOW);
+    const item = items.find((entry) => entry.nodeId === "r")!;
+    assert.equal(item.finishedOn, "Approved");
+    assert.equal(item.reportSummary, "Fixed the nits.");
+  });
+
+  it("no_report reads as what happened", () => {
+    assert.equal(blockErrorKindLabel("no_report"), "No result reported");
+    assert.match(blockErrorKindHint("no_report")!, /once more after a reminder/);
+    assert.equal(blockErrorKindHint("timeout"), null);
+  });
+});
+
+describe("a run held back by a gate (spec 2026-11-10 §6.2)", () => {
+  it("says why it was skipped or is queued", () => {
+    const detail = "previous run is waiting on gate “Deploy?”";
+    assert.equal(runOutcomeText(summary({ status: "skipped", skipReason: "overlap", skipDetail: detail }), NOW), `Skipped — ${detail}`);
+    assert.equal(runOutcomeText(summary({ status: "queued", skipDetail: detail }), NOW), `Queued — ${detail}`);
+    assert.equal(runOutcomeText(summary({ status: "skipped", skipReason: "overlap" }), NOW), "Skipped — the previous run was still going");
+  });
+});
+
+describe("a block waiting on a gate", () => {
+  it("says it waits on a decision, not on a reset", () => {
+    assert.equal(agentLiveLine(block("Review", { type: "agent", status: "waiting", gateId: "g1" }), NOW), "Waiting on a decision");
+    assert.equal(agentLiveLine(block("Review", { type: "agent", status: "waiting" }), NOW), "Waiting for a reset");
+    const definition = { nodes: [node("T", "trigger.manual"), node("Gate", "gate")], edges: [edge("T", "Gate")] };
+    const items = runTimeline(
+      { status: "running", blocks: { T: block("T", { type: "trigger.manual" }), Gate: block("Gate", { type: "gate", status: "waiting", attempt: 1 }) } },
+      definition,
+      NOW
+    );
+    assert.equal(items.find((item) => item.nodeId === "Gate")?.liveLine, "Waiting on a decision");
   });
 });

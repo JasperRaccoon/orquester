@@ -1,5 +1,6 @@
-// Catalog family module `desktops` (get_desktops, control_desktop) — unified MCP design 2026-10-15
-// §4 rows 40–41, §4.1 (ruling S4), plan Task 12. Both audiences, toolset `desktops`.
+// Catalog family module `desktops` (get_desktops, control_desktop, desktop_action) — unified MCP design
+// 2026-10-15 §4 rows 40–41, §4.1 (ruling S4), plan Task 12; desktop_action: desktop agents spec
+// 2026-11-10 §2.5. Both audiences, toolset `desktops`.
 //
 // A desktop is a virtual X display on the daemon's host that GUI apps run in, shown to the user as
 // a tab (docs/superpowers/specs/2026-09-30-desktop-tab-design.md §7.4). Every call is an in-process
@@ -9,21 +10,40 @@
 // Chat tiers: `open` and `launch_app` start processes on the host — Admin (`desktops`), with a card
 // naming the command, the working directory and every env value in full (`./desktop-preview.ts`);
 // `stop_app`, `close_window` and `close` only stop things — Act. A desktop's project is its target
-// (§5.2); a chat caller's `cwd` must lie inside a project (ruling S6).
+// (§5.2); a chat caller's `cwd` must lie inside a project (ruling S6). `desktop_action` (screen,
+// pointer, keys, clipboard) raises no card: Read for screenshot / wait / clipboard_get, Act otherwise.
 
 import { basename, resolve } from "node:path";
 import { z } from "zod";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { DESKTOP_MAX_HEIGHT, DESKTOP_MAX_WIDTH, DESKTOP_MIN_HEIGHT, DESKTOP_MIN_WIDTH } from "@orquester/config";
 import {
+  DESKTOP_ACTION_KINDS,
+  DESKTOP_CLIPBOARD_MAX_BYTES,
+  DESKTOP_CONTROLLED_BY_USER_CODE,
   DESKTOP_ENV_KEY_PATTERN,
+  DESKTOP_IDLE_MAX_MS,
+  DESKTOP_IDLE_MIN_MS,
   DESKTOP_MAX_COMMAND_LENGTH,
+  DESKTOP_NOT_RUNNING_CODE,
+  DESKTOP_RESIZED_CODE,
+  DESKTOP_SCREENSHOT_MAX_MAX,
+  DESKTOP_SCREENSHOT_MIN_MAX,
+  DESKTOP_TYPE_MAX_CHARS,
   DESKTOP_UNAVAILABLE_CODE,
+  DESKTOP_WAIT_MAX_TIMEOUT_MS,
   TOOL_APPROVAL_REASON_MAX_CHARS,
   desktopRoutes,
+  isReadOnlyDesktopAction,
   type CreateDesktopRequest,
+  type DesktopActionKind,
+  type DesktopActionRequest,
+  type DesktopActionResponse,
+  type DesktopActor,
   type DesktopAppSummary,
   type DesktopHostStatus,
   type DesktopSummary,
+  type DesktopToolReference,
   type LaunchAppRequest
 } from "@orquester/api";
 import { callerHostPath, projectNamesFor, resolveProject } from "../addressing.ts";
@@ -31,7 +51,8 @@ import type { DaemonApi, DaemonResponse } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { clipText, jsonBytes, MAX_ECHO_CHARS } from "../result.ts";
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeClaim, type ScopeContext, type ToolCaller } from "../catalog/contract.ts";
-import { desktopPreview } from "./desktop-preview.ts";
+import { imageResult } from "../../session-tools/results.ts";
+import { agentLabel, desktopPreview } from "./desktop-preview.ts";
 
 /** What an app's log returns at most: its tail, well under ok()'s 60 000-byte cap once JSON-escaped. */
 const LOG_RESULT_BYTES = 50_000;
@@ -45,7 +66,11 @@ const ERROR_HINTS: Record<string, string> = {
   DESKTOP_NOT_FOUND: NOT_FOUND_HINT,
   DESKTOP_APP_NOT_FOUND: NOT_FOUND_HINT,
   DESKTOP_WINDOW_NOT_FOUND: " get_desktops {desktopId} shows the desktop's current windows.",
-  [DESKTOP_UNAVAILABLE_CODE]: " get_desktops {host: true} shows what is missing."
+  [DESKTOP_UNAVAILABLE_CODE]: " get_desktops {host: true} shows what is missing.",
+  [DESKTOP_CONTROLLED_BY_USER_CODE]: " Reads still work; wait, or ask the user to give control back.",
+  [DESKTOP_RESIZED_CODE]: " Take a new screenshot and use its screenshot_id.",
+  DESKTOP_SCREENSHOT_NOT_FOUND: " Take a new screenshot and use its screenshot_id.",
+  [DESKTOP_NOT_RUNNING_CODE]: " get_desktops {desktopId} shows its status."
 };
 
 /**
@@ -156,7 +181,7 @@ const getDesktops = defineTool({
   name: "get_desktops",
   title: "Get desktops",
   description:
-    "Desktop tabs: virtual X displays on the daemon's host (in a Linux VM project: inside its VM; such a desktop has box: {id, connected}) running GUI apps, shown to the user live. No desktopId: a project's desktops (id, title, status, size, audio, apps, open windows). desktopId: that one. desktopId + appId: the app's last 64 KiB of stdout/stderr (truncated: true when cut). host: true adds whether the desktops' machine (the project's VM for a VM project) can run desktops (tools found, GPU, warnings, installHint: the apt-get line for what's missing — installing is for the host's owner; tell the user).",
+    "Desktop tabs: virtual X displays on the daemon's host (in a Linux VM project: inside its VM; such a desktop has box: {id, connected}) running GUI apps, shown to the user live. No desktopId: a project's desktops (id, title, status, size, audio, apps, open windows with their bounds, control: who drives its input). desktopId: that one. desktopId + appId: the app's last 64 KiB of stdout/stderr (truncated: true when cut). host: true adds whether the desktops' machine (the project's VM for a VM project) can run desktops (tools found, GPU, warnings, installHint: the apt-get line for what's missing — installing is for the host's owner; tell the user).",
   externalNote: "Without project: every project's desktops.",
   input: {
     project: z.string().min(1).optional().describe("\"<workspace>/<project>\" or a path."),
@@ -377,5 +402,191 @@ const controlDesktop = defineTool({
   }
 });
 
+// ---------------------------------------------------------------------------
+// desktop_action
+// ---------------------------------------------------------------------------
+
+// Factories: one instance in two fields is listed as a "$ref" (see `catalog/registry.test.ts`). The
+// daemon checks every point and region against the display.
+const coordinate = () => z.number().min(0);
+const pixel = () => z.number().int().min(0);
+
+const desktopActionInput = {
+  desktopId: desktopIdArg,
+  action: z.enum(DESKTOP_ACTION_KINDS as unknown as [DesktopActionKind, ...DesktopActionKind[]]),
+  x: coordinate().optional().describe("Pixels of screenshot_id's image, else of the display. Default: the pointer."),
+  y: coordinate().optional(),
+  screenshot_id: z.string().min(1).max(64).optional(),
+  button: z.enum(["left", "middle", "right"]).optional(),
+  count: z.number().int().min(1).max(3).optional().describe("click: 2 double, 3 triple."),
+  modifiers: z.array(z.enum(["ctrl", "shift", "alt", "super"])).max(4).optional(),
+  to_x: coordinate().optional(),
+  to_y: coordinate().optional(),
+  direction: z.enum(["up", "down", "left", "right"]).optional(),
+  amount: z.number().int().min(1).max(50).optional().describe("scroll: wheel clicks (3)."),
+  keys: z.string().min(1).max(200).optional().describe("\"ctrl+shift+t\", \"Return\", \"alt+F4\"."),
+  repeat: z.number().int().min(1).max(20).optional(),
+  text: z.string().optional().describe("type (\\n is Return) or clipboard_set."),
+  region: z.object({ x: pixel(), y: pixel(), width: pixel().min(1), height: pixel().min(1) }).strict().optional().describe("Display pixels."),
+  window_id: z.string().min(1).max(20).optional(),
+  max_size: z.number().int().min(DESKTOP_SCREENSHOT_MIN_MAX).max(DESKTOP_SCREENSHOT_MAX_MAX).optional().describe("Long edge bound (1920)."),
+  for: z.enum(["idle", "change"]).optional().describe("wait: still for idle_ms (default), or changed after since (a seq)."),
+  idle_ms: z.number().int().min(DESKTOP_IDLE_MIN_MS).max(DESKTOP_IDLE_MAX_MS).optional(),
+  since: z.number().int().min(0).optional(),
+  timeout_ms: z.number().int().min(1).max(DESKTOP_WAIT_MAX_TIMEOUT_MS).optional(),
+  screenshot: z.boolean().optional().describe("Input: then a screenshot once the screen settles.")
+};
+type DesktopActionArgs = z.infer<z.ZodObject<typeof desktopActionInput>>;
+type ActionField = Exclude<keyof DesktopActionArgs, "desktopId" | "action">;
+
+const SETTLED_SHOT: readonly ActionField[] = ["screenshot", "max_size"];
+const POINT: readonly ActionField[] = ["x", "y", "screenshot_id"];
+
+/** The fields each action takes (required, then allowed), as the daemon checks them — anything else given is refused. */
+const DESKTOP_ACTION_FIELDS: Readonly<Record<DesktopActionKind, { required: readonly ActionField[]; allowed: readonly ActionField[] }>> = {
+  screenshot: { required: [], allowed: ["region", "window_id", "max_size"] },
+  wait: { required: [], allowed: ["for", "idle_ms", "since", "region", "timeout_ms"] },
+  move: { required: ["x", "y"], allowed: ["screenshot_id", ...SETTLED_SHOT] },
+  click: { required: [], allowed: [...POINT, "button", "count", "modifiers", ...SETTLED_SHOT] },
+  mouse_down: { required: [], allowed: [...POINT, "button", ...SETTLED_SHOT] },
+  mouse_up: { required: [], allowed: [...POINT, "button", ...SETTLED_SHOT] },
+  drag: { required: ["x", "y", "to_x", "to_y"], allowed: ["screenshot_id", "button", "modifiers", ...SETTLED_SHOT] },
+  scroll: { required: ["direction"], allowed: [...POINT, "amount", "modifiers", ...SETTLED_SHOT] },
+  key: { required: ["keys"], allowed: ["repeat", ...SETTLED_SHOT] },
+  type: { required: ["text"], allowed: [...SETTLED_SHOT] },
+  clipboard_get: { required: [], allowed: [] },
+  clipboard_set: { required: ["text"], allowed: [] }
+};
+const ACTION_FIELD_KEYS = Object.keys(desktopActionInput).filter((key) => key !== "desktopId" && key !== "action") as ActionField[];
+
+function checkDesktopAction(args: DesktopActionArgs): void {
+  const fields = DESKTOP_ACTION_FIELDS[args.action];
+  for (const key of fields.required) {
+    if (args[key] === undefined) throw new ToolError("INVALID_ARGUMENT", `desktop_action ${args.action} needs ${key}.`);
+  }
+  for (const key of ACTION_FIELD_KEYS) {
+    if (args[key] !== undefined && !fields.required.includes(key) && !fields.allowed.includes(key)) {
+      throw new ToolError("INVALID_ARGUMENT", `desktop_action ${args.action} takes no ${key}.`);
+    }
+  }
+  if ((args.x === undefined) !== (args.y === undefined)) throw new ToolError("INVALID_ARGUMENT", "x and y go together.");
+  if (args.screenshot_id !== undefined && args.x === undefined) throw new ToolError("INVALID_ARGUMENT", "screenshot_id names the space of x and y: pass them too.");
+  if (args.region !== undefined && args.window_id !== undefined) throw new ToolError("INVALID_ARGUMENT", "Pass region or window_id, not both.");
+  if (!isReadOnlyDesktopAction(args.action) && args.max_size !== undefined && args.screenshot !== true) {
+    throw new ToolError("INVALID_ARGUMENT", "max_size goes with screenshot: true.");
+  }
+  if (args.action === "wait" && (args.for ?? "idle") === "idle" && args.since !== undefined) throw new ToolError("INVALID_ARGUMENT", "since goes with for: \"change\".");
+  if (args.action === "wait" && args.for === "change" && args.idle_ms !== undefined) throw new ToolError("INVALID_ARGUMENT", "idle_ms goes with for: \"idle\".");
+  if (args.action === "type" && [...(args.text ?? "")].length > DESKTOP_TYPE_MAX_CHARS) {
+    throw new ToolError("INVALID_ARGUMENT", `text is longer than ${DESKTOP_TYPE_MAX_CHARS} characters: type it in parts.`);
+  }
+  if (args.action === "clipboard_set" && Buffer.byteLength(args.text ?? "", "utf8") > DESKTOP_CLIPBOARD_MAX_BYTES) {
+    throw new ToolError("INVALID_ARGUMENT", `text is larger than ${DESKTOP_CLIPBOARD_MAX_BYTES} bytes.`);
+  }
+}
+
+/** Who acts, as the desktop's action log and control pill name it. */
+function actorOf(caller: ToolCaller): DesktopActor {
+  if (caller.kind === "external") return { kind: "external", label: "MCP client" };
+  return { kind: "chat", threadId: caller.threadId, label: caller.agentId ? agentLabel(caller.agentId) : "Agent" };
+}
+
+/** The tool's arguments as the daemon's request. */
+function actionRequest(args: DesktopActionArgs, actor: DesktopActor): DesktopActionRequest {
+  const request: DesktopActionRequest = { action: args.action, actor };
+  if (args.x !== undefined) request.x = args.x;
+  if (args.y !== undefined) request.y = args.y;
+  if (args.screenshot_id !== undefined) request.screenshotId = args.screenshot_id;
+  if (args.button !== undefined) request.button = args.button;
+  if (args.count !== undefined) request.count = args.count;
+  if (args.modifiers !== undefined) request.modifiers = [...args.modifiers];
+  if (args.to_x !== undefined) request.toX = args.to_x;
+  if (args.to_y !== undefined) request.toY = args.to_y;
+  if (args.direction !== undefined) request.direction = args.direction;
+  if (args.amount !== undefined) request.amount = args.amount;
+  if (args.keys !== undefined) request.keys = args.keys;
+  if (args.repeat !== undefined) request.repeat = args.repeat;
+  if (args.text !== undefined) request.text = args.text;
+  if (args.region !== undefined) request.region = { ...args.region };
+  if (args.window_id !== undefined) request.windowId = args.window_id;
+  if (args.max_size !== undefined) request.maxSize = args.max_size;
+  if (args.for !== undefined) request.for = args.for;
+  if (args.idle_ms !== undefined) request.idleMs = args.idle_ms;
+  if (args.since !== undefined) request.since = args.since;
+  if (args.timeout_ms !== undefined) request.timeoutMs = args.timeout_ms;
+  if (args.screenshot !== undefined) request.screenshot = args.screenshot;
+  return request;
+}
+
+/** The chat row's summary cap (`DesktopToolReference.summary`, one line). */
+const REF_SUMMARY_MAX = 200;
+
+/** The result's `desktopRef` (kept through slimming): the desktop, a kept screenshot, and the row's words. */
+function desktopRef(desktop: DesktopSummary, result: DesktopActionResponse): DesktopToolReference {
+  const line = result.summary.replace(/[\u0000-\u001f\u007f\u2028\u2029\s]+/g, " ").trim();
+  const chars = [...line];
+  const summary = chars.length <= REF_SUMMARY_MAX ? line : `${chars.slice(0, REF_SUMMARY_MAX - 1).join("")}…`;
+  return {
+    desktopId: desktop.id,
+    projectPath: desktop.projectPath,
+    ...(result.screenshot ? { screenshotId: result.screenshot.screenshotId } : {}),
+    action: result.action,
+    ...(summary ? { summary } : {})
+  };
+}
+
+const desktopAction = defineTool({
+  name: "desktop_action",
+  title: "Use a desktop",
+  description:
+    "See and drive a desktop (get_desktops) as the user watches. Loop: screenshot → act with its screenshot_id (x, y in that image's pixels) → wait, or screenshot: true → look again. screenshot crops to region or window_id. wait: until the screen (or region) is still, or changed after since. move, click, mouse_down/up, drag (to_x, to_y), scroll; key; type; clipboard_get/set. After a resize, older screenshot_ids fail DESKTOP_RESIZED. While the user has control, input fails DESKTOP_CONTROLLED_BY_USER (wait or ask); reads work.",
+  chatNote: "Every action shows in the user's desktop tab.",
+  input: desktopActionInput,
+  audiences: ["external", "chat"],
+  toolset: "desktops",
+  // Screenshots, waits and reading the clipboard change nothing; no action raises a card.
+  tier: (args) => (isReadOnlyDesktopAction(args.action) ? "read" : "act"),
+  async scope(args, ctx) {
+    checkDesktopAction(args);
+    const desktop = await findDesktop(ctx.api, args.desktopId);
+    // The screen and the clipboard are content.
+    return { projects: [desktop.projectPath], sessions: [], reads: "content", writes: !isReadOnlyDesktopAction(args.action), causesTurnIn: [] };
+  },
+  // Input can do anything an app lets a person do.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  resultKind: "image",
+  async run(args, ctx): Promise<Record<string, unknown> | CallToolResult> {
+    checkDesktopAction(args);
+    const { api } = ctx;
+    const desktop = await findDesktop(api, args.desktopId);
+    const request = actionRequest(args, actorOf(ctx.caller));
+    // Abortable where the daemon offers it: the call going away ends a wait and stops a long type.
+    const result = expectDesktopOk<DesktopActionResponse>(
+      api.desktopAction
+        ? await api.desktopAction(desktop.id, request, { signal: ctx.signal })
+        : await api.request("POST", desktopRoutes.actions(desktop.id), { body: request })
+    );
+    const shot = result.screenshot;
+    const value: Record<string, unknown> = {
+      desktopId: result.desktopId,
+      action: result.action,
+      summary: result.summary,
+      seq: result.seq,
+      display: { width: result.display.width, height: result.display.height },
+      ...(result.cursor ? { cursor: { x: result.cursor.x, y: result.cursor.y } } : {}),
+      ...(result.changed !== undefined ? { changed: result.changed } : {}),
+      ...(result.timedOut !== undefined ? { timed_out: result.timedOut } : {}),
+      ...(result.waitedMs !== undefined ? { waited_ms: result.waitedMs } : {}),
+      ...(result.text !== undefined ? { text: result.text } : {}),
+      ...(shot
+        ? { screenshot: { screenshot_id: shot.screenshotId, width: shot.width, height: shot.height, scale: shot.scale, origin: { x: shot.origin.x, y: shot.origin.y }, mime_type: shot.mimeType } }
+        : {}),
+      ...(result.control?.controller === "user" ? { note: "The user has control now: input fails until they give it back." } : {}),
+      desktopRef: desktopRef(desktop, result)
+    };
+    return shot ? imageResult({ data: shot.base64, mimeType: shot.mimeType }, value) : value;
+  }
+});
+
 /** This family in the catalog (`../catalog/index.ts`). */
-export const desktopsFamily: readonly AnyOrquesterTool[] = [getDesktops, controlDesktop];
+export const desktopsFamily: readonly AnyOrquesterTool[] = [getDesktops, controlDesktop, desktopAction];

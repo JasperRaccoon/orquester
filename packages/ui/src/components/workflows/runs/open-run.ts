@@ -7,6 +7,7 @@
 
 import { isAgentLikeSession } from "../../../lib/session-kind";
 import { jumpToProject, resolveProjectRef } from "../../../lib/session-nav";
+import { requestGateFocus } from "../../../lib/workflows/gate-focus";
 import { markWorkflowRunViewed } from "../../../lib/workflows/notifications";
 import { showRunInWorkflowTabs } from "../../../lib/workflows/open-bridge";
 import { useAppStore } from "../../../store/app";
@@ -17,6 +18,8 @@ export interface RunTarget {
   workflowName?: string;
   /** The run's own project, used only when no project is open. */
   projectPath?: string;
+  /** A gate of the run to select (a "Needs you" row, a rail card's decision). */
+  gateId?: string;
 }
 
 /**
@@ -37,6 +40,7 @@ export function openWorkflowRunInEditor(target: RunTarget): boolean {
     return false;
   }
   const title = target.workflowName?.trim();
+  if (target.gateId) requestGateFocus({ runId: target.runId, gateId: target.gateId });
   useAppStore.getState().openWorkflowTab(projectPath, target.workflowId, {
     runId: target.runId,
     ...(title ? { title } : {})

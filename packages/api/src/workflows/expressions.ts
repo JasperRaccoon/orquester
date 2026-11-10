@@ -21,7 +21,7 @@
 // Types
 // ---------------------------------------------------------------------------
 
-export const EXPRESSION_ROOTS = ["nodes", "input", "trigger", "run", "project", "secrets", "workflow"] as const;
+export const EXPRESSION_ROOTS = ["nodes", "input", "trigger", "run", "project", "secrets", "workflow", "loop"] as const;
 export type ExpressionRoot = (typeof EXPRESSION_ROOTS)[number];
 
 export const EXPRESSION_FILTERS = [
@@ -121,6 +121,17 @@ export interface ExpressionContext {
   /** name -> value. Only `secrets.NAME` reads it; the store itself is never a value. */
   secrets: Record<string, string>;
   workflow?: unknown;
+  /**
+   * The `loop` namespace (spec 2026-11-10 §7.2): the current block's pass and the feedback the loop
+   * edge carried into it. The engine always sets it (`{ pass: 1 }` outside loops).
+   */
+  loop?: ExpressionLoopContext;
+}
+
+/** `{{ loop.pass }}` (1-based pass of the current block) and `{{ loop.feedback }}` (absent on pass 1). */
+export interface ExpressionLoopContext {
+  pass: number;
+  feedback?: string;
 }
 
 // ---------------------------------------------------------------------------

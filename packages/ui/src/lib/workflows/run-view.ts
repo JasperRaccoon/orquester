@@ -9,6 +9,7 @@
  */
 
 import {
+  isLoopEdge,
   isRunActive,
   isTriggerType,
   topologicalOrder,
@@ -191,6 +192,7 @@ const BLOCK_TYPE_LABEL: Record<WorkflowNodeType, string> = {
   merge: "Merge",
   stop: "Stop",
   wait: "Wait",
+  gate: "Gate",
   workflow: "Run workflow",
   note: "Note"
 };
@@ -216,11 +218,51 @@ const ERROR_KIND_LABEL: Record<WorkflowBlockErrorKind, string> = {
   child_run_failed: "Sub-workflow failed",
   stopped: "Stopped",
   limit_exceeded: "Limit exceeded",
-  internal: "Internal error"
+  internal: "Internal error",
+  no_report: "No result reported",
+  loop_limit: "Loop limit reached",
+  gate_expired: "Gate expired"
 };
 
 export function blockErrorKindLabel(kind: WorkflowBlockErrorKind | string): string {
   return ERROR_KIND_LABEL[kind as WorkflowBlockErrorKind] ?? "Error";
+}
+
+/** What an error kind means in plain words, when the label alone does not say what happened. */
+export function blockErrorKindHint(kind: WorkflowBlockErrorKind | string): string | null {
+  if (kind === "no_report") {
+    return "The agent ended its turn without reporting its result with report_step_result, and once more after a reminder. The block's retries and its failure connection apply.";
+  }
+  return null;
+}
+
+/** An agent block's report as the run view shows it (spec 2026-11-10 §5): outcome, summary, outputs. */
+export interface BlockReportView {
+  /** The outcome's label (else its id); absent when the block declares only outputs. */
+  outcome?: string;
+  summary: string;
+  /** Declared order first, then any other the report holds. */
+  outputs: { name: string; value: unknown }[];
+  /** The block still runs: a later report may replace this one. */
+  provisional: boolean;
+}
+
+export function blockReportView(node: TimelineNode | undefined, block: WorkflowBlockRun | undefined): BlockReportView | null {
+  const report = block?.report;
+  if (!report) return null;
+  const declared = ((node?.config ?? {}) as { outputs?: { name?: unknown }[] }).outputs ?? [];
+  const values = report.outputs ?? {};
+  const names = [
+    ...declared.map((output) => output.name).filter((name): name is string => typeof name === "string" && Object.prototype.hasOwnProperty.call(values, name)),
+    ...Object.keys(values)
+  ];
+  const outputs = [...new Set(names)].map((name) => ({ name, value: values[name] }));
+  return {
+    ...(report.outcome !== undefined ? { outcome: node ? workflowHandleLabel(node, `outcome:${report.outcome}`) : report.outcome } : {}),
+    summary: report.summary,
+    outputs,
+    provisional: block.status === "running" || block.status === "waiting" || block.status === "queued"
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +279,8 @@ export function runOutcomeText(run: WorkflowRunSummary, now: number): string {
   const error = run.error?.trim();
   switch (run.status) {
     case "queued":
+      // Held back by a previous run that waits (spec 2026-11-10 §6.2): say why, never a silent queue.
+      if (run.skipDetail) return `Queued — ${run.skipDetail}`;
       return took ? `Queued · ${took}` : "Queued";
     case "running": {
       const current = run.current;
@@ -261,6 +305,7 @@ export function runOutcomeText(run: WorkflowRunSummary, now: number): string {
     case "interrupted":
       return error ? `Interrupted — ${error}` : "Interrupted — it could not be resumed after a restart";
     case "skipped":
+      if (run.skipDetail) return `Skipped — ${run.skipDetail}`;
       if (run.skipReason === "overlap") return "Skipped — the previous run was still going";
       if (run.skipReason === "missed") return "Skipped — the daemon was down when it was due";
       return "Skipped";
@@ -391,6 +436,8 @@ export function agentLiveLine(block: WorkflowBlockRun, now: number): string | nu
   if (block.status === "running") return took ? `Working · ${took}` : "Working";
   if (block.status === "queued") return "Queued — waiting for a free agent slot";
   if (block.status === "waiting") {
+    // A loop that reached its limit asks the user (spec 2026-11-10 §7.2).
+    if (block.gateId) return "Waiting on a decision";
     const until = formatClock(block.waitingUntil, now);
     return until ? `Waiting for a reset · until ${until}` : "Waiting for a reset";
   }
@@ -415,7 +462,7 @@ type TimelineNode = Pick<WorkflowNode, "id" | "type" | "name" | "position"> & {
   config?: unknown;
   disabled?: boolean;
 };
-type TimelineEdge = Pick<WorkflowEdge, "id" | "source" | "sourceHandle" | "target">;
+type TimelineEdge = Pick<WorkflowEdge, "id" | "source" | "sourceHandle" | "target" | "loop">;
 
 export interface TimelineWorkflow {
   nodes: readonly TimelineNode[];
@@ -464,6 +511,8 @@ export interface TimelineItem {
   skippedReason?: string;
   /** The latest activity line of a working agent, or a live wait/queue line. */
   liveLine?: string;
+  /** An agent block's report summary (spec 2026-11-10 §5), one line. */
+  reportSummary?: string;
   sessionId?: string;
   childRunId?: string;
   disabled: boolean;
@@ -506,7 +555,8 @@ export function blockSkipReason(
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const node = byId.get(nodeId);
   if (!node) return null;
-  const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target));
+  // A loop edge never decides whether a block runs (spec 2026-11-10 §7.1).
+  const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target) && !isLoopEdge(edge));
   return skippedReasonFor(node, byId, edges, blocks);
 }
 
@@ -530,7 +580,8 @@ export function runTimeline(
 ): TimelineItem[] {
   const nodes = workflow.nodes.filter((node) => node.type !== "note");
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target));
+  // Order and outline follow the forward graph: loop edges point back (spec 2026-11-10 §7.1).
+  const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target) && !isLoopEdge(edge));
   const order = topologicalOrder({ nodes, edges });
   const stepOf = new Map((order ?? []).map((id, index) => [id, index + 1]));
   const total = nodes.length;
@@ -596,7 +647,12 @@ export function runTimeline(
     if (block) {
       if (block.status === "running" && block.activity?.trim()) liveLine = block.activity.trim();
       else if (block.status === "waiting")
-        liveLine = (node.type === "wait" ? waitLine(block, now) : agentLiveLine(block, now)) ?? undefined;
+        liveLine =
+          (node.type === "gate" || block.gateId
+            ? "Waiting on a decision"
+            : node.type === "wait"
+              ? waitLine(block, now)
+              : agentLiveLine(block, now)) ?? undefined;
       else if (block.status === "queued") liveLine = node.type === "agent" ? "Waiting for a free agent slot" : "Queued";
     }
     const item: TimelineItem = {
@@ -626,6 +682,8 @@ export function runTimeline(
       item.skippedReason = notReached ? "Not reached" : skippedReasonFor(node, byId, edges, run.blocks);
     }
     if (liveLine !== undefined) item.liveLine = liveLine;
+    const summary = block?.report?.summary.replace(/\s+/g, " ").trim();
+    if (summary) item.reportSummary = summary;
     if (block?.sessionId) item.sessionId = block.sessionId;
     if (block?.childRunId) item.childRunId = block.childRunId;
     items.push(item);
@@ -674,7 +732,8 @@ export function blockInput(
   }
   const taken = run.takenEdges ? new Set(run.takenEdges) : null;
   const live = workflow.edges.filter((edge) => {
-    if (edge.target !== nodeId) return false;
+    // A loop target's input is what its forward edges carry; the loop brings feedback, not input.
+    if (edge.target !== nodeId || isLoopEdge(edge)) return false;
     if (taken?.has(edge.id)) return true;
     const source = run.blocks[edge.source];
     if (!source) return false;

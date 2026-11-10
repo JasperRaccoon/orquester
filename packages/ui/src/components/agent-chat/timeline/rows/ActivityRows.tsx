@@ -54,6 +54,7 @@ import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
 import { WorkEntryIcon } from "./icons";
 import { ChatIconButton } from "../../primitives/ChatIconButton";
 import { DeviceScreenshotThumb, DeviceShowButton, useDeviceLinkName } from "./DeviceRowLink";
+import { DesktopScreenshotThumb, DesktopShowButton, useDesktopLinkTitle } from "./DesktopRowLink";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
 
@@ -480,6 +481,9 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
   // Devices §10.3: a device tool's row names its device as the store knows it.
   const deviceLink = entry.sessionTool !== undefined ? entry.deviceLink : undefined;
   const storeDeviceName = useDeviceLinkName(deviceLink);
+  // Desktops R2.6: a desktop tool's row names its desktop as the store knows it.
+  const desktopLink = entry.sessionTool !== undefined ? entry.desktopLink : undefined;
+  const desktopTitle = useDesktopLinkTitle(desktopLink);
 
   const warning = workEntryIsWarning(entry);
   const failed = workEntryDisplayIndicatesToolFailure(entry);
@@ -500,7 +504,9 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
   const label =
     deviceLink !== undefined
       ? workEntryDisplayLabel(entry, ctx.workspaceRoot, () => storeDeviceName)
-      : (displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot));
+      : desktopLink !== undefined
+        ? workEntryDisplayLabel(entry, ctx.workspaceRoot, undefined, () => desktopTitle)
+        : (displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot));
   const detail = entry.detail?.trim() ?? "";
   const command = entry.command?.trim() ?? "";
   const changedFiles = entry.changedFiles ?? [];
@@ -582,6 +588,7 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
           </p>
           {entry.threadLink ? <ThreadLinkButton link={entry.threadLink} /> : null}
           {deviceLink ? <DeviceShowButton link={deviceLink} sessionId={ctx.sessionId} /> : null}
+          {desktopLink ? <DesktopShowButton link={desktopLink} /> : null}
           {failed && !destructive ? (
             <X size={12} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500/40" />
           ) : null}
@@ -593,6 +600,7 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
         </div>
       </div>
       {deviceLink?.screenshotId ? <DeviceScreenshotThumb link={deviceLink} name={deviceLink.name ?? storeDeviceName} /> : null}
+      {desktopLink?.screenshotId ? <DesktopScreenshotThumb link={desktopLink} title={desktopTitle} /> : null}
       {expanded && entry.questionAnswer ? <QuestionAnswerHistory answer={entry.questionAnswer} /> : null}
       {expanded && canExpand && entry.questionAnswer === undefined ? (
         <div

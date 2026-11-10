@@ -17,11 +17,15 @@
 //   switching     POST …/account {commandId, accountId}, then the continue message
 //   handing-off   build the handoff prompt (last messages + git status), then creating
 //   waiting-reset every candidate is burnt and `whenAllBurnt` waits: until the earliest reset
-//   output        read the final answer (before anything could close the tab) and finish
+//   output        read the final answer (before anything could close the tab) and finish; a block
+//                 that declares outcomes/outputs (step-report.ts) needs the agent's report here: with
+//                 none, ONE reminder turn goes back through `sending` (`reminderSent` persisted with
+//                 it), and a second report-less settle fails the block `no_report`
 //
 // The invariant (§5.4): a usage limit or an auth failure never fails the block while an eligible
 // candidate remains in its chain.
 
+import { randomBytes } from "node:crypto";
 import {
   WORKFLOW_LIMITS,
   type SessionSummary,
@@ -91,7 +95,9 @@ import {
   renderVariables,
   withAutonomyNote
 } from "./prompt.ts";
+import { chooseLoopSession, loopTemplate, newChatNote, type LoopTurnMode } from "./loop-turn.ts";
 import { protectSecrets, revealSecrets } from "./secret-text.ts";
+import { blockReports, noReportMessage, reminderMessage, reportHandle, reportOutputFields, withStepProtocol } from "./step-report.ts";
 import { describeSkips } from "./select.ts";
 import { autonomousAnswers, autonomousDecision, observe, waitForIdle, watchAgent } from "./watch.ts";
 
@@ -111,6 +117,12 @@ export interface AgentBlockOutput {
   hops: AgentHop[];
   /** Set only when `text` was cut at the cap. */
   textTruncated?: true;
+  /** The reported outcome id (a block with `outcomes`, spec 2026-11-10 §5.4). */
+  outcome?: string;
+  /** The report's summary (a block with `outcomes` / `outputs`). */
+  summary?: string;
+  /** The reported typed values (a block with `outputs`). */
+  outputs?: Record<string, unknown>;
 }
 
 const AGENT_PHASES = [
@@ -195,6 +207,13 @@ export interface AgentBlockState {
   firstWaitAt?: string;
   waitStartedAt?: string;
   waitUntil?: string;
+  /** The one reminder to call `report_step_result` was sent (spec 2026-11-10 §5.3). Absent = false. */
+  reminderSent?: boolean;
+  /**
+   * A later loop pass (spec 2026-11-10 §7.3, `ctx.loop`): how it talks to its agent, chosen once
+   * before anything is sent — `continue` in its previous chat, or `new`.
+   */
+  loopMode?: LoopTurnMode;
 }
 
 export function createAgentExecutor(deps: AgentExecutorDeps): NodeExecutor<"agent"> {
@@ -268,6 +287,11 @@ function parseState(waitingOn: WaitingOn): AgentBlockState | null {
 }
 
 class Cancelled extends Error {}
+
+/** A fresh frame id for untrusted text this block inserts itself (the loop's feedback). */
+function randomFrameId(): string {
+  return randomBytes(6).toString("hex");
+}
 class DeadlinePassed extends Error {}
 
 const DEFAULT_POLICY: AccountPolicy = {
@@ -375,7 +399,15 @@ class AgentBlockRun {
   // --- phases -------------------------------------------------------------------
 
   private async selecting(): Promise<NodeResult | null> {
-    if (this.config.session.kind === "continue") return this.startContinue(this.config.session.fromNode);
+    if (this.config.session.kind === "continue") {
+      // A later loop pass keeps continuing the configured upstream chat, with the loop's text.
+      if (this.ctx.loop) this.st.loopMode = "continue";
+      return this.startContinue(this.config.session.fromNode);
+    }
+    if (this.ctx.loop && this.st.loopMode === undefined) {
+      const continued = await this.startLoopContinue();
+      if (continued !== "new") return continued;
+    }
     const refused = this.renderTemplate();
     if (refused) return this.fail("validation", refused);
     this.catalog.invalidate();
@@ -395,7 +427,7 @@ class AgentBlockRun {
       this.st.prompt = this.protect(vars.text);
     }
     this.st.next = c;
-    this.st.pendingInput = this.protect(withAutonomyNote(this.st.prompt, this.config.autonomyNote));
+    this.st.pendingInput = this.protect(this.firstMessage(this.st.prompt));
     this.st.hopVia = "initial";
     this.st.creatingSince = this.now().toISOString();
     this.st.phase = "creating";
@@ -412,32 +444,77 @@ class AgentBlockRun {
     }
     const sessionId = out.sessionId;
     const creating = this.ctx.workflow.nodes.find((n) => n.type === "agent" && n.name === fromNode);
-    let chain: AgentChainEntry[] = creating?.type === "agent" ? creating.config.chain : this.config.chain;
+    const chain: AgentChainEntry[] = creating?.type === "agent" ? creating.config.chain : this.config.chain;
     const summary = (await this.transient(() => listSessions(this.api))).find((s) => s.id === sessionId);
     if (!summary) return this.fail("agent_error", `The session "${fromNode}" created was closed.`);
-    const snap = await this.transient(() => readThread(this.api, sessionId));
+    return this.continueSession(summary, chain, `the session "${fromNode}" created`);
+  }
+
+  /**
+   * A later loop pass with `session: "continue"` (§7.3): a follow-up turn in its previous pass's
+   * chat — or "new" (recording why, when it could not continue) for a new chat.
+   */
+  private async startLoopContinue(): Promise<NodeResult | null | "new"> {
+    const choice = await chooseLoopSession({
+      loop: this.ctx.loop!,
+      api: this.api,
+      clock: this.deps.clock,
+      signal: this.ctx.signal,
+      logger: this.ctx.log,
+      retry: (fn) => this.transient(fn),
+      agentUsable: async (summary) => {
+        // The chat's agent, model and account as they are now (failover may have moved them).
+        const snap = await this.transient(() => readThread(this.api, summary.id));
+        const accountId = summary.accountId || snap.head.accountId || "system";
+        const { current } = this.sessionCandidate(summary, this.config.chain, accountId, snap.head.modelSelection.model, snap.head.modelSelection.options ?? []);
+        this.catalog.invalidate();
+        const verdict = await this.transient(() => this.catalog.check(current));
+        return verdict.ok ? null : `${summary.refId} cannot take the turn: ${verdict.skip.detail}`;
+      }
+    });
+    if (this.ctx.signal.aborted) throw new Cancelled();
+    this.st.loopMode = choice.mode;
+    if (choice.mode === "new") {
+      if (choice.reason !== undefined) this.ctx.update({ sessionNote: newChatNote(choice.reason) });
+      return "new";
+    }
+    return this.continueSession(choice.summary, this.config.chain, "its previous pass's session");
+  }
+
+  /** The candidate a chat runs as, and the chain failover walks from it (the chat's agent first when the chain lacks it). */
+  private sessionCandidate(summary: SessionSummary, chain: AgentChainEntry[], accountId: string, model?: string, options: AgentCandidate["options"] = []): { current: AgentCandidate; chain: AgentChainEntry[] } {
     const agent = summary.refId;
-    const model = snap.head.modelSelection.model;
-    const options = snap.head.modelSelection.options ?? [];
-    const accountId = summary.accountId || snap.head.accountId || "system";
-    let chainIndex = chain.findIndex((e) => e.agent === agent && e.model === model);
+    const modelId = model ?? chain.find((e) => e.agent === agent)?.model ?? "";
+    let chainIndex = chain.findIndex((e) => e.agent === agent && e.model === modelId);
     if (chainIndex === -1) chainIndex = chain.findIndex((e) => e.agent === agent);
     if (chainIndex === -1) {
-      chain = [{ agent, model, options, accounts: DEFAULT_POLICY }, ...chain];
+      chain = [{ agent, model: modelId, options, accounts: DEFAULT_POLICY }, ...chain];
       chainIndex = 0;
     }
     const label = this.deps.accounts.list().accounts.find((a) => a.id === accountId)?.label;
-    const subject = cooldownSubject(agent, model, accountId);
+    const subject = cooldownSubject(agent, modelId, accountId);
     const current: AgentCandidate = {
       chainIndex,
       agent,
-      model,
+      model: modelId,
       options,
       accountId,
       ...(label ? { accountLabel: label } : accountId === "system" ? { accountLabel: "System" } : {}),
       family: subject.family,
       cooldownAccount: subject.account
     };
+    return { current, chain };
+  }
+
+  /** A follow-up turn into an existing chat (`continue` from an upstream block, or a loop's previous pass). */
+  private async continueSession(summary: SessionSummary, ownerChain: AgentChainEntry[], whose: string): Promise<NodeResult | null> {
+    const sessionId = summary.id;
+    const snap = await this.transient(() => readThread(this.api, sessionId));
+    const agent = summary.refId;
+    const model = snap.head.modelSelection.model;
+    const options = snap.head.modelSelection.options ?? [];
+    const accountId = summary.accountId || snap.head.accountId || "system";
+    const { current, chain } = this.sessionCandidate(summary, ownerChain, accountId, model, options);
     this.st.chain = chain;
     const refused = this.renderTemplate();
     if (refused) return this.fail("validation", refused);
@@ -452,13 +529,13 @@ class AgentBlockRun {
     if (!this.st.knownSessionIds.includes(sessionId)) this.st.knownSessionIds.push(sessionId);
     this.st.sessionStartTurnId = snap.turns.at(-1)?.turnId ?? null;
     this.recordSelection({
-      chosen: { agent, model, ...(options.length ? { options } : {}), accountId, ...(current.accountLabel ? { accountLabel: current.accountLabel } : {}), chainIndex },
-      reason: `Continues the session "${fromNode}" created (${agent}/${current.accountLabel ?? accountId}).`,
+      chosen: { agent, model, ...(options.length ? { options } : {}), accountId, ...(current.accountLabel ? { accountLabel: current.accountLabel } : {}), chainIndex: current.chainIndex },
+      reason: `Continues ${whose} (${agent}/${current.accountLabel ?? accountId}).`,
       skipped: []
     });
     this.pushHop(current, sessionId, "initial");
     this.ctx.update({ sessionId, hops: this.hopsCopy() });
-    return this.enterSending(withAutonomyNote(this.st.prompt, this.config.autonomyNote));
+    return this.enterSending(this.firstMessage(this.st.prompt));
   }
 
   private async creating(): Promise<NodeResult | null> {
@@ -799,7 +876,8 @@ class AgentBlockRun {
     }
     const originalPrompt = this.st.prompt ?? "";
     this.st.pendingInput = this.protect(buildHandoffPrompt({
-      originalPrompt,
+      // A new session: it learns the reporting protocol again (spec 2026-11-10 §5.3).
+      originalPrompt: withStepProtocol(originalPrompt, this.config),
       previousAgent: previous.agent,
       previousReason: this.lastHopReason(),
       previousMessages,
@@ -830,7 +908,18 @@ class AgentBlockRun {
     return null;
   }
 
-  private async output(): Promise<NodeResult> {
+  private async output(): Promise<NodeResult | null> {
+    const reports = blockReports(this.config);
+    const report = reports ? this.ctx.stepReport?.() : undefined;
+    if (reports && !report) {
+      // §5.3: one reminder turn in the same session (persisted with `sending`, before the post).
+      if (!this.st.reminderSent) {
+        this.st.reminderSent = true;
+        this.ctx.update({ activity: "No report yet — reminding the agent" });
+        return this.enterSending(withAutonomyNote(reminderMessage(this.config), this.config.autonomyNote));
+      }
+      return this.fail("no_report", noReportMessage());
+    }
     const sessionId = this.st.sessionId!;
     const snap = await this.transient(() => readThread(this.api, sessionId), { ignoreDeadline: true });
     const { text, truncated } = finalText(snap, this.st.sessionStartTurnId ?? null);
@@ -844,11 +933,22 @@ class AgentBlockRun {
       accountId: current.accountId,
       durationMs: Math.max(0, this.now().getTime() - Date.parse(this.st.startedAt)),
       hops: this.hopsCopy(),
-      ...(truncated ? { textTruncated: true as const } : {})
+      ...(truncated ? { textTruncated: true as const } : {}),
+      ...(report ? reportOutputFields(report) : {})
     };
     this.ctx.update({ hops: output.hops });
     await this.ctx.setWaitingOn(undefined);
-    return { status: "succeeded", output, ...(this.st.warnings.length ? { warnings: [...this.st.warnings] } : {}) };
+    return {
+      status: "succeeded",
+      output,
+      ...(report ? { handle: reportHandle(report) } : {}),
+      ...(this.st.warnings.length ? { warnings: [...this.st.warnings] } : {})
+    };
+  }
+
+  /** The first message of the block's work: the prompt, the reporting protocol when it reports, the autonomy note. */
+  private firstMessage(prompt: string): string {
+    return withAutonomyNote(withStepProtocol(prompt, this.config), this.config.autonomyNote);
   }
 
   // --- helpers ------------------------------------------------------------------
@@ -859,7 +959,8 @@ class AgentBlockRun {
     const source = promptSource(this.config, this.deps.prompts);
     if (!source.ok) return source.message;
     const rendered = renderExpressions(source.template, this.ctx);
-    this.st.template = this.protect(rendered.text);
+    // A later loop pass: the loop's header, feedback and (a new chat) the previous pass, around it.
+    this.st.template = this.protect(loopTemplate(this.ctx.loop, this.st.loopMode ?? "new", rendered.text, randomFrameId()));
     this.st.warnings.push(...rendered.warnings.map((w) => this.protect(w)));
     if (rendered.warnings.length) this.ctx.update({ warnings: [...this.st.warnings] });
     return null;

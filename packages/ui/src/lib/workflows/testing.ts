@@ -1,6 +1,6 @@
 // Test helpers for the workflow editor's modules (not exported from the package).
 
-import { defaultNodeConfig, type Workflow, type WorkflowNode, type WorkflowNodeType } from "@orquester/api";
+import { defaultNodeConfig, type Workflow, type WorkflowEdgeLoop, type WorkflowNode, type WorkflowNodeType } from "@orquester/api";
 import { workflowRecordSchema } from "@orquester/config";
 
 export const T0 = "2026-09-28T10:00:00.000Z";
@@ -23,7 +23,27 @@ export function node(
 }
 
 export function edge(source: string, target: string, sourceHandle = "success", id?: string) {
-  return { id: id ?? `${source}-${sourceHandle}-${target}`, source, target, sourceHandle };
+  return { id: id ?? `${source}-${sourceHandle}-${target}`, source, target, sourceHandle } as {
+    id: string;
+    source: string;
+    target: string;
+    sourceHandle: string;
+    loop?: WorkflowEdgeLoop;
+  };
+}
+
+/** A loop edge (spec 2026-11-10 §7.1); id `<source>-<handle>-loop-<target>`. */
+export function loopEdge(
+  source: string,
+  target: string,
+  sourceHandle = "success",
+  loop: Partial<WorkflowEdgeLoop> = {},
+  id?: string
+): ReturnType<typeof edge> {
+  return {
+    ...edge(source, target, sourceHandle, id ?? `${source}-${sourceHandle}-loop-${target}`),
+    loop: { maxLoops: 2, session: "continue", ...loop }
+  };
 }
 
 /** A schema-valid workflow (parsed, defaults applied). */

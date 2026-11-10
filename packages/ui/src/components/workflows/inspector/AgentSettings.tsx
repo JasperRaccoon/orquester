@@ -1,8 +1,10 @@
 /**
- * The agent block's form (workflows spec §5.1, §7.2), four sections that
+ * The agent block's form (workflows spec §5.1, §7.2), five sections that
  * each say what they hold in one line when closed:
  *  - Prompt: written here with `{{ … }}` data and `{variables}`, or a saved
  *    prompt (previewed, variables marked) with an optional addition;
+ *  - Result: named outcomes (one output each) and typed outputs the agent
+ *    reports (AgentReportSettings);
  *  - Chat: a new chat (optionally titled) or a follow-up in the chat an
  *    earlier agent block opened in the same run;
  *  - Who runs it: the choices, tried in order on usage limits (ChainEditor);
@@ -18,6 +20,7 @@ import { Braces, Maximize2 } from "lucide-react";
 import {
   isPromptVariableName,
   upstreamOf,
+  withoutLoopEdges,
   WORKFLOW_LIMITS,
   WORKFLOW_SECRETS_GUIDE,
   type AgentBlockConfig,
@@ -39,6 +42,7 @@ import { FullScreenEditor } from "../phone/FullScreenEditor";
 import { usePhoneLayout } from "../phone/phone-context";
 import { Callout, DurationInput, Field, FOCUS_RING, RadioCards, Segmented, SelectInput, SmallButton, ToggleRow, useReadOnly, ViewButton } from "../ui/controls";
 import { GuideText } from "../ui/GuideText";
+import { AgentReportSection } from "./AgentReportSettings";
 import { ChainEditor } from "./ChainEditor";
 import { ConfigField, FieldAnchor, InspectorSection, useConfigSetter, useFieldMessages, useInspector } from "./inspector-context";
 import { TemplateEditor, type TemplateEditorHandle } from "./TemplateEditor";
@@ -404,7 +408,8 @@ const ChatSection: React.FC<{ config: AgentBlockConfig }> = ({ config }) => {
   const setConfig = useConfigSetter<AgentBlockConfig>();
   const titleEditor = useRef<TemplateEditorHandle | null>(null);
   const upstreamAgents = useMemo(() => {
-    const upstream = upstreamOf(workflow, node.id);
+    // Chats a loop edge leads back from are not upstream: only the forward graph is.
+    const upstream = upstreamOf(withoutLoopEdges(workflow), node.id);
     return workflow.nodes.filter((candidate) => candidate.type === "agent" && upstream.has(candidate.id));
   }, [workflow, node.id]);
   const session = config.session;
@@ -655,6 +660,7 @@ export const AgentSettings: React.FC = () => {
   return (
     <>
       <PromptSection config={config} />
+      <AgentReportSection config={config} />
       <ChatSection config={config} />
       <WhoRunsSection config={config} />
       <UnattendedSection config={config} />

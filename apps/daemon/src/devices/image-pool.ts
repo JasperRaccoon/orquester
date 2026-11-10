@@ -1,7 +1,7 @@
 /**
- * Device images off the event loop: the fleet view's thumbnails and the agent's screenshots are
- * decoded, scaled and re-encoded (`screenshot-image.ts`, ~300 ms for a 720×1280 frame) in a small
- * pool of worker threads (`image-worker.ts`).
+ * Images off the event loop: the device fleet view's thumbnails and the agents' device and desktop
+ * screenshots are decoded, scaled and (re-)encoded (`screenshot-image.ts`, ~300 ms for a 720×1280
+ * frame) in a small pool of worker threads (`image-worker.ts`).
  *
  * - **Bounded.** At most {@link IMAGE_WORKERS} workers, started on demand and stopped after
  *   {@link IMAGE_WORKER_IDLE_MS} idle; at most {@link IMAGE_QUEUE_CAP} jobs wait, beyond that a job
@@ -18,6 +18,7 @@
 
 import { Worker } from "node:worker_threads";
 
+import type { DesktopPixelFormat } from "../desktops/automation/pixels.ts";
 import type { FittedScreenshot } from "./screenshot-image.ts";
 
 const IMAGE_WORKERS = 2;
@@ -25,7 +26,10 @@ const IMAGE_QUEUE_CAP = 32;
 const IMAGE_JOB_TIMEOUT_MS = 30_000;
 const IMAGE_WORKER_IDLE_MS = 60_000;
 
-export type ImageJob = { kind: "thumbnail"; image: Uint8Array; width: number } | { kind: "fit"; png: Uint8Array; maxBase64Chars: number };
+export type ImageJob =
+  | { kind: "thumbnail"; image: Uint8Array; width: number }
+  | { kind: "fit"; png: Uint8Array; maxBase64Chars: number }
+  | { kind: "fitPixels"; pixels: Uint8Array; format: DesktopPixelFormat; width: number; height: number; maxLongEdge: number; maxBase64Chars: number };
 
 export type ImageResult =
   | { kind: "thumbnail"; data: Uint8Array }
@@ -83,6 +87,18 @@ export class ImageWorkerPool {
   /** `fitScreenshot` in a worker: the PNG when it fits, else a JPEG scaled until it does. */
   async fit(png: Buffer, maxBase64Chars: number): Promise<FittedScreenshot> {
     const result = await this.run({ kind: "fit", png, maxBase64Chars }, null);
+    if (result.kind !== "fit") throw new Error("The image worker answered another job.");
+    return { mimeType: result.mimeType, data: toBuffer(result.data), width: result.width, height: result.height };
+  }
+
+  /**
+   * A desktop capture's raw 32-bit pixels converted to RGB (`pixelsToRgb`) and `fitRgbScreenshot`
+   * in a worker: scaled to `maxLongEdge`, as PNG when it fits, else a JPEG scaled until it does.
+   * Pixels on an ArrayBuffer of their own are transferred, not copied (empty here afterwards).
+   */
+  async fitPixels(image: { width: number; height: number; pixels: Buffer; format: DesktopPixelFormat }, maxLongEdge: number, maxBase64Chars: number): Promise<FittedScreenshot> {
+    const { width, height, pixels, format } = image;
+    const result = await this.run({ kind: "fitPixels", pixels, format: { ...format }, width, height, maxLongEdge, maxBase64Chars }, null);
     if (result.kind !== "fit") throw new Error("The image worker answered another job.");
     return { mimeType: result.mimeType, data: toBuffer(result.data), width: result.width, height: result.height };
   }
@@ -152,7 +168,7 @@ export class ImageWorkerPool {
     slot.worker.ref();
     slot.timer = setTimeout(() => void this.retire(slot, new Error(`The device image took longer than ${Math.round(IMAGE_JOB_TIMEOUT_MS / 1000)} s to encode.`)), IMAGE_JOB_TIMEOUT_MS);
     slot.timer.unref?.();
-    slot.worker.postMessage({ id, job: job.job } satisfies ImageWorkerRequest);
+    slot.worker.postMessage({ id, job: job.job } satisfies ImageWorkerRequest, transferable(job.job));
   }
 
   private answered(slot: Slot, reply: ImageWorkerReply): void {
@@ -185,6 +201,13 @@ export class ImageWorkerPool {
     await slot.worker.terminate().catch(() => undefined);
     if (!this.closed) this.pump();
   }
+}
+
+/** A job's bytes the worker may take over: a capture's pixels when they span their whole (non-shared) ArrayBuffer. */
+function transferable(job: ImageJob): ArrayBuffer[] {
+  if (job.kind !== "fitPixels") return [];
+  const { buffer, byteOffset, byteLength } = job.pixels;
+  return buffer instanceof ArrayBuffer && byteOffset === 0 && byteLength === buffer.byteLength && byteLength > 0 ? [buffer] : [];
 }
 
 function toBuffer(data: Uint8Array): Buffer {

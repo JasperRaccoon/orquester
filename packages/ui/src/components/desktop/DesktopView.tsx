@@ -1,26 +1,45 @@
-/// <reference path="../../types/novnc.d.ts" />
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Power, RotateCw } from "lucide-react";
-import type RFB from "@novnc/novnc";
-import { desktopRoutes, type DesktopSummary, type DesktopWindow, type DesktopWindowAction } from "@orquester/api";
+import {
+  desktopRoutes,
+  type DesktopSize,
+  type DesktopSummary,
+  type DesktopVideoBackend,
+  type DesktopVoxlStatus,
+  type DesktopWindow,
+  type DesktopWindowAction
+} from "@orquester/api";
 import { useAppStore } from "../../store/app";
 import { cn } from "../../lib/cn";
 import { useMediaQuery } from "../../hooks/use-media-query";
+import { useSoftKeyboardOpen } from "../../hooks/use-soft-keyboard-open";
 import { useDesktopAudio } from "../../lib/desktop-audio";
-import { readDesktopPrefs, writeDesktopPrefs, type DesktopPrefs } from "../../lib/desktop-prefs";
-import {
-  DESKTOP_COMPRESSION_LEVEL,
-  DESKTOP_QUALITY_INITIAL,
-  initialDesktopQuality,
-  nextDesktopQuality
-} from "../../lib/desktop-quality";
-import { openDesktopVncChannel, type DesktopVncChannel } from "../../lib/desktop-vnc-socket";
+import { readDesktopPrefs, writeDesktopPrefs, type DesktopPrefs, type DesktopTextSize } from "../../lib/desktop-prefs";
+import { DESKTOP_QUALITY_INITIAL } from "../../lib/desktop-quality";
 import { backoffDelayMs, scheduleRetry as retryLater, type PendingRetry } from "../../lib/connection/backoff";
+import { consumeLatchSet, latchSet, latchedNames, tapLatchIn, type LatchSet } from "../../lib/modifier-latch";
+import { useVisualViewportBox } from "../workflows/phone/use-visual-viewport";
 import { DesktopToolbar } from "./DesktopToolbar";
 import { DesktopAppsDialog, DesktopInfoDialog } from "./DesktopDialogs";
-import { DesktopKeyStrip, useDesktopHiddenInput } from "./DesktopKeyboard";
-import { exitPoint } from "./desktop-pointer";
-import { MODIFIER_KEYSYM, keysymsForText, pasteKeystroke, type LatchModifier, type PasteChord } from "./desktop-keys";
+import { DesktopKeyBar, useDesktopHiddenInput } from "./DesktopKeyboard";
+import { DesktopTouchCursor, useDesktopTouch } from "./DesktopTouch";
+import {
+  LATCH_MODIFIERS,
+  MODIFIER_KEYSYM,
+  XK,
+  keysymsForText,
+  pasteKeystroke,
+  shiftedKeysym,
+  type LatchModifier,
+  type PasteChord
+} from "./desktop-keys";
+import { TEXT_SIZE_DEBOUNCE_MS, textSizeDisplaySize } from "./desktop-text-size";
+import { sharpFitAllowed } from "./desktop-viewport.logic";
+import { createDesktopStreamClient, voxlViewerSupport } from "./stream/create-stream-client";
+import { VOXL_MAX_FAILURES, desktopVideo, viewerUnsupportedReason, voxlFailuresAfterClose, voxlStreamUsable } from "./stream/backend-choice.logic";
+import type { DesktopStreamClient, DesktopStreamEvents, DesktopViewMode } from "./stream/types";
+import { DesktopHandoffControls, DesktopHandoffLayer, useDesktopHandoff } from "./handoff/DesktopHandoff";
+import { takeoverSink } from "../../lib/desktops/handoff.logic";
 
 export interface DesktopViewProps {
   desktop: DesktopSummary;
@@ -32,27 +51,11 @@ export interface DesktopViewProps {
   onCloseTab: () => void;
 }
 
-type RfbCtor = typeof RFB;
 type ConnState = "idle" | "connecting" | "connected" | "reconnecting";
 
 const RECONNECT_BACKOFF = { baseMs: 500, maxMs: 10_000 };
-/** RTT samples (one per 2 s) to spend getting a fixed size applied before giving up. */
-const FIXED_SIZE_ATTEMPTS = 5;
-const DISPLAY_BACKGROUND = "rgb(10, 10, 10)";
 /** noVNC's own Mac/iOS test (`core/util/browser.js`): there it forwards Cmd as Alt. */
 const APPLE_PLATFORM = typeof navigator !== "undefined" && /mac|ipad|iphone|ipod/i.test(navigator.platform);
-
-// noVNC is loaded on first use: it is only needed once a desktop tab is shown,
-// and its `core/util/browser.js` has a top-level await that is better kept out
-// of the app's entry chunk.
-let rfbModule: Promise<RfbCtor> | null = null;
-function loadRfb(): Promise<RfbCtor> {
-  rfbModule ??= import("@novnc/novnc").then((m) => m.default).catch((err: unknown) => {
-    rfbModule = null; // a failed chunk load may succeed on the next attempt
-    throw err;
-  });
-  return rfbModule;
-}
 
 function useDocumentVisible(): boolean {
   const [visible, setVisible] = useState(() => typeof document === "undefined" || document.visibilityState === "visible");
@@ -62,74 +65,6 @@ function useDocumentVisible(): boolean {
     return () => document.removeEventListener("visibilitychange", onChange);
   }, []);
   return visible;
-}
-
-/**
- * Apply a view mode to a live RFB.
- *
- * - **Fit:** `scaleViewport`, and `resizeSession` only while this viewer
- *   `drives` (it has focus or just got local input) — so with several viewers
- *   the one last used sets the display size and the others scale it.
- * - **Fixed, scale:** the shared display at whatever size it is, scaled to fit.
- * - **Fixed, pan:** 1:1, clipped to the tab, drag to pan (`clipViewport` +
- *   `dragViewport`).
- */
-function applyView(rfb: RFB, prefs: DesktopPrefs, driving: boolean): void {
-  if (prefs.view === "fit") {
-    rfb.clipViewport = false;
-    rfb.dragViewport = false;
-    rfb.scaleViewport = true;
-    rfb.resizeSession = driving;
-  } else if (prefs.fixedMode === "pan") {
-    rfb.resizeSession = false;
-    rfb.scaleViewport = false;
-    rfb.clipViewport = true;
-    rfb.dragViewport = true;
-  } else {
-    rfb.resizeSession = false;
-    rfb.clipViewport = false;
-    rfb.dragViewport = false;
-    rfb.scaleViewport = true;
-  }
-}
-
-/**
- * Ask the server for exactly `size`, using noVNC's public API only.
- *
- * noVNC 1.7 has no "request W×H" call. With `resizeSession` on, it requests
- * the size of its screen element (the `width/height: 100%` div it appends to
- * the target), measured with `getBoundingClientRect()` synchronously inside the
- * `resizeSession` setter. So for one synchronous moment the target is laid out
- * at W×H CSS px, `resizeSession` goes on (noVNC measures and sends
- * SetDesktopSize) and straight back off, and the inline size is restored. No
- * frame is painted in between, and noVNC's ResizeObserver sees no change.
- *
- * A CSS-transform wrapper (lay the target out at W×H and scale it visually)
- * does not work: noVNC maps pointer coordinates through getBoundingClientRect
- * divided by its own display scale, so a transformed ancestor skews every
- * click.
- *
- * noVNC silently drops the request before the server has announced
- * ExtendedDesktopSize (the first framebuffer update), while an earlier resize
- * is pending, or within 100 ms of the last one; the caller retries on the next
- * RTT sample until `desktop.size` reports the new size.
- */
-function requestRemoteSize(rfb: RFB, target: HTMLElement, size: { width: number; height: number }): void {
-  const { style } = target;
-  const saved = { right: style.right, bottom: style.bottom, width: style.width, height: style.height };
-  style.right = "auto";
-  style.bottom = "auto";
-  style.width = `${size.width}px`;
-  style.height = `${size.height}px`;
-  try {
-    rfb.resizeSession = true;
-    rfb.resizeSession = false;
-  } finally {
-    style.right = saved.right;
-    style.bottom = saved.bottom;
-    style.width = saved.width;
-    style.height = saved.height;
-  }
 }
 
 /** Keyboard Lock (Chromium only; not in the DOM typings). */
@@ -142,17 +77,24 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+const sameSize = (a: DesktopSize | null, b: DesktopSize | null) => a !== null && b !== null && a.width === b.width && a.height === b.height;
+
 export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: DesktopViewProps) {
   const api = useAppStore((s) => s.api);
   const visible = useDocumentVisible();
   const narrow = !useMediaQuery("(min-width: 640px)");
-  const touch = useMediaQuery("(pointer: coarse)");
+  const coarse = useMediaQuery("(pointer: coarse)");
 
   const rootRef = useRef<HTMLDivElement>(null);
-  const targetRef = useRef<HTMLDivElement>(null);
+  /** The view's box: it takes the touch layer's pointer events and never transforms. */
+  const viewportRef = useRef<HTMLDivElement>(null);
+  /** Around the client's container: the local zoom's CSS transform goes here. */
+  const stageRef = useRef<HTMLDivElement>(null);
+  /** The stream client mounts its video here. */
+  const containerRef = useRef<HTMLDivElement>(null);
   const hiddenInputRef = useRef<HTMLInputElement>(null);
-  const rfbRef = useRef<RFB | null>(null);
-  /** The modifiers of the paste chord the view held back from noVNC, until its `paste` event. */
+  const clientRef = useRef<DesktopStreamClient | null>(null);
+  /** The modifiers of the paste chord the view held back from the client, until its `paste` event. */
   const pasteChordRef = useRef<PasteChord | null>(null);
 
   const [prefs, setPrefs] = useState<DesktopPrefs>(() => readDesktopPrefs(desktop.id));
@@ -162,20 +104,74 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   desktopRef.current = desktop;
 
   const [conn, setConn] = useState<ConnState>("idle");
+  const connRef = useRef(conn);
+  connRef.current = conn;
   const [rttMs, setRttMs] = useState<number | null>(null);
   const [qualityLevel, setQualityLevel] = useState(DESKTOP_QUALITY_INITIAL);
   const [remoteClipboard, setRemoteClipboard] = useState<string | null>(null);
   const [desktopName, setDesktopName] = useState<string | null>(null);
+  /** The display's size as the stream client reports it (the daemon's until it has). */
+  const [streamSize, setStreamSize] = useState<DesktopSize | null>(null);
+  const displaySize = streamSize ?? desktop.size;
+  const displaySizeRef = useRef(displaySize);
+  displaySizeRef.current = displaySize;
   const [connError, setConnError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"restart" | "stop" | null>(null);
   const [appsOpen, setAppsOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
-  const [latched, setLatched] = useState<ReadonlySet<LatchModifier>>(() => new Set());
-  const latchedRef = useRef(latched);
-  latchedRef.current = latched;
+  const [latches, setLatches] = useState<LatchSet<LatchModifier>>(() => latchSet(LATCH_MODIFIERS));
+  const latchesRef = useRef(latches);
+  latchesRef.current = latches;
   const [installHint, setInstallHint] = useState<string | null>(null);
+  /** The backend of the current connection attempt, and why a voxl desktop fell back to RFB. */
+  const [stream, setStream] = useState<{ backend: DesktopVideoBackend; fallback: string | null } | null>(null);
+  /**
+   * Consecutive voxl connections that closed before their `hello` or soon after it (spec R4.6,
+   * `voxlFailuresAfterClose`): kept across reconnects, so the third failure falls back to RFB;
+   * reset when a voxl connection streamed past that, the desktop's stream changes, or its stream
+   * becomes `ready`.
+   */
+  const voxlFailuresRef = useRef(0);
+  const voxlUsable = voxlStreamUsable(desktop);
+  useEffect(() => {
+    voxlFailuresRef.current = 0;
+  }, [desktop.id, voxlUsable]);
+  // Failures while voxl was still being checked or started say nothing about a `ready` stream: a
+  // view they pinned to RFB reconnects and tries voxl again.
+  const voxlReady = voxlUsable && desktop.voxl?.state === "ready";
+  const [voxlRetry, setVoxlRetry] = useState(0);
+  useEffect(() => {
+    if (!voxlReady) return;
+    const pinned = voxlFailuresRef.current >= VOXL_MAX_FAILURES;
+    voxlFailuresRef.current = 0;
+    if (pinned) setVoxlRetry((n) => n + 1);
+  }, [desktop.id, voxlReady]);
+
+  // ---- Touch -----------------------------------------------------------------
+
+  // A touch device: a coarse pointer, or any touch seen on the view. The touch
+  // layer, key bar and View-menu options are for those only (spec R3.8).
+  const [touchSeen, setTouchSeen] = useState(false);
+  const touch = coarse || touchSeen;
+  const touchRef = useRef(touch);
+  touchRef.current = touch;
+  // Local zoom and sharp fit follow the last input: a mouse on a touch laptop
+  // gets the plain view back.
+  const [lastPointer, setLastPointer] = useState<"touch" | "fine" | null>(null);
+  const touchRendering = touch && lastPointer !== "fine";
+  const touchRenderingRef = useRef(touchRendering);
+  touchRenderingRef.current = touchRendering;
+  const inputMode = prefs.inputMode ?? "trackpad";
+  /** The text-size preset in effect (touch devices only); `fit` lets `prefs.view` apply. */
+  const textSize: DesktopTextSize = touch ? (prefs.textSize ?? "fit") : "fit";
+  const textSizeRef = useRef(textSize);
+  textSizeRef.current = textSize;
+  // R2.3: while an agent works the desktop, no viewer changes its size.
+  const agentControls = desktop.control?.controller === "agent";
+  const agentControlsRef = useRef(agentControls);
+  agentControlsRef.current = agentControls;
 
   const vncAvailable = useMemo(() => api?.desktopSocketUrl(desktopRoutes.vncSocket(desktop.id)) != null, [api, desktop.id]);
   const audioUrl = useMemo(() => api?.desktopSocketUrl(desktopRoutes.audioSocket(desktop.id)) ?? null, [api, desktop.id]);
@@ -196,58 +192,91 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   // Fit mode: this viewer drives the display size while it has focus or just
   // received local input, and stops on blur / input elsewhere.
   const drivingRef = useRef(false);
-  const setDriving = useCallback((on: boolean) => {
-    drivingRef.current = on;
-    const rfb = rfbRef.current;
-    if (rfb && prefsRef.current.view === "fit") rfb.resizeSession = on;
+  /** `drivingRef` for rendering (sharp fit), updated only when it flips. */
+  const [driving, setDrivingState] = useState(false);
+
+  /** The client's view mode for the current prefs, handover and touch state. */
+  const clientViewMode = useCallback((): DesktopViewMode => {
+    const { view, fixedMode } = prefsRef.current;
+    // A preset sizes the display itself (requestPreset); the client only scales it.
+    if (textSizeRef.current !== "fit") return { kind: "fixed-scale" };
+    if (view === "fit") return { kind: "fit", driveSize: drivingRef.current && !agentControlsRef.current };
+    // Touch pans with the local zoom instead of noVNC's drag-to-pan.
+    return fixedMode === "pan" && !touchRenderingRef.current ? { kind: "fixed-pan" } : { kind: "fixed-scale" };
   }, []);
 
-  // Fixed mode: the size is requested once per connection and per choice, and
-  // retried (on RTT samples) until the daemon reports it or attempts run out.
-  const fixedRequestRef = useRef<{ key: string; attempts: number } | null>(null);
-  const tryFixedRequest = useCallback(() => {
-    const request = fixedRequestRef.current;
-    const rfb = rfbRef.current;
-    const target = targetRef.current;
-    const { view, fixedSize } = prefsRef.current;
-    if (!request || !rfb || !target || view !== "fixed" || !fixedSize) return;
-    if (request.key !== `${fixedSize.width}x${fixedSize.height}`) return;
-    const current = desktopRef.current.size;
-    if (current.width === fixedSize.width && current.height === fixedSize.height) {
-      fixedRequestRef.current = null;
-      return;
-    }
-    if (request.attempts >= FIXED_SIZE_ATTEMPTS) {
-      fixedRequestRef.current = null;
-      return;
-    }
-    request.attempts += 1;
-    requestRemoteSize(rfb, target, fixedSize);
+  /** The size this viewer asked for and has not seen applied yet. */
+  const pendingSizeRef = useRef<DesktopSize | null>(null);
+  const requestDisplaySize = useCallback((size: DesktopSize) => {
+    pendingSizeRef.current = size;
+    clientRef.current?.requestSize(size);
   }, []);
-  const armFixedRequest = useCallback(() => {
-    const { view, fixedSize } = prefsRef.current;
-    fixedRequestRef.current =
-      view === "fixed" && fixedSize ? { key: `${fixedSize.width}x${fixedSize.height}`, attempts: 0 } : null;
-    tryFixedRequest();
-  }, [tryFixedRequest]);
-
-  // The daemon reporting the size we asked for settles the request.
   useEffect(() => {
-    tryFixedRequest();
-  }, [desktop.size.width, desktop.size.height, tryFixedRequest]);
+    if (sameSize(pendingSizeRef.current, displaySize)) pendingSizeRef.current = null;
+  }, [displaySize]);
+
+  // Text-size presets: the display follows the view's size, debounced, while
+  // this viewer drives it and no agent controls the desktop.
+  const presetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestPreset = useCallback(() => {
+    presetTimerRef.current = null;
+    const preset = textSizeRef.current;
+    const client = clientRef.current;
+    const viewport = viewportRef.current;
+    if (preset === "fit" || !client || !viewport || connRef.current !== "connected") return;
+    if (!drivingRef.current || agentControlsRef.current) return;
+    const rect = viewport.getBoundingClientRect();
+    const size = textSizeDisplaySize(preset, { width: rect.width, height: rect.height }, window.devicePixelRatio || 1);
+    if (size && !sameSize(size, displaySizeRef.current)) requestDisplaySize(size);
+  }, [requestDisplaySize]);
+  const schedulePreset = useCallback(() => {
+    if (textSizeRef.current === "fit") return;
+    if (presetTimerRef.current !== null) clearTimeout(presetTimerRef.current);
+    presetTimerRef.current = setTimeout(requestPreset, TEXT_SIZE_DEBOUNCE_MS);
+  }, [requestPreset]);
+  useEffect(
+    () => () => {
+      if (presetTimerRef.current !== null) clearTimeout(presetTimerRef.current);
+    },
+    []
+  );
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const observer = new ResizeObserver(() => schedulePreset());
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [schedulePreset]);
+
+  const setDriving = useCallback(
+    (on: boolean) => {
+      drivingRef.current = on;
+      setDrivingState(on);
+      const mode = clientViewMode();
+      if (mode.kind === "fit") clientRef.current?.setViewMode(mode);
+      if (on) schedulePreset();
+    },
+    [clientViewMode, schedulePreset]
+  );
 
   // ---- Connection ----------------------------------------------------------
 
   const shouldConnect = active && visible && desktop.status === "running" && vncAvailable;
 
   useEffect(() => {
-    const target = targetRef.current;
-    if (!shouldConnect || !api || !target) return;
+    const container = containerRef.current;
+    if (!shouldConnect || !api || !container) return;
     let disposed = false;
     let attempt = 0;
     let retryTimer: PendingRetry | null = null;
-    let rfb: RFB | null = null;
-    let channel: DesktopVncChannel | null = null;
+    let client: DesktopStreamClient | null = null;
+
+    const drop = () => {
+      if (!client) return;
+      if (clientRef.current === client) clientRef.current = null;
+      client.dispose();
+      client = null;
+    };
 
     const scheduleRetry = () => {
       if (disposed) return;
@@ -263,86 +292,73 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
 
     const start = async () => {
       retryTimer = null;
-      let Rfb: RfbCtor;
-      try {
-        Rfb = await loadRfb();
-      } catch (err) {
-        if (disposed) return;
-        setConnError(`Could not load the viewer: ${errorText(err)}`);
-        scheduleRetry();
-        return;
-      }
+      // A new client per attempt: the factory picks the backend each time.
+      const plan = await createDesktopStreamClient(desktopRef.current, {
+        socketUrl: (path) => api.desktopSocketUrl(path),
+        voxlFailures: voxlFailuresRef.current
+      });
       if (disposed) return;
-      const url = api.desktopSocketUrl(desktopRoutes.vncSocket(desktop.id));
-      if (!url) return;
-
-      let quality = initialDesktopQuality();
-      setQualityLevel(quality.level);
-      const ownChannel = openDesktopVncChannel(url, {
-        onRtt: (ms) => {
-          if (disposed) return;
-          setRttMs(ms);
-          quality = nextDesktopQuality(quality, ms);
-          if (rfb && rfb.qualityLevel !== quality.level) {
-            rfb.qualityLevel = quality.level;
-            setQualityLevel(quality.level);
+      const c = plan.client;
+      client = c;
+      clientRef.current = c;
+      setStream({ backend: c.backend, fallback: plan.choice.backend === "rfb" ? plan.choice.reason : null });
+      /** When the voxl client had its `hello` (it reported `connected`). */
+      let helloAt: number | null = null;
+      /** A voxl client that ends before its `hello`, or soon after it, counts toward the RFB fallback. */
+      const ended = () => {
+        if (c.backend === "voxl") voxlFailuresRef.current = voxlFailuresAfterClose(voxlFailuresRef.current, { helloAt, closedAt: performance.now() });
+      };
+      c.setNativeInput(!touchRef.current);
+      c.setViewMode(clientViewMode());
+      const current = () => !disposed && client === c;
+      const events: DesktopStreamEvents = {
+        state: (state, reason) => {
+          if (!current()) return;
+          if (state === "connected") {
+            attempt = 0;
+            helloAt = performance.now();
+            setConn("connected");
+            setConnError(null);
+            // Opening/activating the tab in a focused window counts as local
+            // input: a lone viewer should fit the tab without an extra click.
+            if (document.hasFocus()) {
+              const focused = document.activeElement;
+              if (!focused || focused === document.body) c.focus();
+              setDriving(true);
+            }
+            // The view effect re-applies the mode and requests a fixed size
+            // once `conn` flips to "connected".
+          } else if (state === "disconnected") {
+            if (reason) setConnError(reason);
+            ended();
+            drop();
+            scheduleRetry();
           }
-          tryFixedRequest();
+        },
+        size: (size) => {
+          if (current()) setStreamSize(size);
+        },
+        clipboard: (text) => {
+          if (current()) setRemoteClipboard(text);
+        },
+        stats: (stats) => {
+          if (!current()) return;
+          if (stats.rttMs !== undefined) setRttMs(stats.rttMs);
+          if (stats.quality !== undefined) setQualityLevel(stats.quality);
+        },
+        name: (name) => {
+          if (current()) setDesktopName(name);
         }
-      });
-      channel = ownChannel;
-      let r: RFB;
+      };
       try {
-        r = new Rfb(target, ownChannel, { shared: true });
+        await c.connect(container, events);
       } catch (err) {
-        ownChannel.close();
-        channel = null;
+        if (!current()) return;
         setConnError(errorText(err));
+        ended();
+        drop();
         scheduleRetry();
-        return;
       }
-      rfb = r;
-      rfbRef.current = r;
-      r.background = DISPLAY_BACKGROUND;
-      r.focusOnClick = true;
-      r.qualityLevel = DESKTOP_QUALITY_INITIAL;
-      r.compressionLevel = DESKTOP_COMPRESSION_LEVEL;
-      applyView(r, prefsRef.current, drivingRef.current);
-
-      r.addEventListener("connect", () => {
-        if (disposed || rfb !== r) return;
-        attempt = 0;
-        setConn("connected");
-        setConnError(null);
-        // Opening/activating the tab in a focused window counts as local
-        // input: a lone viewer should fit the tab without an extra click.
-        if (document.hasFocus()) {
-          const focused = document.activeElement;
-          if (!focused || focused === document.body) r.focus({ preventScroll: true });
-          setDriving(true);
-        }
-        // The view effect re-applies the mode and arms the fixed-size request
-        // once `conn` flips to "connected".
-        applyView(r, prefsRef.current, drivingRef.current);
-      });
-      r.addEventListener("disconnect", () => {
-        if (rfbRef.current === r) rfbRef.current = null;
-        if (disposed || rfb !== r) return;
-        rfb = null;
-        channel = null;
-        scheduleRetry();
-      });
-      r.addEventListener("securityfailure", (e) => {
-        if (!disposed) setConnError(e.detail.reason ?? `Security failure (${e.detail.status})`);
-      });
-      r.addEventListener("clipboard", (e) => {
-        const text = e.detail.text;
-        setRemoteClipboard(text);
-        if (document.hasFocus()) {
-          navigator.clipboard?.writeText(text).catch(() => undefined);
-        }
-      });
-      r.addEventListener("desktopname", (e) => setDesktopName(e.detail.name));
     };
 
     setConn("connecting");
@@ -350,29 +366,45 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     return () => {
       disposed = true;
       retryTimer?.cancel();
-      if (rfbRef.current === rfb) rfbRef.current = null;
-      if (rfb) {
-        try {
-          rfb.disconnect();
-        } catch {
-          channel?.close();
-        }
-      } else {
-        channel?.close();
-      }
+      drop();
       setConn("idle");
     };
-  }, [shouldConnect, api, desktop.id, setDriving, tryFixedRequest]);
+    // A new video backend, a voxl stream that became usable or unusable, or one that became ready
+    // for a view pinned to RFB, reconnects with the factory's new choice (only the stream restarts,
+    // not the desktop).
+  }, [shouldConnect, api, desktop.id, desktop.video, voxlUsable, voxlRetry, setDriving, clientViewMode]);
 
-  // Re-apply the view whenever it changes; choosing a fixed size requests it.
-  const viewKey = `${prefs.view}:${prefs.fixedMode ?? ""}:${prefs.fixedSize?.width ?? 0}x${prefs.fixedSize?.height ?? 0}`;
+  // Re-apply the view whenever it changes. A fixed size or a preset is
+  // requested only when what it depends on changes (a choice, a connection, an
+  // agent giving the desktop back), not when the mode alone does (touch ↔
+  // mouse), so another viewer's size is not taken back for nothing.
+  const fixedKey = `${prefs.fixedSize?.width ?? 0}x${prefs.fixedSize?.height ?? 0}`;
+  const requestKey = [prefs.view, fixedKey, textSize, agentControls, conn].join(":");
+  const viewKey = [requestKey, prefs.fixedMode ?? "", touchRendering].join(":");
+  const lastRequestKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    const rfb = rfbRef.current;
-    if (!rfb || conn !== "connected") return;
-    applyView(rfb, prefsRef.current, drivingRef.current);
-    armFixedRequest();
-    // armFixedRequest is stable; viewKey captures every view field.
-  }, [viewKey, conn, armFixedRequest]);
+    const client = clientRef.current;
+    if (!client) return;
+    client.setViewMode(clientViewMode());
+    const same = lastRequestKeyRef.current === requestKey;
+    lastRequestKeyRef.current = requestKey;
+    if (conn !== "connected" || agentControlsRef.current) return;
+    if (same) {
+      // setViewMode dropped the client's retries: renew a request not applied yet.
+      if (pendingSizeRef.current) client.requestSize(pendingSizeRef.current);
+      return;
+    }
+    pendingSizeRef.current = null;
+    const { view, fixedSize } = prefsRef.current;
+    if (textSizeRef.current !== "fit") schedulePreset();
+    else if (view === "fixed" && fixedSize) requestDisplaySize(fixedSize);
+    // viewKey captures every field the mode and the request read.
+  }, [viewKey, requestKey, conn, clientViewMode, schedulePreset, requestDisplaySize]);
+
+  // The client's own touch handling stays off on touch devices (the touch layer drives input).
+  useEffect(() => {
+    clientRef.current?.setNativeInput(!touch);
+  }, [touch]);
 
   // Focus / input tracking for the Fit-mode handover.
   useEffect(() => {
@@ -393,12 +425,12 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     const onWindowFocus = () => {
       if (inside(document.activeElement)) setDriving(true);
     };
-    // Paste chord on the display: keep it away from noVNC (which would send a
-    // bare Ctrl+V, pasting the desktop's stale clipboard) and let the browser
-    // fire a real `paste` event, handled below. Capture phase on the root runs
-    // before noVNC's listener on its canvas.
+    // Paste chord on the display: keep it away from the client (which would
+    // send a bare Ctrl+V, pasting the desktop's stale clipboard) and let the
+    // browser fire a real `paste` event, handled below. Capture phase on the
+    // root runs before the client's listeners inside its container.
     const onKeyDownCapture = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v" && targetRef.current?.contains(e.target as Node)) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v" && containerRef.current?.contains(e.target as Node)) {
         e.stopPropagation();
         pasteChordRef.current = { shift: e.shiftKey, alt: e.altKey, meta: e.metaKey };
       }
@@ -423,41 +455,13 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     };
   }, [setDriving]);
 
-  // With the touch keyboard up, a tap on the display (noVNC focuses its canvas
-  // on touchstart) must not dismiss it: hand focus back to the hidden input.
   const keyboardOpenRef = useRef(keyboardOpen);
   keyboardOpenRef.current = keyboardOpen;
-  useEffect(() => {
-    const target = targetRef.current;
-    if (!target) return;
-    const onTouchEnd = () => {
-      if (keyboardOpenRef.current) hiddenInputRef.current?.focus({ preventScroll: true });
-    };
-    target.addEventListener("touchend", onTouchEnd);
-    return () => target.removeEventListener("touchend", onTouchEnd);
-  }, []);
-
-  // The mouse leaving the display parks the remote pointer where it crossed
-  // the edge (see desktop-pointer.ts): otherwise the button it last hovered
-  // stays hovered and its tooltip floats above every window raised next.
-  useEffect(() => {
-    const target = targetRef.current;
-    if (!target) return;
-    const onPointerLeave = (e: PointerEvent) => {
-      if (e.pointerType !== "mouse" || e.buttons !== 0) return; // a drag keeps noVNC's capture
-      const canvas = target.querySelector("canvas");
-      if (!canvas || !rfbRef.current) return;
-      const at = exitPoint(canvas.getBoundingClientRect(), e.clientX, e.clientY);
-      canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: at.x, clientY: at.y, bubbles: true, cancelable: true, view: window }));
-    };
-    target.addEventListener("pointerleave", onPointerLeave);
-    return () => target.removeEventListener("pointerleave", onPointerLeave);
-  }, []);
 
   /** Hand the keyboard to the display (to the hidden input while the touch keyboard is up). */
   const focusDisplay = useCallback(() => {
     if (keyboardOpenRef.current) hiddenInputRef.current?.focus({ preventScroll: true });
-    else rfbRef.current?.focus({ preventScroll: true });
+    else clientRef.current?.focus();
   }, []);
 
   // A window that became active (raised from the window list, launched from
@@ -520,6 +524,9 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       (err: unknown) => setActionError(`Fullscreen is not available: ${errorText(err)}`)
     );
   };
+  // Fullscreen covers the layout viewport; on touch devices it follows the
+  // visual one instead, so the soft keyboard never covers the desktop (R3.4).
+  const viewportBox = useVisualViewportBox(fullscreen && touch);
 
   // An error'd desktop may be a host problem: show the install hint if any.
   useEffect(() => {
@@ -536,21 +543,82 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     return () => ctrl.abort();
   }, [desktop.status, api, desktop.box?.id, desktop.projectPath]);
 
+  // ---- Video backend (spec 2026-11-10 R4.1) ---------------------------------
+
+  // The View menu's Video choice shows once the daemon knows about voxl (it reports `video`); Fast
+  // is offered when this host's (or VM's) voxl works and this browser can decode it.
+  const voxlKnown = desktop.video !== undefined || desktop.voxl !== undefined;
+  const [hostVoxl, setHostVoxl] = useState<DesktopVoxlStatus | null>(null);
+  const [viewerReason, setViewerReason] = useState<string | null>(null);
+  useEffect(() => {
+    if (!voxlKnown || !api) return;
+    const ctrl = new AbortController();
+    api.desktopHostStatus(ctrl.signal, desktop.box?.id ? desktop.projectPath : undefined).then(
+      (host) => setHostVoxl(host.voxl ?? null),
+      () => undefined
+    );
+    let live = true;
+    void voxlViewerSupport().then((support) => {
+      if (live) setViewerReason(viewerUnsupportedReason(support));
+    });
+    return () => {
+      live = false;
+      ctrl.abort();
+    };
+  }, [voxlKnown, api, desktop.box?.id, desktop.projectPath]);
+  const voxlUnavailable =
+    viewerReason ??
+    (desktop.voxl?.state === "unavailable"
+      ? desktop.voxl.reason ?? "voxl is not available for this desktop"
+      : hostVoxl && !hostVoxl.available && desktop.voxl === undefined
+        ? hostVoxl.reason ?? "voxl is not installed on this host"
+        : null);
+  const [videoBusy, setVideoBusy] = useState(false);
+  const setVideo = (video: DesktopVideoBackend) => {
+    // Fast on a voxl desktop whose stream is unavailable asks the daemon to look for voxl again.
+    const retry = video === "voxl" && desktopVideo(desktop) === "voxl" && desktop.voxl?.state === "unavailable";
+    if (!api || (video === desktopVideo(desktop) && !retry)) return;
+    setVideoBusy(true);
+    setActionError(null);
+    // The daemon restarts only the stream; the view reconnects when `desktop.video` changes.
+    api.updateDesktop(desktop.id, { video }).then(
+      () => setVideoBusy(false),
+      (err: unknown) => {
+        setVideoBusy(false);
+        setActionError(`Could not switch the video: ${errorText(err)}`);
+      }
+    );
+  };
+
   // ---- Keys & clipboard ----------------------------------------------------
 
-  /** Press and release `keysym` with the latched (and any extra) modifiers held. */
-  const pressKeysym = useCallback((keysym: number, extra: LatchModifier[] = []) => {
-    const rfb = rfbRef.current;
-    if (!rfb) return;
-    const mods = [...new Set<LatchModifier>([...latchedRef.current, ...extra])];
-    for (const m of mods) rfb.sendKey(MODIFIER_KEYSYM[m], "", true);
-    rfb.sendKey(keysym, "");
-    for (const m of [...mods].reverse()) rfb.sendKey(MODIFIER_KEYSYM[m], "", false);
-    if (latchedRef.current.size > 0) {
-      latchedRef.current = new Set();
-      setLatched(latchedRef.current);
-    }
+  /** What the touch layer, key bar and soft keyboard send: the client, and the agent handoff's implicit takeover. */
+  const handoffInputRef = useRef<() => void>(() => undefined);
+  const inputSink = useMemo(() => takeoverSink(() => clientRef.current, () => handoffInputRef.current()), []);
+
+  /** The latched modifiers apply to one key or click: spend the one-shots. */
+  const spendLatches = useCallback(() => {
+    const next = consumeLatchSet(latchesRef.current);
+    if (next === latchesRef.current) return;
+    latchesRef.current = next;
+    setLatches(next);
   }, []);
+
+  /** Press and release `keysym` with the latched (and any extra) modifiers held. */
+  const pressKeysym = useCallback(
+    (keysym: number, extra: LatchModifier[] = []) => {
+      if (!clientRef.current) return;
+      const latched = latchedNames(latchesRef.current);
+      const mods = LATCH_MODIFIERS.filter((m) => latched.includes(m) || extra.includes(m));
+      const key = mods.includes("shift") ? shiftedKeysym(keysym) : keysym;
+      for (const m of mods) inputSink.key(MODIFIER_KEYSYM[m], true);
+      inputSink.key(key, true);
+      inputSink.key(key, false);
+      for (const m of [...mods].reverse()) inputSink.key(MODIFIER_KEYSYM[m], false);
+      spendLatches();
+    },
+    [spendLatches, inputSink]
+  );
 
   const typeText = useCallback(
     (text: string) => {
@@ -561,21 +629,60 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
 
   useDesktopHiddenInput(hiddenInputRef, typeText, pressKeysym);
 
-  const toggleModifier = useCallback((m: LatchModifier) => {
-    const next = new Set(latchedRef.current);
-    if (next.has(m)) next.delete(m);
-    else next.add(m);
-    latchedRef.current = next;
-    setLatched(next);
+  const tapModifier = useCallback((m: LatchModifier, timeStamp: number) => {
+    const next = tapLatchIn(latchesRef.current, m, timeStamp);
+    latchesRef.current = next;
+    setLatches(next);
   }, []);
+
+  /** The touch layer's clicks and drags hold the latched modifiers too. */
+  const takeModifiers = useCallback(() => {
+    const keys = latchedNames(latchesRef.current).map((m) => MODIFIER_KEYSYM[m]);
+    spendLatches();
+    return keys;
+  }, [spendLatches]);
+
+  const touchStore = useDesktopTouch({
+    viewportRef,
+    stageRef,
+    client: () => clientRef.current,
+    sink: inputSink,
+    displaySize,
+    connected: conn === "connected",
+    rendering: touchRendering,
+    sharp: sharpFitAllowed({
+      touchRendering,
+      fitDrivesSize: textSize === "fit" && prefs.view === "fit" && driving && !agentControls,
+      textSize
+    }),
+    directPen: touch,
+    mode: inputMode,
+    takeModifiers,
+    onTouch: () => {
+      setTouchSeen(true);
+      setLastPointer("touch");
+    },
+    onFinePointer: () => setLastPointer("fine"),
+    focusDisplay
+  });
 
   // The Clipboard panel's Send. This machine's clipboard gets the text too:
   // a paste chord on the display hands that clipboard over first, so it would
   // otherwise replace what was just sent with whatever was copied before.
   const sendClipboard = useCallback((text: string) => {
-    rfbRef.current?.clipboardPasteFrom(text);
+    clientRef.current?.setClipboard(text);
     navigator.clipboard?.writeText(text).catch(() => undefined);
   }, []);
+
+  /** Hand `text` (when there is any) to the desktop's clipboard, then send its paste keystroke. */
+  const pasteIntoDesktop = useCallback(
+    (text: string, chord: PasteChord | null) => {
+      if (!clientRef.current) return;
+      if (text) inputSink.setClipboard(text);
+      for (const step of pasteKeystroke(chord, APPLE_PLATFORM)) inputSink.key(step.keysym, step.down, step.code);
+    },
+    [inputSink]
+  );
 
   // Local paste inside the view (the chord on the display, or the soft
   // keyboard's paste): hand the text to the desktop's clipboard, then Ctrl+V.
@@ -587,28 +694,64 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     if (!rootRef.current?.contains(where)) return;
     if (where instanceof HTMLElement && where.isContentEditable) return;
     if ((where instanceof HTMLTextAreaElement || where instanceof HTMLInputElement) && where !== hiddenInputRef.current) return;
-    const rfb = rfbRef.current;
     const text = e.clipboardData.getData("text/plain");
     const chord = pasteChordRef.current;
     pasteChordRef.current = null;
-    if (!rfb) return;
+    if (!clientRef.current) return;
     e.preventDefault();
-    if (text) rfb.clipboardPasteFrom(text);
-    for (const step of pasteKeystroke(chord, APPLE_PLATFORM)) rfb.sendKey(step.keysym, step.code, step.down);
+    pasteIntoDesktop(text, chord);
   };
+
+  // The key bar's Paste (iOS keyboards have no paste key): read this device's
+  // clipboard inside the tap's gesture.
+  const pasteFromKeyBar = () => {
+    // A paste is not a key: it disarms a one-shot modifier rather than carry it.
+    spendLatches();
+    const read = navigator.clipboard?.readText?.();
+    if (!read) {
+      setActionError("Clipboard unavailable — allow paste access and try again.");
+      return;
+    }
+    read.then(
+      (text) => pasteIntoDesktop(text, null),
+      () => setActionError("Clipboard unavailable — allow paste access and try again.")
+    );
+  };
+
+  // The key bar is up while the soft keyboard is, and can be toggled.
+  const softKeyboard = useSoftKeyboardOpen();
+  const sawSoftKeyboardRef = useRef(false);
+  useEffect(() => {
+    if (!touch) return;
+    if (softKeyboard && document.activeElement === hiddenInputRef.current) {
+      sawSoftKeyboardRef.current = true;
+      setKeyboardOpen(true);
+    } else if (!softKeyboard && sawSoftKeyboardRef.current) {
+      // Dismissed with the system's own control: the bar goes with it.
+      sawSoftKeyboardRef.current = false;
+      setKeyboardOpen(false);
+    }
+  }, [softKeyboard, touch]);
 
   // The toolbar button keeps focus where it is on pointerdown, so "is the
   // hidden input focused" is still true here when the keyboard is up.
   const toggleKeyboard = () => {
     const input = hiddenInputRef.current;
     if (keyboardOpen && input && document.activeElement === input) {
-      setKeyboardOpen(false);
-      input.blur();
+      hideKeyboard();
     } else {
       setKeyboardOpen(true);
+      // A keyboard dismissed by the system leaves the input focused: refocus to raise it again.
+      if (input && document.activeElement === input) input.blur();
       // Inside the click: the trusted gesture iOS needs to raise the keyboard.
       input?.focus({ preventScroll: true });
     }
+  };
+  const hideKeyboard = () => {
+    sawSoftKeyboardRef.current = false;
+    setKeyboardOpen(false);
+    keyboardOpenRef.current = false;
+    hiddenInputRef.current?.blur();
   };
 
   // ---- Actions -------------------------------------------------------------
@@ -654,6 +797,10 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     if (action !== "close") focusDisplay();
     api.desktopWindowAction(desktop.id, win.id, action).catch((err: unknown) => setActionError(errorText(err)));
   };
+
+  // ---- Agent handoff (spec 2026-11-10 §3) ----------------------------------
+  const handoff = useDesktopHandoff({ root: rootRef, viewport: viewportRef, stage: stageRef }, desktop, conn === "connected");
+  handoffInputRef.current = handoff.inputReachedDesktop;
 
   // ---- Render --------------------------------------------------------------
 
@@ -745,14 +892,17 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       ref={rootRef}
       data-desktop-view
       className={cn("flex flex-col bg-neutral-950", fullscreen ? "app-no-drag fixed inset-0 z-[90]" : "h-full w-full")}
+      style={fullscreen && touch ? { top: viewportBox.top, height: viewportBox.height, bottom: "auto" } : undefined}
       onPaste={onPaste}
     >
       <DesktopToolbar
         desktop={desktop}
         narrow={narrow}
         touch={touch}
+        panAvailable={!touchRendering}
         prefs={prefs}
         onPrefs={updatePrefs}
+        video={voxlKnown ? { current: desktopVideo(desktop), busy: videoBusy, fastUnavailable: voxlUnavailable, onChange: setVideo } : null}
         audio={audio}
         connected={conn === "connected"}
         remoteClipboard={remoteClipboard}
@@ -769,9 +919,10 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         onRestart={restart}
         onStop={stop}
         onCloseTab={onCloseTab}
+        handoff={<DesktopHandoffControls handoff={handoff} narrow={narrow} />}
       />
       {actionError && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-neutral-800 bg-danger-soft px-3 py-1 text-xs text-danger">
+        <div className="flex shrink-0 items-center gap-2 border-b border-neutral-800 bg-danger-soft px-3 py-1 text-xs text-danger" data-desktop-handoff="">
           <span className="min-w-0 flex-1 truncate" title={actionError}>
             {actionError}
           </span>
@@ -780,9 +931,25 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
           </button>
         </div>
       )}
-      <div className="relative min-h-0 flex-1 overflow-hidden">
-        {/* noVNC appends its own screen + canvas here; React renders no children into it. */}
-        <div ref={targetRef} className="absolute inset-0 touch-none" />
+      <div
+        ref={viewportRef}
+        className={cn(
+          "relative min-h-0 flex-1 overflow-hidden",
+          // R3.7: no page pan/zoom, selection or long-press callout on touch.
+          touch && "touch-none select-none [-webkit-touch-callout:none]"
+        )}
+      >
+        <div ref={stageRef} className="absolute inset-0">
+          {/* The stream client appends its video here; React renders no children into it. */}
+          <div ref={containerRef} className="absolute inset-0 touch-none" />
+        </div>
+        {touchRendering && inputMode === "trackpad" && conn === "connected" && <DesktopTouchCursor store={touchStore} />}
+        <DesktopHandoffLayer
+          handoff={handoff}
+          streamRoot={containerRef}
+          display={displaySize}
+          displayToClient={(x, y) => clientRef.current?.displayToClient(x, y) ?? null}
+        />
         {overlay && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 overflow-y-auto bg-neutral-950/90 px-4 py-6 text-center text-sm text-neutral-400">
             {overlay}
@@ -790,11 +957,12 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         )}
         {/* Invisible ON-SCREEN input for the touch keyboard (iOS won't raise the
             keyboard for far-offscreen fields): 1×1 px, opacity 0, 16px font so
-            iOS doesn't zoom on focus. */}
+            iOS doesn't zoom on focus. `select-text`: iOS won't type into a field
+            inside a user-select: none box. */}
         <input
           ref={hiddenInputRef}
           aria-label="Desktop keyboard input"
-          className="absolute bottom-0 left-0 h-px w-px opacity-0"
+          className="absolute bottom-0 left-0 h-px w-px select-text opacity-0"
           style={{ fontSize: 16 }}
           autoCapitalize="off"
           autoCorrect="off"
@@ -803,7 +971,14 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         />
       </div>
       {touch && keyboardOpen && (
-        <DesktopKeyStrip latched={latched} onToggleModifier={toggleModifier} onKey={(keysym) => pressKeysym(keysym)} />
+        <DesktopKeyBar
+          latches={latches}
+          onTapModifier={tapModifier}
+          onKey={pressKeysym}
+          onCtrlAltDel={() => pressKeysym(XK.Delete, ["ctrl", "alt"])}
+          onPaste={pasteFromKeyBar}
+          onHide={hideKeyboard}
+        />
       )}
       <DesktopAppsDialog open={appsOpen} onClose={() => setAppsOpen(false)} api={api} desktop={desktop} />
       <DesktopInfoDialog
@@ -812,7 +987,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         desktop={desktop}
         prefs={prefs}
         audio={audio}
-        connection={{ state: conn, rttMs, qualityLevel, desktopName }}
+        connection={{ state: conn, rttMs, qualityLevel, desktopName, backend: stream?.backend ?? null, fallback: stream?.fallback ?? null }}
       />
     </div>
   );

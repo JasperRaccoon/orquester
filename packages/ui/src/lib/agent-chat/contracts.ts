@@ -42,6 +42,7 @@ import type {
 } from "@orquester/api/agent-chat";
 import type { InterruptCause } from "@orquester/api/agent-chat";
 import type { DeviceToolReference } from "@orquester/api";
+import type { DesktopRowLink } from "../desktops/chat-rows.logic";
 import type { DelegateChildRef } from "./delegates.logic";
 import type { ComposerDraft } from "./composer.logic";
 
@@ -342,6 +343,13 @@ export interface WorkLogEntry {
    * for a kept screenshot, its thumbnail.
    */
   deviceLink?: DeviceToolReference;
+  /**
+   * The desktop a desktop session tool drove (spec 2026-11-10 R2.6:
+   * `desktop_action`, `get_desktops`, `control_desktop`), from its result's
+   * `desktopRef` — with the action's summary and a kept screenshot when known.
+   * The row offers "Show desktop" and the screenshot's thumbnail.
+   */
+  desktopLink?: DesktopRowLink;
   /**
    * How the Orquester approval card (or grant) that gated this call ended
    * (unified MCP §7.3, the row's `toolApproval` reference) — no arguments, no

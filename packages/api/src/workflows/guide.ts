@@ -10,7 +10,7 @@ import { RULE_OPERATORS, type RuleOperator, type WorkflowNodeType } from "@orque
 
 import { PROMPT_VARIABLES } from "../saved-prompts.ts";
 import { EXPRESSION_FILTERS, type ExpressionFilterName, type ExpressionRoot } from "./expressions.ts";
-import { WORKFLOW_LIMITS, type WorkflowPatchNodeInput } from "./types.ts";
+import { WORKFLOW_LIMITS, type WorkflowEdgeLoopInput, type WorkflowPatchNodeInput } from "./types.ts";
 
 /** One fact: an optional term (an argument, an operator, a field) and what it means. */
 export interface WorkflowGuideItem {
@@ -190,9 +190,47 @@ export const WORKFLOW_FAILURE_GUIDE: readonly WorkflowGuideItem[] = [
   },
   {
     term: "never retried",
-    text: "`all_burnt` (every agent account out of usage) and `limit_exceeded` (an output or body too large, sub-workflows nested too deep); nor a Stop block, `stop()` or a cancelled run."
+    text: "`all_burnt` (every agent account out of usage), `limit_exceeded` (an output or body too large, sub-workflows nested too deep), `loop_limit` (a loop stopped at its limit) and `gate_expired`; nor a Stop block, `stop()` or a cancelled run. `no_report` is retried."
   }
 ];
+
+// ---------------------------------------------------------------------------
+// Loop edges (spec 2026-11-10 §7)
+// ---------------------------------------------------------------------------
+
+/** What happens when a loop edge is taken at its limit, in words (the loop-limit gate, §7.2). */
+export const WORKFLOW_LOOP_LIMIT_TEXT =
+  "A loop edge taken after `maxLoops` loops opens a loop-limit gate on its source for the person (a gate like any other, source `loop_limit`): `allow` raises that edge's limit by one for this run and loops; `stop`, or no decision in 7 days, fails the source with `loop_limit`, so its `error` connection runs, else the run fails.";
+
+/** How loop edges behave: the facts the MCP's authoring guide and the editor's help share. */
+export const WORKFLOW_LOOP_GUIDE: readonly WorkflowGuideItem[] = [
+  {
+    term: "loop edge",
+    text: `A connection with \`loop: { maxLoops: ${WORKFLOW_LIMITS.loops.min}–${WORKFLOW_LIMITS.loops.max}, session: "continue" | "new" }\` that goes from a block's output back to an earlier block (one that runs before it through ordinary connections; not a trigger). Every other connection runs one way: a connection back without \`loop\` is a \`cycle\` error.`
+  },
+  {
+    term: "outputs",
+    text: "A loop edge may leave any output but `error`: an agent's outcome, a gate's choice, an If or Switch branch, or a plain `success`. That output carries the loop edge and nothing else."
+  },
+  {
+    term: "taking it",
+    text: "When the source finishes on that output, its target and every block after the target (the source included) run again as a new pass; blocks of that set still running are stopped first. Blocks before the target keep their results. A loop inside the repeated part gets a fresh budget on each outer pass."
+  },
+  { term: "limit", text: WORKFLOW_LOOP_LIMIT_TEXT },
+  {
+    term: "session",
+    text: "Applies to every agent block the loop runs again. `continue` (default): a follow-up turn in that block's chat from the previous pass, headed \"Workflow loop: pass N of up to M\", with its prompt rendered again; `new`: a new chat whose prompt adds the previous pass's report. A chat that cannot continue starts a new one (noted on the pass). A block with `session: { kind: \"continue\", fromNode }` keeps continuing that block's chat."
+  },
+  {
+    term: "feedback",
+    text: "The target's next pass receives the source's feedback: an agent's report summary, or a gate decision's choice and comment (an If or Switch gives none). An agent target gets it as a feedback block; any block reads it as `{{ loop.feedback }}` (untrusted text, framed in prompts)."
+  },
+  {
+    term: "passes",
+    text: "`nodes.<Name>.output` is a block's latest pass; `{{ loop.pass }}` is the current block's pass, from 1. Earlier passes stay on the run (get_workflow_runs lists them with the loop counters)."
+  }
+];
+
 
 // ---------------------------------------------------------------------------
 // Per block type
@@ -206,6 +244,10 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
       items: [
         {
           text: "Output `{ kind: \"manual\", input }`: the JSON given to Run now (`null` when none). A parent's Run workflow block starts here too, as `{ kind: \"subworkflow\", input, parentRunId, parentNodeId }` — read either as `trigger.input`."
+        },
+        {
+          term: "inputs",
+          text: `Optional typed inputs, in form order (at most ${WORKFLOW_LIMITS.maxInputs}): \`{ name, type: \"string\" | \"number\" | \"boolean\" | \"enum\", values? (enum: ${WORKFLOW_LIMITS.enumValues.min}–${WORKFLOW_LIMITS.enumValues.max}), required? (default false), default?, description? (≤ ${WORKFLOW_LIMITS.inputDescriptionChars} chars), multiline? (string only) }\`. Run now then shows a form, and every run's input (Run now, run_workflow, a parent's Run workflow block) must be an object of these names: defaults fill absent ones; a missing required input, a wrong type, a value not among an enum's values or an unknown key refuses the run (INVALID_INPUT, every problem listed). Only "42" → 42 and "true"/"false" are coerced. Read one as \`trigger.input.<name>\`. Without inputs any JSON is accepted and \`inputExample\` prefills Run now.`
         }
       ]
     }
@@ -253,9 +295,38 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
       items: [
         {
           term: "text",
-          text: `Always a string: the agent's final message (\`""\` when it wrote none), cut at ${mib(WORKFLOW_LIMITS.maxAgentTextBytes)} (then \`textTruncated: true\`). A JSON reply is still text: parse it in a Code block.`
+          text: `Always a string: the agent's final message (\`""\` when it wrote none), cut at ${mib(WORKFLOW_LIMITS.maxAgentTextBytes)} (then \`textTruncated: true\`). Templates never parse it: for values to branch on or pass on, declare \`outcomes\` / \`outputs\` (below).`
+        },
+        {
+          term: "outcome, outputs",
+          text: "With `outcomes`/`outputs` declared: `outcome` (the id the agent reported), `summary` (its words, ≤ 2,000 characters) and `outputs` (the typed values: `{{ nodes.Review.output.outputs.pr_url }}`)."
         },
         { term: "failure", text: "A failed agent block's output holds `{ sessionId, hops }` once a session exists." }
+      ]
+    },
+    {
+      title: "Outcomes and outputs",
+      items: [
+        {
+          term: "outcomes",
+          text: `\`outcomes: [{ id, label?, description? }]\`, ${WORKFLOW_LIMITS.outcomes.min}–${WORKFLOW_LIMITS.outcomes.max}, ids \`^[a-z][a-z0-9_]*\` and unique. Each is an output handle \`outcome:<id>\` (in this order) beside \`error\`; there is no \`success\` handle. The block takes the outcome the agent reported; the other outcomes' connections are dead, so no Code or Switch block is needed to branch.`
+        },
+        {
+          term: "outputs",
+          text: `\`outputs: [{ name, type, values?, required?, description? }]\`, at most ${WORKFLOW_LIMITS.maxOutputs}; \`type\` string, number, boolean, enum (\`values\`: the allowed strings) or json; \`required\` defaults to true. Declared alone, the handles stay \`success\` / \`error\`.`
+        },
+        {
+          term: "report",
+          text: "The prompt gets a protocol block naming the outcomes and outputs, and the agent ends its work with report_step_result { outcome, summary, outputs }. The tool refuses a wrong call with what is allowed; a later valid call replaces the earlier one."
+        },
+        {
+          term: "no_report",
+          text: "A turn that ends with no report gets one reminder turn in the same chat; still none, the block fails with error kind `no_report` (retried by `retry`, else its `error` connection)."
+        },
+        {
+          term: "disabled, pinned",
+          text: "A disabled block with outcomes passes its input on through its first outcome (never a loop edge there: a warning says so). Pinned data of a block with outcomes must include `outcome` (a declared id): it picks the handle."
+        }
       ]
     },
     {
@@ -408,6 +479,44 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
       ]
     }
   ],
+  gate: [
+    {
+      title: "Deciding",
+      items: [
+        {
+          term: "choices",
+          text: `${WORKFLOW_LIMITS.gateChoices.min}–${WORKFLOW_LIMITS.gateChoices.max} \`{ id, label, color?, comment? }\`; each is an output handle \`choice:<id>\` (plus \`error\`). \`comment\`: \`"none"\` (default), \`"optional"\` or \`"required"\` — a required one refuses a decision without a comment.`
+        },
+        {
+          term: "question",
+          text: `A template (at most ${WORKFLOW_LIMITS.gateQuestionChars} characters rendered); \`details\` a Markdown template (at most ${WORKFLOW_LIMITS.gateDetailsBytes / 1024} KB) the decider reads first.`
+        },
+        {
+          term: "decider",
+          text: "`{ kind: \"human\" }` (default): the person decides in Orquester (push, a Needs-you row, a decision card), or with `decide_workflow_gate` from their own MCP client. `{ kind: \"agent\", prompt, chain, profileId?, maxMinutes? }`: a new reviewer chat (same chain, accounts and profile rules as an agent block) gets the prompt plus the question, details and choices, and must call `decide_workflow_gate` with a comment. `{ kind: \"launcher\", maxMinutes? }`: the chat that started the run with `run_workflow` is asked (a queued message; `run_workflow` with `wait` returns at once with the gate); a run started otherwise asks the person."
+        }
+      ]
+    },
+    {
+      title: "Phases and time",
+      items: [
+        {
+          text: `An agent or launcher decider has an agent phase of \`maxMinutes\` (default ${WORKFLOW_LIMITS.gateAgentPhaseDefaultMinutes}). It ends with a decision; anything else — the agent escalates (\`escalate: true\`), fails, is closed, ends its turn twice without deciding (it gets one reminder), or runs out of time — hands the gate to the person (escalated). The person may decide first in either phase; the first decision wins.`
+        },
+        {
+          term: "timeout",
+          text: "`{ minutes, then }` bounds the person phase only, counted from its start (at most 7 days): `then: { kind: \"choice\", choice }` takes that choice (`decidedBy.kind: \"timeout\"`), `{ kind: \"fail\" }` fails the block `gate_expired` (never retried). Without it the person has 7 days, then `gate_expired`. Gates survive restarts, hold no concurrency slot, and time spent waiting on them does not count toward `runTimeoutMinutes`."
+        },
+        {
+          term: "output",
+          text: "`{ choice, comment?, decidedBy: { kind: \"human\"|\"external\"|\"agent\"|\"launcher\"|\"timeout\", label, sessionId? }, decidedAt, escalated }`. Downstream follows `choice:<id>`; the other choices' edges are dead."
+        },
+        {
+          text: "A disabled gate asks nobody and takes its first choice; a pinned gate needs a `choice`. A retry asks every gate again. A test run's gate is answered by the person in the editor only (no push, no agent)."
+        }
+      ]
+    }
+  ],
   workflow: [
     {
       title: "Child run",
@@ -418,7 +527,7 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
         },
         {
           term: "input",
-          text: "A template (exactly one `{{ … }}` keeps the raw value; empty, this block's input) that the child reads as `trigger.input` — give the child a Manual trigger."
+          text: "A template (exactly one `{{ … }}` keeps the raw value; empty, this block's input) that the child reads as `trigger.input` — give the child a Manual trigger. When its Manual trigger declares inputs, the value must fit them (defaults applied) or this block fails with every input problem listed."
         },
         {
           term: "output",
@@ -445,7 +554,7 @@ export const WORKFLOW_EXPRESSION_ROOT_GUIDE: readonly { root: ExpressionRoot; pa
   {
     root: "nodes",
     path: "nodes.<Name>.output",
-    text: "Any block's output by its unique name (`nodes.FetchTickets.output.tickets`), once it has finished in this run — wired to this block or not."
+    text: "Any block's output by its unique name (`nodes.FetchTickets.output.tickets`), once it has finished in this run — wired to this block or not. A block a loop ran again reads as its latest pass."
   },
   { root: "nodes", path: "nodes.<Name>.status", text: "`succeeded`, `failed`, `skipped` or `cancelled`." },
   { root: "nodes", path: "nodes.<Name>.error", text: "`{ kind, message }` of a failed block." },
@@ -457,7 +566,13 @@ export const WORKFLOW_EXPRESSION_ROOT_GUIDE: readonly { root: ExpressionRoot; pa
   { root: "run", path: "run", text: "`{ id, startedAt, workflowId, workflowName, attempt }` (`attempt`: this block's try, from 1)." },
   { root: "project", path: "project", text: "`{ path, name, workspace, branch }`." },
   { root: "secrets", path: "secrets.<NAME>", text: "One workflow secret (never the whole set), redacted wherever it is stored." },
-  { root: "workflow", path: "workflow", text: "`{ id, name }` of this workflow." }
+  { root: "workflow", path: "workflow", text: "`{ id, name }` of this workflow." },
+  { root: "loop", path: "loop.pass", text: "This block's pass, from 1: a loop edge running the block again starts its next pass." },
+  {
+    root: "loop",
+    path: "loop.feedback",
+    text: "On a loop's target, from its second pass: what the loop's source sent back (an agent's report summary, a gate's choice and comment). Empty otherwise: write `{{ loop.feedback | default(\"\") }}`."
+  }
 ];
 
 /** What each filter does; `usage` is how it is written after `|`. */
@@ -498,7 +613,7 @@ export const WORKFLOW_EXPRESSION_RULES: readonly WorkflowGuideItem[] = [
   },
   {
     term: "no parsing",
-    text: "Templates never parse JSON text: an agent's `text` is a string, so `{{ input.text.severity }}` reads nothing. Parse it in a Code block (`JSON.parse`) and read the fields of its output; `| json` only encodes."
+    text: "Templates never parse JSON text: an agent's `text` is a string, so `{{ input.text.severity }}` reads nothing. Declare the agent block's `outputs` (and `outcomes` to branch) and read `{{ input.outputs.severity }}` / `{{ nodes.Triage.output.outcome }}`; `| json` only encodes."
   },
   { term: "escape", text: "Write `\\{{` for a literal `{{`." }
 ];
@@ -569,20 +684,11 @@ export interface WorkflowRecipe {
   /** Sentences: what the pattern shows and the pitfalls it avoids. */
   notes: readonly string[];
   nodes: readonly WorkflowPatchNodeInput[];
-  edges: readonly { source: string; sourceHandle?: string; target: string }[];
+  edges: readonly { source: string; sourceHandle?: string; target: string; loop?: WorkflowEdgeLoopInput }[];
 }
 
 const CLAUDE = [{ agent: "claude", model: "default" }];
 const SLACK_URL = "https://hooks.slack.com/services/{{ secrets.SLACK_PATH }}";
-
-const PARSE_REPLY_SOURCE = [
-  "export default async function ({ input }) {",
-  "  const match = /\\{[\\s\\S]*\\}/.exec(input.text);",
-  "  if (!match) throw new Error(`No JSON in the reply: ${input.text.slice(0, 200)}`);",
-  "  return JSON.parse(match[0]);",
-  "}",
-  ""
-].join("\n");
 
 const CLOSE_EACH_SOURCE = [
   "export default async function ({ input, secrets, log }) {",
@@ -643,12 +749,13 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
     ]
   },
   {
-    id: "agent-json",
-    title: "Agent replies in JSON, Code parses it, If branches on a field",
+    id: "agent-outcomes",
+    title: "Agent reports an outcome and typed outputs; each outcome has its own connection",
     notes: [
-      `An agent's \`text\` is always a string, and templates cannot parse it: \`{{ input.text.severity }}\` inserts nothing and records the warning \`${MISSING_PATH_EXAMPLE}\`. \`| json\` only encodes a value as JSON text.`,
-      "Parse it in a Code block (a reply without JSON throws, failing the block); its output is a real object: `{{ input.severity }}`, `{{ nodes.Parse.output.summary }}`.",
-      "If passes its input on, so Page still reads Parse's object as `input`."
+      "`outcomes` turn the block's handles into `outcome:high` and `outcome:low` (plus `error`): the run follows the one the agent reported with report_step_result, and the other connection is dead. No Code or If block is needed to branch.",
+      "`outputs` are typed values the agent reports beside its outcome: `{{ input.outputs.summary_line }}` in the next block, `{{ nodes.Triage.output.outputs.summary_line }}` anywhere later; `{{ nodes.Triage.output.summary }}` is the report's own summary.",
+      `An agent's \`text\` stays a string that templates cannot parse: \`{{ input.text.severity }}\` inserts nothing and records the warning \`${MISSING_PATH_EXAMPLE}\`.`,
+      "A turn that ends without a report gets one reminder; still none, the block fails `no_report`."
     ],
     nodes: [
       { type: "trigger.manual", name: "Start" },
@@ -656,28 +763,26 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
         type: "agent",
         name: "Triage",
         config: {
-          prompt: {
-            kind: "text",
-            text: "Classify the newest error in logs/app.log. Reply with ONLY this JSON: {\"severity\": \"high\" or \"low\", \"summary\": \"one line\"}"
-          },
-          chain: CLAUDE
+          prompt: { kind: "text", text: "Classify the newest error in logs/app.log." },
+          chain: CLAUDE,
+          outcomes: [
+            { id: "high", label: "Urgent", description: "Users are affected now." },
+            { id: "low", label: "Can wait", description: "Nobody is blocked." }
+          ],
+          outputs: [{ name: "summary_line", type: "string", description: "The error in one line." }]
         }
       },
-      { type: "code", name: "Parse", config: { source: PARSE_REPLY_SOURCE } },
-      { type: "if", name: "Urgent", config: { combine: "all", rules: [{ left: "{{ input.severity }}", op: "equals", right: "high" }] } },
       {
         type: "http",
         name: "Page",
-        config: { method: "POST", url: SLACK_URL, body: { kind: "json", value: "{ \"text\": {{ input.summary | json }} }" } }
+        config: { method: "POST", url: SLACK_URL, body: { kind: "json", value: "{ \"text\": {{ input.outputs.summary_line | json }} }" } }
       },
-      { type: "stop", name: "Calm", config: { as: "success", message: "Low severity: {{ nodes.Parse.output.summary }}" } }
+      { type: "stop", name: "Calm", config: { as: "success", message: "Low severity: {{ nodes.Triage.output.outputs.summary_line }}" } }
     ],
     edges: [
       { source: "Start", target: "Triage" },
-      { source: "Triage", target: "Parse" },
-      { source: "Parse", target: "Urgent" },
-      { source: "Urgent", sourceHandle: "true", target: "Page" },
-      { source: "Urgent", sourceHandle: "false", target: "Calm" }
+      { source: "Triage", sourceHandle: "outcome:high", target: "Page" },
+      { source: "Triage", sourceHandle: "outcome:low", target: "Calm" }
     ]
   },
   {
@@ -719,7 +824,7 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
     id: "handle-failure",
     title: "Retry, then handle the failure",
     notes: [
-      "`retry` is a block field, not config: the `error` connection is taken only after the last try. `all_burnt` and `limit_exceeded` are never retried.",
+      "`retry` is a block field, not config: the `error` connection is taken only after the last try. `all_burnt`, `limit_exceeded`, `loop_limit` and `gate_expired` are never retried.",
       "After `error`, `input` is the failed block's output (Shell `{ stdout, stderr, exitCode }`, e.g. `{{ input.stderr | lines(20) }}`) and `{{ nodes.Deploy.error.message }}` says why.",
       "A handled failure no longer fails the run: the Stop with `as: \"failure\"` keeps it failed (and notified)."
     ],
@@ -748,7 +853,7 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
     id: "each-item",
     title: "Process a list of items",
     notes: [
-      "There is no loop or for-each block, and connections cannot form a loop (`cycle`). Iterate inside one block: a Code block's `for … of` (as here; `Promise.all` for parallel calls), or one agent given the whole list (`{{ input.body.issues | json }}`).",
+      "There is no for-each block, and a loop edge repeats steps until a check passes, never once per item. Iterate inside one block: a Code block's `for … of` (as here; `Promise.all` for parallel calls), or one agent given the whole list (`{{ input.body.issues | json }}`).",
       "A Run workflow block starts exactly one child run, so it cannot fan out per item."
     ],
     nodes: [
@@ -767,6 +872,52 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
     edges: [
       { source: "Start", target: "ListOpen" },
       { source: "ListOpen", target: "CloseEach" }
+    ]
+  },
+  {
+    id: "loop-until-approved",
+    title: "Fix, review, loop back on requested changes, then a person approves the merge",
+    notes: [
+      "Review's `outcomes` replace its `success` handle. `outcome:changes_requested` carries only the loop edge back to Fix: Fix and Review run again, Fix in its previous chat (`session: \"continue\"`) with Review's summary as feedback; a fourth request opens the loop-limit gate.",
+      "`outcome:approved` reaches the Approve gate: the person picks `choice:approve` (Merge) or `choice:reject` (the run fails with the comment)."
+    ],
+    nodes: [
+      { type: "trigger.manual", name: "Start", config: { inputExample: "{ \"task\": \"Add a --json flag to the CLI\" }" } },
+      { type: "agent", name: "Fix", config: { prompt: { kind: "text", text: "Implement in {project}: {{ trigger.input.task }}. Commit on a new branch; do not merge." }, chain: CLAUDE } },
+      {
+        type: "agent",
+        name: "Review",
+        config: {
+          prompt: { kind: "text", text: "Review the branch Fix committed for: {{ trigger.input.task }}. Approve it, or request changes and say which." },
+          chain: CLAUDE,
+          outcomes: [
+            { id: "approved", label: "Approved" },
+            { id: "changes_requested", label: "Changes requested", description: "Something must change first; the summary says what." }
+          ]
+        }
+      },
+      {
+        type: "gate",
+        name: "Approve",
+        config: {
+          question: "Merge the fix for: {{ trigger.input.task }}?",
+          details: "{{ nodes.Review.output.summary }}",
+          choices: [
+            { id: "approve", label: "Approve" },
+            { id: "reject", label: "Reject", comment: "optional" }
+          ]
+        }
+      },
+      { type: "agent", name: "Merge", config: { prompt: { kind: "text", text: "Merge the branch Fix committed into the branch it started from." }, chain: CLAUDE } },
+      { type: "stop", name: "Rejected", config: { as: "failure", message: "Rejected: {{ nodes.Approve.output.comment | default(\"no comment\") }}" } }
+    ],
+    edges: [
+      { source: "Start", target: "Fix" },
+      { source: "Fix", target: "Review" },
+      { source: "Review", sourceHandle: "outcome:changes_requested", target: "Fix", loop: { maxLoops: 3, session: "continue" } },
+      { source: "Review", sourceHandle: "outcome:approved", target: "Approve" },
+      { source: "Approve", sourceHandle: "choice:approve", target: "Merge" },
+      { source: "Approve", sourceHandle: "choice:reject", target: "Rejected" }
     ]
   },
   {

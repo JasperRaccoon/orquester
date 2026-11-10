@@ -55,6 +55,7 @@ import {
   SwitchSettings,
   WaitSettings
 } from "./FlowSettings";
+import { GateSettings } from "./GateSettings";
 import { InspectorContext, useInspector, useNodeSetter, type InspectorContextValue, type InspectorReveal } from "./inspector-context";
 import { CodeSettings, HttpSettings, ShellSettings } from "./ProcessSettings";
 import { GitSettings, ManualSettings, ScheduleSettings } from "./TriggerSettings";
@@ -100,6 +101,8 @@ function SettingsFor({ type }: { type: WorkflowNode["type"] }): React.ReactEleme
       return <StopSettings />;
     case "wait":
       return <WaitSettings />;
+    case "gate":
+      return <GateSettings />;
     case "workflow":
       return <SubWorkflowSettings />;
     case "note":

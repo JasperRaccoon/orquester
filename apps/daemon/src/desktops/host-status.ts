@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { accessSync, constants, readFileSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
-import type { DesktopHostStatus, DesktopHostTool } from "@orquester/api";
+import type { DesktopHostStatus, DesktopHostTool, DesktopVoxlStatus } from "@orquester/api";
 import { sessionPath, tmuxAvailable, tmuxVersionOk } from "../tmux.ts";
 
 // Host prerequisites for desktops (desktop spec §4): which tools resolve,
@@ -292,6 +292,10 @@ export function evaluateDesktopHost(
   };
 }
 
+function voxlProbeFailed(error: unknown): DesktopVoxlStatus {
+  return { available: false, version: null, path: null, reason: `voxl could not be checked: ${error instanceof Error ? error.message : String(error)}` };
+}
+
 /**
  * Detects the host once per call for the tools (installing a package lights
  * desktops up without a restart), and once per daemon run for the ffmpeg
@@ -303,7 +307,7 @@ export class DesktopHostProbe {
   private installing: Promise<DesktopHostStatus> | null = null;
   private readonly apt: HostAptGet;
 
-  constructor(private readonly options: { path?: () => string; apt?: HostAptGet } = {}) {
+  constructor(private readonly options: { path?: () => string; apt?: HostAptGet; voxl?: () => Promise<DesktopVoxlStatus> } = {}) {
     this.apt = options.apt ?? systemAptGet();
   }
 
@@ -311,7 +315,9 @@ export class DesktopHostProbe {
     const { status, missingPackages } = await this.probe();
     const installHint = buildInstallHint(missingPackages);
     const canInstall = installHint !== null && (await this.apt.available());
-    return { ...status, installHint, ...(canInstall ? { canInstall: true } : {}) };
+    // voxl is optional (spec 2026-11-10 R4.7): it never makes desktops unavailable.
+    const voxl = this.options.voxl ? await this.options.voxl().catch(voxlProbeFailed) : undefined;
+    return { ...status, installHint, ...(canInstall ? { canInstall: true } : {}), ...(voxl ? { voxl } : {}) };
   }
 
   /**

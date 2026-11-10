@@ -174,8 +174,10 @@ class FakeApi implements WorkflowsApi {
   async deleteWorkflow(): Promise<void> {
     if (this.deleteError) throw this.deleteError;
   }
+  runError: unknown = null;
   async runWorkflow(id: string, req?: RunWorkflowRequest): Promise<RunWorkflowResponse> {
     this.runs.push({ id, req });
+    if (this.runError) throw this.runError;
     return this.runAnswer;
   }
   async listWorkflowRuns(): Promise<ListWorkflowRunsResponse> {
@@ -229,6 +231,28 @@ describe("sanitising", () => {
       ["r1"],
       "another workflow's run and a malformed one never ride this row"
     );
+  });
+});
+
+describe("sanitising a manual trigger's declared inputs", () => {
+  it("keeps each input the schema accepts, on a manual trigger only", () => {
+    const row = sanitizeWorkflowSummary({
+      id: "a",
+      name: "A",
+      triggers: [
+        {
+          nodeId: "t",
+          type: "trigger.manual",
+          text: "Run now",
+          inputs: [{ name: "env", type: "enum", values: ["stg"], required: true }, { name: "1bad", type: "string" }, { name: "n", type: "date" }, "junk"]
+        },
+        { nodeId: "s", type: "trigger.schedule", text: "Hourly", inputs: [{ name: "x", type: "string" }] },
+        { nodeId: "u", type: "trigger.manual", text: "Run now", inputs: [{ name: "1bad", type: "string" }] }
+      ]
+    });
+    assert.deepEqual(row?.triggers[0]?.inputs, [{ name: "env", type: "enum", values: ["stg"], required: true }]);
+    assert.equal(row && "inputs" in row.triggers[1]!, false, "a schedule takes no inputs");
+    assert.equal(row && "inputs" in row.triggers[2]!, false, "none left: no inputs key");
   });
 });
 
@@ -395,6 +419,48 @@ describe("events", () => {
     assert.deepEqual(state().summaries.get("a")?.activeRuns, []);
   });
 
+  it("loops: a new pass replaces the last one, edge lists are replaced, loop counters are kept", () => {
+    applyWorkflowsEvent(event("workflow.upserted", { workflow: summary({ id: "a" }) }));
+    const started = run({ id: "r9", workflowId: "a", status: "running" });
+    applyWorkflowsEvent(event("workflowRun.started", { run: started }));
+    applyWorkflowsEvent(
+      event("workflowRun.updated", {
+        run: started,
+        blocks: [block({ nodeId: "fix", status: "succeeded", attempt: 1 }), block({ nodeId: "rev", status: "succeeded", attempt: 1, handle: "false" })],
+        takenEdges: ["t-fix", "fix-rev"],
+        deadEdges: ["rev-dep"]
+      })
+    );
+    // The loop resets Fix and Review as pass 2: pending, no attempt yet — and Review's edges reopen.
+    applyWorkflowsEvent(
+      event("workflowRun.updated", {
+        run: started,
+        blocks: [
+          block({ nodeId: "fix", status: "pending", attempt: 0, pass: 2, passes: [{ pass: 1, status: "succeeded", attempt: 1 }] }),
+          block({ nodeId: "rev", status: "pending", attempt: 0, pass: 2, passes: [{ pass: 1, status: "succeeded", attempt: 1, handle: "false" }] })
+        ],
+        takenEdges: ["t-fix"],
+        deadEdges: [],
+        loopCounters: { "rev-loop-fix": 1, "": 4, bad: -1, odd: "x" },
+        loopLimits: { "rev-loop-fix": 3 }
+      })
+    );
+    const entry = state().runs.r9!;
+    assert.equal(entry.blocks.fix?.status, "pending", "pass 2 replaces pass 1 although its attempt is lower");
+    assert.equal(entry.blocks.fix?.pass, 2);
+    assert.deepEqual(entry.blocks.rev?.passes?.map((pass) => [pass.pass, pass.handle]), [[1, "false"]]);
+    assert.deepEqual(entry.takenEdges, ["t-fix"]);
+    assert.deepEqual(entry.deadEdges, []);
+    assert.deepEqual(entry.loopCounters, { "rev-loop-fix": 1 });
+    assert.deepEqual(entry.loopLimits, { "rev-loop-fix": 3 });
+
+    // A late delta of pass 1 never overwrites pass 2; an update without lists or counters keeps them.
+    applyWorkflowsEvent(event("workflowRun.updated", { run: started, blocks: [block({ nodeId: "fix", status: "succeeded", attempt: 1 })] }));
+    assert.equal(state().runs.r9?.blocks.fix?.pass, 2);
+    assert.deepEqual(state().runs.r9?.takenEdges, ["t-fix"]);
+    assert.deepEqual(state().runs.r9?.loopCounters, { "rev-loop-fix": 1 });
+  });
+
   it("a secrets change marks the scopes it touches stale", async () => {
     const api = new FakeApi();
     await loadWorkflowSecrets(api, null);
@@ -475,6 +541,39 @@ describe("runs", () => {
     assert.equal(entry.blocks.n2?.status, "pending");
   });
 
+  it("a reload takes the loaded edge lists (a loop shrank them), but for what an update changed meanwhile", async () => {
+    const api = new FakeApi();
+    const loaded = (takenEdges: string[], deadEdges: string[]) => ({
+      run: { ...run({ id: "r6", workflowId: "a" }), definition: record({ id: "a" }), triggerPayload: null, blocks: {}, takenEdges, deadEdges }
+    });
+    // Pass 1: Fix → Review, Review's "false" taken, Deploy dead.
+    api.runDetail = loaded(["t-fix", "fix-rev", "rev-loop-fix"], ["rev-dep"]);
+    await loadWorkflowRun(api, "r6");
+    // The stream drops; meanwhile the loop reset Fix and Review as pass 2. The reload says so.
+    markWorkflowsStale();
+    api.runDetail = loaded(["t-fix"], []);
+    await loadWorkflowRun(api, "r6", { force: true });
+    assert.deepEqual(state().runs.r6?.takenEdges, ["t-fix"], "pass 1's edges are not drawn taken again");
+    assert.deepEqual(state().runs.r6?.deadEdges, []);
+
+    // An update while a reload is in flight: what it added stands, what it dropped stays dropped.
+    const answer = deferred<GetWorkflowRunResponse>();
+    api.nextRunDetail = answer;
+    const loading = loadWorkflowRun(api, "r6", { force: true });
+    await settle();
+    applyWorkflowsEvent(event("workflowRun.updated", { run: run({ id: "r6", workflowId: "a" }), takenEdges: ["fix-rev"], deadEdges: ["rev-dep"] }));
+    answer.resolve(loaded(["t-fix"], []) as GetWorkflowRunResponse);
+    await loading;
+    assert.deepEqual(state().runs.r6?.takenEdges, ["fix-rev"], "the update dropped t-fix and added fix-rev");
+    assert.deepEqual(state().runs.r6?.deadEdges, ["rev-dep"]);
+
+    // Once the load is done, nothing is remembered: the next reload is the truth again.
+    api.runDetail = loaded(["t-fix"], []);
+    await loadWorkflowRun(api, "r6", { force: true });
+    assert.deepEqual(state().runs.r6?.takenEdges, ["t-fix"]);
+    assert.deepEqual(state().runs.r6?.deadEdges, []);
+  });
+
   it("a reconnect marks a held run stale; a forced reload clears it and takes the run's end", async () => {
     const api = new FakeApi();
     api.runDetail = {
@@ -497,6 +596,40 @@ describe("runs", () => {
     await loadWorkflowRun(api, "r3", { force: true });
     assert.equal(state().runs.r3?.stale, false);
     assert.equal(state().runs.r3?.summary.status, "failed");
+  });
+
+  it("a loaded run carries its loop counters and its blocks' earlier passes", async () => {
+    const api = new FakeApi();
+    api.runDetail = {
+      run: {
+        ...run({ id: "r5", workflowId: "a" }),
+        definition: record({ id: "a" }),
+        triggerPayload: null,
+        blocks: {
+          n1: block({
+            nodeId: "n1",
+            pass: 2,
+            sessionNote: "new chat: previous session unavailable (archived)",
+            loopFeedback: "Fix the tests",
+            passes: [{ pass: 1, status: "failed", attempt: 1, error: { kind: "agent_error", message: "x" } }, { status: "succeeded" }, 7] as never
+          })
+        },
+        takenEdges: [],
+        deadEdges: [],
+        loopCounters: { e1: 2 },
+        loopLimits: { e1: 3 }
+      }
+    };
+    await loadWorkflowRun(api, "r5");
+    const entry = state().runs.r5!;
+    assert.deepEqual(entry.loopCounters, { e1: 2 });
+    assert.deepEqual(entry.loopLimits, { e1: 3 });
+    const held = entry.blocks.n1!;
+    assert.equal(held.pass, 2);
+    assert.equal(held.sessionNote, "new chat: previous session unavailable (archived)");
+    assert.equal(held.loopFeedback, "Fix the tests");
+    assert.deepEqual(held.passes, [{ pass: 1, status: "failed", attempt: 1, error: { kind: "agent_error", message: "x" } }], "passes without a number are dropped");
+    assert.equal("loopCounters" in entry.summary, false, "the counters are not summary fields");
   });
 
   it("a list refresh updates the summary of a run held whole", async () => {
@@ -575,6 +708,31 @@ describe("mutations", () => {
     api.runAnswer = { runId: "r9" };
     await runWorkflowNow(api, "a", { force: true });
     assert.deepEqual(api.runs[1]?.req, { force: true });
+  });
+
+  it("an overlap skip remembers the run's input for Run anyway", async () => {
+    const api = new FakeApi();
+    api.list = [summary({ id: "a", name: "Deploy" })];
+    await loadWorkflows(api);
+    api.runAnswer = { runId: null, skipped: "overlap" };
+    await runWorkflowNow(api, "a", { input: { env: "prd" } });
+    assert.deepEqual(state().notice?.input, { env: "prd" });
+  });
+
+  it("an INVALID_INPUT refusal hands back its input errors; quiet leaves the notice alone", async () => {
+    const api = new FakeApi();
+    api.list = [summary({ id: "a", name: "Deploy" })];
+    await loadWorkflows(api);
+    const inputErrors = [{ input: "env", message: "input `env` is required: pass one of: stg, prd" }];
+    api.runError = Object.assign(apiError(400, "INVALID_INPUT", "The input does not fit"), { inputErrors });
+    const refused = await runWorkflowNow(api, "a", { input: {} }, { quiet: true });
+    assert.equal(refused.ok, false);
+    assert.deepEqual(refused.ok ? null : refused.inputErrors, inputErrors);
+    assert.equal(refused.ok ? null : refused.code, "INVALID_INPUT");
+    assert.equal(state().notice, null, "the form shows it in place");
+    const loud = await runWorkflowNow(api, "a", { input: {} });
+    assert.equal(loud.ok, false);
+    assert.equal(state().notice?.tone, "error");
   });
 
   it("create shows the row at once; delete removes it, and a gone workflow counts as deleted", async () => {

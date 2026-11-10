@@ -37,7 +37,7 @@ let watchingConnection = false;
  * `/events` stream has no replay, so a change made while it was down is only
  * seen by asking again. Installed once, on the first mount of a reader.
  */
-function watchConnection(): void {
+export function watchConnection(): void {
   if (watchingConnection) return;
   watchingConnection = true;
   let previous = useAppStore.getState().connectionStatus;

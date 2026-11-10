@@ -110,10 +110,13 @@ import {
 import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { DesktopAudioHub } from "./desktops/audio.ts";
+import { openDesktopAutomation } from "./desktops/automation/engine.ts";
+import { encodeDesktopScreenshot } from "./desktops/automation/screenshot.ts";
 import { DesktopHostProbe, resolveTool } from "./desktops/host-status.ts";
-import { registerDesktopHttpRoutes } from "./desktops/http-routes.ts";
+import { desktopQueryTokenAllowed, registerDesktopHttpRoutes } from "./desktops/http-routes.ts";
 import { DesktopManager } from "./desktops/manager.ts";
 import { registerDesktopWsRoutes } from "./desktops/ws-routes.ts";
+import { VoxlProbe } from "./desktops/voxl.ts";
 import { registerAuthRoutes } from "./auth/routes.ts";
 import { AuthSessionStore } from "./auth/sessions.ts";
 import { LoginThrottle, clientIp } from "./auth/throttle.ts";
@@ -742,7 +745,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   publishPluginEvents(plugins, broadcaster);
   // Ephemeral AI VMs (spec 2026-10-19): the hub, the box service, sync, tooling and the box
   // terminals the session manager wraps (`boxes/wiring.ts` says what is wired when).
+  // voxl, the optional H.264 desktop streamer (spec 2026-11-10 §5): this host's binary, which VM
+  // desktops get a copy of.
+  const voxlProbe = new VoxlProbe({ baseDir: paths.baseDir, env: () => env });
   const boxes: DaemonBoxes = createDaemonBoxes({
+    voxlStatus: () => voxlProbe.status(),
     baseDir: paths.baseDir,
     keysDir: resolved.keysDir,
     home: resolved.vars.userhome,
@@ -1464,7 +1471,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Desktop tabs (desktop spec §5): virtual X displays in tmux service sessions
   // on the sessions' tmux server, so they outlive the daemon like terminals do.
   // Reattached after `sessions.reattach()` (above); best-effort like it.
-  const desktopHost = new DesktopHostProbe();
+  const desktopHost = new DesktopHostProbe({ voxl: () => voxlProbe.status() });
   const desktopAudio = new DesktopAudioHub({
     ffmpegPath: resolveTool("ffmpeg"),
     log: (message, error) => console.warn(message, error ?? "")
@@ -1477,13 +1484,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     installHost: () => desktopHost.install(),
     audio: desktopAudio,
     // boxes: desktops of Linux box projects run in their VM.
-    boxes: boxes.desktops
+    boxes: boxes.desktops,
+    // Agents' screenshots, input and waits (spec 2026-11-10 §2).
+    openAutomation: openDesktopAutomation,
+    encodeScreenshot: encodeDesktopScreenshot,
+    voxlStatus: () => voxlProbe.status()
   });
   await desktops.load();
   desktops.on("created", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.created", d));
   desktops.on("updated", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.updated", d));
   desktops.on("closed", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.closed", p));
   desktops.on("windows", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.windows", p));
+  desktops.on("action", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.action", p));
   await desktops.reattach().catch((error) => console.error("Desktop reattach failed", error));
 
   // Dev-server URL suggestions: fed from every session's PTY output.
@@ -1811,7 +1823,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Devices: the device MCP tools' operations (null while the plugin is off).
     devices: () => devices.service(),
     // GPT Image: generate_image's operation (it refuses while the plugin is off).
-    gptImage: () => gptImage
+    gptImage: () => gptImage,
+    // Desktops: desktop_action, abortable by the call.
+    desktops: () => desktops
   });
 
   lineage.attachApi(services.internalApi);
@@ -2329,7 +2343,9 @@ export function createServer(
     const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "");
     // Devices: a kept screenshot and a lease thumbnail load from `<img>` the same way (GET/HEAD of
     // matched route patterns only, never a prefix; the hub proxy and every POST need the header).
-    const queryTokenRoute = url === "/api/fs/download" || deviceQueryTokenAllowed(request.method, routePath);
+    // Desktops: a kept automation screenshot (a chat row's thumbnail), likewise.
+    const queryTokenRoute =
+      url === "/api/fs/download" || deviceQueryTokenAllowed(request.method, routePath) || desktopQueryTokenAllowed(request.method, routePath);
     const queryToken = queryTokenRoute ? (request.query as { token?: string }).token : undefined;
     const session = authSessions.verify(headerToken ?? queryToken);
     if (!session) {
@@ -5376,6 +5392,8 @@ export function createServer(
       vncSocketPath: (id) => services.desktops.vncSocketPath(id),
       // boxes: a VM desktop's RFB socket is reached through its box link.
       vncStream: (id) => services.desktops.vncStream(id),
+      // voxl: the relay dials the desktop's voxl, started for its first viewer.
+      voxlUpstream: (id) => services.desktops.voxlUpstream(id),
       audioSource: (id) => services.desktops.audioSource(id),
       audio: services.desktopAudio
     });
@@ -5550,7 +5568,9 @@ export function createServer(
           fsRoot: resolved.fsRoot,
           workspacesDir: resolved.workspacesDir,
           // boxes: read_file / directory reads of box projects go to the box.
-          boxRegistry: () => services.boxRegistry
+          boxRegistry: () => services.boxRegistry,
+          // Desktops: desktop_action, abortable by the call (the /mcp request is authenticated already).
+          desktops: () => services.desktops
         }),
       credentialId: () => externalCredentialId(config.transports.http.username)
     });

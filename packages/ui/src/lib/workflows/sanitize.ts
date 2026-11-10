@@ -11,13 +11,15 @@
  * schemas in @orquester/config, so those go through `safeParse`.
  */
 
-import { WORKFLOW_NODE_TYPES, workflowProjectSchema, workflowRecordSchema } from "@orquester/config";
+import { WORKFLOW_NODE_TYPES, workflowInputDeclSchema, workflowProjectSchema, workflowRecordSchema } from "@orquester/config";
 import { WORKFLOW_SUMMARY_MAX_ERRORS } from "@orquester/api";
+import { sanitizeGateList } from "./gates";
 import type {
   AccountSelectionDecision,
   AgentHop,
   Workflow,
   WorkflowBlockError,
+  WorkflowBlockPass,
   WorkflowBlockRun,
   WorkflowBlockStatus,
   WorkflowNodeType,
@@ -29,6 +31,7 @@ import type {
   WorkflowRunStatus,
   WorkflowRunSummary,
   WorkflowSecretName,
+  WorkflowStepReport,
   WorkflowSummary,
   WorkflowTriggerKind,
   WorkflowTriggerSummary
@@ -144,6 +147,14 @@ export function sanitizeRunSummary(value: unknown): WorkflowRunSummary | null {
   if (parentRunId !== undefined) run.parentRunId = parentRunId;
   const retryOf = nonEmpty(value.retryOf);
   if (retryOf !== undefined) run.retryOf = retryOf;
+  // Gates (spec 2026-11-10 §6.2, §6.4): the badges' counts, parked, and why a run did not start.
+  for (const key of ["pendingGates", "pendingPersonGates"] as const) {
+    const count = finite(value[key]);
+    if (count !== undefined && count > 0) run[key] = Math.floor(count);
+  }
+  if (value.parked === true) run.parked = true;
+  const skipDetail = str(value.skipDetail)?.trim();
+  if (skipDetail) run.skipDetail = skipDetail;
   return run;
 }
 
@@ -155,6 +166,14 @@ function sanitizeTrigger(value: unknown): WorkflowTriggerSummary | null {
   for (const key of ["nextRunAt", "lastPollAt", "lastError"] as const) {
     const field = value[key];
     if (typeof field === "string" || field === null) trigger[key] = field;
+  }
+  // A manual trigger's declared inputs (the rail's Run now form): each one the schema accepts.
+  if (value.type === "trigger.manual" && Array.isArray(value.inputs)) {
+    const inputs = list(value.inputs, (entry) => {
+      const parsed = workflowInputDeclSchema.safeParse(entry);
+      return parsed.success ? parsed.data : null;
+    });
+    if (inputs.length > 0) trigger.inputs = inputs;
   }
   return trigger;
 }
@@ -308,6 +327,16 @@ function sanitizeSelection(value: unknown): AccountSelectionDecision | undefined
   return decision;
 }
 
+/** An agent block's report (spec 2026-11-10 §5.2); `undefined` without a summary. */
+function sanitizeStepReport(value: unknown): WorkflowStepReport | undefined {
+  if (!isRecord(value) || typeof value.summary !== "string") return undefined;
+  const report: WorkflowStepReport = { summary: value.summary, sessionId: str(value.sessionId) ?? "", reportedAt: str(value.reportedAt) ?? "" };
+  const outcome = nonEmpty(value.outcome);
+  if (outcome !== undefined) report.outcome = outcome;
+  if (isRecord(value.outputs)) report.outputs = value.outputs;
+  return report;
+}
+
 /** One block's run state; `null` without a node id or a known status. */
 export function sanitizeBlockRun(value: unknown): WorkflowBlockRun | null {
   if (!isRecord(value)) return null;
@@ -328,11 +357,16 @@ export function sanitizeBlockRun(value: unknown): WorkflowBlockRun | null {
   }
   const childRunId = nonEmpty(value.childRunId);
   if (childRunId !== undefined) block.childRunId = childRunId;
+  const gateId = nonEmpty(value.gateId);
+  if (gateId !== undefined) block.gateId = gateId;
   if ("output" in value) block.output = value.output;
   if (value.outputTruncated === true) block.outputTruncated = true;
   if (value.pinned === true) block.pinned = true;
   const error = sanitizeBlockError(value.error);
   if (error !== undefined) block.error = error;
+  // Outcomes (spec 2026-11-10 §5): the report the run view and a pass's details show.
+  const report = sanitizeStepReport(value.report);
+  if (report !== undefined) block.report = report;
   if (Array.isArray(value.warnings)) {
     block.warnings = value.warnings.filter((warning): warning is string => typeof warning === "string");
   }
@@ -345,7 +379,45 @@ export function sanitizeBlockRun(value: unknown): WorkflowBlockRun | null {
       stderrBytes: Math.max(0, finite(value.logs.stderrBytes) ?? 0)
     };
   }
+  // Loops (spec 2026-11-10 §7.2): the pass, the earlier passes, the feedback and the session note.
+  const pass = passNumber(value.pass);
+  if (pass !== undefined) block.pass = pass;
+  for (const key of ["loopFeedback", "sessionNote"] as const) {
+    const field = str(value[key]);
+    if (field !== undefined) block[key] = field;
+  }
+  if (Array.isArray(value.passes)) {
+    const passes = list(value.passes, (entry) => sanitizeBlockPass(entry, block)).sort((a, b) => a.pass - b.pass);
+    if (passes.length > 0) block.passes = passes;
+  }
   return block;
+}
+
+function passNumber(value: unknown): number | undefined {
+  const pass = finite(value);
+  return pass !== undefined && pass >= 1 ? Math.floor(pass) : undefined;
+}
+
+/** One earlier pass of `owner`, read like a block record (its own fields, the owner's identity); `null` without a pass number. */
+function sanitizeBlockPass(value: unknown, owner: Pick<WorkflowBlockRun, "nodeId" | "name" | "type">): WorkflowBlockPass | null {
+  if (!isRecord(value)) return null;
+  const pass = passNumber(value.pass);
+  if (pass === undefined) return null;
+  const record = sanitizeBlockRun({ ...value, nodeId: owner.nodeId, name: owner.name, type: owner.type, passes: undefined });
+  if (record === null) return null;
+  const { nodeId: _nodeId, name: _name, type: _type, passes: _passes, ...rest } = record;
+  return { ...rest, pass };
+}
+
+/** A run's per-edge counts (`loopCounters`, `loopLimits`): whole, non-negative numbers by edge id. */
+export function sanitizeEdgeCounts(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [edgeId, count] of Object.entries(value)) {
+    const number = finite(count);
+    if (edgeId.length > 0 && number !== undefined && number >= 0) out[edgeId] = Math.floor(number);
+  }
+  return out;
 }
 
 /** A list of block states (a run's `blocks` map, or an update's delta array) keyed by node id. */
@@ -388,6 +460,12 @@ export function sanitizeWorkflowRun(value: unknown): WorkflowRun | null {
     deadEdges: sanitizeEdgeIds(value.deadEdges)
   };
   if ("finalOutput" in value) run.finalOutput = value.finalOutput;
+  const loopCounters = sanitizeEdgeCounts(value.loopCounters);
+  if (loopCounters !== undefined) run.loopCounters = loopCounters;
+  const gates = sanitizeGateList(value.gates);
+  if (gates.length > 0) run.gates = Object.fromEntries(gates.map((gate) => [gate.gateId, gate]));
+  const loopLimits = sanitizeEdgeCounts(value.loopLimits);
+  if (loopLimits !== undefined) run.loopLimits = loopLimits;
   return run;
 }
 

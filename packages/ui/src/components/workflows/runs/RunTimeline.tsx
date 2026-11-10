@@ -4,6 +4,8 @@
  * (ticking while it runs), the agent's account and hop count, its error or
  * why it was skipped; branches indented under their handle ("on failure",
  * "true", "case 1"), a join once after its branches. Tap a step to open it.
+ * A step a loop ran again lists its passes (#1, #2, …; spec 2026-11-10 §7.4):
+ * tap one to open the step on that pass.
  */
 
 import React, { useMemo } from "react";
@@ -11,6 +13,7 @@ import { CornerDownRight, FlaskConical, Pin, Repeat2 } from "lucide-react";
 
 import type { WorkflowRunEntry } from "../../../lib/workflows/store";
 import { cn } from "../../../lib/cn";
+import { passChips, type PassChip } from "../../../lib/workflows/passes";
 import {
   blockErrorKindLabel,
   blockTypeLabel,
@@ -25,7 +28,8 @@ export interface RunTimelineProps {
   entry: WorkflowRunEntry;
   now: number;
   selectedNodeId: string | null;
-  onSelectBlock: (nodeId: string) => void;
+  /** Open a step — on one of its passes, when a pass chip was tapped. */
+  onSelectBlock: (nodeId: string, pass?: number) => void;
   variant?: RunsVariant;
   className?: string;
 }
@@ -56,6 +60,15 @@ export const RunTimeline: React.FC<RunTimelineProps> = ({
         : [],
     [definition, entry.summary.status, entry.blocks, entry.takenEdges, entry.deadEdges, now]
   );
+  const passes = useMemo(() => {
+    const map = new Map<string, PassChip[]>();
+    if (!definition) return map;
+    for (const node of definition.nodes) {
+      const chips = passChips(entry.blocks[node.id], node, now);
+      if (chips.length > 0) map.set(node.id, chips);
+    }
+    return map;
+  }, [definition, entry.blocks, now]);
 
   if (!definition) {
     return (
@@ -87,6 +100,7 @@ export const RunTimeline: React.FC<RunTimelineProps> = ({
           sheet={sheet}
           selected={item.kind === "step" && item.nodeId === selectedNodeId}
           onSelect={onSelectBlock}
+          passes={item.kind === "step" ? (passes.get(item.nodeId) ?? null) : null}
         />
       ))}
     </ol>
@@ -100,8 +114,9 @@ const TimelineRow: React.FC<{
   last: boolean;
   sheet: boolean;
   selected: boolean;
-  onSelect: (nodeId: string) => void;
-}> = ({ item, last, sheet, selected, onSelect }) => {
+  onSelect: (nodeId: string, pass?: number) => void;
+  passes: PassChip[] | null;
+}> = ({ item, last, sheet, selected, onSelect, passes }) => {
   const indent = item.depth * INDENT;
   if (item.kind === "join-ref") {
     return (
@@ -128,6 +143,8 @@ const TimelineRow: React.FC<{
   const meta: string[] = [];
   meta.push(blockTypeLabel(item.type));
   if (item.account) meta.push(item.account);
+  const latestPass = passes?.find((chip) => chip.latest);
+  if (latestPass) meta.push(`pass ${latestPass.pass}`);
   if (item.attempt > 1) meta.push(`attempt ${item.attempt}`);
   if (item.finishedOn) meta.push(`→ ${item.finishedOn}`);
 
@@ -212,6 +229,11 @@ const TimelineRow: React.FC<{
             {item.liveLine ? (
               <span className="mt-0.5 block truncate text-xs leading-5 text-neutral-300">{item.liveLine}</span>
             ) : null}
+            {item.reportSummary ? (
+              <span className="mt-0.5 block truncate text-xs leading-5 text-neutral-400" title={item.reportSummary}>
+                {item.reportSummary}
+              </span>
+            ) : null}
             {item.error ? (
               <span className="mt-0.5 block text-xs leading-5 text-danger">
                 <span className="line-clamp-2 break-words">
@@ -227,10 +249,40 @@ const TimelineRow: React.FC<{
             ) : null}
           </span>
         </button>
+        {passes ? <TimelinePasses name={item.name} nodeId={item.nodeId} passes={passes} sheet={sheet} onSelect={onSelect} /> : null}
       </div>
     </li>
   );
 };
+
+/** A step's passes, oldest first: each opens the step on that pass. */
+const TimelinePasses: React.FC<{
+  name: string;
+  nodeId: string;
+  passes: PassChip[];
+  sheet: boolean;
+  onSelect: (nodeId: string, pass?: number) => void;
+}> = ({ name, nodeId, passes, sheet, onSelect }) => (
+  <div role="group" aria-label={`${name} — passes`} className={cn("relative flex flex-wrap gap-1 pb-1.5 pr-2", sheet ? "pl-11" : "pl-9")}>
+    {passes.map((chip) => (
+      <button
+        key={chip.pass}
+        type="button"
+        aria-label={`Open ${name} on ${chip.description}${chip.latest ? ", the latest pass" : ""}`}
+        title={chip.description}
+        onClick={() => onSelect(nodeId, chip.pass)}
+        className={cn(
+          "inline-flex items-center gap-1 rounded-full border border-neutral-800 bg-neutral-950 px-2 text-[11px] font-medium tabular-nums text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800/50",
+          FOCUS_RING,
+          sheet ? "h-10 min-w-12 px-3 text-xs" : "h-6"
+        )}
+      >
+        <StatusGlyph icon={chip.view.icon} tone={chip.view.tone} size={sheet ? 13 : 11} />
+        {chip.label}
+      </button>
+    ))}
+  </div>
+);
 
 const BranchLabel: React.FC<{ label: string }> = ({ label }) => (
   <div className="flex items-center gap-1.5 pb-0.5 pl-2 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-neutral-500">

@@ -25,23 +25,33 @@ import {
   type LucideIcon
 } from "lucide-react";
 
-import { acceptsInput, isTriggerType, outputHandles, workflowHandleLabel } from "@orquester/api";
+import { acceptsInput, isTriggerType, outputHandles, workflowHandleLabel, type WorkflowGateChoiceColor, type WorkflowNode } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
 import { accentClass, blockAgent } from "../../../lib/workflows/catalog-ui";
 import { formatDuration } from "../../../lib/workflows/format";
 import type { OverlayNodeState } from "../../../lib/workflows/overlay";
 import { blockGlyph } from "../AddBlockMenu";
+import { GateNodeSlot } from "../gates/GateNodeSlot";
 import { HANDLE_HIT, useCanvasActions, type BlockNodeData } from "./canvas-context";
 
 export type BlockFlowNode = Node<BlockNodeData, "block">;
 
-/** The paint of an output handle's dot and label. */
-export function handleTone(handle: string): { dot: string; text: string } {
+/** A gate choice's colour as a handle's paint (spec 2026-11-10 §6.1). */
+const CHOICE_TONE: Partial<Record<WorkflowGateChoiceColor, { dot: string; text: string }>> = {
+  primary: { dot: "var(--sem-info-400)", text: "text-info" },
+  success: { dot: "var(--sem-ok-400)", text: "text-ok" },
+  warning: { dot: "var(--sem-warn-400)", text: "text-warn" },
+  danger: { dot: "var(--sem-danger-400)", text: "text-danger" }
+};
+
+/** The paint of an output handle's dot and label; a gate's choice takes its own colour. */
+export function handleTone(handle: string, color?: WorkflowGateChoiceColor): { dot: string; text: string } {
+  if (color && handle.startsWith("choice:")) return CHOICE_TONE[color] ?? { dot: "var(--n-400)", text: "text-neutral-300" };
   if (handle === "success" || handle === "true") return { dot: "var(--sem-ok-400)", text: "text-ok" };
   if (handle === "error") return { dot: "var(--sem-danger-400)", text: "text-danger" };
   if (handle === "false") return { dot: "var(--n-400)", text: "text-neutral-400" };
-  if (handle.startsWith("case:")) return { dot: "var(--sem-info-400)", text: "text-info" };
+  if (handle.startsWith("case:") || handle.startsWith("outcome:")) return { dot: "var(--sem-info-400)", text: "text-info" };
   return { dot: "var(--n-400)", text: "text-neutral-400" };
 }
 
@@ -76,9 +86,11 @@ const OutputHandle: React.FC<{
   hint: boolean;
   /** A block's failure output: its "+" shows on hover (or selection) only. */
   quiet: boolean;
-}> = ({ nodeId, handle, label, top, connected, hint, quiet }) => {
+  /** A gate choice's colour. */
+  color?: WorkflowGateChoiceColor;
+}> = ({ nodeId, handle, label, top, connected, hint, quiet, color }) => {
   const actions = useCanvasActions();
-  const tone = handleTone(handle);
+  const tone = handleTone(handle, color);
   const showPlus = !actions.readOnly && !connected;
   return (
     // A zero-size anchor on the right edge at the handle's height.
@@ -146,11 +158,19 @@ const OutputHandle: React.FC<{
   );
 };
 
+/** A gate's `choice:<id>` handle's colour, as configured. */
+function choiceColor(node: WorkflowNode, handle: string): WorkflowGateChoiceColor | undefined {
+  if (node.type !== "gate" || !handle.startsWith("choice:")) return undefined;
+  return node.config.choices.find((choice) => `choice:${choice.id}` === handle)?.color;
+}
+
 function OverlayLine({ overlay }: { overlay: OverlayNodeState }): React.ReactElement {
   const view = STATUS_VIEW[overlay.status];
   const Icon = view.icon;
   const bits: string[] = [];
   if (overlay.durationMs !== undefined) bits.push(formatDuration(overlay.durationMs) || "0s");
+  // A loop ran it again (spec 2026-11-10 §7.4): which pass this is.
+  if (overlay.pass !== undefined && (overlay.passCount ?? 1) > 1) bits.push(`pass ${overlay.pass}`);
   if (overlay.attempt > 1) bits.push(`try ${overlay.attempt}`);
   if (overlay.accountLabel) bits.push(overlay.accountLabel);
   if (overlay.hopCount && overlay.hopCount > 1) bits.push(`${overlay.hopCount} hops`);
@@ -160,8 +180,26 @@ function OverlayLine({ overlay }: { overlay: OverlayNodeState }): React.ReactEle
       <Icon size={12} className={cn("shrink-0", view.tone, overlay.status === "running" && "motion-safe:animate-spin")} />
       <span className={cn("shrink-0 font-medium", view.tone)}>{view.label}</span>
       {bits.length > 0 ? <span className="min-w-0 truncate text-neutral-500">{bits.join(" · ")}</span> : null}
+      {overlay.outcome ? <OutcomeChip outcome={overlay.outcome} /> : null}
       {overlay.pinned ? <Pin size={11} className="ml-auto shrink-0 text-neutral-500" aria-label="Pinned output" /> : null}
     </div>
+  );
+}
+
+/** The outcome an agent block took (or, while it runs, reported so far): spec 2026-11-10 §5. */
+function OutcomeChip({ outcome }: { outcome: NonNullable<OverlayNodeState["outcome"]> }): React.ReactElement {
+  const text = outcome.final ? `Outcome: ${outcome.label}` : `Reported so far: ${outcome.label}`;
+  return (
+    <span
+      className={cn(
+        "ml-auto max-w-[45%] shrink-0 truncate rounded-full px-1.5 text-[10.5px] font-medium leading-4",
+        outcome.final ? "bg-info-soft/40 text-info" : "border border-dashed border-info/40 text-info"
+      )}
+      title={text}
+      aria-label={text}
+    >
+      {outcome.label}
+    </span>
   );
 }
 
@@ -229,6 +267,7 @@ function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.
             {summary || " "}
           </div>
           {overlay ? <OverlayLine overlay={overlay} /> : null}
+          {runView ? <GateNodeSlot nodeId={id} gateBlock={node.type === "gate"} /> : null}
           {triggerError && !overlay ? (
             <div
               className="mt-1 flex min-w-0 items-center gap-1 text-[11px] leading-4 text-warn"
@@ -266,6 +305,7 @@ function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.
           connected={connected.includes(handle)}
           hint={hint && index === 0}
           quiet={!branching && handle === "error"}
+          color={choiceColor(node, handle)}
         />
       ))}
     </div>

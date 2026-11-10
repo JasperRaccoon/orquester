@@ -50,6 +50,13 @@ describe("which push becomes a system notification", () => {
       runId: null
     });
     assert.equal(desktopNotificationFor(scriptPush, away)?.target, null);
+    // A gate's push (spec 2026-11-10 §6.4) opens its run with the gate selected.
+    assert.deepEqual(desktopNotificationFor({ ...workflowPush, gateId: "g1" }, away)?.target, {
+      kind: "workflow",
+      workflowId: "w1",
+      runId: "r1",
+      gateId: "g1"
+    });
   });
 
   it("stays quiet about the session the user is looking at, but not about another one", () => {
@@ -101,6 +108,10 @@ describe("payloads off the bus and the bridge", () => {
   it("parses a push event field by field, capping its text and dropping malformed ids", () => {
     assert.deepEqual(parsePushNotificationEvent({ ...sessionPush, extra: 1 }), sessionPush);
     assert.deepEqual(parsePushNotificationEvent(workflowPush), workflowPush);
+    assert.deepEqual(parsePushNotificationEvent({ ...workflowPush, gateId: "g1" }), { ...workflowPush, gateId: "g1" });
+    assert.deepEqual(parsePushNotificationEvent({ ...workflowPush, gateId: "g/1" }), workflowPush);
+    const { runId: _run, ...noRun } = workflowPush;
+    assert.deepEqual(parsePushNotificationEvent({ ...noRun, gateId: "g1" }), noRun);
     const long = parsePushNotificationEvent({ kind: "agent", title: ` ${"t".repeat(300)} `, body: "b".repeat(900), tag: "orquester-agent" });
     assert.equal(long?.title.length, 200);
     assert.equal(long?.body.length, 500);
@@ -132,6 +143,17 @@ describe("payloads off the bus and the bridge", () => {
   it("parses a clicked notification's target and a menu action strictly", () => {
     assert.deepEqual(parseNotificationTarget({ kind: "session", sessionId: "c1" }), { kind: "session", sessionId: "c1" });
     assert.deepEqual(parseNotificationTarget({ kind: "workflow", workflowId: "w1", runId: "r 1" }), {
+      kind: "workflow",
+      workflowId: "w1",
+      runId: null
+    });
+    assert.deepEqual(parseNotificationTarget({ kind: "workflow", workflowId: "w1", runId: "r1", gateId: "g1" }), {
+      kind: "workflow",
+      workflowId: "w1",
+      runId: "r1",
+      gateId: "g1"
+    });
+    assert.deepEqual(parseNotificationTarget({ kind: "workflow", workflowId: "w1", runId: null, gateId: "g1" }), {
       kind: "workflow",
       workflowId: "w1",
       runId: null

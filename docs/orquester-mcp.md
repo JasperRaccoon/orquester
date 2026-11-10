@@ -15,16 +15,16 @@ follow and pause an agent's own goal; answer the agent's questions and tool appr
 transcripts, a tool call's whole output, subagents and per-turn diffs; search the text of every
 chat; wait until a session needs attention; read quota, cost and one session's token usage; push a
 notification to the user's devices; read files and a project's git state; keep the shared todo lists
-and the saved-prompt library; build, edit, run and debug the daemon's automated workflows (§12);
+and the saved-prompt library; build, edit, run, debug and decide the gates of the daemon's automated workflows (§12);
 manage each agent CLI's own global MCP servers, skills, plugins, marketplaces, hooks, commands and
 instruction file (§13); open desktop tabs — Linux GUI apps on a virtual display on the daemon's
-host (§14); and check a repo's Secret files vault. That is **42 tools** (server version 3.0.0; §6 lists them, and opens with the migration
+host (§14); and check a repo's Secret files vault. That is **45 tools** (server version 3.0.0; §6 lists them, and opens with the migration
 from the 72-tool 2.x surface).
 
 **One catalog, two audiences.** The same tool definitions also serve the agents chatting *inside*
 Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
-these 42 tools plus five chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
-`push_secret_files`), and — while their plugins allow — the plugin families: temporary boxes,
+these 45 tools plus six chat-only ones (`html_preview`, `html_render`, `show_image`, `request_secret`,
+`push_secret_files`, `report_step_result`), and — while their plugins allow — the plugin families: temporary boxes,
 the knowledge base, devices (§15) and GPT Image (§16). (`show_image` copies PNG, JPEG, WebP or GIF files — from the
 workspaces, the chat's own attachments or the host's temp folders, or named `recent:N` /
 `attachment:<id>` — into the chat as an inline image row; it reads nothing else.) Every
@@ -268,7 +268,7 @@ read); `list_sessions` adds `limit`; desktop tools take `project` where they too
 `create_session` accepts a legacy model when named (the result says `isLegacy: true`) and reports
 the account it got with `accountSource`.
 
-### The 42 tools
+### The 45 tools
 
 `tools/list` gives every tool a title, annotations, a description of every parameter and
 `_meta: {"orquester/tier", "orquester/toolset"}`. The toolset is the tool's group; the tier is what
@@ -314,12 +314,15 @@ call is listed by its widest (`admin` in `_meta`). For you, every tool simply ru
 | `run_workflow` | workflow-authoring | Admin | A manual run of a pinned revision, optionally waited on |
 | `get_workflow_runs` | reads | Read | Runs, one run's blocks, a block's whole output or log |
 | `cancel_workflow_run` | workflow-authoring | Act | Cancel an active run |
+| `decide_workflow_gate` | workflow-authoring | Act (only the gate's assigned chat) | Decide, or (agent deciders) escalate, a gate a run waits on |
+| `list_workflow_gates` | reads | Read | Gates waiting for a decision across runs (and decided ones) |
 | `list_workflow_secrets` | workflow-authoring | Read | Workflow secret names |
 | `set_workflow_secret` | workflow-authoring | Admin | Set or delete a workflow secret |
 | `get_agent_profile` | reads | Read | Agent CLIs' global config: summary, items, one item, instruction file, a marketplace's plugins |
 | `edit_agent_profile` | agent-profile-editing | Admin | Up to 10 agent-profile changes in one call |
 | `get_desktops` | desktops | Read | Desktop tabs, their apps and windows, an app's log, the host's readiness |
 | `control_desktop` | desktops | Admin for `open` / `launch_app`; Act otherwise | Open a desktop, launch, stop or close apps and windows, close it |
+| `desktop_action` | desktops | Read for `screenshot` / `wait` / `clipboard_get`; Act otherwise | See and drive a desktop: screenshots, waits, pointer, keys, text, clipboard |
 | `secret_files_status` | secret-files | Read | A repo's Secret files vault: managed files, each clone's state per file, variable names that differ |
 <!-- external-tools:end -->
 
@@ -333,8 +336,8 @@ call (`control_session {action: "close"}` aside: the tab is gone). The tools tha
 command also return the host's `seq`; `update_session` returns the fields it `applied` instead.
 The annotations describe the most dangerous thing a tool can do: `readOnlyHint` on every tool that
 only reads or waits; `destructiveHint` on `control_session` (close, rewind), `update_todos`,
-`update_saved_prompts`, `delete_workflow`, `set_workflow_secret`, `edit_agent_profile` and
-`control_desktop`; `openWorldHint: false` on every read and on `update_todos` and
+`update_saved_prompts`, `delete_workflow`, `set_workflow_secret`, `edit_agent_profile`,
+`control_desktop` and `desktop_action`; `openWorldHint: false` on every read and on `update_todos` and
 `update_saved_prompts`, which touch only the daemon's own state (a tool that drives an agent keeps
 the default).
 
@@ -1464,8 +1467,8 @@ only `createdBy.kind`.
 
 ### Automated workflows, agent config, desktops
 
-The 12 workflow tools are in §12, `get_agent_profile` and `edit_agent_profile` in §13,
-`get_desktops` and `control_desktop` in §14.
+The 14 workflow tools are in §12 (with the chat-only `report_step_result`), `get_agent_profile` and `edit_agent_profile` in §13,
+`get_desktops`, `control_desktop` and `desktop_action` in §14.
 
 ---
 
@@ -1857,8 +1860,8 @@ limit (the daemon's backoff floor applies) but is still not for polling loops.
 
 Orquester runs **automated workflows**: n8n-like graphs of blocks — triggers (manual, schedule,
 git events), agents, JavaScript code, shell scripts, HTTP requests, if/switch/merge/wait/stop,
-sub-workflows — owned by the daemon and shown in the right rail's "Automated workflows" panel and
-the workflow editor tab. These 12 tools let an agent do what the editor does: "create a workflow
+sub-workflows, gates — owned by the daemon and shown in the right rail's "Automated workflows" panel and
+the workflow editor tab. These 14 tools let an agent do what the editor does: "create a workflow
 that does X, Y, Z", "edit workflow X to add this path", "run it and tell me what happened". They
 are clients of the daemon's `/api/workflows*`, `/api/workflow-runs*` and `/api/workflow-secrets*`
 routes, like every other tool; everything a tool changes shows up live in the editor and the rail.
@@ -1868,15 +1871,17 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 | Tool | Input | Returns |
 |---|---|---|
 | `list_workflow_block_types` | `type?` | `{types: [{type, category, title, description, handles, output, example, configSchema}], expressionGuide, authoringGuide, configSchemasOmitted?}` — **read it first** |
-| `list_workflows` | `project?` | `{workflows: [{workflowId, name, enabled, revision, project, projectPath?, triggers: [text], nodeCount, errorCount, lastRun?, activeRuns, updatedAt}]}` |
-| `get_workflow` | `workflowId`, `node?` | `{workflowId, name, revision, enabled, project, problems, errorCount, warningCount, connections, workflow}` — or, with `node`, that one block and its connections |
+| `list_workflows` | `project?` | `{workflows: [{workflowId, name, enabled, revision, project, projectPath?, triggers: [text], inputs?, nodeCount, errorCount, lastRun?, activeRuns, updatedAt}]}` |
+| `get_workflow` | `workflowId`, `node?` | `{workflowId, name, revision, enabled, project, inputs?, inputsNote?, problems, errorCount, warningCount, connections, workflow}` — or, with `node`, that one block and its connections |
 | `create_workflow` | `name`, `description?`, `project`, `settings?`, `nodes`, `edges? = []`, `enabled? = false`, `dryRun? = false` | `{created: true, workflowId, revision, problems, …, connections, workflow, next?}`; with `dryRun`, the validation only |
 | `update_workflow` | `workflowId`, `revision`, `ops` (1–500), `dryRun? = false` | `{updated: true, workflowId, revision, problems, …, connections, workflow}`; with `dryRun`, the patched definition's validation only |
 | `delete_workflow` | `workflowId`, `confirm: true` | `{deleted: true, workflowId}` |
 | `preview_expression` | `workflowId`, `template?` or `templates?`, `node?`, `runId?`, `usePinned? = false`, `mode? = "text"` | each rendered text (or raw value), warnings, parse errors, `available` |
-| `run_workflow` | `workflowId`, `revision`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}` |
-| `get_workflow_runs` | `workflowId` (`before?`, `limit? = 20`), or `runId` (`waitSeconds?`), or `runId` + `nodeId` (`outputOffset?`, `log?`) | runs, newest first, `before`; one run's `{run, blocks, outputNote?}`; one block's `output` or a window `{outputText, offset, totalBytes, nextOffset?}`, or its stdout/stderr log |
+| `run_workflow` | `workflowId`, `revision`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}`; an input its declared inputs refuse: `INVALID_INPUT` with `detail.inputErrors` |
+| `get_workflow_runs` | `workflowId` (`before?`, `limit? = 20`), or `runId` (`waitSeconds?`), or `runId` + `nodeId` (`outputOffset?`, `log?`) | runs, newest first, `before`; one run's `{run, blocks, gates?, loops?, outputNote?}`; one block's `output` or a window `{outputText, offset, totalBytes, nextOffset?}`, or its stdout/stderr log |
 | `cancel_workflow_run` | `runId` | `{cancelRequested: true, runId, run?}` |
+| `decide_workflow_gate` | `runId`, `gateId` (or `nodeName`), `choice`, `comment?`; or `escalate: true` + `comment` (agent deciders) | `{decided: true, runId, gateId, choice, next}`; `{escalated: true, …}`; a later call `{alreadyDecided: true, choice, decidedBy, decidedAt, comment?, next}` |
+| `list_workflow_gates` | `project?`, `includeDecided? = false` | `{gates: [{gateId, runId, rootRunId?, workflow, workflowId, projectPath?, block, source?, question, details?, choices, decider, state, deadlineAt?, waitingFor?, decision?, escalated?, yours?, call?}], next}` |
 | `list_workflow_secrets` | `workflowId?` | `{secrets: [{name, scope, workflowId?, updatedAt, short?}]}` — names only |
 | `set_workflow_secret` | `name`, `value?`, `workflowId?`, `delete? = false` | `{set: true, name, scope, workflowId?, warning?}` or the deletion |
 
@@ -1888,8 +1893,8 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   projectOverride?}`. `config` is merged over the type's default config, so only what differs is
   needed; a missing name is minted (`Agent`, `Agent2`, …). Positions are optional: without any,
   the daemon lays the whole graph out.
-- **Edges** name blocks by **name** (or id): `{source, sourceHandle?, target}`, `sourceHandle`
-  defaulting to `success`.
+- **Edges** name blocks by **name** (or id): `{source, sourceHandle?, target, loop?}`, `sourceHandle`
+  defaulting to `success` (`loop`: "Loop edges" below).
 - **`settings`**: `overlap` (`skip` — the default: a trigger that fires while a run is active is
   skipped —, `queue`, `parallel`), `maxConcurrent` (1–8, parallel only), `timezone` (IANA;
   defaults to the daemon host's own zone), `runTimeoutMinutes`, `notify {onFailure, onSuccess}`,
@@ -1903,7 +1908,7 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   without saving.
 - **`problems`** come back on every read and write: `{severity: "error" | "warning" | "info", code,
   message, nodeId?, edgeId?, field?}`, errors first, at most 100 (`problemsOmitted` counts the
-  rest). Errors (a cycle, a reference to an unknown block, `{{ }}` in a shell script…) block
+  rest). Errors (a cycle — an edge back to an earlier block that is not a loop edge —, a reference to an unknown block, `{{ }}` in a shell script…) block
   enabling; warnings (a secret in an agent prompt, an unknown secret name…) do not.
 - **`revision`** moves by one on every save. `update_workflow` and `run_workflow` must send the
   revision they last read (`get_workflow`, or the previous write's answer): a run is refused when
@@ -1912,13 +1917,16 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 ### Authoring rules (what `list_workflow_block_types`' `authoringGuide` teaches)
 
 - Blocks read earlier outputs through expressions: `{{ nodes.<Name>.output… }}`, `{{ input }}`
-  (the output of the block feeding this one), `{{ trigger… }}`, `{{ run… }}`, `{{ project… }}`,
-  `{{ secrets.NAME }}`, with filters (`| json`, `| compact`, `| default("x")`, `| length`, …). The
+  (the output of the block feeding this one), `{{ trigger… }}`, `{{ run… }}`, `{{ project… }}`, `{{ workflow… }}`,
+  `{{ secrets.NAME }}`, `{{ loop.pass }}` / `{{ loop.feedback }}` (loop edges), with filters (`| json`, `| compact`, `| default("x")`, `| length`, …). The
   `expressionGuide` has the full grammar.
 - Output handles: triggers `success`; agent, code, shell, http, merge, wait and workflow `success`
-  and `error`; if `true` / `false` / `error`; switch `case:0`, `case:1`, …, `default`, `error`;
-  stop and note none. A failed block with no `error` edge fails the run. A block all of whose
-  incoming edges are dead (an if's other branch) is skipped.
+  and `error`; an agent block with `outcomes` one `outcome:<id>` per outcome (in declared order) and
+  `error`, no `success`; gate one `choice:<id>` per choice and `error`; if `true` / `false` /
+  `error`; switch `case:0`, `case:1`, …, `default`, `error`; stop and note none. A failed block
+  with no `error` edge fails the run; a block's `retry: {maxTries, delaySeconds}` re-runs it first,
+  except after `all_burnt`, `limit_exceeded`, `loop_limit` or `gate_expired` (`no_report` is
+  retried). A block all of whose incoming edges are dead (an if's other branch) is skipped.
 - **Shell scripts never contain `{{ }}`** (validation refuses it): map values to environment
   variables in the block's `env` list and read `"$NAME"` in the script.
 - **Code** is an ES module whose default export `async function ({ input, nodes, trigger,
@@ -1926,17 +1934,79 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   the run as stopped.
 - **Agent blocks run full-access and unattended** in a new chat session (no approvals, no
   questions) until the agent finishes; the output is `{text, sessionId, agent, model, accountId,
-  durationMs, hops}` — ask for JSON in the prompt to parse `text` downstream. `chain` is the
+  durationMs, hops}`, plus `outcome`, `summary` and `outputs` when the block declares outcomes or
+  outputs (below). `text` is always a string and templates never parse it. `chain` is the
   agent/model fallback order (take the models from `list_agents`); accounts are chosen by usage and
   switched on usage limits. An optional `profileId` (an Agent Profile's id from `list_agents`
   `profiles`) launches the block's new chat with that profile; absent, it is Global. A profile that
   is gone or cannot be prepared fails the block at once (never Global, no failover), and validation
   warns (`unknown_profile`) about a block naming a profile that no longer exists. Deleting a profile
   in the right rail lists the workflows whose agent blocks use it and asks before going ahead.
+- **Typed outcomes and outputs** replace "ask for JSON and parse it in a Code block". An agent
+  block may declare `outcomes: [{id, label?, description?}]` (2–12, ids `^[a-z][a-z0-9_]*`,
+  unique) and/or `outputs: [{name, type, values?, required?, description?}]` (≤ 20; `type`
+  `string`, `number`, `boolean`, `enum` with `values`, or `json`; `required` defaults to true).
+  With `outcomes`, each outcome is its own handle `outcome:<id>`: the run follows the one the agent
+  reported, and the other outcomes' edges are dead — no Code or Switch block needed. With `outputs`
+  only, the handles stay `success` / `error`. The prompt gets a protocol block naming the outcomes
+  and outputs, and the agent reports with `report_step_result` (chat-only, below). A turn that ends
+  with no report gets **one** reminder turn in the same chat; still none, the block fails with error
+  kind `no_report` (retryable: its `retry` and `error` edge apply). Read the values as
+  `{{ nodes.Review.output.outcome }}`, `{{ nodes.Review.output.outputs.pr_url }}`. A disabled agent
+  block with outcomes passes its input on through its **first** outcome, never taking a loop edge
+  there (a warning says so);
+  pinned data of a block with outcomes must include `outcome` (it picks the handle;
+  `pinned_outcome_missing` otherwise). Validation codes: `outcomes_count`, `duplicate_outcome`,
+  `outputs_count`, `duplicate_output`, `enum_values`, `description_too_long`,
+  `disabled_takes_first_outcome`, and `edge_invalid_handle` for a `success` edge from a block with
+  outcomes.
 - **`rename_node` rewrites every `{{ }}` reference** (and an agent's `session.fromNode`), **not a
   name inside a code block's JavaScript** — update that source yourself.
 - **Edit with `update_workflow` ops, never by recreating a workflow**, and call `get_workflow` first
   for the current revision.
+
+### Loop edges
+
+Connections run one way, except a **loop edge**: an edge with `loop: {maxLoops, session?}` from a
+block's output back to an earlier block, to repeat steps until a check passes (never once per item
+of a list). A `create_workflow` edge or a `connect` op takes `loop`; `set_loop {edgeId, loop}`
+changes an edge's settings in place (`loop: null` makes it ordinary again). `connections` show a
+loop edge as `Review (outcome:changes) ↺ Fix (loop: at most 3, same chat)`.
+
+- **Where it may go.** The target must run before the source through ordinary edges and is never a
+  trigger (`loop_not_ancestor`, `edge_target_no_input`); it may leave any output but `error`
+  (`loop_from_error`): an agent's outcome, a gate's choice, an If or Switch branch, a plain
+  `success`. That output carries the loop edge and nothing else (`loop_handle_shared`). `maxLoops`
+  is 1–20 (`loop_limit_range`). An ordinary edge back to an earlier block is a `cycle` error naming
+  that edge: make it a loop edge with a limit.
+- **Taking it.** When the source finishes on that output, its target and every block after the
+  target (the source included) — the *reset set* — run again as a new *pass*; blocks of the set
+  still running are stopped first (after a restart too), blocks before the target keep their
+  results, and a loop nested in the set gets a fresh budget.
+- **At its limit.** Taken after it has looped `maxLoops` times, the edge opens a **loop-limit gate**
+  on its source block, decided by the person: "<source> → <target> reached its limit (N)." with
+  choices `allow` ("Allow one more loop": that edge's limit goes up by one for this run and the
+  loop is taken) and `stop` ("Stop": the source pass fails with `loop_limit`, never retried; its
+  `error` edge runs, else the run fails). It is a gate like any other (see Gates: push, "Needs you",
+  `list_workflow_gates` with `source: "loop_limit"`, `decide_workflow_gate`); undecided after 7 days
+  it fails `loop_limit`.
+- **Sessions.** `session` (default `continue`) applies to every agent block of the reset set:
+  `continue` sends a follow-up turn into that block's chat from its previous pass, headed
+  "Workflow loop: pass N of up to M", with its prompt rendered again (the target also gets the
+  feedback; other blocks are told to re-check their earlier findings); `new` starts a new chat
+  whose prompt adds the feedback and the previous pass's report or answer. A chat that cannot
+  continue (closed, its agent unavailable, still busy) starts a new one and the pass records
+  `sessionNote: "new chat: previous session unavailable (<reason>)"`. A block whose own
+  `session` continues an upstream block's chat (`fromNode`) keeps doing so.
+- **Feedback** is what the source sent back: an agent's report summary, or a gate decision's choice
+  label and comment (an If or Switch sends none). The target reads it as `{{ loop.feedback }}`
+  (untrusted text: framed in prompts); `{{ loop.pass }}` is any block's pass, from 1.
+  `nodes.<Name>.output` is a block's latest pass.
+- **Runs.** `get_workflow_runs {runId}` lists the run's `loops` (`{edgeId, from, handle, to, used,
+  max, session}`), and each block run again its `pass`, `loopFeedback`, `sessionNote` and earlier
+  `passes` (status, handle, error, session, report summary; at most the last 10). A retry starts
+  every loop at 0 and reuses the latest pass of the blocks it keeps; a run failed with `loop_limit`
+  retried gets a fresh budget.
 
 ### Patch ops (`update_workflow`)
 
@@ -1950,7 +2020,8 @@ named by id or name everywhere.
 | `update_node` | `node`, `set: {name?, config?, position?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?}` | `set.config` merges **one level deep**: each top-level config key sent replaces that key whole (send the whole `prompt` object, the whole `rules` list), `null` removes it. `null` clears an optional field. A block's `id` and `type` never change. |
 | `remove_node` | `node` | Removes its edges (and pinned output) too. |
 | `rename_node` | `node`, `to` | Rewrites every `{{ nodes.<old>… }}` reference. |
-| `connect` | `source`, `sourceHandle?` (= `success`), `target` | The handle must be one the source has. |
+| `connect` | `source`, `sourceHandle?` (= `success`), `target`, `loop?: {maxLoops, session?}` | The handle must be one the source has. With `loop`, a loop edge back to an earlier block (see "Loop edges"). |
+| `set_loop` | `edgeId`, `loop: {maxLoops, session?}` or `null` | An edge's loop settings, in place (same id); `null` makes it an ordinary edge. |
 | `disconnect` | `edgeId`, or `source`, `sourceHandle?`, `target` | Without `sourceHandle`, every edge between the two goes. |
 | `set_settings` | `settings` | Merged; `notify` merged one level deeper. |
 | `set_project` | `project` | The same shape as `create_workflow`'s. |
@@ -1968,7 +2039,69 @@ run as it stands: `finished: true`, or `finished: false, timedOut: true` for a r
 (the run itself goes on; `get_workflow_runs {runId, waitSeconds}` later, or `cancel_workflow_run`).
 Agent blocks can take hours: for those, start without `wait` and check back. When the overlap policy skips the run
 (`overlap: "skip"` and a run already active) the answer is `{runId: null, skipped: "overlap"}`;
-`force: true` runs anyway.
+`force: true` runs anyway. When the active run that held it back waits on a gate, the answer says so
+(`skipDetail: "previous run is waiting on gate “…”"`); a run queued behind one carries the same
+`queued` note.
+
+### Gates
+
+A **gate** block pauses its run for a decision between named choices; each choice is an output
+handle `choice:<id>` (plus `error`). A loop edge at its limit opens the same kind of gate on its
+source block (`source: "loop_limit"`, person only; "Loop edges" above). Who decides is the block's
+`decider`:
+
+- **`human`** (the default): the person, in Orquester (a push, a "Needs you" row, a decision card in
+  the run view) — or from their own MCP client: an external `decide_workflow_gate` decides as the
+  person (recorded `decidedBy.kind: "external"`).
+- **`agent`**: a reviewer chat the gate starts with the agent block's machinery (chain, accounts,
+  Agent Profile, unattended). Its prompt is the decider prompt plus the question, details, choices
+  and the exact `decide_workflow_gate` call. If its turn ends without a decision it gets one
+  reminder; after that — or when it fails, is closed, or `maxMinutes` (default 60) passes — the gate
+  goes to the person (`escalated`).
+- **`launcher`**: the chat that started the run with `run_workflow` (a child run asks its top-level
+  run's launcher). The daemon queues a message into that chat — its next turn, never a steer — with
+  the exact call; and a `run_workflow {wait: true}` still waiting returns at once with
+  `waitingOnGate` and a `next` that names the call. A run started any other way (the GUI, REST, a
+  trigger), or whose chat is gone, asks the person. `startedBy` is the daemon's record of the
+  calling chat — never an argument.
+
+Rules: only the assigned chat may decide (any other chat is refused, `GATE_NOT_DECIDER`, with no
+card); for it the call is Act and opens no approval card, even from another project or a
+workflow-owned chat — except that a planning turn gets the usual planning refusal. An agent must
+`comment`; a choice with `comment: "required"` needs one from anyone. The person may always decide
+first. The **first decision wins**: it is persisted before the run moves on, and a later call
+answers `alreadyDecided: true` with the decision that stands. `escalate: true` (agent deciders
+only, with a comment) hands the gate to the person.
+
+Time: the agent phase lasts `maxMinutes`; the person phase lasts `timeout.minutes` from its start
+(then `timeout.then`: take a choice, `decidedBy.kind: "timeout"`, or fail `gate_expired`, never
+retried), at most 7 days. Gates survive daemon restarts (both deadlines are re-armed), hold no
+concurrency slot, and a run whose every active block waits on a gate, a timer or such a child run
+is **parked**: it does not count toward the global run cap, and parked time is not counted against
+`runTimeoutMinutes`. The gate's output is `{choice, comment?, decidedBy: {kind, label, sessionId?},
+decidedAt, escalated}`. A retry asks every gate again; a disabled gate takes its first choice; a
+pinned gate needs a `choice`; a test run's gate is answered by the person in the editor (no push,
+no agent). `get_workflow_runs {runId}` lists the run's `gates` with their decisions.
+
+**Typed inputs.** A manual trigger may declare `inputs`: an ordered list of `{name, type: "string" |
+"number" | "boolean" | "enum", values? (enum: 1–50), required? (default false), default?,
+description? (≤ 300 characters), multiline? (string only)}`, at most 30. `get_workflow` and
+`list_workflows` show them as `inputs: [{name, type, required, values?, default?, description?,
+multiline?}]`, so an agent knows what to pass. When they are declared, a run's `input` must be an
+object of exactly those names (absent or `null` counts as `{}`): a default fills an absent input; a
+missing required input (or an empty text for one), a wrong type, a value not among an enum's
+`values` and an unknown key are refused — the strings `"42"` and `"true"` / `"false"` are accepted
+for a number and a boolean, nothing else is converted. Every problem is listed at once, each naming
+the input and the fix (``input `env` must be one of: stg, prd``): `run_workflow` fails with
+`INVALID_INPUT`, its message listing them and `detail.inputErrors` holding `[{input?, message}]`. In
+a chat this happens before any approval card opens; the card then shows the input as the run will
+store it, defaults applied. The run's `{{ trigger.input }}` is that validated object. The same check
+runs for Run now in the GUI and the REST route; a retry reuses its source run's input unchanged, a
+test run applies defaults without requiring the rest, and a Run workflow block's value is checked
+against the child's declared inputs (the block fails with `validation` and `detail.inputErrors`).
+Without declared inputs any JSON is accepted, as before. Validation warns (`undeclared_input`) when
+an expression reads `trigger.input.<name>` (or the trigger's `output.input.<name>`) for a name the
+trigger does not declare.
 
 **Sub-workflows are frozen when a run starts.** A top-level run records the definition of every
 workflow its Run workflow blocks reach (recursively) as it starts, and each child run runs that
@@ -1995,8 +2128,9 @@ chats, which can already read the secrets store, so a Code edit under a grant re
 A run's view lists every block in the definition's order: `status` (`pending`, `queued`,
 `running`, `waiting`, `succeeded`, `failed`, `skipped`, `cancelled`), `handle` (the output it
 finished on), `attempt`, `error {kind, message}`, `warnings`, and for an agent block its
-`sessionId` (open it with `read_transcript`), `hops` (account switches and handoffs) and
-`selection` (why that account). **Outputs are fitted to one result**: small ones come back whole
+`sessionId` (open it with `read_transcript`), `hops` (account switches and handoffs),
+`selection` (why that account) and — for a block with outcomes or outputs — `report {outcome?,
+summary, outputs?, reportedAt}`, the agent's latest valid `report_step_result`. **Outputs are fitted to one result**: small ones come back whole
 as `output`, and when they do not all fit, the largest become `outputText` — the head of their
 JSON — with `outputTruncated: true` (the daemon's own preview cut sets it too). Read a whole
 output with `get_workflow_runs {runId, nodeId}`: it answers `output` when it fits, else a window of
@@ -2031,6 +2165,78 @@ Errors keep the daemon's codes, with a hint: `WORKFLOW_NOT_FOUND` (`list_workflo
 already ended), `SECRET_INVALID`, `LIMIT_EXCEEDED`, `WORKFLOWS_UNAVAILABLE` (the daemon cannot
 write its workflows file right now).
 
+### Reporting a step's result (chat-only): `report_step_result`
+
+| Tool | Input | Returns |
+|---|---|---|
+| `report_step_result` | `outcome?` (one of the step's outcome ids), `summary` (≤ 2 000 characters), `outputs?` (the step's declared outputs by name) | the text `Recorded. End your turn now.` |
+
+Advertised to every chat (there is no per-chat tool switch) and to no external client; Act tier
+with nothing to card, so it never opens an approval card — a workflow-owned chat included. It
+succeeds only for the chat that is the current session of a **running** agent block that declares
+`outcomes` or `outputs`: the daemon matches the calling chat (the request's agent principal, never
+an argument) against the sessions that block's pass recorded, failover sessions included — not the
+session's owner, since a `session: continue` block reuses another block's chat. If two running
+passes held the same chat, the most recently started owns the report. Anyone else is refused
+`NOT_A_WORKFLOW_STEP`: "This chat is not a workflow step that reports a result."
+
+The call is checked against the block's declarations and refused `INVALID_REPORT` with **every**
+problem and what is allowed (``outcome "lgtm" is not one of this step's outcomes: use `approved` or
+`changes_requested`.``, ``outputs.pr_url is required: a string.``, unknown outputs, enum values);
+`"42"` and `"true"`/`"false"` are accepted for number and boolean outputs, nothing else is coerced.
+A valid call is stored on the block's run (persisted before the answer); a later valid call in the
+same pass replaces it until the block settles. The tool does not end the turn; the agent should.
+Route: `POST /api/workflow-step-report` (`workflowRoutes.stepReport`), honoured only with an
+in-chat agent principal.
+
+### Worked example: fix → review → loop → approve
+
+The request: *"Have Claude implement a task, have a second pass review it until it approves (at
+most three rounds of changes), then ask me before merging."* This is the authoring guide's recipe
+"Fix, review, loop back on requested changes, then a person approves the merge":
+
+```
+create_workflow {
+  "name": "Fix and review", "project": { "kind": "existing", "project": "acme/api" },
+  "nodes": [
+    { "type": "trigger.manual", "name": "Start" },
+    { "type": "agent", "name": "Fix", "config": {
+        "prompt": { "kind": "text", "text": "Implement in {project}: {{ trigger.input.task }}. Commit on a new branch; do not merge." },
+        "chain": [{ "agent": "claude", "model": "default" }] } },
+    { "type": "agent", "name": "Review", "config": {
+        "prompt": { "kind": "text", "text": "Review the branch Fix committed for: {{ trigger.input.task }}. Approve it, or request changes and say which." },
+        "chain": [{ "agent": "claude", "model": "default" }],
+        "outcomes": [{ "id": "approved", "label": "Approved" },
+                     { "id": "changes_requested", "label": "Changes requested", "description": "Something must change first; the summary says what." }] } },
+    { "type": "gate", "name": "Approve", "config": {
+        "question": "Merge the fix for: {{ trigger.input.task }}?", "details": "{{ nodes.Review.output.summary }}",
+        "choices": [{ "id": "approve", "label": "Approve" }, { "id": "reject", "label": "Reject", "comment": "optional" }] } },
+    { "type": "agent", "name": "Merge", "config": {
+        "prompt": { "kind": "text", "text": "Merge the branch Fix committed into {branch}." },
+        "chain": [{ "agent": "claude", "model": "default" }] } },
+    { "type": "stop", "name": "Rejected", "config": { "as": "failure", "message": "Rejected: {{ nodes.Approve.output.comment | default(\"no comment\") }}" } }
+  ],
+  "edges": [
+    { "source": "Start", "target": "Fix" },
+    { "source": "Fix", "target": "Review" },
+    { "source": "Review", "sourceHandle": "outcome:changes_requested", "target": "Fix", "loop": { "maxLoops": 3, "session": "continue" } },
+    { "source": "Review", "sourceHandle": "outcome:approved", "target": "Approve" },
+    { "source": "Approve", "sourceHandle": "choice:approve", "target": "Merge" },
+    { "source": "Approve", "sourceHandle": "choice:reject", "target": "Rejected" }
+  ]
+}
+```
+
+- Review declares `outcomes`, so its handles are `outcome:approved`, `outcome:changes_requested`
+  and `error` (no `success`); it reports with `report_step_result {outcome, summary}`.
+- `outcome:changes_requested` carries only the loop edge: Fix and Review run again, Fix as a
+  follow-up turn in its own chat with Review's summary as feedback (`{{ loop.feedback }}`).
+  A fourth request for changes opens the loop-limit gate (`allow` / `stop`, above).
+- `outcome:approved` reaches the Approve gate (decider: the person). While it waits,
+  `list_workflow_gates` lists it and `decide_workflow_gate {runId, nodeName: "Approve", choice:
+  "approve"}` decides it (from your client, as the person); `reject` ends the run failed with the
+  comment.
+
 ### Worked example: the Jira fixer
 
 The request: *"Every 15 minutes, fetch new Jira tickets labelled orquester-fix; if there are none,
@@ -2055,10 +2261,11 @@ create_workflow {
     { "type": "stop", "name": "NothingToDo", "config": { "as": "success", "message": "No new tickets" } },
     { "type": "agent", "name": "FixTickets",
       "config": {
-        "prompt": { "kind": "text", "text": "Fix these Jira tickets in {project} on {branch}, one commit per ticket (\"KEY: …\"). Do not push.\n{{ nodes.FetchTickets.output.tickets | json }}\nReply with ONLY this JSON: {\"fixed\": [\"KEY-1\"]}" },
-        "chain": [{ "agent": "claude", "model": "opus" }] } },
+        "prompt": { "kind": "text", "text": "Fix these Jira tickets in {project} on {branch}, one commit per ticket (\"KEY: …\"). Do not push.\n{{ nodes.FetchTickets.output.tickets | json }}" },
+        "chain": [{ "agent": "claude", "model": "opus" }],
+        "outputs": [{ "name": "fixed", "type": "json", "description": "The keys of the tickets you fixed, e.g. [\"KEY-1\"]." }] } },
     { "type": "code", "name": "MarkDone",
-      "config": { "source": "export default async function ({ nodes, secrets }) {\n  const { fixed } = JSON.parse(/\\{[\\s\\S]*\\}/.exec(nodes.FixTickets.output.text)[0]);\n  for (const key of fixed) {\n    await fetch(`${secrets.JIRA_BASE_URL}/rest/api/3/issue/${key}/transitions`, { method: \"POST\", headers: { Authorization: `Basic ${secrets.JIRA_AUTH}`, \"Content-Type\": \"application/json\" }, body: JSON.stringify({ transition: { id: secrets.JIRA_DONE_ID } }) });\n  }\n  return { moved: fixed };\n}\n" } }
+      "config": { "source": "export default async function ({ nodes, secrets }) {\n  const fixed = nodes.FixTickets.output.outputs.fixed ?? [];\n  for (const key of fixed) {\n    await fetch(`${secrets.JIRA_BASE_URL}/rest/api/3/issue/${key}/transitions`, { method: \"POST\", headers: { Authorization: `Basic ${secrets.JIRA_AUTH}`, \"Content-Type\": \"application/json\" }, body: JSON.stringify({ transition: { id: secrets.JIRA_DONE_ID } }) });\n  }\n  return { moved: fixed };\n}\n" } }
   ],
   "edges": [
     { "source": "Every15Min", "target": "FetchTickets" },
@@ -2114,7 +2321,7 @@ run_workflow { "workflowId": "5f0c…", "revision": 1, "wait": true, "timeoutSec
       { "name": "FetchTickets", "status": "succeeded", "output": { "tickets": [{ "key": "PROJ-7", "summary": "…" }] } },
       { "name": "HasTickets", "status": "succeeded", "handle": "true", "output": { /* … */ } },
       { "name": "NoTickets", "status": "skipped" },
-      { "name": "FixTickets", "status": "succeeded", "sessionId": "c-19…", "hops": [ /* … */ ], "output": { "text": "{\"fixed\":[\"PROJ-7\"]}", /* … */ } },
+      { "name": "FixTickets", "status": "succeeded", "sessionId": "c-19…", "hops": [ /* … */ ], "report": { "summary": "Fixed PROJ-7.", "outputs": { "fixed": ["PROJ-7"] }, /* … */ }, "output": { "text": "Fixed PROJ-7.", "outputs": { "fixed": ["PROJ-7"] }, /* … */ } },
       { "name": "MarkDone", "status": "succeeded", "output": { "moved": ["PROJ-7"] } },
       { "name": "NotifySlack", "status": "succeeded", "output": { "status": 200, /* … */ } },
       { "name": "Failed", "status": "skipped" } ] }
@@ -2322,7 +2529,7 @@ A **desktop** is a tab that runs Linux GUI apps on the daemon's host: a virtual 
 (TigerVNC's `Xvnc`, the Openbox window manager, PulseAudio and a D-Bus session bus) that the user
 sees and controls live in the tab, with sound. Several apps can share one desktop — one display,
 one audio output — and the tab's window bar switches between their windows. Desktops live in their
-own tmux session, so they survive daemon restarts. These 2 tools are clients of the daemon's
+own tmux session, so they survive daemon restarts. These 3 tools are clients of the daemon's
 `/api/desktops*` routes, the tab's own: a desktop an agent opens appears as a tab in every client,
 and one the user opens is listed here.
 
@@ -2332,13 +2539,16 @@ and one the user opens is listed here.
 |---|---|---|
 | `get_desktops` | `project?` (omit for every project), `desktopId?`, `appId?` (with `desktopId`), `host?` | `{desktops: [Desktop]}`; `{desktopId}`: `{desktop: Desktop}`; `{desktopId, appId}`: `{desktopId, appId, text, truncated?}`; `host: true` adds `host: {available, audioAvailable, tools: [{name, path, required}], ffmpegPulse, ffmpegOpus, renderNode, tmuxUsable, warnings, installHint}` |
 | `control_desktop` | `action` (`"open"` \| `"launch_app"` \| `"stop_app"` \| `"close_window"` \| `"close"`), `project?`, `desktopId?`, `appId?`, `windowId?`, `command?`, `cwd?`, `env?`, `title?`, `size?`, `renderThreads?`, `force?`, `reason?` | `open`: `{desktop: Desktop}`; `launch_app`: `{app: App}`; `stop_app`: `{stopped: true, desktopId, appId, force}`; `close_window`: `{done: true, desktopId, windowId, action}`; `close`: `{closed: true, desktopId}` |
+| `desktop_action` | `desktopId`, `action` (`"screenshot"` \| `"wait"` \| `"move"` \| `"click"` \| `"mouse_down"` \| `"mouse_up"` \| `"drag"` \| `"scroll"` \| `"key"` \| `"type"` \| `"clipboard_get"` \| `"clipboard_set"`), and the action's fields (below) | `{desktopId, action, summary, seq, display: {width, height}, cursor?, changed?, timed_out?, waited_ms?, text?, screenshot?: {screenshot_id, width, height, scale, origin, mime_type}, note?, desktopRef}`; with a screenshot also an MCP image block (PNG, or a JPEG scaled to fit) |
 
 - **Desktop** is `{id, projectPath, title, order, createdAt, display, size, renderThreads, status:
   "starting" | "running" | "stopped" | "error", error?, audio: "available" | "unavailable", apps:
   [App], windows: [Window], activeWindowId}`; **App** is `{id, desktopId, command, cwd, env, status:
   "starting" | "running" | "exited", exitCode, startedAt, exitedAt}`; **Window** is `{id, title,
   appId, wmClass, maximized}` — `id` is the X window id in `0x…` hex, and `appId` is null for a
-  window no launched app owns.
+  window no launched app owns. `bounds: {x, y, width, height}` is its frame on the screen (display
+  pixels), absent while unknown. `control` is `null`, or `{controller: "agent" | "user", actor?,
+  since}`: who drives the desktop's input.
 - **Check `get_desktops {host: true}` first.** Desktops need `Xvnc`, `openbox`, `dbus-daemon` and a tmux
   ≥ 3.2; sound needs PulseAudio and an ffmpeg with `pulse` input and `libopus`. Without the
   required tools `open` answers `DESKTOP_UNAVAILABLE` and its message carries the host's
@@ -2355,9 +2565,30 @@ and one the user opens is listed here.
 - **`close_window`** asks the app to close (`_NET_CLOSE_WINDOW`), so it may prompt to save instead.
   `stop_app` sends SIGTERM to the app's process group, then SIGKILL after 5 s (at once with
   `force`). `close` stops every app and removes the tab everywhere — unsaved work is lost.
-  Raising or maximizing a window is the user's, in the tab (no tool sees the screen).
+  Raising or maximizing a window is the user's, in the tab (or `desktop_action`'s clicks).
 - **`get_desktops {desktopId, appId}`** returns the app's recent stdout and stderr (the daemon keeps the last
   64 KiB); a log too long for one result keeps its tail, `truncated: true`.
+- **`desktop_action`** fields per action (any other field is `INVALID_ARGUMENT`): `screenshot`
+  (`region?` or `window_id?` crops it, `max_size?` 320–3840 bounds the long edge, default 1920);
+  `wait` (`for?`: `"idle"` (default: still for `idle_ms?` 100–10 000, default 500) or `"change"`
+  (after `since?`, a `seq`), `region?`, `timeout_ms?` ≤ 60 000, default 10 000; a timeout returns
+  `timed_out: true`); `move` (`x`, `y`), `click` (`x?`, `y?`, `button?`, `count?` 1–3,
+  `modifiers?`), `mouse_down` / `mouse_up` (`x?`, `y?`, `button?`), `drag` (`x`, `y`, `to_x`,
+  `to_y`, `button?`, `modifiers?`), `scroll` (`direction`, `amount?` 1–50, default 3, `x?`, `y?`,
+  `modifiers?`): points default to the pointer, and with `screenshot_id` are pixels of that
+  screenshot (mapped through its `scale` and `origin`); `key` (`keys`: `"ctrl+shift+t"`, `"Return"`,
+  `repeat?` 1–20); `type` (`text`, ≤ 4 000 characters, `\n` is Return); `clipboard_get`;
+  `clipboard_set` (`text`, ≤ 1 MiB). Input actions take `screenshot: true` (and `max_size?`): the
+  result then carries a screenshot taken once the screen was still for 300 ms (at most 3 s).
+  Chat tiers: Read for `screenshot`, `wait` and `clipboard_get`, Act otherwise; no action raises a
+  card. Every action shows in the tab's activity log (typed text cut to 60 characters, clipboard
+  contents never). `desktopRef: {desktopId, projectPath, screenshotId?, action, summary}` is kept
+  through result slimming, so the chat row links the desktop and its screenshot after a reload.
+- **Control**: input claims control for the caller (the tab shows "<agent> is controlling"); it
+  lapses 2 minutes after the agent's last action. While the user has taken over, input fails
+  `DESKTOP_CONTROLLED_BY_USER` (reads still work): wait, or ask them to give it back. A
+  `screenshot_id` taken before the display was resized fails `DESKTOP_RESIZED` (take a new one); a
+  stopped desktop is `DESKTOP_NOT_RUNNING`.
 - **Errors**: the daemon's codes pass through (`DESKTOP_UNAVAILABLE`, a 404 `NOT_FOUND` for an
   unknown desktop, app or window, a 403 `FORBIDDEN` for a `cwd` outside the sandbox), with a hint
   naming the tool that lists the ids.
