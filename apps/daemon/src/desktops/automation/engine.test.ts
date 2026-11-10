@@ -636,6 +636,19 @@ describe("DesktopAutomation damage and waits", () => {
     await engine.close();
   });
 
+  test("a region is watched by the 16×16 blocks it touches: a live wait and one since an earlier seq agree at its edge", async () => {
+    const { server, engine } = await open();
+    // The region (44–47) and the damage (40–41) share block 32–47 but no pixel.
+    const edge = { x: 44, y: 0, width: 4, height: 4 };
+    const live = engine.wait({ for: "change", idleMs: 0, region: edge, timeoutMs: 1_000 });
+    server.damage({ x: 40, y: 0, width: 2, height: 2 });
+    await roundTrip(engine);
+    mock.timers.tick(1_000);
+    assert.deepEqual(await live, { changed: true, timedOut: false, seq: 1, waitedMs: 0 });
+    assert.deepEqual(await engine.wait({ for: "change", idleMs: 0, since: 0, region: edge, timeoutMs: 1_000 }), { changed: true, timedOut: false, seq: 1, waitedMs: 0 });
+    await engine.close();
+  });
+
   test("a resize bumps the sequence, notifies listeners and ends change waits; an abort rejects", async () => {
     const { server, engine } = await open();
     const sizes: unknown[] = [];

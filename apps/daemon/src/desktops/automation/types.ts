@@ -42,6 +42,7 @@ export interface DesktopWaitOptions {
   notBefore?: number;
   /** change: a change after this sequence (default: the current one). */
   since?: number;
+  /** Display pixels, watched at the damage grid's 16×16 block granularity (a change in a block it touches counts). */
   region?: DesktopRect;
   timeoutMs: number;
   signal?: AbortSignal;

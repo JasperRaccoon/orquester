@@ -4,7 +4,8 @@
 // - captures the screen (GetImage in bands, converted to RGB through the root visual's masks),
 // - follows every change through a RawRectangles DAMAGE on the root: each DamageNotify bumps the
 //   screen sequence and stamps the 16×16 blocks it covers, so waits for "idle" and "change" run
-//   on events plus one deadline timer, never by polling,
+//   on events plus one deadline timer, never by polling; a wait's region is watched at that block
+//   granularity (damage in a block the region touches counts, live and from the grid alike),
 // - injects input with XTEST only, binding a keysym the keymap lacks to a spare keycode (kept in
 //   an LRU of 8, restored when evicted or on close), and releasing whatever an input call pressed
 //   even when it fails halfway,
@@ -120,7 +121,7 @@ interface Keyboard {
 }
 
 interface Waiter {
-  /** Display pixels, or null for the whole screen. */
+  /** Display pixels (watched by the 16×16 blocks it touches), or null for the whole screen. */
   region: DesktopRect | null;
   /** Damage (or a resize) touched the region; `seq` is the new screen sequence. */
   changed(seq: number): void;
@@ -181,7 +182,14 @@ function pixelConverter(setup: SetupInfo): PixelConverter {
   };
 }
 
-const intersects = (a: DesktopRect, b: DamageRect): boolean => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+interface BlockRange {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+}
+
+const overlaps = (a: BlockRange, b: BlockRange): boolean => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
 
 /** STRING is Latin-1: code points past U+00FF become "?". */
 function latin1(text: string): Buffer {
@@ -482,7 +490,7 @@ class X11DesktopAutomation implements DesktopAutomation {
   }
 
   /** The grid blocks a rectangle covers (clipped to the screen), as column/row ranges. */
-  private blocks(rect: DamageRect | null): { x0: number; x1: number; y0: number; y1: number } {
+  private blocks(rect: DamageRect | null): BlockRange {
     if (!rect) return { x0: 0, x1: this.gridColumns, y0: 0, y1: this.gridRows };
     return {
       x0: Math.max(0, Math.floor(rect.x / BLOCK)),
@@ -511,14 +519,16 @@ class X11DesktopAutomation implements DesktopAutomation {
   private onDamage(area: DamageRect): void {
     this.sequence += 1;
     const now = Date.now();
-    const { x0, x1, y0, y1 } = this.blocks(area);
-    for (let y = y0; y < y1; y++) {
-      for (let x = x0; x < x1; x++) {
+    const damaged = this.blocks(area);
+    for (let y = damaged.y0; y < damaged.y1; y++) {
+      for (let x = damaged.x0; x < damaged.x1; x++) {
         this.blockTime[y * this.gridColumns + x] = now;
         this.blockSeq[y * this.gridColumns + x] = this.sequence;
       }
     }
-    for (const waiter of [...this.waiters]) if (!waiter.region || intersects(waiter.region, area)) waiter.changed(this.sequence);
+    // By blocks, as the grid the waits start from records it: a region sees damage in any 16×16
+    // block it touches, so a live wait and one answered from the grid agree at the region's edges.
+    for (const waiter of [...this.waiters]) if (!waiter.region || overlaps(this.blocks(waiter.region), damaged)) waiter.changed(this.sequence);
     // One DamageSubtract per batch of notifications keeps the server's damage region small.
     if (this.subtractQueued) return;
     this.subtractQueued = true;
