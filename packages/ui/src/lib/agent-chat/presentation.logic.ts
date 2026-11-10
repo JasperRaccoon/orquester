@@ -563,6 +563,7 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   // desktops
   get_desktops: "Checked desktops",
   control_desktop: "Controlled a desktop",
+  desktop_action: "Used a desktop",
   // secret-files
   secret_files_status: "Checked secret files",
   push_secret_files: "Pushed secret files",

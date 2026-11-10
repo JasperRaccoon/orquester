@@ -25,7 +25,7 @@ const MAX_KEYS_CHARS = 200;
 /** No display is larger (the record schema's bound); coordinates beyond it are nonsense. */
 const MAX_COORDINATE = 16_384;
 
-const singleLine = (value: string): boolean => !/[\u0000-\u001f\u007f  ]/.test(value);
+const singleLine = (value: string): boolean => !/[\u0000-\u001f\u007f\u2028\u2029]/.test(value);
 
 const label = z.string().trim().min(1).max(MAX_LABEL_CHARS).refine(singleLine, "must be a single line");
 const coordinate = z.number().finite().min(0).max(MAX_COORDINATE);

@@ -185,11 +185,16 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
  * - `deviceRef`: the device a devices tool acted on, and a screenshot it kept
  *   (`DeviceToolReference`, `../devices.ts`: `{device, leaseId?, screenshotId?}`),
  *   read back with `deviceToolReferenceOfActivityData`.
+ * - `desktopRef`: the desktop `desktop_action` acted on, a screenshot it kept, and
+ *   the row's words (`DesktopToolReference`, `../desktops.ts`: `{desktopId,
+ *   projectPath, screenshotId?, action?, summary?}`).
  * - `imageRef`: the images a `show_image` / `generate_image` call put in the
  *   chat (`ImageToolReference`, `chat-images.ts`: stored attachment ids, never
  *   bytes), read back with `imageToolReferenceOfActivityPayload`.
  */
 export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = [
+  // Desktops: `desktop_action` (`DesktopToolReference`).
+  "desktopRef",
   // Devices: `open_device`, `device_action`, … (`DeviceToolReference`).
   "deviceRef",
   "htmlRender",
