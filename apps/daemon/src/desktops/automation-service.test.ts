@@ -35,7 +35,7 @@ interface Harness {
   engine(): FakeDesktopAutomation;
 }
 
-async function harness(t: TestContext): Promise<Harness> {
+async function harness(t: TestContext, now?: () => Date): Promise<Harness> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-desktop-automation-"));
   t.after(() => rm(appdir, { recursive: true, force: true }));
   const h: Harness = {
@@ -72,6 +72,7 @@ async function harness(t: TestContext): Promise<Harness> {
       h.controlChanges += 1;
     },
     actionLogged: (payload) => h.logged.push(payload),
+    ...(now ? { now } : {}),
     logger: { warn: () => {} }
   });
   t.after(() => h.service.shutdown());
@@ -102,6 +103,9 @@ test("an action is checked before anything runs: a misplaced field, a bad value 
     { action: "screenshot", region: { x: 0, y: 0, width: 10, height: 10 }, windowId: "0x400001" },
     { action: "wait", since: 3 },
     { action: "key", keys: "Return", repeat: 21 },
+    // What only the engine knew: no such key, a C1 control character.
+    { action: "key", keys: "ctrl+bogus" },
+    { action: "type", text: "next\u0085line" },
     { action: "click", actor: { kind: "chat", threadId: "t1", label: "" } }
   ] as const) {
     const error = await refusal(act(h, request as never));
@@ -110,6 +114,7 @@ test("an action is checked before anything runs: a misplaced field, a bad value 
   }
   assert.equal(h.engines.length, 0);
   assert.equal(h.logged.length, 0, "a malformed request is not an action");
+  assert.deepEqual([h.service.control("d1"), h.controlChanges], [null, 0], "nor does it take control");
   // Bounds need the display: checked once the engine is open, before any input.
   const outside = await refusal(act(h, { action: "click", x: 1280, y: 10 }));
   assert.equal(outside.code, "INVALID_ARGUMENT");
@@ -174,6 +179,29 @@ test("input is refused while the user has control and reads still run; an agent'
   assert.equal(h.controlChanges, changes + 1, "the lapse goes out as an update");
 });
 
+test("the user taking over stops the agent's input in flight: it fails DESKTOP_CONTROLLED_BY_USER", async (t) => {
+  const h = await harness(t);
+  await act(h, { action: "screenshot" });
+  let entered!: () => void;
+  const inType = new Promise<void>((resolve) => (entered = resolve));
+  let finish!: () => void;
+  h.engine().duringType = (signal) =>
+    new Promise<void>((resolve, reject) => {
+      finish = resolve;
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      entered();
+    });
+  const typing = act(h, { action: "type", text: "a long text" });
+  await inType;
+  h.service.setControl("d1", "user");
+  // Were the input not stopped, it would end well now.
+  finish();
+  const stopped = await refusal(typing);
+  assert.deepEqual([stopped.status, stopped.code], [409, "DESKTOP_CONTROLLED_BY_USER"]);
+  assert.deepEqual(h.logged.at(-1)!.entry.ok, false);
+  assert.equal(h.service.control("d1")?.controller, "user");
+});
+
 test("one engine per desktop: opened once, replaced after its connection drops, closed when idle 5 minutes or released", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const h = await harness(t);
@@ -192,4 +220,55 @@ test("one engine per desktop: opened once, replaced after its connection drops, 
   const stopped = await refusal(act(h, { action: "screenshot" }));
   assert.deepEqual([stopped.status, stopped.code], [409, DESKTOP_NOT_RUNNING_CODE]);
   assert.equal(h.engines.length, 3);
+});
+
+test("daemon shutdown waits for the automations to close, at most a second", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await harness(t);
+  await act(h, { action: "screenshot" });
+  let closed!: () => void;
+  h.engine().closing = new Promise<void>((resolve) => (closed = resolve));
+  let done = false;
+  const shutdown = h.service.shutdown().then(() => (done = true));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(done, false, "the close is still running");
+  closed();
+  await shutdown;
+  assert.equal(h.engine().closes, 1);
+
+  // A close that never ends holds shutdown back for a second only.
+  const other = await harness(t);
+  await act(other, { action: "screenshot" });
+  other.engine().closing = new Promise<void>(() => {});
+  const bounded = other.service.shutdown();
+  t.mock.timers.tick(1_000);
+  await bounded;
+});
+
+test("a desktop's seq only rises, across an engine reopen and a daemon restart; a since from an earlier engine counts as changed", async (t) => {
+  let clock = Date.parse("2026-11-10T12:00:00.000Z");
+  const h = await harness(t, () => new Date(clock));
+  const first = (await act(h, { action: "screenshot" })).seq;
+  // Its connection drops: the next action opens a new engine, which counts from its own start.
+  h.engine().closed = true;
+  const reopened = (await act(h, { action: "screenshot" })).seq;
+  assert.equal(h.engines.length, 2);
+  assert.ok(reopened > first, `${reopened} > ${first}`);
+  assert.equal((await act(h, { action: "wait", for: "change", since: first })).changed, true, "the new engine cannot tell what changed since");
+  assert.equal((await act(h, { action: "wait", for: "change", since: reopened })).changed, false);
+
+  clock += 1;
+  const restarted = await harness(t, () => new Date(clock));
+  assert.ok((await act(restarted, { action: "screenshot" })).seq > reopened, "a restarted daemon numbers above the run before");
+});
+
+test("an engine that owns the clipboard is not closed when idle; once another client takes it, it is", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await harness(t);
+  await act(h, { action: "clipboard_set", text: "copied" });
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(h.engine().closes, 0, "closing would lose the clipboard");
+  h.engine().ownsClipboard = false;
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(h.engine().closes, 1);
 });

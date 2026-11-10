@@ -559,8 +559,12 @@ const desktopAction = defineTool({
     checkDesktopAction(args);
     const { api } = ctx;
     const desktop = await findDesktop(api, args.desktopId);
+    const request = actionRequest(args, actorOf(ctx.caller));
+    // Abortable where the daemon offers it: the call going away ends a wait and stops a long type.
     const result = expectDesktopOk<DesktopActionResponse>(
-      await api.request("POST", desktopRoutes.actions(desktop.id), { body: actionRequest(args, actorOf(ctx.caller)) })
+      api.desktopAction
+        ? await api.desktopAction(desktop.id, request, { signal: ctx.signal })
+        : await api.request("POST", desktopRoutes.actions(desktop.id), { body: request })
     );
     const shot = result.screenshot;
     const value: Record<string, unknown> = {

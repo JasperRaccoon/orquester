@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { MAX_SERVER_MESSAGE_BYTES, X11Error } from "../x11/connection.ts";
 import { encodeSelectionNotify } from "../x11/protocol.ts";
 import { openDesktopAutomation } from "./engine.ts";
+import { pixelsToRgb } from "./pixels.ts";
 import { DesktopAutomationError, type DesktopAutomation } from "./types.ts";
 
 const ROOT = 0x1e5;
@@ -543,6 +544,25 @@ describe("DesktopAutomation input", () => {
     await engine.close();
   });
 
+  test("an aborted signal stops input between its steps and releases what it pressed; a call queued with it never starts", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { server, engine } = await open();
+    const takenOver = new AbortController();
+    const dragged = engine.drag({ x: 0, y: 0 }, { x: 50, y: 40 }, 1, ["ctrl"], takenOver.signal);
+    const queued = engine.click(5, 5, 1, 1, [], takenOver.signal);
+    // The press, then the barrier before the first step.
+    await server.until(() => server.inputs.some((input) => input.type === "ButtonPress") && server.requests.at(-1)?.opcode === 43);
+    await drain();
+    const reason = new Error("the user took over");
+    takenOver.abort(reason);
+    t.mock.timers.tick(20);
+    await assert.rejects(dragged, (error: unknown) => error === reason);
+    await assert.rejects(queued, (error: unknown) => error === reason);
+    assert.deepEqual(server.inputs.filter((input) => input.type === "MotionNotify").map(({ x, y }) => [x, y]), [[0, 0]], "no step after the abort, and no click");
+    assert.deepEqual(server.held(), []);
+    await engine.close();
+  });
+
   test("click holds modifiers around count clicks 60 ms apart; mouse_down stays held until mouse_up or close", async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const { server, engine } = await open();
@@ -586,8 +606,16 @@ describe("DesktopAutomation damage and waits", () => {
     assert.equal(settled, false, "still 300 ms after the change inside the region");
     mock.timers.tick(200);
     assert.deepEqual(await waited, { changed: true, timedOut: false, seq: 2, waitedMs: 700 });
-    // Already still: at once.
-    assert.deepEqual(await engine.wait({ for: "idle", idleMs: 100, timeoutMs: 1_000 }), { changed: false, timedOut: false, seq: 2, waitedMs: 0 });
+    // Already still: still for idleMs from the wait's start, not from the last change long before.
+    let still = false;
+    const fromNow = engine.wait({ for: "idle", idleMs: 100, timeoutMs: 1_000 }).finally(() => (still = true));
+    mock.timers.tick(99);
+    await roundTrip(engine);
+    assert.equal(still, false, "an already still screen still waits idleMs");
+    mock.timers.tick(1);
+    assert.deepEqual(await fromNow, { changed: false, timedOut: false, seq: 2, waitedMs: 100 });
+    // A notBefore earlier than the last change counts from that change.
+    assert.deepEqual(await engine.wait({ for: "idle", idleMs: 100, notBefore: 0, timeoutMs: 1_000 }), { changed: false, timedOut: false, seq: 2, waitedMs: 0 });
     await engine.close();
   });
 
@@ -628,6 +656,19 @@ describe("DesktopAutomation damage and waits", () => {
     await engine.close();
   });
 
+  test("a region is watched by the 16×16 blocks it touches: a live wait and one since an earlier seq agree at its edge", async () => {
+    const { server, engine } = await open();
+    // The region (44–47) and the damage (40–41) share block 32–47 but no pixel.
+    const edge = { x: 44, y: 0, width: 4, height: 4 };
+    const live = engine.wait({ for: "change", idleMs: 0, region: edge, timeoutMs: 1_000 });
+    server.damage({ x: 40, y: 0, width: 2, height: 2 });
+    await roundTrip(engine);
+    mock.timers.tick(1_000);
+    assert.deepEqual(await live, { changed: true, timedOut: false, seq: 1, waitedMs: 0 });
+    assert.deepEqual(await engine.wait({ for: "change", idleMs: 0, since: 0, region: edge, timeoutMs: 1_000 }), { changed: true, timedOut: false, seq: 1, waitedMs: 0 });
+    await engine.close();
+  });
+
   test("a resize bumps the sequence, notifies listeners and ends change waits; an abort rejects", async () => {
     const { server, engine } = await open();
     const sizes: unknown[] = [];
@@ -654,10 +695,14 @@ describe("DesktopAutomation capture", () => {
       const { server, engine } = await open({ imageByteOrder });
       server.pointer = { x: 5, y: 6 };
       const capture = await engine.capture({ x: 10, y: 4, width: 3, height: 2 });
-      assert.deepEqual({ ...capture, rgb: undefined }, { width: 3, height: 2, origin: { x: 10, y: 4 }, rgb: undefined, seq: 0, display: { width: 64, height: 48 }, cursor: { x: 5, y: 6 } });
+      assert.deepEqual(
+        { ...capture, pixels: undefined },
+        { width: 3, height: 2, origin: { x: 10, y: 4 }, pixels: undefined, format: { byteOrder: imageByteOrder, redMask: 0xff0000, greenMask: 0xff00, blueMask: 0xff }, seq: 0, display: { width: 64, height: 48 }, cursor: { x: 5, y: 6 } }
+      );
       const expected = [];
       for (let y = 4; y < 6; y++) for (let x = 10; x < 13; x++) expected.push(...FakeXServer.color(x, y));
-      assert.deepEqual([...capture.rgb], expected);
+      assert.deepEqual([...pixelsToRgb(capture.pixels, capture.format, 6)], expected);
+      assert.equal(capture.pixels.buffer.byteLength, 6 * 4, "on an ArrayBuffer of its own, to be transferred whole");
       await engine.close();
     });
   }
@@ -668,7 +713,8 @@ describe("DesktopAutomation capture", () => {
     const bands = server.requests.filter((request) => request.opcode === 73).map((request) => request.buf.readUInt16LE(14));
     assert.deepEqual(bands, [1023, 77]);
     for (const rows of bands) assert.ok(32 + rows * 1024 * 4 <= MAX_SERVER_MESSAGE_BYTES);
-    const at = (x: number, y: number): number[] => [...capture.rgb.subarray((y * 1024 + x) * 3, (y * 1024 + x) * 3 + 3)];
+    const rgb = pixelsToRgb(capture.pixels, capture.format, 1024 * 1100);
+    const at = (x: number, y: number): number[] => [...rgb.subarray((y * 1024 + x) * 3, (y * 1024 + x) * 3 + 3)];
     assert.deepEqual(at(1023, 1099), FakeXServer.color(1023, 1099));
     assert.deepEqual(at(7, 1023), FakeXServer.color(7, 1023));
     await engine.close();
@@ -727,8 +773,10 @@ describe("DesktopAutomation clipboard", () => {
 
     // Reading back what we own needs no conversion.
     assert.equal(await engine.getClipboard(), text);
+    assert.equal(engine.ownsClipboard, true);
     await engine.close();
     assert.equal(server.owners.get(clipboard)!.owner, 0, "close gives the selection up");
+    assert.equal(engine.ownsClipboard, false);
   });
 
   test("getClipboard converts from the owner, falls back to STRING, refuses INCR, times out after 2 s", async (t) => {

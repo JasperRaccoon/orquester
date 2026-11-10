@@ -1,9 +1,18 @@
 // Desktop automation for agents (spec 2026-11-10 §2.3–§3): one DesktopAutomation per running
-// desktop, opened on the first action and closed after 5 idle minutes, when the desktop stops or
-// its X connection drops (the next action opens a new one); who controls each desktop's input
+// desktop, opened on the first action and closed after 5 idle minutes (unless it owns the
+// clipboard: closing would lose what the agent copied, so it stays open while it does), when the
+// desktop stops or its X connection drops (the next action opens a new one); who controls each desktop's input
 // (`control.ts`, runtime only) with the agent's control lapsing 2 minutes after its last action;
 // the action log (`action-log.ts`); and the kept screenshots (`screenshots.ts`). The manager owns
 // one and delegates to it; the routes reach it through the manager.
+//
+// The screen sequence (`seq`, and a wait's `since`) is the service's, not the engine's: each engine
+// counts from 0, so the service adds a per-desktop base. A reopened engine's base is one past the
+// last number the previous engine could have reported, so a desktop's numbers only rise; and the
+// first base of a daemon run is its start time in microseconds, above any number the run before
+// reached (that would take more than one change per microsecond on average). A `since` from an
+// earlier engine therefore lies before everything the current one saw and counts as changed (it
+// cannot tell what happened meanwhile); a `since` past the current number (none can be) means "from now".
 
 import {
   DESKTOP_AGENT_CONTROL_LAPSE_MS,
@@ -36,6 +45,7 @@ import {
   type OpenDesktopAutomation,
   type XButton
 } from "./automation/types.ts";
+import { keysymsForText, parseCombo } from "./automation/keys.ts";
 import { agentInputControl, requestedControl, sameActor } from "./control.ts";
 import { ImagePoolBusyError } from "../devices/image-pool.ts";
 import { DesktopError } from "./errors.ts";
@@ -100,6 +110,10 @@ interface DesktopAutomationState {
   idleTimer: NodeJS.Timeout | null;
   control: DesktopControl | null;
   lapseTimer: NodeJS.Timeout | null;
+  /** Aborted (and replaced) when the user takes control: input claimed before then stops. */
+  inputAbort: AbortController;
+  /** The base the next engine's sequence gets (one past the last one's highest). */
+  nextSeqBase: number;
 }
 
 /** What one action did, before it is logged. */
@@ -113,7 +127,9 @@ interface ActionOutcome {
 }
 
 const IDLE_CLOSE_MS = 5 * 60_000;
-/** `screenshot: true`: the screen must be still this long, waited for at most this long. */
+/** How long daemon shutdown waits for the automations' clean-up (the CLI force-exits 3 s into a stop). */
+const SHUTDOWN_CLOSE_MS = 1_000;
+/** `screenshot: true`: the screen must be still this long after the input, waited for at most this long. */
 const SETTLE_IDLE_MS = 300;
 const SETTLE_TIMEOUT_MS = 3_000;
 const DEFAULT_SCROLL_AMOUNT = 3;
@@ -121,6 +137,10 @@ const BUTTONS: Record<DesktopMouseButton, XButton> = { left: 1, middle: 2, right
 
 export class DesktopAutomationService {
   private readonly states = new Map<string, DesktopAutomationState>();
+  /** Each open engine's sequence base (see the header). */
+  private readonly seqBases = new WeakMap<DesktopAutomation, number>();
+  /** The first base of this daemon run: its start in microseconds. */
+  private readonly seqOrigin: number;
   private readonly log = new DesktopActionLog({ now: () => this.now() });
   private readonly idleCloseMs: number;
   private readonly now: () => Date;
@@ -130,6 +150,7 @@ export class DesktopAutomationService {
     this.idleCloseMs = options.idleCloseMs ?? IDLE_CLOSE_MS;
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? console;
+    this.seqOrigin = this.now().getTime() * 1_000;
   }
 
   /** Who controls the desktop's input now (`null`: nobody). */
@@ -163,6 +184,7 @@ export class DesktopAutomationService {
    */
   async run(desktopId: string, body: unknown, signal?: AbortSignal): Promise<DesktopActionResponse> {
     const request = parseDesktopActionRequest(body);
+    checkKeys(request);
     const desktop = this.options.desktop(desktopId);
     if (!desktop) throw new DesktopError(404, "DESKTOP_NOT_FOUND", "No such desktop.");
     const state = this.state(desktopId);
@@ -173,7 +195,8 @@ export class DesktopAutomationService {
     try {
       if (!isReadOnlyDesktopAction(request.action) && state.control?.controller === "user") throw controlledByUser();
       const automation = await this.automationFor(desktopId, state, desktop);
-      const outcome = await this.perform(desktopId, state, epoch, automation, desktop, request, signal);
+      const seqBase = this.seqBases.get(automation) ?? state.nextSeqBase;
+      const outcome = await this.perform(desktopId, state, epoch, automation, seqBase, desktop, request, signal);
       // Closed meanwhile: its log is gone.
       if (this.states.get(desktopId) !== state) throw notRunning();
       const entry = this.record(desktopId, {
@@ -189,7 +212,7 @@ export class DesktopAutomationService {
         desktopId,
         action: request.action,
         summary: entry.summary,
-        seq: outcome.seq ?? automation.seq(),
+        seq: seqBase + (outcome.seq ?? automation.seq()),
         display: automation.size(),
         ...(cursor ? { cursor } : {}),
         ...(outcome.wait ?? {}),
@@ -220,22 +243,27 @@ export class DesktopAutomationService {
     }
   }
 
-  /** The desktop stopped or its display went out of reach: close its automation (control and log stay). */
-  release(desktopId: string): void {
+  /**
+   * The desktop stopped or its display went out of reach: close its automation (control and log
+   * stay). Resolves once the close is done (it never rejects); callers that need not wait ignore it.
+   */
+  release(desktopId: string): Promise<void> {
     const state = this.states.get(desktopId);
-    if (!state) return;
+    if (!state) return Promise.resolve();
     state.epoch += 1;
     if (state.idleTimer) clearTimeout(state.idleTimer);
     state.idleTimer = null;
     state.opening = null;
     const automation = state.automation;
     state.automation = null;
-    if (automation) void automation.close().catch((error) => this.logger.warn(`Desktop ${desktopId}: closing its automation failed`, error));
+    if (!automation) return Promise.resolve();
+    this.retireSeq(state, automation);
+    return automation.close().catch((error: unknown) => this.logger.warn(`Desktop ${desktopId}: closing its automation failed`, error));
   }
 
   /** The desktop closed: its automation, control, log and screenshots go. */
   async forget(desktopId: string): Promise<void> {
-    this.release(desktopId);
+    void this.release(desktopId);
     const state = this.states.get(desktopId);
     if (state?.lapseTimer) clearTimeout(state.lapseTimer);
     this.states.delete(desktopId);
@@ -243,13 +271,28 @@ export class DesktopAutomationService {
     await this.options.screenshots.remove(desktopId);
   }
 
-  /** Daemon shutdown: every automation closes, no timer stays. */
-  shutdown(): void {
+  /**
+   * Daemon shutdown: every automation closes, no timer stays. Resolves once the closes are done,
+   * so held buttons are released and borrowed keycodes restored on the X server before the daemon
+   * exits; at most {@link SHUTDOWN_CLOSE_MS} (each close gives up on a silent server by itself, but
+   * later than the daemon's own stop deadline).
+   */
+  async shutdown(): Promise<void> {
+    const closes: Promise<void>[] = [];
     for (const [desktopId, state] of this.states) {
-      this.release(desktopId);
+      closes.push(this.release(desktopId));
       if (state.lapseTimer) clearTimeout(state.lapseTimer);
       state.lapseTimer = null;
     }
+    let bound: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.all(closes),
+      new Promise<void>((resolve) => {
+        bound = setTimeout(resolve, SHUTDOWN_CLOSE_MS);
+        bound.unref?.();
+      })
+    ]);
+    clearTimeout(bound);
   }
 
   // ---------------------------------------------------------------------------
@@ -261,20 +304,29 @@ export class DesktopAutomationService {
     state: DesktopAutomationState,
     epoch: number,
     automation: DesktopAutomation,
+    seqBase: number,
     desktop: DesktopAutomationDesktop,
     request: DesktopActionRequest,
     signal: AbortSignal | undefined
   ): Promise<ActionOutcome> {
     const { action } = request;
-    /** Input runs only once control is the actor's (checked again: the user may have taken over meanwhile). */
-    const claim = (): void => {
+    /**
+     * Input runs only once control is the actor's (checked again: the user may have taken over
+     * meanwhile). The signal it returns aborts when the user takes over after this (or the caller
+     * goes away): the engine then stops the input before its turn or between its steps.
+     */
+    const claim = (): AbortSignal => {
       const next = agentInputControl(state.control, request.actor, this.now().toISOString());
       if (!next.ok) throw controlledByUser();
       this.changeControl(desktopId, state, next.control);
+      const takenOver = state.inputAbort.signal;
+      return signal ? AbortSignal.any([takenOver, signal]) : takenOver;
     };
     const settled = async (outcome: ActionOutcome): Promise<ActionOutcome> => {
       if (request.screenshot !== true) return outcome;
-      await automation.wait({ for: "idle", idleMs: SETTLE_IDLE_MS, timeoutMs: SETTLE_TIMEOUT_MS, ...(signal ? { signal } : {}) });
+      // Still for 300 ms counted from the end of the input (the engine's clock), not from the last
+      // change before it: an app that has not redrawn yet must get the time to start.
+      await automation.wait({ for: "idle", idleMs: SETTLE_IDLE_MS, notBefore: Date.now(), timeoutMs: SETTLE_TIMEOUT_MS, ...(signal ? { signal } : {}) });
       const shot = await this.takeScreenshot(desktopId, state, epoch, automation, undefined, request.maxSize);
       return { ...outcome, screenshot: shot.screenshot, seq: shot.seq, cursor: shot.cursor };
     };
@@ -300,7 +352,8 @@ export class DesktopAutomationService {
         const result = await automation.wait({
           for: kind,
           idleMs: request.idleMs ?? DESKTOP_IDLE_DEFAULT_MS,
-          ...(request.since !== undefined ? { since: request.since } : {}),
+          // In the engine's numbers: before its first one when older, "now" when past the current one.
+          ...(request.since !== undefined ? { since: Math.min(request.since - seqBase, automation.seq()) } : {}),
           ...(request.region !== undefined ? { region: displayRegion(request.region, automation.size()) } : {}),
           timeoutMs: request.timeoutMs ?? DESKTOP_WAIT_DEFAULT_TIMEOUT_MS,
           ...(signal ? { signal } : {})
@@ -313,54 +366,47 @@ export class DesktopAutomationService {
       }
       case "move": {
         const point = await pointAt(request.x, request.y);
-        claim();
-        await automation.move(point.x, point.y);
+        await automation.move(point.x, point.y, claim());
         return settled({ facts: { kind: action, point } });
       }
       case "click": {
         const point = await pointAt(request.x, request.y);
         const count = request.count ?? 1;
-        claim();
-        await automation.click(point.x, point.y, BUTTONS[button], count, modifiers);
+        await automation.click(point.x, point.y, BUTTONS[button], count, modifiers, claim());
         return settled({ facts: { kind: action, point, button, count, modifiers } });
       }
       case "mouse_down":
       case "mouse_up": {
         const point = await pointAt(request.x, request.y);
-        claim();
-        if (request.x !== undefined) await automation.move(point.x, point.y);
-        await automation.button(BUTTONS[button], action === "mouse_down");
+        const input = claim();
+        if (request.x !== undefined) await automation.move(point.x, point.y, input);
+        await automation.button(BUTTONS[button], action === "mouse_down", input);
         return settled({ facts: { kind: action, point, button } });
       }
       case "drag": {
         const from = await pointAt(request.x, request.y);
         const to = await pointAt(request.toX, request.toY);
-        claim();
-        await automation.drag(from, to, BUTTONS[button], modifiers);
+        await automation.drag(from, to, BUTTONS[button], modifiers, claim());
         return settled({ facts: { kind: action, point: from, to, button, modifiers } });
       }
       case "scroll": {
         const point = await pointAt(request.x, request.y);
         const amount = request.amount ?? DEFAULT_SCROLL_AMOUNT;
-        claim();
-        await automation.scroll(request.x === undefined ? null : point, request.direction!, amount, modifiers);
+        await automation.scroll(request.x === undefined ? null : point, request.direction!, amount, modifiers, claim());
         return settled({ facts: { kind: action, point, direction: request.direction!, amount, modifiers } });
       }
       case "key": {
         const repeat = request.repeat ?? 1;
-        claim();
-        await automation.key(request.keys!, repeat);
+        await automation.key(request.keys!, repeat, claim());
         return settled({ facts: { kind: action, keys: request.keys!, repeat } });
       }
       case "type":
-        claim();
-        await automation.type(request.text!);
+        await automation.type(request.text!, claim());
         return settled({ facts: { kind: action, text: request.text! } });
       case "clipboard_get":
         return { facts: { kind: action }, text: await automation.getClipboard() };
       case "clipboard_set":
-        claim();
-        await automation.setClipboard(request.text!);
+        await automation.setClipboard(request.text!, claim());
         return { facts: { kind: action, text: request.text! } };
     }
   }
@@ -436,6 +482,7 @@ export class DesktopAutomationService {
       // Its connection dropped: a new one replaces it.
       const dropped = state.automation;
       state.automation = null;
+      this.retireSeq(state, dropped);
       void dropped.close().catch(() => undefined);
     }
     if (state.opening) return state.opening;
@@ -448,6 +495,7 @@ export class DesktopAutomationService {
           throw notRunning();
         }
         state.automation = automation;
+        this.seqBases.set(automation, state.nextSeqBase);
         return automation;
       }
     );
@@ -461,9 +509,20 @@ export class DesktopAutomationService {
     return opening;
   }
 
+  /** An engine let go: the next one's numbers start past every number it could have reported. */
+  private retireSeq(state: DesktopAutomationState, automation: DesktopAutomation): void {
+    const base = this.seqBases.get(automation);
+    if (base !== undefined) state.nextSeqBase = Math.max(state.nextSeqBase, base + automation.seq() + 1);
+  }
+
   private changeControl(desktopId: string, state: DesktopAutomationState, control: DesktopControl | null): void {
     if (control === state.control) return;
     state.control = control;
+    if (control?.controller === "user") {
+      // The agent's input in flight or queued stops (DESKTOP_CONTROLLED_BY_USER); later input claims anew.
+      state.inputAbort.abort(controlledByUser());
+      state.inputAbort = new AbortController();
+    }
     this.armLapse(desktopId, state);
     if (this.states.get(desktopId) === state) this.options.controlChanged(desktopId);
   }
@@ -480,14 +539,20 @@ export class DesktopAutomationService {
     state.lapseTimer.unref?.();
   }
 
-  /** No action running: the automation closes after idleCloseMs unless another comes. */
+  /**
+   * No action running: the automation closes after idleCloseMs unless another comes. One that owns
+   * the clipboard is looked at again after another idle period instead (it closes once another
+   * client took the clipboard, or when the desktop stops).
+   */
   private armIdleClose(desktopId: string, state: DesktopAutomationState): void {
     if (state.idleTimer) clearTimeout(state.idleTimer);
     state.idleTimer = null;
     if (state.inFlight > 0 || (!state.automation && !state.opening)) return;
     state.idleTimer = setTimeout(() => {
       state.idleTimer = null;
-      if (state.inFlight === 0) this.release(desktopId);
+      if (state.inFlight > 0) return;
+      if (state.automation?.ownsClipboard) this.armIdleClose(desktopId, state);
+      else void this.release(desktopId);
     }, this.idleCloseMs);
     state.idleTimer.unref?.();
   }
@@ -502,10 +567,23 @@ export class DesktopAutomationService {
   private state(desktopId: string): DesktopAutomationState {
     let state = this.states.get(desktopId);
     if (!state) {
-      state = { automation: null, opening: null, epoch: 0, inFlight: 0, idleTimer: null, control: null, lapseTimer: null };
+      state = { automation: null, opening: null, epoch: 0, inFlight: 0, idleTimer: null, control: null, lapseTimer: null, inputAbort: new AbortController(), nextSeqBase: this.seqOrigin };
       this.states.set(desktopId, state);
     }
     return state;
+  }
+}
+
+/**
+ * What the engine would refuse of a key combo or a text, checked before the action claims control:
+ * an unknown key name or an untypeable character is a malformed request (400), not an action.
+ */
+function checkKeys(request: DesktopActionRequest): void {
+  try {
+    if (request.action === "key") parseCombo(request.keys!);
+    if (request.action === "type") keysymsForText(request.text!);
+  } catch (error) {
+    throw desktopErrorOf(error);
   }
 }
 

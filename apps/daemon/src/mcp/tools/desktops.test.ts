@@ -15,6 +15,7 @@ import { slimActivityPayload } from "@orquester/api/agent-chat";
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { audienceSchema, executeToolCall } from "../executor.ts";
+import type { DaemonApi } from "../daemon-api.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { desktopPreview, isLoaderEnvKey } from "./desktop-preview.ts";
 import { desktopsFamily } from "./desktops.ts";
@@ -313,6 +314,26 @@ test("desktop_action: each action's fields are checked before any call; snake_ca
   assert.deepEqual(api.calls.at(-1)!.body, { action: "wait", actor: { kind: "external", label: "MCP client" }, for: "change", since: 41, timeoutMs: 5000 });
   api.on("POST", "/api/desktops/dt-1/actions", { status: 409, body: { code: "DESKTOP_CONTROLLED_BY_USER", message: "The user has control of this desktop." } });
   assert.match(await refused(api, "desktop_action", { desktopId: "dt-1", action: "type", text: "hi" }, "DESKTOP_CONTROLLED_BY_USER"), /Reads still work/);
+});
+
+test("desktop_action goes through DaemonApi.desktopAction with the call's signal: the call going away aborts a wait or a long type", async () => {
+  const seen: Array<{ desktopId: string; action: string; signal: AbortSignal | undefined }> = [];
+  const desktopAction: NonNullable<DaemonApi["desktopAction"]> = async (desktopId, request, opts) => {
+    seen.push({ desktopId, action: request.action, signal: opts?.signal });
+    return { status: 200, body: actionResponse({ action: "type", summary: "Typed “hi”" }) };
+  };
+  const api = Object.assign(fakeApi(), { desktopAction });
+  const call = new AbortController();
+  const result = await executeToolCall(
+    { approvals: new FakeApprovalPort() },
+    { name: "desktop_action", arguments: { desktopId: "dt-1", action: "type", text: "hi" } },
+    { caller: { kind: "external" }, api, signal: call.signal }
+  );
+  assert.ok(!result.isError, JSON.stringify(result.structuredContent));
+  assert.deepEqual(seen.map(({ desktopId, action }) => [desktopId, action]), [["dt-1", "type"]]);
+  assert.ok(!api.calls.some((entry) => entry.method === "POST"), "not posted to the route");
+  call.abort();
+  assert.equal(seen[0]!.signal?.aborted, true);
 });
 
 test("desktop_action tiers: screenshot, wait and clipboard_get are reads (they run while planning); input is Act, with no card in the own project", async () => {

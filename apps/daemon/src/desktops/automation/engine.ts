@@ -1,16 +1,19 @@
 // The desktop automation engine (spec 2026-11-10 §2.3): one X11 client per running desktop, with
 // its own connection and the desktop's authority, that
 //
-// - captures the screen (GetImage in bands, converted to RGB through the root visual's masks),
+// - captures the screen (GetImage in bands, the raw pixels with the root visual's layout: the image
+//   workers convert them to RGB, `./pixels.ts`),
 // - follows every change through a RawRectangles DAMAGE on the root: each DamageNotify bumps the
 //   screen sequence and stamps the 16×16 blocks it covers, so waits for "idle" and "change" run
-//   on events plus one deadline timer, never by polling,
+//   on events plus one deadline timer, never by polling; a wait's region is watched at that block
+//   granularity (damage in a block the region touches counts, live and from the grid alike),
 // - injects input with XTEST only, binding a keysym the keymap lacks to a spare keycode (kept in
 //   an LRU of 8, restored when evicted or on close), and releasing whatever an input call pressed
 //   even when it fails halfway,
 // - owns and reads the CLIPBOARD selection through an unmapped InputOnly helper window.
 //
-// Input and clipboard calls run one at a time; captures and waits run alongside them.
+// Input and clipboard calls run one at a time; captures and waits run alongside them. An input
+// call's signal stops it before its turn or between its steps.
 
 import { DESKTOP_CLIPBOARD_MAX_BYTES, DESKTOP_TYPE_MAX_CHARS, type DesktopModifier, type DesktopRect, type DesktopSize } from "@orquester/api";
 
@@ -51,6 +54,7 @@ import {
 import { findMitCookie, parseXauthority } from "../x11/xauth.ts";
 import { encodeXTestFakeInput, encodeXTestGetVersion, FakeEventType, XTEST_EXTENSION_NAME, type FakeInput } from "../x11/xtest.ts";
 import { Keysym, keysymsForText, letterCases, parseCombo, type ComboKey } from "./keys.ts";
+import type { DesktopPixelFormat } from "./pixels.ts";
 import {
   DesktopAutomationError,
   type DesktopAutomation,
@@ -120,7 +124,7 @@ interface Keyboard {
 }
 
 interface Waiter {
-  /** Display pixels, or null for the whole screen. */
+  /** Display pixels (watched by the 16×16 blocks it touches), or null for the whole screen. */
   region: DesktopRect | null;
   /** Damage (or a resize) touched the region; `seq` is the new screen sequence. */
   changed(seq: number): void;
@@ -134,10 +138,8 @@ interface OwnedClipboard {
   time: number;
 }
 
-/** Pixel conversion for the root visual: 32-bit pixels in the server's image byte order → RGB. */
-type PixelConverter = (src: Buffer, dst: Buffer, dstOffset: number, pixels: number) => void;
-
-function pixelConverter(setup: SetupInfo): PixelConverter {
+/** The root visual's pixel layout; refused (DESKTOP_UNSUPPORTED_VISUAL) unless 24/32-bit TrueColor at 32 bits per pixel. */
+function pixelFormat(setup: SetupInfo): DesktopPixelFormat {
   const screen = setup.screens[0]!;
   const visual = screen.rootVisual;
   const format = setup.pixmapFormats.find((entry) => entry.depth === screen.rootDepth);
@@ -147,41 +149,17 @@ function pixelConverter(setup: SetupInfo): PixelConverter {
       `The display's visual (depth ${screen.rootDepth}, ${format?.bitsPerPixel ?? "?"} bits per pixel) cannot be captured; only 24/32-bit TrueColor is supported.`
     );
   }
-  const lsb = setup.imageByteOrder === "lsb";
-  const { redMask, greenMask, blueMask } = visual;
-  if (redMask === 0xff0000 && greenMask === 0xff00 && blueMask === 0xff) {
-    // The usual layout: B G R X in memory (LSBFirst), X R G B (MSBFirst).
-    const [r, g, b] = lsb ? [2, 1, 0] : [1, 2, 3];
-    return (src, dst, dstOffset, pixels) => {
-      for (let i = 0, s = 0, d = dstOffset; i < pixels; i++, s += 4, d += 3) {
-        dst[d] = src[s + r]!;
-        dst[d + 1] = src[s + g]!;
-        dst[d + 2] = src[s + b]!;
-      }
-    };
-  }
-  const channel = (mask: number): { mask: number; shift: number; scale: Uint8Array } => {
-    let shift = 0;
-    while (shift < 32 && ((mask >>> shift) & 1) === 0) shift++;
-    const max = mask >>> shift;
-    const scale = new Uint8Array(max + 1);
-    for (let v = 0; v <= max; v++) scale[v] = Math.round((v * 255) / max);
-    return { mask, shift, scale };
-  };
-  const red = channel(redMask);
-  const green = channel(greenMask);
-  const blue = channel(blueMask);
-  return (src, dst, dstOffset, pixels) => {
-    for (let i = 0, s = 0, d = dstOffset; i < pixels; i++, s += 4, d += 3) {
-      const pixel = lsb ? src.readUInt32LE(s) : src.readUInt32BE(s);
-      dst[d] = red.scale[(pixel & red.mask) >>> red.shift]!;
-      dst[d + 1] = green.scale[(pixel & green.mask) >>> green.shift]!;
-      dst[d + 2] = blue.scale[(pixel & blue.mask) >>> blue.shift]!;
-    }
-  };
+  return { byteOrder: setup.imageByteOrder === "lsb" ? "lsb" : "msb", redMask: visual.redMask, greenMask: visual.greenMask, blueMask: visual.blueMask };
 }
 
-const intersects = (a: DesktopRect, b: DamageRect): boolean => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+interface BlockRange {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+}
+
+const overlaps = (a: BlockRange, b: BlockRange): boolean => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
 
 /** STRING is Latin-1: code points past U+00FF become "?". */
 function latin1(text: string): Buffer {
@@ -196,7 +174,8 @@ function latin1(text: string): Buffer {
 /**
  * The XTEST events of one input call: each is sent without its own round trip, a sync barrier
  * follows every {@link SYNC_EVERY}, and `flush()` reports the first X error among them. It
- * remembers what is pressed so the call can release it when it fails.
+ * remembers what is pressed so the call can release it when it fails. Once `signal` aborts, every
+ * press and motion throws its reason; releases still go out.
  */
 class InputBatch {
   /** Keys and buttons pressed and not yet released, in press order. */
@@ -207,20 +186,24 @@ class InputBatch {
   constructor(
     private readonly conn: X11Connection,
     private readonly xtest: number,
-    private readonly root: number
+    private readonly root: number,
+    private readonly signal?: AbortSignal
   ) {}
 
   key(keycode: number, down: boolean): Promise<void> {
+    if (down) this.signal?.throwIfAborted();
     this.track("key", keycode, down);
     return this.fake({ type: down ? FakeEventType.KeyPress : FakeEventType.KeyRelease, detail: keycode });
   }
 
   button(button: number, down: boolean): Promise<void> {
+    if (down) this.signal?.throwIfAborted();
     this.track("button", button, down);
     return this.fake({ type: down ? FakeEventType.ButtonPress : FakeEventType.ButtonRelease, detail: button });
   }
 
   motion(x: number, y: number): Promise<void> {
+    this.signal?.throwIfAborted();
     return this.fake({ type: FakeEventType.MotionNotify, detail: 0, root: this.root, x, y });
   }
 
@@ -277,7 +260,7 @@ class X11DesktopAutomation implements DesktopAutomation {
   private subtractQueued = false;
   private readonly waiters = new Set<Waiter>();
   private readonly resizeListeners = new Set<(size: DesktopSize) => void>();
-  private converter: PixelConverter | null = null;
+  private pixelFormat: DesktopPixelFormat | null = null;
 
   private keyboardCache: Keyboard | null = null;
   /** Bumped on every MappingNotify: a mapping read before it is stale. */
@@ -346,6 +329,10 @@ class X11DesktopAutomation implements DesktopAutomation {
     return this.dropped || this.closing !== null;
   }
 
+  get ownsClipboard(): boolean {
+    return this.clipboard !== null && !this.closed;
+  }
+
   size(): DesktopSize {
     return { ...this.display };
   }
@@ -375,12 +362,13 @@ class X11DesktopAutomation implements DesktopAutomation {
 
   async capture(region?: DesktopRect): Promise<DesktopCapture> {
     this.assertOpen();
-    this.converter ??= pixelConverter(this.conn.setup);
+    const format = (this.pixelFormat ??= pixelFormat(this.conn.setup));
     const rect = this.clip(region ?? { x: 0, y: 0, ...this.display });
     const seq = this.sequence;
     const display = this.size();
     const stride = rect.width * 4;
-    const rgb = Buffer.allocUnsafe(rect.width * rect.height * 3);
+    // Not from Buffer's pool: its own ArrayBuffer, which the encoder hands to an image worker whole.
+    const pixels = Buffer.allocUnsafeSlow(rect.height * stride);
     const bandRows = Math.max(1, Math.floor(CAPTURE_BAND_BYTES / stride));
     const depth = this.conn.setup.screens[0]!.rootDepth;
     try {
@@ -388,10 +376,10 @@ class X11DesktopAutomation implements DesktopAutomation {
         const rows = Math.min(bandRows, rect.height - row);
         const reply = await this.conn.getImage(this.conn.root, { x: rect.x, y: rect.y + row, width: rect.width, height: rows });
         if (reply.depth !== depth || reply.data.length < rows * stride) throw new Error(`GetImage answered depth ${reply.depth} with ${reply.data.length} bytes for ${rect.width}×${rows}`);
-        this.converter(reply.data, rgb, row * rect.width * 3, rows * rect.width);
+        reply.data.copy(pixels, row * stride, 0, rows * stride);
       }
       const pointer = await this.conn.queryPointer(this.conn.root);
-      return { width: rect.width, height: rect.height, origin: { x: rect.x, y: rect.y }, rgb, seq, display, cursor: { x: pointer.rootX, y: pointer.rootY } };
+      return { width: rect.width, height: rect.height, origin: { x: rect.x, y: rect.y }, pixels, format, seq, display, cursor: { x: pointer.rootX, y: pointer.rootY } };
     } catch (error) {
       throw notRunning(error);
     }
@@ -409,6 +397,7 @@ class X11DesktopAutomation implements DesktopAutomation {
     if (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0) throw new DesktopAutomationError("INVALID_ARGUMENT", "timeoutMs must be a non-negative number");
     if (options.for === "idle" && (!Number.isFinite(options.idleMs) || options.idleMs < 0)) throw new DesktopAutomationError("INVALID_ARGUMENT", "idleMs must be a non-negative number");
     if (options.since !== undefined && !Number.isFinite(options.since)) throw new DesktopAutomationError("INVALID_ARGUMENT", "since must be a screen sequence");
+    if (options.notBefore !== undefined && !Number.isFinite(options.notBefore)) throw new DesktopAutomationError("INVALID_ARGUMENT", "notBefore must be a time");
     const region = options.region ? this.clip(options.region) : null;
     const start = Date.now();
     const deadline = start + options.timeoutMs;
@@ -451,14 +440,16 @@ class X11DesktopAutomation implements DesktopAutomation {
         timer = setTimeout(() => finish(true), options.timeoutMs);
       } else {
         // Damage only marks the wait as changed; the one timer re-checks the region's last change
-        // when the idle period (or the timeout) would be over, and re-arms if it moved.
+        // when the idle period (or the timeout) would be over, and re-arms if it moved. Stillness
+        // before `notBefore` (default: now) does not count.
         waiter.changed = () => {
           changed = true;
         };
+        const notBefore = options.notBefore ?? start;
         const check = (): void => {
           timer = null;
           const now = Date.now();
-          const idleAt = this.regionTime(region) + options.idleMs;
+          const idleAt = Math.max(this.regionTime(region), notBefore) + options.idleMs;
           if (idleAt <= now) return finish(false);
           if (deadline <= now) return finish(true);
           timer = setTimeout(check, Math.min(idleAt, deadline) - now);
@@ -479,7 +470,7 @@ class X11DesktopAutomation implements DesktopAutomation {
   }
 
   /** The grid blocks a rectangle covers (clipped to the screen), as column/row ranges. */
-  private blocks(rect: DamageRect | null): { x0: number; x1: number; y0: number; y1: number } {
+  private blocks(rect: DamageRect | null): BlockRange {
     if (!rect) return { x0: 0, x1: this.gridColumns, y0: 0, y1: this.gridRows };
     return {
       x0: Math.max(0, Math.floor(rect.x / BLOCK)),
@@ -506,16 +497,20 @@ class X11DesktopAutomation implements DesktopAutomation {
   }
 
   private onDamage(area: DamageRect): void {
+    // A closing engine's sequence stays where it was (the service numbers the next engine after it).
+    if (this.closed) return;
     this.sequence += 1;
     const now = Date.now();
-    const { x0, x1, y0, y1 } = this.blocks(area);
-    for (let y = y0; y < y1; y++) {
-      for (let x = x0; x < x1; x++) {
+    const damaged = this.blocks(area);
+    for (let y = damaged.y0; y < damaged.y1; y++) {
+      for (let x = damaged.x0; x < damaged.x1; x++) {
         this.blockTime[y * this.gridColumns + x] = now;
         this.blockSeq[y * this.gridColumns + x] = this.sequence;
       }
     }
-    for (const waiter of [...this.waiters]) if (!waiter.region || intersects(waiter.region, area)) waiter.changed(this.sequence);
+    // By blocks, as the grid the waits start from records it: a region sees damage in any 16×16
+    // block it touches, so a live wait and one answered from the grid agree at the region's edges.
+    for (const waiter of [...this.waiters]) if (!waiter.region || overlaps(this.blocks(waiter.region), damaged)) waiter.changed(this.sequence);
     // One DamageSubtract per batch of notifications keeps the server's damage region small.
     if (this.subtractQueued) return;
     this.subtractQueued = true;
@@ -527,7 +522,7 @@ class X11DesktopAutomation implements DesktopAutomation {
   }
 
   private onRootResize(size: DesktopSize): void {
-    if (size.width === this.display.width && size.height === this.display.height) return;
+    if (this.closed || (size.width === this.display.width && size.height === this.display.height)) return;
     this.display = size;
     this.sequence += 1;
     this.resetGrid();
@@ -539,12 +534,12 @@ class X11DesktopAutomation implements DesktopAutomation {
   // Input
   // -------------------------------------------------------------------------
 
-  async move(x: number, y: number): Promise<void> {
+  async move(x: number, y: number, signal?: AbortSignal): Promise<void> {
     const point = this.point(x, y);
-    return this.input((io) => io.motion(point.x, point.y));
+    return this.input((io) => io.motion(point.x, point.y), signal);
   }
 
-  async button(button: XButton, down: boolean): Promise<void> {
+  async button(button: XButton, down: boolean, signal?: AbortSignal): Promise<void> {
     this.assertButton(button);
     return this.input(async (io) => {
       await io.button(button, down);
@@ -555,10 +550,10 @@ class X11DesktopAutomation implements DesktopAutomation {
       } else {
         this.heldButtons.delete(button);
       }
-    });
+    }, signal);
   }
 
-  async click(x: number, y: number, button: XButton, count: number, modifiers: readonly DesktopModifier[]): Promise<void> {
+  async click(x: number, y: number, button: XButton, count: number, modifiers: readonly DesktopModifier[], signal?: AbortSignal): Promise<void> {
     const point = this.point(x, y);
     this.assertButton(button);
     if (!Number.isInteger(count) || count < 1 || count > 3) throw new DesktopAutomationError("INVALID_ARGUMENT", "count must be 1–3");
@@ -574,10 +569,10 @@ class X11DesktopAutomation implements DesktopAutomation {
         await io.button(button, false);
       }
       await this.releaseKeys(io, held);
-    });
+    }, signal);
   }
 
-  async drag(from: { x: number; y: number }, to: { x: number; y: number }, button: XButton, modifiers: readonly DesktopModifier[]): Promise<void> {
+  async drag(from: { x: number; y: number }, to: { x: number; y: number }, button: XButton, modifiers: readonly DesktopModifier[], signal?: AbortSignal): Promise<void> {
     const start = this.point(from.x, from.y);
     const end = this.point(to.x, to.y);
     this.assertButton(button);
@@ -592,10 +587,16 @@ class X11DesktopAutomation implements DesktopAutomation {
       }
       await io.button(button, false);
       await this.releaseKeys(io, held);
-    });
+    }, signal);
   }
 
-  async scroll(at: { x: number; y: number } | null, direction: "up" | "down" | "left" | "right", amount: number, modifiers: readonly DesktopModifier[]): Promise<void> {
+  async scroll(
+    at: { x: number; y: number } | null,
+    direction: "up" | "down" | "left" | "right",
+    amount: number,
+    modifiers: readonly DesktopModifier[],
+    signal?: AbortSignal
+  ): Promise<void> {
     const point = at ? this.point(at.x, at.y) : null;
     const wheel = { up: 4, down: 5, left: 6, right: 7 }[direction];
     if (wheel === undefined) throw new DesktopAutomationError("INVALID_ARGUMENT", `Unknown scroll direction "${String(direction)}"`);
@@ -608,10 +609,10 @@ class X11DesktopAutomation implements DesktopAutomation {
         await io.button(wheel, false);
       }
       await this.releaseKeys(io, held);
-    });
+    }, signal);
   }
 
-  async key(combo: string, repeat: number): Promise<void> {
+  async key(combo: string, repeat: number, signal?: AbortSignal): Promise<void> {
     if (!Number.isInteger(repeat) || repeat < 1 || repeat > 20) throw new DesktopAutomationError("INVALID_ARGUMENT", "repeat must be 1–20");
     const keys = parseCombo(combo);
     return this.input(async (io) => {
@@ -632,15 +633,15 @@ class X11DesktopAutomation implements DesktopAutomation {
         }
         await this.releaseKeys(io, pressed);
       }
-    });
+    }, signal);
   }
 
-  async type(text: string): Promise<void> {
+  async type(text: string, signal?: AbortSignal): Promise<void> {
     if ([...text].length > DESKTOP_TYPE_MAX_CHARS) throw new DesktopAutomationError("INVALID_ARGUMENT", `The text is longer than ${DESKTOP_TYPE_MAX_CHARS} characters`);
     const keysyms = keysymsForText(text);
     return this.input(async (io) => {
       for (const keysym of keysyms) {
-        // close() lets a long text stop between characters.
+        // close() lets a long text stop between characters (and so does the signal: io's presses check it).
         this.assertOpen();
         const { keycode, shift } = await this.keycodeFor(io, keysym);
         const shiftKey = shift ? this.modifierKeycode(await this.keyboard(), "shift") : null;
@@ -649,18 +650,21 @@ class X11DesktopAutomation implements DesktopAutomation {
         await io.key(keycode, false);
         if (shiftKey !== null) await io.key(shiftKey, false);
       }
-    });
+    }, signal);
   }
 
   /**
    * Run one input call alone, ending with a sync barrier. Whatever it pressed and did not release
-   * (it failed halfway) is released first; its own error wins over one from that clean-up.
+   * (it failed halfway, or `signal` aborted it) is released first; its own error wins over one
+   * from that clean-up. A call whose signal aborted while it waited its turn never starts.
    */
-  private input(job: (io: InputBatch) => Promise<void>): Promise<void> {
+  private input(job: (io: InputBatch) => Promise<void>, signal: AbortSignal | undefined): Promise<void> {
     this.assertOpen();
+    signal?.throwIfAborted();
     return this.exclusive(async () => {
       this.assertOpen();
-      const io = new InputBatch(this.conn, this.xtest, this.conn.root);
+      signal?.throwIfAborted();
+      const io = new InputBatch(this.conn, this.xtest, this.conn.root, signal);
       let failure: unknown = null;
       try {
         await job(io);
@@ -804,12 +808,14 @@ class X11DesktopAutomation implements DesktopAutomation {
   // Clipboard
   // -------------------------------------------------------------------------
 
-  async setClipboard(text: string): Promise<void> {
+  async setClipboard(text: string, signal?: AbortSignal): Promise<void> {
     const utf8 = Buffer.from(text, "utf8");
     if (utf8.length > DESKTOP_CLIPBOARD_MAX_BYTES) throw new DesktopAutomationError("INVALID_ARGUMENT", `The clipboard text is larger than ${DESKTOP_CLIPBOARD_MAX_BYTES} bytes`);
     this.assertOpen();
+    signal?.throwIfAborted();
     return this.exclusive(async () => {
       this.assertOpen();
+      signal?.throwIfAborted();
       try {
         const time = await this.serverTime();
         // Set before the request: a SelectionRequest may follow it at once.

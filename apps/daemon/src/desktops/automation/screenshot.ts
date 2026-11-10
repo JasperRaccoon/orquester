@@ -1,7 +1,8 @@
 /**
- * A desktop capture as the image an agent gets (spec 2026-11-10 R1.8): the raw RGB from
- * `DesktopAutomation.capture()` is scaled down (area average) so its long edge is at most
- * `maxSize`, then sent as PNG when its base64 fits the MCP image cap
+ * A desktop capture as the image an agent gets (spec 2026-11-10 R1.8): the raw pixels from
+ * `DesktopAutomation.capture()` are converted to RGB (`./pixels.ts`; their buffer is transferred
+ * to the worker, so the capture's `pixels` is empty afterwards), scaled down (area average) so its
+ * long edge is at most `maxSize`, then sent as PNG when its base64 fits the MCP image cap
  * ({@link DEVICE_SCREENSHOT_MAX_BASE64_CHARS}), else as a JPEG halved until it does. The work runs
  * in the daemon's image workers (`devices/image-pool.ts`), never on the event loop.
  *
@@ -33,10 +34,10 @@ export interface EncodedDesktopScreenshot {
 }
 
 export async function encodeDesktopScreenshot(
-  capture: Pick<DesktopCapture, "width" | "height" | "rgb">,
+  capture: Pick<DesktopCapture, "width" | "height" | "pixels" | "format">,
   maxSize: number = DESKTOP_SCREENSHOT_DEFAULT_MAX
 ): Promise<EncodedDesktopScreenshot> {
   if (!Number.isInteger(maxSize) || maxSize < 1) throw new RangeError(`maxSize must be a positive integer, not ${maxSize}`);
-  const fitted = await deviceImages.fitRgb(capture, maxSize, DEVICE_SCREENSHOT_MAX_BASE64_CHARS);
+  const fitted = await deviceImages.fitPixels(capture, maxSize, DEVICE_SCREENSHOT_MAX_BASE64_CHARS);
   return { ...fitted, scale: capture.width / fitted.width };
 }
