@@ -66,6 +66,11 @@ async function harness(t: TestContext, voxl: DesktopVoxlStatus | (() => Promise<
         await atomicWrite(join(dir!, "voxl.exit"), "134\n");
         return;
       }
+      if (h.behaviour === "exits") {
+        await writeFile(log, "[t ERROR voxl] video init failed: X connect: refused\n");
+        await atomicWrite(join(dir!, "voxl.exit"), "1\n");
+        return;
+      }
       const server = createServer((socket) => {
         socket.once("data", () => socket.end("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"));
       });
@@ -220,4 +225,43 @@ test("a taken port is retried once with another", async (t) => {
   assert.ok(h.voxlLaunches[1]!.includes(`--port=${lease.port}`));
   assert.deepEqual((await until(h.manager, desktop.id, () => true)).voxl, { state: "ready" });
   lease.release();
+});
+
+test("after voxl fails the stream is ready again after a cooldown; three failures in a few minutes stop that until Fast is chosen again", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const h = await harness(t, VOXL);
+  const desktop = await h.manager.create({ projectPath: h.appdir, projectRealPath: h.appdir, video: "voxl" });
+  await until(h.manager, desktop.id, (d) => d.voxl?.state === "ready");
+  const upstream = h.manager.voxlUpstream(desktop.id)!;
+  const cooldown = 30_000;
+
+  // 1: voxl exits on its own; refused while unavailable, then the next viewer may try again.
+  const lease = await upstream();
+  await atomicWrite(join(desktopRuntimeDir(h.appdir, desktop.id), "voxl.exit"), "1\n");
+  await until(h.manager, desktop.id, (d) => d.voxl?.state === "unavailable");
+  lease.release();
+  await assert.rejects(upstream(), VoxlUnavailableError);
+  assert.equal(h.voxlLaunches.length, 1);
+  t.mock.timers.tick(cooldown);
+  assert.deepEqual(h.manager.get(desktop.id)?.voxl, { state: "ready" });
+
+  // 2 and 3: voxl fails to start; the third failure is not retried after the cooldown.
+  h.behaviour = "exits";
+  await assert.rejects(upstream(), /exited while starting \(1\)/);
+  t.mock.timers.tick(cooldown);
+  assert.equal(h.manager.get(desktop.id)?.voxl?.state, "ready");
+  await assert.rejects(upstream(), VoxlUnavailableError);
+  t.mock.timers.tick(cooldown);
+  const given = h.manager.get(desktop.id)?.voxl;
+  assert.equal(given?.state, "unavailable");
+  assert.match(given?.reason ?? "", /exited while starting/);
+  assert.equal(h.voxlLaunches.length, 3);
+
+  // Fast again (PATCH video: voxl on the voxl desktop) looks for voxl at once.
+  h.behaviour = "listen";
+  assert.notEqual((await h.manager.update(desktop.id, { video: "voxl" })).voxl?.state, "unavailable");
+  await until(h.manager, desktop.id, (d) => d.voxl?.state === "ready");
+  const again = await upstream();
+  assert.equal(h.voxlLaunches.length, 4);
+  again.release();
 });

@@ -574,7 +574,9 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         : null);
   const [videoBusy, setVideoBusy] = useState(false);
   const setVideo = (video: DesktopVideoBackend) => {
-    if (!api || video === desktopVideo(desktop)) return;
+    // Fast on a voxl desktop whose stream is unavailable asks the daemon to look for voxl again.
+    const retry = video === "voxl" && desktopVideo(desktop) === "voxl" && desktop.voxl?.state === "unavailable";
+    if (!api || (video === desktopVideo(desktop) && !retry)) return;
     setVideoBusy(true);
     setActionError(null);
     // The daemon restarts only the stream; the view reconnects when `desktop.video` changes.
