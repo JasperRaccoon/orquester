@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { keysymForCodePoint, keysymForNamedKey, keysymsForText, pasteKeystroke } from "./desktop-keys.ts";
+import { keysymForCodePoint, keysymForNamedKey, keysymsForText, pasteKeystroke, shiftedKeysym } from "./desktop-keys.ts";
 
 test("Latin-1 characters are their own keysym", () => {
   assert.equal(keysymForCodePoint("a".codePointAt(0)!), 0x61);
@@ -61,4 +61,12 @@ test("named keys", () => {
   assert.equal(keysymForNamedKey("Backspace"), 0xff08);
   assert.equal(keysymForNamedKey("ArrowUp"), 0xff52);
   assert.equal(keysymForNamedKey("a"), null);
+});
+
+test("a key under a latched Shift uses the capital's keysym, so Xvnc keeps Shift held", () => {
+  assert.equal(shiftedKeysym(0x74), 0x54); // t → T (Ctrl+Shift+T)
+  assert.equal(shiftedKeysym(0xe9), 0xc9); // é → É
+  assert.equal(shiftedKeysym(0xf7), 0xf7); // ÷ has no capital
+  assert.equal(shiftedKeysym(0x31), 0x31);
+  assert.equal(shiftedKeysym(0xff09), 0xff09); // Tab: Shift+Tab as is
 });

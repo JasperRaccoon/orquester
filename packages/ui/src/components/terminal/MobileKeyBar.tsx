@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useRef } from "react";
-import { ClipboardPaste, Loader2, Lock, Paperclip } from "lucide-react";
+import { ClipboardPaste, Loader2, Paperclip } from "lucide-react";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useActiveTabId, useAppStore, useProjectTabs, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
 import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { UploadProgressBar } from "../ui/upload-progress";
+import { KeyBarButton, LatchKeyButton } from "../ui/key-bar";
 import { pasteTextForSession } from "../../lib/paste";
 import { TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, TERMINAL_FONT_STEP } from "../../lib/terminal-font";
 import {
@@ -45,18 +46,6 @@ const MODIFIERS: { name: ModifierName; label: string }[] = [
   { name: "ctrl", label: "Ctrl" },
   { name: "alt", label: "Alt" }
 ];
-
-const LATCH_CLASS: Record<LatchState, string> = {
-  off: "bg-neutral-800 text-neutral-200 active:bg-neutral-700",
-  armed: "bg-info-soft/40 text-info ring-1 ring-inset ring-info/60",
-  locked: "bg-info text-neutral-950"
-};
-
-const LATCH_LABEL: Record<LatchState, string> = {
-  off: "off",
-  armed: "on for the next key",
-  locked: "locked on"
-};
 
 // Per-kind auto-dismiss for the upload status line (ms). A hard failure warrants
 // a longer read than a benign over-the-cap skip; `uploading` isn't timed — it's
@@ -305,29 +294,12 @@ export const MobileKeyBar: React.FC = () => {
             A+
           </button>
         </div>
-        <KeyButton label="Esc" onPress={() => sendKey(ESC_KEY)} />
-        {MODIFIERS.map(({ name, label }) => {
-          const state = latchOf(name);
-          return (
-            <button
-              key={name}
-              type="button"
-              aria-label={`${label} modifier, ${LATCH_LABEL[state]}`}
-              aria-pressed={state !== "off"}
-              // Tap arms for the next key; a quick second tap locks; tap again releases.
-              onPointerDown={(e) => {
-                e.preventDefault();
-                tapModifier(sessionId, name, e.timeStamp);
-              }}
-              className={`flex h-9 shrink-0 touch-manipulation items-center justify-center gap-1 rounded-md px-3 font-mono text-sm ${LATCH_CLASS[state]}`}
-            >
-              {label}
-              {state === "locked" && <Lock size={11} aria-hidden />}
-            </button>
-          );
-        })}
+        <KeyBarButton label="Esc" onPress={() => sendKey(ESC_KEY)} />
+        {MODIFIERS.map(({ name, label }) => (
+          <LatchKeyButton key={name} label={label} state={latchOf(name)} onTap={(at) => tapModifier(sessionId, name, at)} />
+        ))}
         {KEYS.map((key) => (
-          <KeyButton
+          <KeyBarButton
             key={key.label}
             label={key.label}
             wide={key.wide}
@@ -338,21 +310,3 @@ export const MobileKeyBar: React.FC = () => {
     </div>
   );
 };
-
-const KeyButton: React.FC<{ label: string; wide?: boolean; onPress: () => void }> = ({
-  label,
-  wide,
-  onPress
-}) => (
-  <button
-    type="button"
-    // Don't take focus → the keyboard stays up.
-    onPointerDown={(e) => {
-      e.preventDefault();
-      onPress();
-    }}
-    className={`flex h-9 shrink-0 items-center justify-center rounded-md bg-neutral-800 px-3 font-mono text-sm text-neutral-200 active:bg-neutral-700 ${wide ? "flex-1" : ""}`}
-  >
-    {label}
-  </button>
-);

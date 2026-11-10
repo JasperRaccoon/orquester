@@ -1,5 +1,5 @@
 /**
- * X keysyms for the desktop viewer's touch keyboard (hidden input + key strip).
+ * X keysyms for the desktop viewer's touch keyboard (hidden input + key bar).
  * noVNC's own keysym tables live in `core/input/*`, which the package does not
  * export, so the handful of values used here are spelled out (X11
  * `keysymdef.h`).
@@ -19,6 +19,8 @@ export const XK = {
   Page_Up: 0xff55,
   Page_Down: 0xff56,
   End: 0xff57,
+  F1: 0xffbe,
+  Shift_L: 0xffe1,
   Control_L: 0xffe3,
   Alt_L: 0xffe9,
   Alt_R: 0xffea,
@@ -79,13 +81,33 @@ export function pasteKeystroke(chord: PasteChord | null, apple: boolean): KeySte
   return steps;
 }
 
-export type LatchModifier = "ctrl" | "alt" | "super";
+export type LatchModifier = "shift" | "ctrl" | "alt" | "super";
+
+/** The key bar's modifiers, in the order they are pressed. */
+export const LATCH_MODIFIERS: readonly LatchModifier[] = ["shift", "ctrl", "alt", "super"];
 
 export const MODIFIER_KEYSYM: Record<LatchModifier, number> = {
+  shift: XK.Shift_L,
   ctrl: XK.Control_L,
   alt: XK.Alt_L,
   super: XK.Super_L
 };
+
+/** F1–F12 (`n` 1-based). */
+export function functionKeysym(n: number): number {
+  return XK.F1 + n - 1;
+}
+
+/**
+ * The keysym a key gives with Shift held: a lowercase Latin-1 letter becomes
+ * its capital (Xvnc maps keysyms, and a lowercase one under Shift would make it
+ * release Shift); anything else is unchanged.
+ */
+export function shiftedKeysym(keysym: number): number {
+  if (keysym >= 0x61 && keysym <= 0x7a) return keysym - 0x20;
+  if (keysym >= 0xe0 && keysym <= 0xfe && keysym !== 0xf7) return keysym - 0x20;
+  return keysym;
+}
 
 /**
  * The keysym for one Unicode code point: Latin-1 printable characters map
