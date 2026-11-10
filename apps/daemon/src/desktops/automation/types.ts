@@ -66,20 +66,30 @@ export interface DesktopAutomation {
   pointer(): Promise<{ x: number; y: number }>;
   capture(region?: DesktopRect): Promise<DesktopCapture>;
   wait(options: DesktopWaitOptions): Promise<DesktopWaitResult>;
-  move(x: number, y: number): Promise<void>;
+  // Input runs one call at a time. Its `signal` (the service's: the user took over, or the caller
+  // went away) stops a call that has not started, or one running between its steps (characters,
+  // drag steps, clicks, repeats); what it pressed is released and it rejects with the signal's reason.
+  move(x: number, y: number, signal?: AbortSignal): Promise<void>;
   /** Press/release one button at the current pointer position. */
-  button(button: XButton, down: boolean): Promise<void>;
+  button(button: XButton, down: boolean, signal?: AbortSignal): Promise<void>;
   /** Click `count` times (1–3) at (x, y) with `modifiers` held. */
-  click(x: number, y: number, button: XButton, count: number, modifiers: readonly DesktopModifier[]): Promise<void>;
-  drag(from: { x: number; y: number }, to: { x: number; y: number }, button: XButton, modifiers: readonly DesktopModifier[]): Promise<void>;
+  click(x: number, y: number, button: XButton, count: number, modifiers: readonly DesktopModifier[], signal?: AbortSignal): Promise<void>;
+  drag(from: { x: number; y: number }, to: { x: number; y: number }, button: XButton, modifiers: readonly DesktopModifier[], signal?: AbortSignal): Promise<void>;
   /** `amount` wheel clicks at (x, y) (or the current position) in a direction. */
-  scroll(at: { x: number; y: number } | null, direction: "up" | "down" | "left" | "right", amount: number, modifiers: readonly DesktopModifier[]): Promise<void>;
+  scroll(
+    at: { x: number; y: number } | null,
+    direction: "up" | "down" | "left" | "right",
+    amount: number,
+    modifiers: readonly DesktopModifier[],
+    signal?: AbortSignal
+  ): Promise<void>;
   /** A `+`-separated combo ("ctrl+shift+t"), `repeat` times. Throws `DesktopAutomationError` (`INVALID_ARGUMENT`) for an unknown key name. */
-  key(combo: string, repeat: number): Promise<void>;
+  key(combo: string, repeat: number, signal?: AbortSignal): Promise<void>;
   /** Type Unicode text (`\n` → Return, `\t` → Tab). */
-  type(text: string): Promise<void>;
+  type(text: string, signal?: AbortSignal): Promise<void>;
   getClipboard(): Promise<string>;
-  setClipboard(text: string): Promise<void>;
+  /** Queued with input; `signal` as for input. */
+  setClipboard(text: string, signal?: AbortSignal): Promise<void>;
   /** Fires when the display size changes. */
   onResize(listener: (size: DesktopSize) => void): () => void;
   /** Release everything held, give up the selection, close the connection. Idempotent. */

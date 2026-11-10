@@ -178,6 +178,29 @@ test("input is refused while the user has control and reads still run; an agent'
   assert.equal(h.controlChanges, changes + 1, "the lapse goes out as an update");
 });
 
+test("the user taking over stops the agent's input in flight: it fails DESKTOP_CONTROLLED_BY_USER", async (t) => {
+  const h = await harness(t);
+  await act(h, { action: "screenshot" });
+  let entered!: () => void;
+  const inType = new Promise<void>((resolve) => (entered = resolve));
+  let finish!: () => void;
+  h.engine().duringType = (signal) =>
+    new Promise<void>((resolve, reject) => {
+      finish = resolve;
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      entered();
+    });
+  const typing = act(h, { action: "type", text: "a long text" });
+  await inType;
+  h.service.setControl("d1", "user");
+  // Were the input not stopped, it would end well now.
+  finish();
+  const stopped = await refusal(typing);
+  assert.deepEqual([stopped.status, stopped.code], [409, "DESKTOP_CONTROLLED_BY_USER"]);
+  assert.deepEqual(h.logged.at(-1)!.entry.ok, false);
+  assert.equal(h.service.control("d1")?.controller, "user");
+});
+
 test("one engine per desktop: opened once, replaced after its connection drops, closed when idle 5 minutes or released", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const h = await harness(t);

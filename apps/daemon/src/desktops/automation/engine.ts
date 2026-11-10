@@ -11,7 +11,8 @@
 //   even when it fails halfway,
 // - owns and reads the CLIPBOARD selection through an unmapped InputOnly helper window.
 //
-// Input and clipboard calls run one at a time; captures and waits run alongside them.
+// Input and clipboard calls run one at a time; captures and waits run alongside them. An input
+// call's signal stops it before its turn or between its steps.
 
 import { DESKTOP_CLIPBOARD_MAX_BYTES, DESKTOP_TYPE_MAX_CHARS, type DesktopModifier, type DesktopRect, type DesktopSize } from "@orquester/api";
 
@@ -204,7 +205,8 @@ function latin1(text: string): Buffer {
 /**
  * The XTEST events of one input call: each is sent without its own round trip, a sync barrier
  * follows every {@link SYNC_EVERY}, and `flush()` reports the first X error among them. It
- * remembers what is pressed so the call can release it when it fails.
+ * remembers what is pressed so the call can release it when it fails. Once `signal` aborts, every
+ * press and motion throws its reason; releases still go out.
  */
 class InputBatch {
   /** Keys and buttons pressed and not yet released, in press order. */
@@ -215,20 +217,24 @@ class InputBatch {
   constructor(
     private readonly conn: X11Connection,
     private readonly xtest: number,
-    private readonly root: number
+    private readonly root: number,
+    private readonly signal?: AbortSignal
   ) {}
 
   key(keycode: number, down: boolean): Promise<void> {
+    if (down) this.signal?.throwIfAborted();
     this.track("key", keycode, down);
     return this.fake({ type: down ? FakeEventType.KeyPress : FakeEventType.KeyRelease, detail: keycode });
   }
 
   button(button: number, down: boolean): Promise<void> {
+    if (down) this.signal?.throwIfAborted();
     this.track("button", button, down);
     return this.fake({ type: down ? FakeEventType.ButtonPress : FakeEventType.ButtonRelease, detail: button });
   }
 
   motion(x: number, y: number): Promise<void> {
+    this.signal?.throwIfAborted();
     return this.fake({ type: FakeEventType.MotionNotify, detail: 0, root: this.root, x, y });
   }
 
@@ -552,12 +558,12 @@ class X11DesktopAutomation implements DesktopAutomation {
   // Input
   // -------------------------------------------------------------------------
 
-  async move(x: number, y: number): Promise<void> {
+  async move(x: number, y: number, signal?: AbortSignal): Promise<void> {
     const point = this.point(x, y);
-    return this.input((io) => io.motion(point.x, point.y));
+    return this.input((io) => io.motion(point.x, point.y), signal);
   }
 
-  async button(button: XButton, down: boolean): Promise<void> {
+  async button(button: XButton, down: boolean, signal?: AbortSignal): Promise<void> {
     this.assertButton(button);
     return this.input(async (io) => {
       await io.button(button, down);
@@ -568,10 +574,10 @@ class X11DesktopAutomation implements DesktopAutomation {
       } else {
         this.heldButtons.delete(button);
       }
-    });
+    }, signal);
   }
 
-  async click(x: number, y: number, button: XButton, count: number, modifiers: readonly DesktopModifier[]): Promise<void> {
+  async click(x: number, y: number, button: XButton, count: number, modifiers: readonly DesktopModifier[], signal?: AbortSignal): Promise<void> {
     const point = this.point(x, y);
     this.assertButton(button);
     if (!Number.isInteger(count) || count < 1 || count > 3) throw new DesktopAutomationError("INVALID_ARGUMENT", "count must be 1–3");
@@ -587,10 +593,10 @@ class X11DesktopAutomation implements DesktopAutomation {
         await io.button(button, false);
       }
       await this.releaseKeys(io, held);
-    });
+    }, signal);
   }
 
-  async drag(from: { x: number; y: number }, to: { x: number; y: number }, button: XButton, modifiers: readonly DesktopModifier[]): Promise<void> {
+  async drag(from: { x: number; y: number }, to: { x: number; y: number }, button: XButton, modifiers: readonly DesktopModifier[], signal?: AbortSignal): Promise<void> {
     const start = this.point(from.x, from.y);
     const end = this.point(to.x, to.y);
     this.assertButton(button);
@@ -605,10 +611,16 @@ class X11DesktopAutomation implements DesktopAutomation {
       }
       await io.button(button, false);
       await this.releaseKeys(io, held);
-    });
+    }, signal);
   }
 
-  async scroll(at: { x: number; y: number } | null, direction: "up" | "down" | "left" | "right", amount: number, modifiers: readonly DesktopModifier[]): Promise<void> {
+  async scroll(
+    at: { x: number; y: number } | null,
+    direction: "up" | "down" | "left" | "right",
+    amount: number,
+    modifiers: readonly DesktopModifier[],
+    signal?: AbortSignal
+  ): Promise<void> {
     const point = at ? this.point(at.x, at.y) : null;
     const wheel = { up: 4, down: 5, left: 6, right: 7 }[direction];
     if (wheel === undefined) throw new DesktopAutomationError("INVALID_ARGUMENT", `Unknown scroll direction "${String(direction)}"`);
@@ -621,10 +633,10 @@ class X11DesktopAutomation implements DesktopAutomation {
         await io.button(wheel, false);
       }
       await this.releaseKeys(io, held);
-    });
+    }, signal);
   }
 
-  async key(combo: string, repeat: number): Promise<void> {
+  async key(combo: string, repeat: number, signal?: AbortSignal): Promise<void> {
     if (!Number.isInteger(repeat) || repeat < 1 || repeat > 20) throw new DesktopAutomationError("INVALID_ARGUMENT", "repeat must be 1–20");
     const keys = parseCombo(combo);
     return this.input(async (io) => {
@@ -645,15 +657,15 @@ class X11DesktopAutomation implements DesktopAutomation {
         }
         await this.releaseKeys(io, pressed);
       }
-    });
+    }, signal);
   }
 
-  async type(text: string): Promise<void> {
+  async type(text: string, signal?: AbortSignal): Promise<void> {
     if ([...text].length > DESKTOP_TYPE_MAX_CHARS) throw new DesktopAutomationError("INVALID_ARGUMENT", `The text is longer than ${DESKTOP_TYPE_MAX_CHARS} characters`);
     const keysyms = keysymsForText(text);
     return this.input(async (io) => {
       for (const keysym of keysyms) {
-        // close() lets a long text stop between characters.
+        // close() lets a long text stop between characters (and so does the signal: io's presses check it).
         this.assertOpen();
         const { keycode, shift } = await this.keycodeFor(io, keysym);
         const shiftKey = shift ? this.modifierKeycode(await this.keyboard(), "shift") : null;
@@ -662,18 +674,21 @@ class X11DesktopAutomation implements DesktopAutomation {
         await io.key(keycode, false);
         if (shiftKey !== null) await io.key(shiftKey, false);
       }
-    });
+    }, signal);
   }
 
   /**
    * Run one input call alone, ending with a sync barrier. Whatever it pressed and did not release
-   * (it failed halfway) is released first; its own error wins over one from that clean-up.
+   * (it failed halfway, or `signal` aborted it) is released first; its own error wins over one
+   * from that clean-up. A call whose signal aborted while it waited its turn never starts.
    */
-  private input(job: (io: InputBatch) => Promise<void>): Promise<void> {
+  private input(job: (io: InputBatch) => Promise<void>, signal: AbortSignal | undefined): Promise<void> {
     this.assertOpen();
+    signal?.throwIfAborted();
     return this.exclusive(async () => {
       this.assertOpen();
-      const io = new InputBatch(this.conn, this.xtest, this.conn.root);
+      signal?.throwIfAborted();
+      const io = new InputBatch(this.conn, this.xtest, this.conn.root, signal);
       let failure: unknown = null;
       try {
         await job(io);
@@ -817,12 +832,14 @@ class X11DesktopAutomation implements DesktopAutomation {
   // Clipboard
   // -------------------------------------------------------------------------
 
-  async setClipboard(text: string): Promise<void> {
+  async setClipboard(text: string, signal?: AbortSignal): Promise<void> {
     const utf8 = Buffer.from(text, "utf8");
     if (utf8.length > DESKTOP_CLIPBOARD_MAX_BYTES) throw new DesktopAutomationError("INVALID_ARGUMENT", `The clipboard text is larger than ${DESKTOP_CLIPBOARD_MAX_BYTES} bytes`);
     this.assertOpen();
+    signal?.throwIfAborted();
     return this.exclusive(async () => {
       this.assertOpen();
+      signal?.throwIfAborted();
       try {
         const time = await this.serverTime();
         // Set before the request: a SelectionRequest may follow it at once.

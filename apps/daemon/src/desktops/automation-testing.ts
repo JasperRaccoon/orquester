@@ -25,6 +25,8 @@ export class FakeDesktopAutomation implements DesktopAutomation {
   sequence = 41;
   clipboard = "";
   readonly calls: FakeAutomationCall[] = [];
+  /** Runs inside type() with its signal, after the call is recorded (a test holds the input in flight). */
+  duringType: ((signal: AbortSignal | undefined) => Promise<void>) | null = null;
 
   size(): DesktopSize {
     return { ...this.display };
@@ -50,42 +52,52 @@ export class FakeDesktopAutomation implements DesktopAutomation {
     return { changed: false, timedOut: false, seq: this.sequence, waitedMs: 1_200 };
   }
 
-  async move(x: number, y: number): Promise<void> {
+  // Input with an aborted signal never starts, as the engine's queue has it.
+  async move(x: number, y: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.calls.push({ kind: "move", x, y });
     this.cursor = { x, y };
   }
 
-  async button(button: XButton, down: boolean): Promise<void> {
+  async button(button: XButton, down: boolean, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.calls.push({ kind: "button", button, down });
   }
 
-  async click(x: number, y: number, button: XButton, count: number, modifiers: readonly DesktopModifier[]): Promise<void> {
+  async click(x: number, y: number, button: XButton, count: number, modifiers: readonly DesktopModifier[], signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.calls.push({ kind: "click", x, y, button, count, modifiers: [...modifiers] });
     this.cursor = { x, y };
     this.sequence += 1;
   }
 
-  async drag(from: { x: number; y: number }, to: { x: number; y: number }, button: XButton): Promise<void> {
+  async drag(from: { x: number; y: number }, to: { x: number; y: number }, button: XButton, _modifiers: readonly DesktopModifier[], signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.calls.push({ kind: "drag", from, to, button });
   }
 
-  async scroll(at: { x: number; y: number } | null, direction: "up" | "down" | "left" | "right", amount: number): Promise<void> {
+  async scroll(at: { x: number; y: number } | null, direction: "up" | "down" | "left" | "right", amount: number, _modifiers: readonly DesktopModifier[], signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.calls.push({ kind: "scroll", at, direction, amount });
   }
 
-  async key(combo: string, repeat: number): Promise<void> {
+  async key(combo: string, repeat: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.calls.push({ kind: "key", combo, repeat });
   }
 
-  async type(text: string): Promise<void> {
+  async type(text: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.calls.push({ kind: "type", text });
+    await this.duringType?.(signal);
   }
 
   async getClipboard(): Promise<string> {
     return this.clipboard;
   }
 
-  async setClipboard(text: string): Promise<void> {
+  async setClipboard(text: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.calls.push({ kind: "setClipboard", text });
     this.clipboard = text;
   }

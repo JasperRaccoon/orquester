@@ -543,6 +543,25 @@ describe("DesktopAutomation input", () => {
     await engine.close();
   });
 
+  test("an aborted signal stops input between its steps and releases what it pressed; a call queued with it never starts", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { server, engine } = await open();
+    const takenOver = new AbortController();
+    const dragged = engine.drag({ x: 0, y: 0 }, { x: 50, y: 40 }, 1, ["ctrl"], takenOver.signal);
+    const queued = engine.click(5, 5, 1, 1, [], takenOver.signal);
+    // The press, then the barrier before the first step.
+    await server.until(() => server.inputs.some((input) => input.type === "ButtonPress") && server.requests.at(-1)?.opcode === 43);
+    await drain();
+    const reason = new Error("the user took over");
+    takenOver.abort(reason);
+    t.mock.timers.tick(20);
+    await assert.rejects(dragged, (error: unknown) => error === reason);
+    await assert.rejects(queued, (error: unknown) => error === reason);
+    assert.deepEqual(server.inputs.filter((input) => input.type === "MotionNotify").map(({ x, y }) => [x, y]), [[0, 0]], "no step after the abort, and no click");
+    assert.deepEqual(server.held(), []);
+    await engine.close();
+  });
+
   test("click holds modifiers around count clicks 60 ms apart; mouse_down stays held until mouse_up or close", async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const { server, engine } = await open();

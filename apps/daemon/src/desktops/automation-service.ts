@@ -101,6 +101,8 @@ interface DesktopAutomationState {
   idleTimer: NodeJS.Timeout | null;
   control: DesktopControl | null;
   lapseTimer: NodeJS.Timeout | null;
+  /** Aborted (and replaced) when the user takes control: input claimed before then stops. */
+  inputAbort: AbortController;
 }
 
 /** What one action did, before it is logged. */
@@ -268,11 +270,17 @@ export class DesktopAutomationService {
     signal: AbortSignal | undefined
   ): Promise<ActionOutcome> {
     const { action } = request;
-    /** Input runs only once control is the actor's (checked again: the user may have taken over meanwhile). */
-    const claim = (): void => {
+    /**
+     * Input runs only once control is the actor's (checked again: the user may have taken over
+     * meanwhile). The signal it returns aborts when the user takes over after this (or the caller
+     * goes away): the engine then stops the input before its turn or between its steps.
+     */
+    const claim = (): AbortSignal => {
       const next = agentInputControl(state.control, request.actor, this.now().toISOString());
       if (!next.ok) throw controlledByUser();
       this.changeControl(desktopId, state, next.control);
+      const takenOver = state.inputAbort.signal;
+      return signal ? AbortSignal.any([takenOver, signal]) : takenOver;
     };
     const settled = async (outcome: ActionOutcome): Promise<ActionOutcome> => {
       if (request.screenshot !== true) return outcome;
@@ -317,54 +325,47 @@ export class DesktopAutomationService {
       }
       case "move": {
         const point = await pointAt(request.x, request.y);
-        claim();
-        await automation.move(point.x, point.y);
+        await automation.move(point.x, point.y, claim());
         return settled({ facts: { kind: action, point } });
       }
       case "click": {
         const point = await pointAt(request.x, request.y);
         const count = request.count ?? 1;
-        claim();
-        await automation.click(point.x, point.y, BUTTONS[button], count, modifiers);
+        await automation.click(point.x, point.y, BUTTONS[button], count, modifiers, claim());
         return settled({ facts: { kind: action, point, button, count, modifiers } });
       }
       case "mouse_down":
       case "mouse_up": {
         const point = await pointAt(request.x, request.y);
-        claim();
-        if (request.x !== undefined) await automation.move(point.x, point.y);
-        await automation.button(BUTTONS[button], action === "mouse_down");
+        const input = claim();
+        if (request.x !== undefined) await automation.move(point.x, point.y, input);
+        await automation.button(BUTTONS[button], action === "mouse_down", input);
         return settled({ facts: { kind: action, point, button } });
       }
       case "drag": {
         const from = await pointAt(request.x, request.y);
         const to = await pointAt(request.toX, request.toY);
-        claim();
-        await automation.drag(from, to, BUTTONS[button], modifiers);
+        await automation.drag(from, to, BUTTONS[button], modifiers, claim());
         return settled({ facts: { kind: action, point: from, to, button, modifiers } });
       }
       case "scroll": {
         const point = await pointAt(request.x, request.y);
         const amount = request.amount ?? DEFAULT_SCROLL_AMOUNT;
-        claim();
-        await automation.scroll(request.x === undefined ? null : point, request.direction!, amount, modifiers);
+        await automation.scroll(request.x === undefined ? null : point, request.direction!, amount, modifiers, claim());
         return settled({ facts: { kind: action, point, direction: request.direction!, amount, modifiers } });
       }
       case "key": {
         const repeat = request.repeat ?? 1;
-        claim();
-        await automation.key(request.keys!, repeat);
+        await automation.key(request.keys!, repeat, claim());
         return settled({ facts: { kind: action, keys: request.keys!, repeat } });
       }
       case "type":
-        claim();
-        await automation.type(request.text!);
+        await automation.type(request.text!, claim());
         return settled({ facts: { kind: action, text: request.text! } });
       case "clipboard_get":
         return { facts: { kind: action }, text: await automation.getClipboard() };
       case "clipboard_set":
-        claim();
-        await automation.setClipboard(request.text!);
+        await automation.setClipboard(request.text!, claim());
         return { facts: { kind: action, text: request.text! } };
     }
   }
@@ -468,6 +469,11 @@ export class DesktopAutomationService {
   private changeControl(desktopId: string, state: DesktopAutomationState, control: DesktopControl | null): void {
     if (control === state.control) return;
     state.control = control;
+    if (control?.controller === "user") {
+      // The agent's input in flight or queued stops (DESKTOP_CONTROLLED_BY_USER); later input claims anew.
+      state.inputAbort.abort(controlledByUser());
+      state.inputAbort = new AbortController();
+    }
     this.armLapse(desktopId, state);
     if (this.states.get(desktopId) === state) this.options.controlChanged(desktopId);
   }
@@ -506,7 +512,7 @@ export class DesktopAutomationService {
   private state(desktopId: string): DesktopAutomationState {
     let state = this.states.get(desktopId);
     if (!state) {
-      state = { automation: null, opening: null, epoch: 0, inFlight: 0, idleTimer: null, control: null, lapseTimer: null };
+      state = { automation: null, opening: null, epoch: 0, inFlight: 0, idleTimer: null, control: null, lapseTimer: null, inputAbort: new AbortController() };
       this.states.set(desktopId, state);
     }
     return state;
