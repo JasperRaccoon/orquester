@@ -118,7 +118,14 @@ const generateImage = defineTool({
         { signal: ctx.signal }
       )
     );
-    const { attachmentId } = await storeChatImage(api, caller, { bytes: made.bytes, mimeType: made.mimeType, name: made.name });
+    let attachmentId: string;
+    try {
+      ({ attachmentId } = await storeChatImage(api, caller, { bytes: made.bytes, mimeType: made.mimeType, name: made.name }));
+    } catch (error) {
+      // The project copy is written by then: say where, so a retry shows it rather than making another (-v2).
+      if (!made.path || !(error instanceof ToolError)) throw error;
+      throw new ToolError(error.code, `${error.message} The image was made and saved in the project as ${made.relativePath ?? made.path}: show it with show_image instead of generating it again.`, error.detail);
+    }
     const text = caption(args.prompt);
     // Within the size a row keeps (a long prompt and path would drop the whole row).
     const imageRef: ImageToolReference = boundImageToolReference({

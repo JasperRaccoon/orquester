@@ -248,6 +248,22 @@ test("a renewal a live chat holds, or one with nothing to renew now, never flags
   }
 });
 
+test("an image answer that breaks off is not asked for again: the plan already paid for it", async () => {
+  const h = harness([{ id: "a" }]);
+  await h.service.start();
+  h.answer(() => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"data":[{"b64_json":"iVBOR'));
+        controller.error(new Error("socket hang up"));
+      }
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+  });
+  assert.equal((await refusal(h.service.generate(input(), signal()))).code, "GPT_IMAGE_UNAVAILABLE");
+  assert.equal(h.requests.length, 1);
+});
+
 test("upstream refusals map to plain errors; only passing failures are retried", async () => {
   const h = harness([{ id: "a" }]);
   await h.service.start();

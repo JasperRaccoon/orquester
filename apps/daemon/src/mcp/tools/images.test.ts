@@ -123,6 +123,14 @@ describe("generate_image", () => {
     assert.deepEqual(imageRowRef("generate_image", result)?.images.map((image) => image.attachmentId), [`${THREAD}-att-1`]);
   });
 
+  it("an image saved in the project that the chat could not store says where it is, so a retry does not make another", async (t) => {
+    const s = await setup(t, { ...made, path: "/w/ws/p/assets/icon.png", relativePath: "assets/icon.png" });
+    s.api.onUpload(() => ({ status: 503, value: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting." } }));
+    const result = await call(s.api, { prompt: "an icon", save_as: "assets/" });
+    assert.equal(result.isError, true);
+    assert.match((result.structuredContent as { message: string }).message, /saved in the project as assets\/icon\.png/);
+  });
+
   it("sends nothing upstream when a reference is refused", async (t) => {
     const s = await setup(t, made);
     await writeFile(join(s.ws, "acme", "app", "notes.png"), "not an image");
