@@ -44,11 +44,13 @@ interface FakeOptions {
   bitsPerPixel?: number;
   /** In 4-byte units. */
   maximumRequestLength?: number;
+  /** Keycodes from 8 (default 24: up to 31). */
+  keycodes?: number;
 }
 
 /** keycodes 8–31 (2 keysyms each): a/A, 1/!, Shift_L, Control_L, Return, Alt_L/Meta_L; the rest unbound. */
-function keymap(): number[][] {
-  const map: number[][] = Array.from({ length: 24 }, () => [0, 0]);
+function keymap(keycodes = 24): number[][] {
+  const map: number[][] = Array.from({ length: keycodes }, () => [0, 0]);
   map[0] = [XK.a, XK.A]; // 8
   map[1] = [XK.one, XK.exclam]; // 9
   map[2] = [XK.Shift_L, 0]; // 10
@@ -66,7 +68,7 @@ const ALT = 13;
 class FakeXServer {
   readonly requests: Request[] = [];
   readonly inputs: FakeInputRecord[] = [];
-  readonly keymap = keymap();
+  readonly keymap: number[][];
   /** Every ChangeKeyboardMapping: first keycode and its keysyms. */
   readonly mappingChanges: Array<{ keycode: number; keysyms: number[] }> = [];
   readonly properties = new Map<number, Map<number, { type: number; format: number; data: Buffer }>>();
@@ -90,6 +92,7 @@ class FakeXServer {
   readonly stream: Duplex;
 
   constructor(readonly options: FakeOptions = {}) {
+    this.keymap = keymap(options.keycodes);
     this.width = options.width ?? 64;
     this.height = options.height ?? 48;
     this.stream = new Duplex({
@@ -489,6 +492,14 @@ describe("DesktopAutomation input", () => {
     assert.deepEqual(server.mappingChanges.at(-1), { keycode: 31, keysyms: [0, 0] });
     assert.deepEqual(server.keymap[31 - MIN_KEYCODE], [0, 0]);
     assert.equal(engine.closed, true);
+    await engine.close();
+  });
+
+  test("a keysym is bound outside the spare keycodes voxl takes while there is such a spare", async () => {
+    // A full keymap (8–255): voxl's scratch list holds 253–255 and 251, so 252 is the highest left.
+    const { server, engine } = await open({ keycodes: 248 });
+    await engine.type("é");
+    assert.deepEqual(server.mappingChanges, [{ keycode: 252, keysyms: [XK.eacute, XK.eacute] }]);
     await engine.close();
   });
 
