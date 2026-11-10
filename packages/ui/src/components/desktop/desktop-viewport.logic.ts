@@ -11,6 +11,7 @@
  */
 
 import type { DesktopSize } from "@orquester/api";
+import type { DesktopTextSize } from "../../lib/desktop-prefs";
 
 export const ZOOM_MAX = 5;
 /** A pinch that ends below this zoom snaps back to 1×. */
@@ -79,6 +80,17 @@ export function baseScale(g: DesktopViewportGeometry): number {
   if (!g.sharp) return 1;
   const stretch = fitScale(g) * g.devicePixelRatio;
   return stretch >= 1 && stretch <= SHARP_MAX_STRETCH ? 1 / stretch : 1;
+}
+
+/**
+ * Whether sharp fit may apply: on touch rendering only, and only to a display
+ * this viewer does not size to the view itself. A Fit-mode display that follows
+ * the view, or a Large / Medium preset, is already the size the user chose;
+ * shrinking it to device pixels would undo that (More space is device pixels).
+ */
+export function sharpFitAllowed(state: { touchRendering: boolean; fitDrivesSize: boolean; textSize: DesktopTextSize }): boolean {
+  if (!state.touchRendering || state.fitDrivesSize) return false;
+  return state.textSize === "fit" || state.textSize === "more";
 }
 
 /** The 1× transform: identity, or the sharp-fit scale with the display centered and its corner on a device pixel. */

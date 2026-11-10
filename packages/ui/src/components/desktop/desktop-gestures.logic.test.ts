@@ -234,6 +234,19 @@ test("a double tap clicks twice on the first tap's point", () => {
   assert.deepEqual(calls, ["move 200,100", "down 1", "up 1", "move 200,100", "down 1", "up 1"]);
 });
 
+test("a slide between two quick taps breaks the double tap: the second tap clicks where it lands", () => {
+  const { calls, down, move, up } = setup("touch");
+  down(1, 100, 50);
+  up(1, 100, 50, 60);
+  down(2, 100, 50, 20);
+  move(2, 140, 50);
+  up(2, 140, 50);
+  calls.length = 0;
+  down(3, 105, 52, 20);
+  up(3, 105, 52, 60);
+  assert.deepEqual(calls, ["move 210,104", "down 1", "up 1"]);
+});
+
 test("latched modifiers are held around a tap's click (Shift-tap = Shift-click), once", () => {
   const { calls, down, up } = setup("touch", [SHIFT]);
   down(1, 100, 50);

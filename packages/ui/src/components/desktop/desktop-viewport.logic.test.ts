@@ -5,6 +5,7 @@ import {
   baseScale,
   displayToViewport,
   followCursor,
+  sharpFitAllowed,
   viewTransform,
   type DesktopViewportGeometry
 } from "./desktop-viewport.logic.ts";
@@ -58,4 +59,14 @@ test("sharp fit shows a display that would stretch by ≤ 1.25× at one device p
   assert.equal(baseScale({ ...geo, display: { width: 1400, height: 700 } }), 1);
   assert.equal(baseScale({ ...geo, display: { width: 2400, height: 1200 } }), 1);
   assert.equal(baseScale({ ...geo, sharp: false }), 1);
+});
+
+test("sharp fit never shrinks a display this viewer sizes to the view", () => {
+  const touch = { touchRendering: true, fitDrivesSize: false };
+  assert.equal(sharpFitAllowed({ ...touch, textSize: "fit" }), true, "a fixed or another viewer's size");
+  assert.equal(sharpFitAllowed({ ...touch, textSize: "more" }), true, "More space is device pixels already");
+  assert.equal(sharpFitAllowed({ ...touch, fitDrivesSize: true, textSize: "fit" }), false, "Fit mode following this view");
+  assert.equal(sharpFitAllowed({ ...touch, textSize: "large" }), false);
+  assert.equal(sharpFitAllowed({ ...touch, textSize: "medium" }), false);
+  assert.equal(sharpFitAllowed({ touchRendering: false, fitDrivesSize: false, textSize: "fit" }), false, "mouse rendering");
 });

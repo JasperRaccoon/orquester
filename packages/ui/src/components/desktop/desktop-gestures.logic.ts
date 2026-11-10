@@ -222,6 +222,7 @@ export class DesktopGestureRecognizer {
   cancelPointer(p: GesturePointer): void {
     const g = this.gesture;
     if (!g?.fingers.has(p.id)) return;
+    this.lastTap = null;
     g.fingers.delete(p.id);
     this.end(g);
     if (g.fingers.size === 0) this.gesture = null;
@@ -234,6 +235,7 @@ export class DesktopGestureRecognizer {
       this.releaseKeys(keys);
     }
     this.penHeld.clear();
+    this.lastTap = null;
     const g = this.gesture;
     if (!g) return;
     this.end(g);
@@ -399,6 +401,9 @@ export class DesktopGestureRecognizer {
   private finish(g: Gesture, t: number): void {
     this.clearTimer(g);
     this.gesture = null;
+    // Only a tap right after a tap is a double tap: any other gesture in between ends the pair.
+    const lastTap = this.lastTap;
+    this.lastTap = null;
     if (g.kind !== "pending") {
       this.end(g);
       return;
@@ -413,13 +418,12 @@ export class DesktopGestureRecognizer {
     } else if (g.maxFingers === 2) {
       this.click(3, this.inputMode === "touch" ? this.displayAt(geo, start) : (this.cursorAt ?? this.displayCenter(geo)));
     } else {
-      this.tap(geo, start, t);
+      this.tap(geo, start, t, lastTap);
     }
   }
 
-  private tap(geo: DesktopViewportGeometry, start: GesturePointer, t: number): void {
+  private tap(geo: DesktopViewportGeometry, start: GesturePointer, t: number, last: DesktopGestureRecognizer["lastTap"]): void {
     let at = this.inputMode === "touch" ? this.displayAt(geo, start) : (this.cursorAt ?? this.displayCenter(geo));
-    const last = this.lastTap;
     if (last && start.t - last.t <= DOUBLE_TAP_MS && distance(last.at, start) <= DOUBLE_TAP_SLOP_PX) at = last.display;
     this.click(1, at);
     this.lastTap = { t, at: { x: start.x, y: start.y }, display: at };

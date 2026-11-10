@@ -26,6 +26,7 @@ import {
   type PasteChord
 } from "./desktop-keys";
 import { TEXT_SIZE_DEBOUNCE_MS, textSizeDisplaySize } from "./desktop-text-size";
+import { sharpFitAllowed } from "./desktop-viewport.logic";
 import { createDesktopStreamClient } from "./stream/create-stream-client";
 import type { DesktopStreamClient, DesktopStreamEvents, DesktopViewMode } from "./stream/types";
 
@@ -157,6 +158,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   // Fit mode: this viewer drives the display size while it has focus or just
   // received local input, and stops on blur / input elsewhere.
   const drivingRef = useRef(false);
+  /** `drivingRef` for rendering (sharp fit), updated only when it flips. */
+  const [driving, setDrivingState] = useState(false);
 
   /** The client's view mode for the current prefs, handover and touch state. */
   const clientViewMode = useCallback((): DesktopViewMode => {
@@ -167,6 +170,16 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     // Touch pans with the local zoom instead of noVNC's drag-to-pan.
     return fixedMode === "pan" && !touchRenderingRef.current ? { kind: "fixed-pan" } : { kind: "fixed-scale" };
   }, []);
+
+  /** The size this viewer asked for and has not seen applied yet. */
+  const pendingSizeRef = useRef<DesktopSize | null>(null);
+  const requestDisplaySize = useCallback((size: DesktopSize) => {
+    pendingSizeRef.current = size;
+    clientRef.current?.requestSize(size);
+  }, []);
+  useEffect(() => {
+    if (sameSize(pendingSizeRef.current, displaySize)) pendingSizeRef.current = null;
+  }, [displaySize]);
 
   // Text-size presets: the display follows the view's size, debounced, while
   // this viewer drives it and no agent controls the desktop.
@@ -180,8 +193,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     if (!drivingRef.current || agentControlsRef.current) return;
     const rect = viewport.getBoundingClientRect();
     const size = textSizeDisplaySize(preset, { width: rect.width, height: rect.height }, window.devicePixelRatio || 1);
-    if (size && !sameSize(size, displaySizeRef.current)) client.requestSize(size);
-  }, []);
+    if (size && !sameSize(size, displaySizeRef.current)) requestDisplaySize(size);
+  }, [requestDisplaySize]);
   const schedulePreset = useCallback(() => {
     if (textSizeRef.current === "fit") return;
     if (presetTimerRef.current !== null) clearTimeout(presetTimerRef.current);
@@ -204,6 +217,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   const setDriving = useCallback(
     (on: boolean) => {
       drivingRef.current = on;
+      setDrivingState(on);
       const mode = clientViewMode();
       if (mode.kind === "fit") clientRef.current?.setViewMode(mode);
       if (on) schedulePreset();
@@ -308,26 +322,32 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     };
   }, [shouldConnect, api, desktop.id, setDriving, clientViewMode]);
 
-  // Re-apply the view whenever it changes; a fixed size or a preset is then
-  // requested (and requested again once an agent gives the desktop back).
-  const viewKey = [
-    prefs.view,
-    prefs.fixedMode ?? "",
-    `${prefs.fixedSize?.width ?? 0}x${prefs.fixedSize?.height ?? 0}`,
-    textSize,
-    touchRendering,
-    agentControls
-  ].join(":");
+  // Re-apply the view whenever it changes. A fixed size or a preset is
+  // requested only when what it depends on changes (a choice, a connection, an
+  // agent giving the desktop back), not when the mode alone does (touch ↔
+  // mouse), so another viewer's size is not taken back for nothing.
+  const fixedKey = `${prefs.fixedSize?.width ?? 0}x${prefs.fixedSize?.height ?? 0}`;
+  const requestKey = [prefs.view, fixedKey, textSize, agentControls, conn].join(":");
+  const viewKey = [requestKey, prefs.fixedMode ?? "", touchRendering].join(":");
+  const lastRequestKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const client = clientRef.current;
     if (!client) return;
     client.setViewMode(clientViewMode());
+    const same = lastRequestKeyRef.current === requestKey;
+    lastRequestKeyRef.current = requestKey;
     if (conn !== "connected" || agentControlsRef.current) return;
+    if (same) {
+      // setViewMode dropped the client's retries: renew a request not applied yet.
+      if (pendingSizeRef.current) client.requestSize(pendingSizeRef.current);
+      return;
+    }
+    pendingSizeRef.current = null;
     const { view, fixedSize } = prefsRef.current;
     if (textSizeRef.current !== "fit") schedulePreset();
-    else if (view === "fixed" && fixedSize) client.requestSize(fixedSize);
+    else if (view === "fixed" && fixedSize) requestDisplaySize(fixedSize);
     // viewKey captures every field the mode and the request read.
-  }, [viewKey, conn, clientViewMode, schedulePreset]);
+  }, [viewKey, requestKey, conn, clientViewMode, schedulePreset, requestDisplaySize]);
 
   // The client's own touch handling stays off on touch devices (the touch layer drives input).
   useEffect(() => {
@@ -527,7 +547,11 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     displaySize,
     connected: conn === "connected",
     rendering: touchRendering,
-    sharp: touchRendering,
+    sharp: sharpFitAllowed({
+      touchRendering,
+      fitDrivesSize: textSize === "fit" && prefs.view === "fit" && driving && !agentControls,
+      textSize
+    }),
     directPen: touch,
     mode: inputMode,
     takeModifiers,
