@@ -73,6 +73,11 @@ function parseControl(data: RawData): Record<string, unknown> | null {
 /** voxl's own cap on one message. */
 const VOXL_MAX_PAYLOAD = 64 * 1024 * 1024;
 const VOXL_UNAVAILABLE = "voxl unavailable";
+/**
+ * voxl's answer to the relay's upgrade. With the streams' 30 s acquire budget (voxl-streams.ts) the
+ * relay has given up before the browser client's 45 s wait for `hello` ends.
+ */
+const VOXL_HANDSHAKE_TIMEOUT_MS = 10_000;
 
 /**
  * A close code that may be sent on: voxl's (or the viewer's) own, else 1000 for "no status" and
@@ -307,6 +312,7 @@ export async function registerDesktopWsRoutes(app: FastifyInstance, deps: Deskto
           headers: { Authorization: `Bearer ${held.password}` },
           perMessageDeflate: false,
           maxPayload: VOXL_MAX_PAYLOAD,
+          handshakeTimeout: VOXL_HANDSHAKE_TIMEOUT_MS,
           // The stream is already connected (this machine's TCP, or a VM's `tcp` channel).
           createConnection: (() => stream as Socket) as unknown as typeof createConnection
         });

@@ -560,12 +560,17 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   /**
    * Switch the video backend (PATCH): only the stream changes — a running voxl is stopped for
    * `rfb`; for `voxl` the stream becomes available and voxl starts with its first viewer. The
-   * desktop and its apps keep running.
+   * desktop and its apps keep running. `voxl` on a voxl desktop whose stream is `unavailable`
+   * looks for voxl again at once (also after the streams stopped retrying a crashing one).
    */
   async update(id: string, request: { video?: DesktopVideoBackend }): Promise<DesktopSummary> {
     const rt = this.mustGet(id);
     await this.enqueue(rt, async () => {
-      if (!this.isCurrent(rt) || request.video === undefined || request.video === desktopRecordVideo(rt.record)) return;
+      if (!this.isCurrent(rt) || request.video === undefined) return;
+      if (request.video === desktopRecordVideo(rt.record)) {
+        if (request.video === "voxl" && this.voxl.state(id)?.state === "unavailable") this.attachVoxl(rt);
+        return;
+      }
       this.requireWritable();
       rt.record.video = request.video;
       void this.store.persist();

@@ -384,7 +384,10 @@ The daemon allocates the port (voxl's `--port 0` logs `:0`); a taken port makes 
 retries once with another. The relay waits for readiness — voxl's listen line in its log (watched with
 `fs.watch`, no polling loop), then one `/healthz` — before dialing upstream. If voxl fails to start or
 exits on its own, the desktop is not touched: the stream turns `unavailable` with the reason and viewers
-fall back to RFB (the next viewer may try again). `DesktopSummary.voxl.state` stays simple: `ready` =
+fall back to RFB; while the binary is there it turns `ready` again after a 30 s cooldown, so the next
+viewer may try again. Three such failures within 5 minutes stop the retries: the stream stays
+`unavailable` until the desktop restarts or the View menu's Fast is chosen again (`PATCH {video:
+"voxl"}` on a voxl desktop whose stream is `unavailable` looks for voxl again at once). `DesktopSummary.voxl.state` stays simple: `ready` =
 viewers may connect (voxl may or may not run right now), `unavailable` = use RFB. A voxl still running
 across a daemon restart is adopted (its port and password are in the desktop dir's 0600 `voxl.env`),
 else stopped. The relay clamps a viewer's `sz,w,h` to the desktop size limits (voxl accepts up to

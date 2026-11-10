@@ -23,7 +23,9 @@ import {
 // reconnect within it is instant). Readiness is voxl's listen line in its log (watched, never
 // polled) confirmed by one `/healthz`; its exit lands in `voxl.exit`, also watched. A voxl that
 // fails to start or exits on its own never touches the desktop: its stream turns `unavailable`
-// (viewers use RFB) with the reason, and the next viewer may try again.
+// (viewers use RFB) with the reason, and turns `ready` again after a cooldown (30 s) so the next
+// viewer may try again. A crash loop is cut short: after 3 failures within 5 minutes it stays
+// `unavailable` until asked again (PATCH `video: voxl` probes again at once) or the desktop restarts.
 //
 // The summary's state: `ready` = viewers may connect (whether or not voxl runs right now),
 // `unavailable` = use RFB. After a daemon restart a voxl still running is adopted (port and
@@ -74,8 +76,14 @@ interface Entry {
   binary: string | null;
   proc: VoxlProcess | null;
   starting: Promise<VoxlProcess> | null;
+  /** The check for the machine's voxl while the state is `starting` (a viewer waits for it). */
+  probing: Promise<void> | null;
   viewers: number;
   idleTimer: NodeJS.Timeout | null;
+  /** Turns an `unavailable` stream back to `ready` after a failure. */
+  retryTimer: NodeJS.Timeout | null;
+  /** When voxl failed to start or exited on its own, within the last FAILURE_WINDOW_MS. */
+  failures: number[];
   /** Bumped when the desktop goes or switches away: work of an older attach is dropped. */
   epoch: number;
 }
@@ -95,6 +103,18 @@ export interface DesktopVoxlStreamsOptions {
 const READY_TIMEOUT_MS = 15_000;
 const STOP_GRACE_MS = 5_000;
 const IDLE_STOP_MS = 30_000;
+/** How long a stream stays `unavailable` after voxl failed before the next viewer may try again. */
+const RETRY_AFTER_MS = 30_000;
+/**
+ * How long a viewer waits for voxl in all (its check, its start). The relay adds at most its 10 s
+ * upstream handshake (ws-routes.ts); together they stay below the browser client's 45 s wait for
+ * voxl's `hello` (packages/ui …/stream/voxl/connection.ts), so the relay answers first.
+ */
+const ACQUIRE_TIMEOUT_MS = 30_000;
+const EXPIRED = Symbol("expired");
+/** This many voxl failures within FAILURE_WINDOW_MS stop the automatic retries. */
+const MAX_FAILURES = 3;
+const FAILURE_WINDOW_MS = 5 * 60_000;
 const HEALTHZ_TIMEOUT_MS = 5_000;
 const LOG_TAIL_BYTES = 16 * 1024;
 
@@ -129,26 +149,18 @@ export class DesktopVoxlStreams {
       binary: null,
       proc: null,
       starting: null,
+      probing: null,
       viewers: 0,
       idleTimer: null,
+      retryTimer: null,
+      failures: [],
       epoch: 0
     };
     this.entries.set(desktop.id, entry);
-    const epoch = entry.epoch;
     this.options.changed(desktop.id);
-    let reason: string | null = null;
-    try {
-      const status = await desktop.machine.voxl();
-      if (status.available && status.path) entry.binary = status.path;
-      else reason = status.reason ?? "voxl is not available.";
-    } catch (error) {
-      reason = `voxl could not be checked: ${errorMessage(error)}`;
-    }
-    if (!this.current(entry, epoch)) return;
-    if (options.adopt) await this.adoptOrClean(entry).catch((error) => this.options.logger.warn(`Desktop ${desktop.id}: voxl reattach failed`, error));
-    if (!this.current(entry, epoch)) return;
-    entry.state = entry.binary !== null || entry.proc !== null ? { state: "ready" } : { state: "unavailable", reason: reason ?? "voxl is not available." };
-    this.options.changed(desktop.id);
+    const probing = this.probe(entry, options);
+    entry.probing = probing;
+    await probing;
   }
 
   /**
@@ -166,13 +178,41 @@ export class DesktopVoxlStreams {
 
   /**
    * A viewer wants voxl: the running one, or a new one started for it (concurrent viewers share
-   * one start). Throws {@link VoxlUnavailableError} when voxl cannot run (the state says why).
+   * one start); while the machine's voxl is still being looked for, it waits for that. Throws
+   * {@link VoxlUnavailableError} when voxl cannot run (the state says why), or when it is not
+   * ready within the acquire budget (a start still under way goes on for the next viewer).
    */
   async acquire(desktopId: string): Promise<VoxlLease> {
-    const entry = this.entries.get(desktopId);
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<typeof EXPIRED>((resolve) => {
+      timer = setTimeout(() => resolve(EXPIRED), ACQUIRE_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    try {
+      return await this.lease(desktopId, expired);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Daemon shutdown: timers and watches only; a running voxl keeps running (the next boot adopts or stops it). */
+  shutdown(): void {
+    for (const id of [...this.entries.keys()]) this.dropEntry(id);
+  }
+
+  // ---------------------------------------------------------------------------
+
+  private async lease(desktopId: string, expired: Promise<typeof EXPIRED>): Promise<VoxlLease> {
+    const budget = `${Math.round(ACQUIRE_TIMEOUT_MS / 1000)} s`;
+    let entry = this.entries.get(desktopId);
+    // While the machine's voxl is being looked for (`starting`), the viewer waits for the answer.
+    while (entry?.probing) {
+      if ((await Promise.race([entry.probing, expired])) === EXPIRED) throw new VoxlUnavailableError(`voxl was still being checked after ${budget}.`);
+      entry = this.entries.get(desktopId);
+    }
     if (!entry) throw new VoxlUnavailableError("This desktop does not stream with voxl.");
-    if (entry.binary === null && entry.proc === null) {
-      throw new VoxlUnavailableError(entry.state.reason ?? (entry.state.state === "starting" ? "voxl is still being checked." : "voxl is not available."));
+    if (entry.state.state === "unavailable" || (entry.binary === null && entry.proc === null)) {
+      throw new VoxlUnavailableError(entry.state.reason ?? "voxl is not available.");
     }
     const epoch = entry.epoch;
     entry.viewers += 1;
@@ -180,7 +220,9 @@ export class DesktopVoxlStreams {
     entry.idleTimer = null;
     let proc: VoxlProcess;
     try {
-      proc = entry.proc ?? (await (entry.starting ??= this.startProcess(entry, epoch)));
+      const started = entry.proc ?? (await Promise.race([(entry.starting ??= this.startProcess(entry, epoch)), expired]));
+      if (started === EXPIRED) throw new VoxlUnavailableError(`voxl did not become ready within ${budget}.`);
+      proc = started;
     } catch (error) {
       this.leave(entry, epoch);
       throw error instanceof VoxlUnavailableError ? error : new VoxlUnavailableError(errorMessage(error));
@@ -202,15 +244,28 @@ export class DesktopVoxlStreams {
     };
   }
 
-  /** Daemon shutdown: timers and watches only; a running voxl keeps running (the next boot adopts or stops it). */
-  shutdown(): void {
-    for (const id of [...this.entries.keys()]) this.dropEntry(id);
-  }
-
-  // ---------------------------------------------------------------------------
-
   private current(entry: Entry, epoch: number): boolean {
     return this.entries.get(entry.desktop.id) === entry && entry.epoch === epoch;
+  }
+
+  /** Look for the machine's voxl (a VM's first one is copied over the box link), then settle the state. */
+  private async probe(entry: Entry, options: { adopt?: boolean }): Promise<void> {
+    const { desktop } = entry;
+    const epoch = entry.epoch;
+    let reason: string | null = null;
+    try {
+      const status = await desktop.machine.voxl();
+      if (status.available && status.path) entry.binary = status.path;
+      else reason = status.reason ?? "voxl is not available.";
+    } catch (error) {
+      reason = `voxl could not be checked: ${errorMessage(error)}`;
+    }
+    if (!this.current(entry, epoch)) return;
+    if (options.adopt) await this.adoptOrClean(entry).catch((error) => this.options.logger.warn(`Desktop ${desktop.id}: voxl reattach failed`, error));
+    if (!this.current(entry, epoch)) return;
+    entry.probing = null;
+    entry.state = entry.binary !== null || entry.proc !== null ? { state: "ready" } : { state: "unavailable", reason: reason ?? "voxl is not available." };
+    this.options.changed(desktop.id);
   }
 
   private dropEntry(desktopId: string): void {
@@ -219,6 +274,8 @@ export class DesktopVoxlStreams {
     entry.epoch += 1;
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     entry.idleTimer = null;
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    entry.retryTimer = null;
     entry.proc?.exitWatch?.close();
     if (entry.proc) entry.proc.exitWatch = null;
     this.entries.delete(desktopId);
@@ -263,8 +320,7 @@ export class DesktopVoxlStreams {
       const reason = error instanceof VoxlUnavailableError ? error.message : `voxl could not start: ${errorMessage(error)}`;
       if (this.current(entry, epoch)) {
         this.options.logger.warn(`Desktop ${desktop.id}: ${reason}`);
-        entry.state = { state: "unavailable", reason };
-        this.options.changed(desktop.id);
+        this.failed(entry, epoch, reason);
       }
       throw new VoxlUnavailableError(reason);
     } finally {
@@ -353,8 +409,7 @@ export class DesktopVoxlStreams {
           const code = parseCode(await machine.readText(files.exit).catch(() => null));
           const line = voxlFailureLine(await machine.readTail(files.log, LOG_TAIL_BYTES).catch(() => ""));
           if (!this.current(entry, epoch)) return;
-          entry.state = { state: "unavailable", reason: `voxl exited${code === null ? "" : ` (${code})`}${line ? `: ${line}` : "."}` };
-          this.options.changed(entry.desktop.id);
+          this.failed(entry, epoch, `voxl exited${code === null ? "" : ` (${code})`}${line ? `: ${line}` : "."}`);
         })
         .catch(() => {});
     };
@@ -370,6 +425,35 @@ export class DesktopVoxlStreams {
       this.options.logger.warn(`Desktop ${entry.desktop.id}: could not watch voxl's exit`, error);
     }
     check();
+  }
+
+  /**
+   * voxl failed to start or exited on its own: the stream is `unavailable` (viewers use RFB), and
+   * `ready` again after the cooldown while the binary is there, unless this is the MAX_FAILURES-th
+   * failure within FAILURE_WINDOW_MS: then it stays so until the stream is attached again (PATCH,
+   * desktop restart).
+   */
+  private failed(entry: Entry, epoch: number, reason: string): void {
+    const now = Date.now();
+    entry.failures = entry.failures.filter((at) => now - at < FAILURE_WINDOW_MS);
+    entry.failures.push(now);
+    const giveUp = entry.failures.length >= MAX_FAILURES;
+    entry.state = {
+      state: "unavailable",
+      reason: giveUp ? `${reason} (failed ${entry.failures.length} times in a few minutes; choose Fast video again to retry)` : reason
+    };
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    entry.retryTimer = null;
+    if (!giveUp && entry.binary !== null) {
+      entry.retryTimer = setTimeout(() => {
+        entry.retryTimer = null;
+        if (!this.current(entry, epoch) || entry.state.state !== "unavailable" || entry.proc || entry.starting) return;
+        entry.state = { state: "ready" };
+        this.options.changed(entry.desktop.id);
+      }, RETRY_AFTER_MS);
+      entry.retryTimer.unref?.();
+    }
+    this.options.changed(entry.desktop.id);
   }
 
   /** After a daemon restart: take over a voxl that still answers, else stop what is left of one. */

@@ -44,7 +44,7 @@ interface Harness {
   behaviour: VoxlBehaviour;
 }
 
-async function harness(t: TestContext, voxl: DesktopVoxlStatus): Promise<Harness> {
+async function harness(t: TestContext, voxl: DesktopVoxlStatus | (() => Promise<DesktopVoxlStatus>)): Promise<Harness> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-desktop-voxl-"));
   const servers: Server[] = [];
   const h: Harness = { manager: undefined as unknown as DesktopManager, appdir, sessions: [], voxlLaunches: [], behaviour: "listen" };
@@ -64,6 +64,11 @@ async function harness(t: TestContext, voxl: DesktopVoxlStatus): Promise<Harness
         bindFailed = true;
         await writeFile(log, "thread 'main' panicked at src/lib.rs:410:10:\nbind: Os { code: 98, kind: AddrInUse, message: \"Address already in use\" }\n");
         await atomicWrite(join(dir!, "voxl.exit"), "134\n");
+        return;
+      }
+      if (h.behaviour === "exits") {
+        await writeFile(log, "[t ERROR voxl] video init failed: X connect: refused\n");
+        await atomicWrite(join(dir!, "voxl.exit"), "1\n");
         return;
       }
       const server = createServer((socket) => {
@@ -91,7 +96,7 @@ async function harness(t: TestContext, voxl: DesktopVoxlStatus): Promise<Harness
     indexFile: desktopsIndexPath(appdir),
     tmux,
     hostStatus: async () => HOST,
-    voxlStatus: async () => voxl,
+    voxlStatus: typeof voxl === "function" ? voxl : async () => voxl,
     baseEnv: () => ({ PATH: "/usr/bin:/bin" }),
     renderNode: () => false,
     createTracker: (() => tracker) as unknown as DesktopManagerOptions["createTracker"],
@@ -145,6 +150,31 @@ test("without a voxl binary a voxl desktop runs on, its stream unavailable with 
   assert.equal(summary.status, "running");
   await assert.rejects(h.manager.voxlUpstream(desktop.id)!(), VoxlUnavailableError);
   assert.equal(h.voxlLaunches.length, 0);
+});
+
+test("a viewer arriving while the machine's voxl is still being looked for waits for it instead of being refused", async (t) => {
+  let found!: (status: DesktopVoxlStatus) => void;
+  const probe = new Promise<DesktopVoxlStatus>((resolve) => (found = resolve));
+  const h = await harness(t, () => probe);
+  const desktop = await h.manager.create({ projectPath: h.appdir, projectRealPath: h.appdir, video: "voxl" });
+  assert.deepEqual(h.manager.get(desktop.id)?.voxl, { state: "starting" });
+  const leased = h.manager.voxlUpstream(desktop.id)!();
+  found(VOXL);
+  const lease = await leased;
+  assert.equal(h.voxlLaunches.length, 1);
+  assert.ok(h.voxlLaunches[0]!.includes(`--port=${lease.port}`));
+  lease.release();
+});
+
+test("a viewer's wait for voxl is bounded below the browser's wait for hello", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await harness(t, () => new Promise<DesktopVoxlStatus>(() => {}));
+  const desktop = await h.manager.create({ projectPath: h.appdir, projectRealPath: h.appdir, video: "voxl" });
+  const leased = h.manager.voxlUpstream(desktop.id)!();
+  t.mock.timers.tick(30_000);
+  const outcome = await Promise.race([leased.then(() => "leased", (error: unknown) => error), new Promise((resolve) => setImmediate(() => resolve("waiting")))]);
+  assert.ok(outcome instanceof VoxlUnavailableError, String(outcome));
+  assert.match(outcome.message, /still being checked/);
 });
 
 test("PATCH switches the backend without restarting the desktop; it is persisted", async (t) => {
@@ -206,4 +236,43 @@ test("a taken port is retried once with another", async (t) => {
   assert.ok(h.voxlLaunches[1]!.includes(`--port=${lease.port}`));
   assert.deepEqual((await until(h.manager, desktop.id, () => true)).voxl, { state: "ready" });
   lease.release();
+});
+
+test("after voxl fails the stream is ready again after a cooldown; three failures in a few minutes stop that until Fast is chosen again", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const h = await harness(t, VOXL);
+  const desktop = await h.manager.create({ projectPath: h.appdir, projectRealPath: h.appdir, video: "voxl" });
+  await until(h.manager, desktop.id, (d) => d.voxl?.state === "ready");
+  const upstream = h.manager.voxlUpstream(desktop.id)!;
+  const cooldown = 30_000;
+
+  // 1: voxl exits on its own; refused while unavailable, then the next viewer may try again.
+  const lease = await upstream();
+  await atomicWrite(join(desktopRuntimeDir(h.appdir, desktop.id), "voxl.exit"), "1\n");
+  await until(h.manager, desktop.id, (d) => d.voxl?.state === "unavailable");
+  lease.release();
+  await assert.rejects(upstream(), VoxlUnavailableError);
+  assert.equal(h.voxlLaunches.length, 1);
+  t.mock.timers.tick(cooldown);
+  assert.deepEqual(h.manager.get(desktop.id)?.voxl, { state: "ready" });
+
+  // 2 and 3: voxl fails to start; the third failure is not retried after the cooldown.
+  h.behaviour = "exits";
+  await assert.rejects(upstream(), /exited while starting \(1\)/);
+  t.mock.timers.tick(cooldown);
+  assert.equal(h.manager.get(desktop.id)?.voxl?.state, "ready");
+  await assert.rejects(upstream(), VoxlUnavailableError);
+  t.mock.timers.tick(cooldown);
+  const given = h.manager.get(desktop.id)?.voxl;
+  assert.equal(given?.state, "unavailable");
+  assert.match(given?.reason ?? "", /exited while starting/);
+  assert.equal(h.voxlLaunches.length, 3);
+
+  // Fast again (PATCH video: voxl on the voxl desktop) looks for voxl at once.
+  h.behaviour = "listen";
+  assert.notEqual((await h.manager.update(desktop.id, { video: "voxl" })).voxl?.state, "unavailable");
+  await until(h.manager, desktop.id, (d) => d.voxl?.state === "ready");
+  const again = await upstream();
+  assert.equal(h.voxlLaunches.length, 4);
+  again.release();
 });

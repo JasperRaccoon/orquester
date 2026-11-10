@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { VOXL_MAX_FAILURES, chooseDesktopBackend, type VoxlViewerSupport } from "./backend-choice.logic.ts";
+import { VOXL_MAX_FAILURES, VOXL_STABLE_MS, chooseDesktopBackend, voxlFailuresAfterClose, type VoxlViewerSupport } from "./backend-choice.logic.ts";
 
 const capable: VoxlViewerSupport = { secureContext: true, webCodecs: true, h264: true };
 const voxlDesktop = { video: "voxl" as const, voxl: { state: "ready" as const } };
@@ -39,4 +39,12 @@ test("three consecutive voxl connection failures fall back to RFB", () => {
   const choice = chooseDesktopBackend({ desktop: voxlDesktop, support: capable, voxlFailures: VOXL_MAX_FAILURES });
   assert.equal(choice.backend, "rfb");
   assert.match(choice.backend === "rfb" ? choice.reason ?? "" : "", /3 times/);
+});
+
+test("a voxl connection dropped right after its hello counts as a failure; one that streamed a while resets the count", () => {
+  let failures = 0;
+  for (let i = 0; i < VOXL_MAX_FAILURES; i++) failures = voxlFailuresAfterClose(failures, { helloAt: 1_000, closedAt: 1_000 + VOXL_STABLE_MS - 1 });
+  assert.equal(chooseDesktopBackend({ desktop: voxlDesktop, support: capable, voxlFailures: failures }).backend, "rfb");
+  assert.equal(voxlFailuresAfterClose(2, { helloAt: null, closedAt: 5_000 }), 3, "never had hello");
+  assert.equal(voxlFailuresAfterClose(2, { helloAt: 1_000, closedAt: 1_000 + VOXL_STABLE_MS }), 0);
 });

@@ -63,7 +63,9 @@ apt_install() {
 }
 
 installed_version() { # <bin>: the version it prints (run unprivileged), or nothing
-  runuser -u "$BUILD_USER" -- "$1" --version 2>/dev/null </dev/null | sed -n 's/^voxl \([^[:space:]]*\)$/\1/p' | head -n1
+  # A binary that does not run prints nothing: never a failure here (set -e, pipefail), so the
+  # caller's `fail` says why.
+  runuser -u "$BUILD_USER" -- "$1" --version 2>/dev/null </dev/null | sed -n 's/^voxl \([^[:space:]]*\)$/\1/p' | head -n1 || true
 }
 
 mapfile -t need < <(missing_packages "${RUNTIME_PACKAGES[@]}")

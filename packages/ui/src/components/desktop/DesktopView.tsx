@@ -36,7 +36,7 @@ import {
 import { TEXT_SIZE_DEBOUNCE_MS, textSizeDisplaySize } from "./desktop-text-size";
 import { sharpFitAllowed } from "./desktop-viewport.logic";
 import { createDesktopStreamClient, voxlViewerSupport } from "./stream/create-stream-client";
-import { desktopVideo, viewerUnsupportedReason, voxlStreamUsable } from "./stream/backend-choice.logic";
+import { VOXL_MAX_FAILURES, desktopVideo, viewerUnsupportedReason, voxlFailuresAfterClose, voxlStreamUsable } from "./stream/backend-choice.logic";
 import type { DesktopStreamClient, DesktopStreamEvents, DesktopViewMode } from "./stream/types";
 import { DesktopHandoffControls, DesktopHandoffLayer, useDesktopHandoff } from "./handoff/DesktopHandoff";
 import { takeoverSink } from "../../lib/desktops/handoff.logic";
@@ -128,15 +128,26 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   /** The backend of the current connection attempt, and why a voxl desktop fell back to RFB. */
   const [stream, setStream] = useState<{ backend: DesktopVideoBackend; fallback: string | null } | null>(null);
   /**
-   * Consecutive voxl connections that closed before their `hello` (spec R4.6): kept across
-   * reconnects, so the third failure falls back to RFB; reset when voxl connects or the desktop's
-   * stream changes.
+   * Consecutive voxl connections that closed before their `hello` or soon after it (spec R4.6,
+   * `voxlFailuresAfterClose`): kept across reconnects, so the third failure falls back to RFB;
+   * reset when a voxl connection streamed past that, the desktop's stream changes, or its stream
+   * becomes `ready`.
    */
   const voxlFailuresRef = useRef(0);
   const voxlUsable = voxlStreamUsable(desktop);
   useEffect(() => {
     voxlFailuresRef.current = 0;
   }, [desktop.id, voxlUsable]);
+  // Failures while voxl was still being checked or started say nothing about a `ready` stream: a
+  // view they pinned to RFB reconnects and tries voxl again.
+  const voxlReady = voxlUsable && desktop.voxl?.state === "ready";
+  const [voxlRetry, setVoxlRetry] = useState(0);
+  useEffect(() => {
+    if (!voxlReady) return;
+    const pinned = voxlFailuresRef.current >= VOXL_MAX_FAILURES;
+    voxlFailuresRef.current = 0;
+    if (pinned) setVoxlRetry((n) => n + 1);
+  }, [desktop.id, voxlReady]);
 
   // ---- Touch -----------------------------------------------------------------
 
@@ -291,10 +302,11 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       client = c;
       clientRef.current = c;
       setStream({ backend: c.backend, fallback: plan.choice.backend === "rfb" ? plan.choice.reason : null });
-      let reachedConnected = false;
-      /** A voxl client that ends before its `hello` counts toward the RFB fallback. */
-      const failed = () => {
-        if (c.backend === "voxl" && !reachedConnected) voxlFailuresRef.current += 1;
+      /** When the voxl client had its `hello` (it reported `connected`). */
+      let helloAt: number | null = null;
+      /** A voxl client that ends before its `hello`, or soon after it, counts toward the RFB fallback. */
+      const ended = () => {
+        if (c.backend === "voxl") voxlFailuresRef.current = voxlFailuresAfterClose(voxlFailuresRef.current, { helloAt, closedAt: performance.now() });
       };
       c.setNativeInput(!touchRef.current);
       c.setViewMode(clientViewMode());
@@ -304,8 +316,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
           if (!current()) return;
           if (state === "connected") {
             attempt = 0;
-            reachedConnected = true;
-            if (c.backend === "voxl") voxlFailuresRef.current = 0;
+            helloAt = performance.now();
             setConn("connected");
             setConnError(null);
             // Opening/activating the tab in a focused window counts as local
@@ -319,7 +330,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
             // once `conn` flips to "connected".
           } else if (state === "disconnected") {
             if (reason) setConnError(reason);
-            failed();
+            ended();
             drop();
             scheduleRetry();
           }
@@ -344,7 +355,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       } catch (err) {
         if (!current()) return;
         setConnError(errorText(err));
-        failed();
+        ended();
         drop();
         scheduleRetry();
       }
@@ -358,9 +369,10 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       drop();
       setConn("idle");
     };
-    // A new video backend, or a voxl stream that became usable or unusable, reconnects with the
-    // factory's new choice (only the stream restarts, not the desktop).
-  }, [shouldConnect, api, desktop.id, desktop.video, voxlUsable, setDriving, clientViewMode]);
+    // A new video backend, a voxl stream that became usable or unusable, or one that became ready
+    // for a view pinned to RFB, reconnects with the factory's new choice (only the stream restarts,
+    // not the desktop).
+  }, [shouldConnect, api, desktop.id, desktop.video, voxlUsable, voxlRetry, setDriving, clientViewMode]);
 
   // Re-apply the view whenever it changes. A fixed size or a preset is
   // requested only when what it depends on changes (a choice, a connection, an
@@ -563,7 +575,9 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         : null);
   const [videoBusy, setVideoBusy] = useState(false);
   const setVideo = (video: DesktopVideoBackend) => {
-    if (!api || video === desktopVideo(desktop)) return;
+    // Fast on a voxl desktop whose stream is unavailable asks the daemon to look for voxl again.
+    const retry = video === "voxl" && desktopVideo(desktop) === "voxl" && desktop.voxl?.state === "unavailable";
+    if (!api || (video === desktopVideo(desktop) && !retry)) return;
     setVideoBusy(true);
     setActionError(null);
     // The daemon restarts only the stream; the view reconnects when `desktop.video` changes.
