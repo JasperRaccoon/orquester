@@ -62,12 +62,17 @@ export type StepReportCheck =
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
+/** UTF-8 bytes of a JSON value. */
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
 /**
  * Check a report against the block's declarations (§5.2): the outcome is a declared id (required when
  * outcomes are declared, refused when none are), the summary is text of at most
  * `reportSummaryChars`, every required output is present, each output fits its type (with §4.2's
- * coercion) and enum values, and there is no undeclared output. Every problem is listed, each naming
- * what is allowed.
+ * coercion) and enum values, there is no undeclared output, and the outputs are at most
+ * `reportOutputsBytes` as JSON. Every problem is listed, each naming what is allowed.
  */
 export function checkStepReport(decl: StepReportDecl, args: StepReportArgs): StepReportCheck {
   const problems: string[] = [];
@@ -120,6 +125,13 @@ export function checkStepReport(decl: StepReportDecl, args: StepReportArgs): Ste
       const coerced = coerceTypedValue(output, given[output.name]);
       if (!coerced.ok) problems.push(`outputs.${output.name} must be ${outputTypeText(output)}.`);
       else outputs[output.name] = coerced.value;
+    }
+    const bytes = jsonBytes(outputs);
+    if (bytes > WORKFLOW_LIMITS.reportOutputsBytes) {
+      const limit = WORKFLOW_LIMITS.reportOutputsBytes / 1024;
+      problems.push(
+        `outputs are ${Math.ceil(bytes / 1024)} KiB as JSON; at most ${limit} KiB. Shorten the values, or write large content to a file in the project and report its path instead.`
+      );
     }
   }
 

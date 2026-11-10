@@ -366,12 +366,12 @@ function blockView(b: WorkflowBlockRun): Record<string, unknown> {
       ...(s.earliestResetAt ? { earliestResetAt: s.earliestResetAt } : {})
     };
   }
-  // An agent block with outcomes/outputs (spec 2026-11-10 §5): its latest valid report.
+  // An agent block with outcomes/outputs (spec 2026-11-10 §5): its latest valid report. Its outputs
+  // are not repeated here: they are the block output's `outputs`, which the result budget fits.
   if (b.report) {
     view.report = {
       ...(b.report.outcome !== undefined ? { outcome: b.report.outcome } : {}),
       summary: clipText(b.report.summary, 2_000),
-      ...(b.report.outputs !== undefined ? { outputs: b.report.outputs } : {}),
       reportedAt: b.report.reportedAt
     };
   }

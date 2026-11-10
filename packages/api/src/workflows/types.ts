@@ -138,6 +138,8 @@ export const WORKFLOW_LIMITS = {
   maxOutputs: 20,
   /** `report_step_result`'s `summary`, in characters (§5.2). */
   reportSummaryChars: 2000,
+  /** `report_step_result`'s `outputs`, as UTF-8 JSON bytes (after coercion). */
+  reportOutputsBytes: 64 * 1024,
   /** A gate's `choices` (§6.1). */
   gateChoices: { min: 2, max: 8 },
   /** A gate's rendered `question`, in characters. */

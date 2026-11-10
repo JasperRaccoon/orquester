@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { checkStepReport, passThroughHandle, pinnedHandle, pinnedOutcomeProblem, reportRequired, stepReportDecl, type StepReportDecl } from "./outcomes.ts";
 import { testNode } from "./testing.ts";
+import { WORKFLOW_LIMITS } from "./types.ts";
 
 const decl: StepReportDecl = {
   outcomes: [{ id: "approved" }, { id: "changes_requested" }],
@@ -61,6 +62,21 @@ describe("checkStepReport (spec 2026-11-10 §5.2)", () => {
     const noOutputs = checkStepReport({ outcomes: [{ id: "a" }, { id: "b" }] }, { outcome: "a", summary: "x", outputs: { y: 1 } });
     assert.ok(!noOutputs.ok && noOutputs.problems[0] === "This step declares no outputs: leave outputs out.");
     assert.deepEqual(checkStepReport({ outcomes: [{ id: "a" }, { id: "b" }] }, { outcome: "a", summary: "x" }), { ok: true, report: { outcome: "a", summary: "x" } });
+  });
+
+  it("refuses outputs over reportOutputsBytes as JSON, saying how to fix it", () => {
+    const notes: StepReportDecl = { outputs: [{ name: "notes", type: "string" }, { name: "data", type: "json", required: false }] };
+    const limit = WORKFLOW_LIMITS.reportOutputsBytes;
+    assert.equal(limit, 64 * 1024);
+    // {"notes":"…"} is 12 bytes besides the text.
+    assert.ok(checkStepReport(notes, { summary: "x", outputs: { notes: "a".repeat(limit - 12) } }).ok, "exactly at the limit");
+    const over = checkStepReport(notes, { summary: "x", outputs: { notes: "é".repeat(limit / 2) } });
+    assert.ok(!over.ok);
+    assert.equal(over.problems.length, 1);
+    assert.match(over.problems[0]!, /^outputs are \d+ KiB as JSON; at most 64 KiB\./);
+    assert.match(over.problems[0]!, /file in the project/);
+    const json = checkStepReport(notes, { summary: "x", outputs: { notes: "ok", data: { rows: Array.from({ length: 20_000 }, (_, i) => i) } } });
+    assert.ok(!json.ok && /at most 64 KiB/.test(json.problems[0]!), "json outputs count too");
   });
 
   it("refuses outputs that are not an object", () => {

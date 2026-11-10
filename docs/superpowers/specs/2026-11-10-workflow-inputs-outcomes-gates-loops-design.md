@@ -169,7 +169,9 @@ A new catalog tool, chat audience only: **`report_step_result`**
   caller gets "This chat is not a workflow step that reports a result."
 - It must never open an approval card (not Admin tier).
 - It validates outcome ∈ declared ids, required outputs present, types (same coercion as §4.2),
-  enum values, no unknown outputs. A refusal lists exactly what is wrong and the allowed values.
+  enum values, no unknown outputs, and `outputs` of at most 64 KiB as JSON
+  (`WORKFLOW_LIMITS.reportOutputsBytes`; the refusal says to shorten them or report a file's path).
+  A refusal lists exactly what is wrong and the allowed values.
 - A valid call is stored on the pass. A later valid call in the same pass replaces it (the agent can
   correct itself) until the block settles.
 - The result says "Recorded. End your turn now." The tool does not end the turn.

@@ -17,6 +17,7 @@ import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { ToolError } from "../errors.ts";
 import { executeToolCall, type ExecutorDeps } from "../executor.ts";
+import { MAX_RESULT_BYTES } from "../result.ts";
 import { busEvent, FakeDaemonApi, serveWorkflowReferences } from "../testing.ts";
 import { changesSecretUse, workflowsReferencingPrompt, workflowUnion } from "./workflow-preview.ts";
 
@@ -435,6 +436,22 @@ test("get_workflow_runs {runId} fits outputs and {runId, nodeId} pages whole Uni
   await rejects(call(api, "get_workflow_runs", { runId: "run-1", nodeId: "Ghost" }), "NODE_NOT_FOUND", /Work/);
   api.on("GET", "/api/workflow-runs/run-9", failure(404, "RUN_NOT_FOUND", "Missing"));
   await rejects(call(api, "get_workflow_runs", { runId: "run-9" }), "RUN_NOT_FOUND", /get_workflow_runs \{workflowId\}/);
+});
+
+test("get_workflow_runs {runId}: a block's report shows its outcome and summary, never its outputs again (they are in its fitted output)", async (t) => {
+  const api = await sandbox(t);
+  const run = runRecord(definition(api), "succeeded");
+  const big = { notes: "x".repeat(900 * 1024) };
+  run.blocks = {
+    a: { nodeId: "a", name: "Work", type: "agent", status: "succeeded", attempt: 1, output: { text: "done", summary: "ok", outputs: big }, report: { outcome: "approved", summary: "ok", outputs: big, sessionId: "s", reportedAt: stamp } },
+    b: { nodeId: "b", name: "Finish", type: "code", status: "succeeded", attempt: 1, output: { done: true } }
+  };
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run } });
+  const result = await exec(api, "get_workflow_runs", { runId: "run-1" });
+  assert.ok(Buffer.byteLength(JSON.stringify(result.structuredContent)) <= MAX_RESULT_BYTES, "the result stays within its budget");
+  const blocks = (result.structuredContent as { blocks: { report?: Record<string, unknown>; outputTruncated?: boolean }[] }).blocks;
+  assert.deepEqual(blocks[0]!.report, { outcome: "approved", summary: "ok", reportedAt: stamp });
+  assert.equal(blocks[0]!.outputTruncated, true, "the outputs ride the fitted output");
 });
 
 test("get_workflow_runs {workflowId} pages a workflow's runs (was list_workflow_runs); runId-only fields need a runId", async (t) => {
