@@ -23,6 +23,7 @@ import {
   type WorkflowDeepLink
 } from "../../lib/workflows/deep-link";
 import { requestGateFocus } from "../../lib/workflows/gate-focus";
+import { useWorkflowGatesLoad } from "../../lib/workflows/gate-hooks";
 import { markWorkflowRunViewed } from "../../lib/workflows/notifications";
 import { showRunInWorkflowTabs, subscribeOpenWorkflowRun } from "../../lib/workflows/open-bridge";
 import { loadWorkflows, workflowsStore } from "../../lib/workflows/store";
@@ -46,6 +47,8 @@ function openInProject(projectPath: string, link: WorkflowDeepLink, title: strin
 }
 
 export const WorkflowsHost: React.FC = () => {
+  // The cross-project gate list behind every "Needs you" badge and row, loaded once for the app.
+  useWorkflowGatesLoad();
   useEffect(
     () =>
       subscribeOpenWorkflowRun((target) => {

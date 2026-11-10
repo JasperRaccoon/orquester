@@ -11,13 +11,7 @@ import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
-import { OrquesterProvider } from "../../context/orquester-context";
-import type { ApiClient } from "../../lib/api-client";
 import { knowledgePlugin } from "../../lib/knowledge/fixtures.test-helpers";
-
-// The activity bar loads the waiting workflow gates (its Workflows badge) through the API.
-const fakeApi = { listWorkflowGates: async () => ({ gates: [] }) } as unknown as ApiClient;
-const activityBar = () => createElement(OrquesterProvider, { runtime: "web", api: fakeApi, useTitlebar: false, children: createElement(ActivityBar) });
 
 // Loaded once the DOM globals exist: react-dom decides at load time which DOM events it can use.
 let act: typeof import("react-dom/test-utils").act;
@@ -88,7 +82,7 @@ describe("the Knowledge entry points", () => {
 
   it("the activity bar shows Knowledge only while the plugin is on", async () => {
     useAppStore.setState({ plugins: null });
-    await render(activityBar());
+    await render(createElement(ActivityBar));
     assert.equal(knowledgeButton(), null, "no plugins list yet");
 
     await act(async () => useAppStore.setState({ plugins: [knowledgePlugin(false)] }));
@@ -99,7 +93,7 @@ describe("the Knowledge entry points", () => {
   });
 
   it("the activity bar button toggles the view, pressed while it shows, without a project", async () => {
-    await render(activityBar());
+    await render(createElement(ActivityBar));
     const button = knowledgeButton()!;
     assert.equal(button.getAttribute("aria-pressed"), "false");
 

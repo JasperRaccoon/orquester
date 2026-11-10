@@ -57,9 +57,11 @@ function rowsSnapshot(): GateAttentionRow[] {
   return kept;
 }
 
-/** The "Needs you" rows — every gate waiting for the person, test runs' aside — loading the list while connected. */
+/**
+ * The "Needs you" rows — every gate waiting for the person, test runs' aside. Reads the store only:
+ * the mounted `WorkflowsHost` keeps the list loaded (`useWorkflowGatesLoad`), so the badges need no API.
+ */
 export function useGateAttention(): readonly GateAttentionRow[] {
-  useWorkflowGatesLoad();
   return useSyncExternalStore(workflowsStore.subscribe, rowsSnapshot, rowsSnapshot);
 }
 
