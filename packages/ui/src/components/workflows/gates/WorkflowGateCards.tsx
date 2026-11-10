@@ -26,8 +26,11 @@ export interface WorkflowGateCardsProps {
   workflow: Pick<WorkflowSummary, "id" | "name">;
   variant: "docked" | "sheet";
   now: number;
-  /** Open the gate's run with the gate selected. */
-  onOpenRun: (runId: string, gateId: string) => void;
+  /**
+   * Open the gate's run with the gate selected. A sub-workflow's gate is in its child run,
+   * which belongs to the child workflow (`gate.workflowId`), not this card's.
+   */
+  onOpenRun: (gate: WorkflowGateState) => void;
   /** Why the run cannot be opened here (no project open), else `null`. */
   openRunDisabledReason: string | null;
 }
@@ -137,7 +140,7 @@ export const WorkflowGateCards: React.FC<WorkflowGateCardsProps> = ({ workflow, 
             gate={gate}
             workflowName={workflow.name}
             now={now}
-            onOpenRun={() => onOpenRun(gate.runId, gate.gateId)}
+            onOpenRun={() => onOpenRun(gate)}
             disabledReason={openRunDisabledReason}
           />
         ) : (
@@ -145,7 +148,7 @@ export const WorkflowGateCards: React.FC<WorkflowGateCardsProps> = ({ workflow, 
             key={`${gate.runId}/${gate.gateId}`}
             gate={gate}
             now={now}
-            onOpenRun={() => onOpenRun(gate.runId, gate.gateId)}
+            onOpenRun={() => onOpenRun(gate)}
             disabledReason={openRunDisabledReason}
           />
         )
@@ -157,7 +160,7 @@ export const WorkflowGateCards: React.FC<WorkflowGateCardsProps> = ({ workflow, 
           title={openRunDisabledReason ?? "Open the oldest of the others"}
           onClick={() => {
             const next = gates[SHOWN];
-            if (next) onOpenRun(next.runId, next.gateId);
+            if (next) onOpenRun(next);
           }}
           className={cn(LINK, variant === "sheet" ? "min-h-11 px-3 text-[13px]" : "min-h-7")}
         >
