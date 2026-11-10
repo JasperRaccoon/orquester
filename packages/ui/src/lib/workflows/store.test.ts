@@ -541,6 +541,39 @@ describe("runs", () => {
     assert.equal(entry.blocks.n2?.status, "pending");
   });
 
+  it("a reload takes the loaded edge lists (a loop shrank them), but for what an update changed meanwhile", async () => {
+    const api = new FakeApi();
+    const loaded = (takenEdges: string[], deadEdges: string[]) => ({
+      run: { ...run({ id: "r6", workflowId: "a" }), definition: record({ id: "a" }), triggerPayload: null, blocks: {}, takenEdges, deadEdges }
+    });
+    // Pass 1: Fix → Review, Review's "false" taken, Deploy dead.
+    api.runDetail = loaded(["t-fix", "fix-rev", "rev-loop-fix"], ["rev-dep"]);
+    await loadWorkflowRun(api, "r6");
+    // The stream drops; meanwhile the loop reset Fix and Review as pass 2. The reload says so.
+    markWorkflowsStale();
+    api.runDetail = loaded(["t-fix"], []);
+    await loadWorkflowRun(api, "r6", { force: true });
+    assert.deepEqual(state().runs.r6?.takenEdges, ["t-fix"], "pass 1's edges are not drawn taken again");
+    assert.deepEqual(state().runs.r6?.deadEdges, []);
+
+    // An update while a reload is in flight: what it added stands, what it dropped stays dropped.
+    const answer = deferred<GetWorkflowRunResponse>();
+    api.nextRunDetail = answer;
+    const loading = loadWorkflowRun(api, "r6", { force: true });
+    await settle();
+    applyWorkflowsEvent(event("workflowRun.updated", { run: run({ id: "r6", workflowId: "a" }), takenEdges: ["fix-rev"], deadEdges: ["rev-dep"] }));
+    answer.resolve(loaded(["t-fix"], []) as GetWorkflowRunResponse);
+    await loading;
+    assert.deepEqual(state().runs.r6?.takenEdges, ["fix-rev"], "the update dropped t-fix and added fix-rev");
+    assert.deepEqual(state().runs.r6?.deadEdges, ["rev-dep"]);
+
+    // Once the load is done, nothing is remembered: the next reload is the truth again.
+    api.runDetail = loaded(["t-fix"], []);
+    await loadWorkflowRun(api, "r6", { force: true });
+    assert.deepEqual(state().runs.r6?.takenEdges, ["t-fix"]);
+    assert.deepEqual(state().runs.r6?.deadEdges, []);
+  });
+
   it("a reconnect marks a held run stale; a forced reload clears it and takes the run's end", async () => {
     const api = new FakeApi();
     api.runDetail = {
