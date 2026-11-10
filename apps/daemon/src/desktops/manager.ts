@@ -17,6 +17,9 @@ import {
   type DesktopSize,
   type DesktopStatus,
   type DesktopSummary,
+  type DesktopVideoBackend,
+  type DesktopVoxlStatus,
+  type DesktopVoxlStream,
   type DesktopWindow,
   type DesktopWindowAction,
   type DesktopWindowsPayload,
@@ -31,6 +34,7 @@ import {
   type DesktopRecord,
   type RecentLaunchRecord,
   desktopRecordSchema,
+  desktopRecordVideo,
   desktopRuntimeDir
 } from "@orquester/config";
 import type { DesktopAudioHub, DesktopAudioSpawn } from "./audio.ts";
@@ -41,7 +45,7 @@ import {
   screenshotEncoderUnavailable
 } from "./automation-service.ts";
 import type { DesktopAutomationTarget, OpenDesktopAutomation } from "./automation/types.ts";
-import { type DesktopBoxes, type DesktopGroupOwner, type DesktopHost, type DesktopWatch, LocalDesktopHost } from "./desktop-host.ts";
+import { type DesktopBoxes, type DesktopGroupOwner, type DesktopHost, type DesktopWatch, LocalDesktopHost, waitFor } from "./desktop-host.ts";
 import { DesktopError } from "./errors.ts";
 import {
   CLIENT_CONF_CONTENT,
@@ -61,6 +65,8 @@ import { type ReconciledDesktop, reconcile } from "./reconcile.ts";
 import { DesktopScreenshotStore } from "./screenshots.ts";
 import { DesktopStore } from "./store.ts";
 import { DesktopWindowNotFoundError, DesktopWindowTracker, type DesktopWindowTrackerOptions } from "./windows.ts";
+import { VOXL_WINDOW } from "./voxl.ts";
+import { DesktopVoxlStreams, type VoxlLease } from "./voxl-streams.ts";
 import { x11SocketPath } from "./x11/connection.ts";
 import { newXauthority } from "./x11/xauth.ts";
 
@@ -124,6 +130,11 @@ export interface DesktopManagerOptions {
   encodeScreenshot?: DesktopScreenshotEncoder;
   /** How long an unused automation stays open (default 5 min). */
   automationIdleMs?: number;
+  // voxl (spec 2026-11-10 §5; voxl-streams.ts)
+  /** This host's voxl (absent: none). A VM desktop gets this binary copied into its VM. */
+  voxlStatus?: () => Promise<DesktopVoxlStatus>;
+  /** How long voxl keeps running after its last viewer left (default 30 s). */
+  voxlIdleStopMs?: number;
 }
 
 export interface DesktopManagerEvents {
@@ -147,6 +158,8 @@ export interface CreateDesktopInput {
   app?: LaunchAppInput;
   /** boxes: the Linux VM the project lives in (the routes contained the paths there); absent: this machine. */
   boxId?: string;
+  /** The video backend; absent: `voxl` when the host has a working voxl, else `rfb`. */
+  video?: DesktopVideoBackend;
 }
 
 /** Validated launch input: `cwd` is a realpath inside the fs root. */
@@ -241,6 +254,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   private readonly unsubscribeBoxes: () => void;
   /** Agents' eyes and hands on running desktops, who controls each, and what they did. */
   private readonly automation: DesktopAutomationService;
+  /** The voxl process of each running `voxl` desktop, started while someone watches. */
+  private readonly voxl: DesktopVoxlStreams;
 
   constructor(private readonly options: DesktopManagerOptions) {
     super();
@@ -253,7 +268,18 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       tmux: options.tmux,
       baseEnv: options.baseEnv,
       renderNode: options.renderNode,
-      tmpDir: options.tmpDir
+      tmpDir: options.tmpDir,
+      voxl: options.voxlStatus
+    });
+    this.voxl = new DesktopVoxlStreams({
+      changed: (id) => {
+        const rt = this.desktops.get(id);
+        if (rt) this.emitUpdated(rt);
+      },
+      logger: this.logger,
+      readyTimeoutMs: options.readyTimeoutMs,
+      stopGraceMs: options.stopGraceMs,
+      idleStopMs: options.voxlIdleStopMs
     });
     this.store = new DesktopStore({ file: options.indexFile, logger: this.logger });
     this.store.setSnapshot(() => ({
@@ -385,6 +411,17 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   }
 
   /**
+   * How the voxl relay gets a running `voxl` desktop's voxl (started for the viewer, or shared), else
+   * null (not running, RFB, its VM out of reach). The lease's `release()` goes with the viewer.
+   */
+  voxlUpstream(id: string): (() => Promise<VoxlLease>) | null {
+    const rt = this.desktops.get(id);
+    if (rt?.status !== "running" || desktopRecordVideo(rt.record) !== "voxl") return null;
+    if (rt.record.box !== null && (rt.linkDown || !this.hostOf(rt)?.connected)) return null;
+    return () => this.voxl.acquire(id);
+  }
+
+  /**
    * The pulse socket of a running desktop with audio (and, in a VM, how to
    * start the encoder there), the reason when it has none, null when not
    * running (or its VM is not connected).
@@ -428,6 +465,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     this.requireWritable();
     const id = this.newId();
     const dir = machine.desktopDir(id);
+    const video = input.video ?? (await this.defaultVideo());
     const siblings = [...this.desktops.values()].filter((rt) => rt.record.projectPath === input.projectPath);
     const record = desktopRecordSchema.parse({
       id,
@@ -443,7 +481,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       apps: [],
       // Whether this host runs PulseAudio (a passthrough field: older builds keep it).
       audio: host.audioAvailable,
-      box: boxId === null ? null : { id: boxId, dir }
+      box: boxId === null ? null : { id: boxId, dir },
+      video
     });
     const rt = newRuntime(record);
     rt.status = "starting";
@@ -519,6 +558,34 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   }
 
   /**
+   * Switch the video backend (PATCH): only the stream changes — a running voxl is stopped for
+   * `rfb`; for `voxl` the stream becomes available and voxl starts with its first viewer. The
+   * desktop and its apps keep running.
+   */
+  async update(id: string, request: { video?: DesktopVideoBackend }): Promise<DesktopSummary> {
+    const rt = this.mustGet(id);
+    await this.enqueue(rt, async () => {
+      if (!this.isCurrent(rt) || request.video === undefined || request.video === desktopRecordVideo(rt.record)) return;
+      this.requireWritable();
+      rt.record.video = request.video;
+      void this.store.persist();
+      if (request.video === "voxl") this.attachVoxl(rt);
+      else await this.voxl.detach(id, { kill: true });
+      this.emitUpdated(rt);
+    });
+    return this.summary(rt);
+  }
+
+  /** A new desktop's backend when the request names none: voxl where the host has a working one. */
+  private async defaultVideo(): Promise<DesktopVideoBackend> {
+    try {
+      return (await this.options.voxlStatus?.())?.available === true ? "voxl" : "rfb";
+    } catch {
+      return "rfb";
+    }
+  }
+
+  /**
    * boxes: `restart` of a VM desktop — installs what its VM is missing first
    * (as `create` does), then starts the host there. An install that cannot
    * happen leaves it `error` with the reason and throws 409.
@@ -582,6 +649,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     await this.enqueue(rt, async () => {
       if (!this.isCurrent(rt)) return;
       await this.teardown(rt);
+      await this.voxl.detach(id);
       this.desktops.delete(id);
       void this.store.persist();
       await this.automation.forget(id);
@@ -898,6 +966,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     rt.generation += 1;
     this.unwatch(rt);
     this.stopTracker(rt);
+    void this.voxl.detach(rt.record.id);
     for (const timer of rt.killTimers.values()) clearTimeout(timer);
     rt.killTimers.clear();
     rt.pendingStops.clear();
@@ -936,6 +1005,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       this.watch(rt);
       await this.startTracker(rt);
       this.syncApps(rt);
+      this.attachVoxl(rt, { adopt: true });
     } else {
       rt.status = "stopped";
       rt.record.display = null;
@@ -983,6 +1053,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     this.unsubscribeBoxes();
     // Held buttons released and borrowed keycodes restored before the daemon exits (bounded).
     await this.automation.shutdown();
+    this.voxl.shutdown();
     for (const rt of this.desktops.values()) {
       this.unwatch(rt);
       this.stopTracker(rt);
@@ -1060,6 +1131,18 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     await this.startTracker(rt);
     void this.store.persist();
     this.emitUpdated(rt);
+    this.attachVoxl(rt);
+  }
+
+  /** A running `voxl` desktop's stream: its machine's voxl is looked for (it starts with the first viewer). */
+  private attachVoxl(rt: Runtime, options: { adopt?: boolean } = {}): void {
+    const machine = this.hostOf(rt);
+    const display = rt.record.display;
+    if (desktopRecordVideo(rt.record) !== "voxl" || rt.status !== "running" || display === null || !machine || this.stopped) return;
+    void this.voxl.attach(
+      { id: rt.record.id, machine, layout: this.layout(rt.record), display, session: desktopSessionName(rt.record.id) },
+      options
+    );
   }
 
   private async failStart(rt: Runtime, reason: string): Promise<void> {
@@ -1093,6 +1176,10 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       await waitFor(machine, layout.dir, () => exists(machine, layout.hostExit), this.stopGraceMs);
       await machine.signalGroup(host.panePid, "SIGKILL", hostOwner(layout));
     }
+    // voxl (its own window's group) had the session's hangup; whatever ignored it goes now.
+    for (const window of windows) {
+      if (window.name === VOXL_WINDOW) await machine.signalGroup(window.panePid, "SIGKILL", hostOwner(layout));
+    }
     if (!machine.connected) rt.reconcilePending = true;
   }
 
@@ -1107,6 +1194,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     rt.generation += 1;
     this.unwatch(rt);
     this.stopTracker(rt);
+    // The session's end takes voxl down with it.
+    await this.voxl.detach(rt.record.id);
     for (const timer of rt.killTimers.values()) clearTimeout(timer);
     rt.killTimers.clear();
     rt.pendingStops.clear();
@@ -1172,6 +1261,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       rt.generation += 1;
       this.unwatch(rt);
       this.stopTracker(rt);
+      await this.voxl.detach(rt.record.id);
       const layout = this.layout(rt.record);
       const machine = this.hostOf(rt);
       const exitedAt = this.now().toISOString();
@@ -1545,6 +1635,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     rt.generation += 1;
     this.unwatch(rt);
     this.stopTracker(rt);
+    await this.voxl.detach(rt.record.id);
     for (const timer of rt.killTimers.values()) clearTimeout(timer);
     rt.killTimers.clear();
     rt.pendingStops.clear();
@@ -1589,8 +1680,16 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       windows: rt.windows,
       activeWindowId: rt.activeWindowId,
       control: this.automation.control(record.id),
-      video: "rfb"
+      video: desktopRecordVideo(record),
+      ...(desktopRecordVideo(record) === "voxl" ? { voxl: this.voxlSummary(rt) } : {})
     };
+  }
+
+  /** A `voxl` desktop's stream: the streams' state while it runs; `starting` with it; else unavailable. */
+  private voxlSummary(rt: Runtime): DesktopVoxlStream {
+    if (rt.status === "starting") return { state: "starting" };
+    if (rt.status !== "running") return { state: "unavailable", reason: "The desktop is not running." };
+    return this.voxl.state(rt.record.id) ?? { state: "starting" };
   }
 
   private emitUpdated(rt: Runtime): void {
@@ -1738,51 +1837,6 @@ async function readExitFiles(machine: DesktopHost, layout: DesktopLayout, strict
     exits.set(appId, strict ? parseIntText(await machine.readText(path)) : await readInt(machine, path));
   }
   return exits;
-}
-
-/**
- * Resolve true once `done()` holds, re-checked on every watch event in `dir`
- * (one check at a time), or false after `timeoutMs` (or when `dir` cannot be
- * watched and the condition is not already true). No polling.
- */
-function waitFor(machine: DesktopHost, dir: string, done: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    let watcher: DesktopWatch | null = null;
-    let settled = false;
-    let checking = false;
-    let again = false;
-    const holds = () => done().catch(() => false);
-    const finish = (value: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      watcher?.close();
-      resolve(value);
-    };
-    const check = () => {
-      if (settled) return;
-      if (checking) {
-        again = true;
-        return;
-      }
-      checking = true;
-      void (async () => {
-        do {
-          again = false;
-          if (await holds()) finish(true);
-        } while (again && !settled);
-        checking = false;
-      })();
-    };
-    const timer = setTimeout(() => void holds().then(finish), timeoutMs);
-    try {
-      watcher = machine.watch(dir, check, () => void holds().then(finish));
-    } catch {
-      void holds().then(finish);
-      return;
-    }
-    check();
-  });
 }
 
 /** The record's project realpath (records from before `projectRealPath` stored the realpath as `projectPath`). */

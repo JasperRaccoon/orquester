@@ -131,7 +131,10 @@ function fakeBox(appdir: string): FakeBox {
     // Whatever ran there before is not ours any more (a reboot reuses pids).
     leaderBelongsTo: async () => false,
     appEnv: (options) => local.appEnv(options),
-    trackerOptions: (options) => options
+    trackerOptions: (options) => options,
+    voxl: () => local.voxl(),
+    allocatePort: () => local.allocatePort(),
+    connectTcp: (port) => local.connectTcp(port)
   };
   const fake: FakeBox = {
     host,

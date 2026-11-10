@@ -37,6 +37,7 @@ export type DesktopRoutesService = Pick<
   | "create"
   | "stop"
   | "restart"
+  | "update"
   | "close"
   | "launchApp"
   | "stopApp"
@@ -132,8 +133,14 @@ const createSchema = z.object({
   // Clamped to the display bounds by the record schema.
   size: z.object({ width: z.number().finite(), height: z.number().finite() }).optional(),
   renderThreads: z.number().int().min(1).optional(),
-  app: launchSchema.optional()
+  app: launchSchema.optional(),
+  video: z.enum(["rfb", "voxl"], { message: "video must be rfb or voxl" }).optional()
 });
+
+/** PATCH {@link desktopRoutes.desktop} (`UpdateDesktopRequest`). */
+const updateSchema = z
+  .object({ video: z.enum(["rfb", "voxl"], { message: "video must be rfb or voxl" }).optional() })
+  .strict();
 
 /** The realpath of a directory inside the fs root (FsSandboxError outside it; 400 when not a directory). */
 async function sandboxedDir(fsRoot: string, path: string, field: string): Promise<string> {
@@ -343,6 +350,7 @@ export function registerDesktopHttpRoutes(app: FastifyInstance, deps: DesktopRou
         size: body.size,
         renderThreads: body.renderThreads,
         app,
+        ...(body.video ? { video: body.video } : {}),
         ...(place.kind === "box" ? { boxId: place.boxId } : {})
       });
     } catch (error) {
@@ -371,6 +379,16 @@ export function registerDesktopHttpRoutes(app: FastifyInstance, deps: DesktopRou
       }
     }
   );
+
+  // Switch the video backend: only the stream restarts, never the desktop or its apps.
+  app.patch<{ Params: { id: string } }>("/api/desktops/:id", async (request, reply): Promise<DesktopSummary | FastifyReply> => {
+    try {
+      const body = updateSchema.parse(request.body ?? {});
+      return await desktops.update(request.params.id, body);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 
   app.delete<{ Params: { id: string } }>("/api/desktops/:id", async (request, reply): Promise<FastifyReply> => {
     try {

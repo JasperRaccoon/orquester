@@ -7,7 +7,11 @@
  *   `/tmp` under that user's uid — the same rule as on the host).
  * - The shipped scripts (`desktops/assets/`) are copied into
  *   `~/.orquester/desktop-assets/<content hash>/` before the first desktop
- *   starts and whenever they change; they run from there unchanged.
+ *   starts and whenever they change; they run from there unchanged. The host's
+ *   voxl binary (spec 2026-11-10 §5) goes the same way, into
+ *   `desktop-assets/voxl-<content hash>/voxl`, when a `voxl` desktop first
+ *   starts; it is used once `voxl --version` runs there (its libraries come
+ *   with the GUI installer's packages), else that VM's desktops use RFB.
  * - tmux: a private server in the box (`BoxDesktopTmux`). Files: `fs.*`
  *   requests and the file channels. Watches: `fs.watch` + `fs.change` events,
  *   re-established after every reconnect (a watch belongs to one link) and
@@ -24,12 +28,13 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, posix, relative } from "node:path";
 import { PassThrough, type Duplex } from "node:stream";
 
-import type { BoxFsChangeEvent } from "@orquester/api";
+import type { BoxFsChangeEvent, DesktopVoxlStatus } from "@orquester/api";
 
 import type { DesktopAudioEncoderProcess, DesktopAudioSpawn } from "../../../desktops/audio.ts";
 import type { DesktopGroupOwner, DesktopHost, DesktopScripts, DesktopWatch } from "../../../desktops/desktop-host.ts";
 import { type AppEnvOptions, DESKTOP_HOST_SCRIPT, buildAppEnv, fallbackSocketDir } from "../../../desktops/host-env.ts";
 import { type ProcStat, parseProcStat, type DesktopWindowTrackerOptions } from "../../../desktops/windows.ts";
+import { parseVoxlVersion, randomVoxlPort } from "../../../desktops/voxl.ts";
 import { x11SocketPath } from "../../../desktops/x11/connection.ts";
 import type { BoxConnection, BoxProcess, BoxToolingProvisioner } from "../../contracts.ts";
 import { boxToolingEnv, toolingFor } from "../exec/env.ts";
@@ -42,6 +47,9 @@ import { BoxDesktopTmux } from "./tmux.ts";
 const ASSETS_DIR = dirname(DESKTOP_HOST_SCRIPT);
 const HOST_SCRIPT = basename(DESKTOP_HOST_SCRIPT);
 const APP_SCRIPT = "app-run.sh";
+const VOXL_SCRIPT = "voxl-run.sh";
+/** `desktop-assets/<this><hash>/voxl`: the voxl copies (the scripts' cleanup leaves them alone). */
+const VOXL_COPY_PREFIX = "voxl-";
 /** Written last into an assets copy: the copy is complete. */
 const ASSETS_COMPLETE = ".complete";
 
@@ -134,6 +142,27 @@ function shippedAssets(): Promise<{ hash: string; files: AssetFile[] }> {
   return assetsOnHost;
 }
 
+let voxlOnHost: { key: string; binary: Promise<{ hash: string; data: Buffer }> } | null = null;
+
+/** The host's voxl binary and its content hash (read once per path and modification time). */
+function hostVoxlBinary(path: string): Promise<{ hash: string; data: Buffer }> {
+  return (async () => {
+    const info = await stat(path);
+    const key = `${path}\0${info.mtimeMs}\0${info.size}`;
+    if (voxlOnHost?.key !== key) {
+      const binary = readFile(path).then((data) => ({ hash: createHash("sha256").update(data).digest("hex").slice(0, 16), data }));
+      binary.catch(() => {
+        if (voxlOnHost?.binary === binary) voxlOnHost = null;
+      });
+      voxlOnHost = { key, binary };
+    }
+    return voxlOnHost.binary;
+  })();
+}
+
+const VOXL_NOT_ON_HOST = "voxl is not installed on the server.";
+const VOXL_NOT_COPIED = "voxl is copied into the VM when its first desktop with voxl video starts.";
+
 export interface BoxDesktopHostOptions {
   boxId: string;
   /** The box's live connection object (undefined until it first connected since the daemon started). */
@@ -141,6 +170,8 @@ export interface BoxDesktopHostOptions {
   tooling?: Pick<BoxToolingProvisioner, "contribution">;
   /** The private tmux server in the box (tests use their own). */
   tmuxServer?: string;
+  /** The host's voxl, copied into the VM for its desktops (absent: none). */
+  hostVoxl?: () => Promise<DesktopVoxlStatus>;
 }
 
 /** A VM desktop's machine: see the module doc. */
@@ -151,6 +182,9 @@ export class BoxDesktopHost implements DesktopHost {
   private renderNodeRead: { connection: BoxConnection; present: Promise<boolean> } | null = null;
   private scriptsCopied: { connection: BoxConnection; scripts: Promise<DesktopScripts> } | null = null;
   private unixProbe: { connection: BoxConnection; key: string; supported: Promise<boolean> } | null = null;
+  /** The voxl copy that ran there (`--version`), per connection; a failure is never kept (the libraries may come later). */
+  private voxlRan: { connection: BoxConnection; path: string; status: DesktopVoxlStatus } | null = null;
+  private voxlCopying: { connection: BoxConnection; path: string; done: Promise<void> } | null = null;
 
   constructor(private readonly options: BoxDesktopHostOptions) {
     this.boxId = options.boxId;
@@ -232,12 +266,73 @@ export class BoxDesktopHost implements DesktopHost {
         await fs.writeFile(posix.join(dir, file.path), file.data, { mode: file.mode, mkdirs: true });
       }
       await fs.writeFile(posix.join(dir, ASSETS_COMPLETE), `${hash}\n`, { mode: 0o644, mkdirs: true });
-      // Older copies go; a running host keeps the script it already has open.
+      // Older copies go; a running host keeps the script it already has open. (voxl's copies are its own.)
       for (const entry of await fs.readdir(root)) {
-        if (entry.name !== hash && entry.kind === "dir") await fs.rm(posix.join(root, entry.name), { recursive: true, force: true });
+        if (entry.name !== hash && entry.kind === "dir" && !entry.name.startsWith(VOXL_COPY_PREFIX)) {
+          await fs.rm(posix.join(root, entry.name), { recursive: true, force: true });
+        }
       }
     }
-    return { host: posix.join(dir, HOST_SCRIPT), app: posix.join(dir, APP_SCRIPT) };
+    return { host: posix.join(dir, HOST_SCRIPT), app: posix.join(dir, APP_SCRIPT), voxl: posix.join(dir, VOXL_SCRIPT) };
+  }
+
+  /**
+   * voxl in the VM: the host's binary, copied in (once per content), that runs there. `probeOnly`
+   * (status reads): an existing copy is checked, none is made.
+   */
+  async voxl(options: { probeOnly?: boolean } = {}): Promise<DesktopVoxlStatus> {
+    const host = (await this.options.hostVoxl?.()) ?? null;
+    if (!host?.available || !host.path) return { available: false, version: null, path: null, reason: host?.reason ?? VOXL_NOT_ON_HOST };
+    const connection = this.link();
+    const { hash, data } = await hostVoxlBinary(host.path);
+    const fs = new BoxProjectFs(connection);
+    const root = posix.join(connection.sys.home, ".orquester", "desktop-assets");
+    const dir = posix.join(root, `${VOXL_COPY_PREFIX}${hash}`);
+    const path = posix.join(dir, "voxl");
+    if (this.voxlRan?.connection === connection && this.voxlRan.path === path) return this.voxlRan.status;
+    if ((await fs.stat(posix.join(dir, ASSETS_COMPLETE))) === null) {
+      if (options.probeOnly) return { available: false, version: null, path: null, reason: VOXL_NOT_COPIED };
+      if (this.voxlCopying?.connection !== connection || this.voxlCopying.path !== path) {
+        const done = (async () => {
+          await fs.writeFile(path, data, { mode: 0o755, mkdirs: true });
+          await fs.writeFile(posix.join(dir, ASSETS_COMPLETE), `${hash}\n`, { mode: 0o644, mkdirs: true });
+          for (const entry of await fs.readdir(root)) {
+            if (entry.kind === "dir" && entry.name.startsWith(VOXL_COPY_PREFIX) && entry.name !== `${VOXL_COPY_PREFIX}${hash}`) {
+              await fs.rm(posix.join(root, entry.name), { recursive: true, force: true });
+            }
+          }
+        })();
+        done.catch(() => {
+          if (this.voxlCopying?.done === done) this.voxlCopying = null;
+        });
+        this.voxlCopying = { connection, path, done };
+      }
+      await this.voxlCopying.done;
+    }
+    try {
+      const { stdout } = await runInBox(connection, path, ["--version"], { timeout: COMMAND_TIMEOUT_MS, maxBuffer: SMALL_OUTPUT_BYTES });
+      const version = parseVoxlVersion(stdout);
+      if (version === null) return { available: false, version: null, path, reason: "voxl in the VM printed no version." };
+      const status: DesktopVoxlStatus = { available: true, version, path };
+      this.voxlRan = { connection, path, status };
+      return status;
+    } catch (error) {
+      const stderr = (error as { stderr?: unknown }).stderr;
+      const detail = typeof stderr === "string" && stderr.trim() ? stderr.trim().split("\n").at(-1)! : (error as Error).message;
+      return { available: false, version: null, path, reason: `voxl does not run in the VM: ${detail.slice(0, 300)}` };
+    }
+  }
+
+  async allocatePort(): Promise<number> {
+    return randomVoxlPort();
+  }
+
+  connectTcp(port: number): Promise<Duplex> {
+    try {
+      return this.link().openTcp(port);
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
 
   async prepareDirs(dirs: readonly string[]): Promise<void> {

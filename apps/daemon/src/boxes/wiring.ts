@@ -24,7 +24,7 @@
  * or the plugin's switch-on) until its destroy (`BoxConfigWatches`).
  */
 
-import { EPHEMERAL_VMS_PLUGIN_ID, type PluginsResponse } from "@orquester/api";
+import { EPHEMERAL_VMS_PLUGIN_ID, type DesktopVoxlStatus, type PluginsResponse } from "@orquester/api";
 import { agentAccountsDir, boxMcpSettingsPath, boxPendingTerminalKillsPath, type StoredBox } from "@orquester/config";
 import type { FastifyInstance } from "fastify";
 
@@ -118,6 +118,8 @@ export interface DaemonBoxesDeps {
    * tabs (default: `createBoxGuiInstaller()` from `remote/gui`; tests pass a fake).
    */
   guiInstaller?: BoxGuiInstaller;
+  /** The host's voxl (spec 2026-11-10 §5), copied into VMs for their desktops (absent: VM desktops use RFB). */
+  voxlStatus?: () => Promise<DesktopVoxlStatus>;
 }
 
 /** What `attach` needs once the daemon's session list, browser tabs and chat services exist. */
@@ -291,7 +293,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
   });
   const gitRoute = createBoxGitRouteResolver(registry);
   // Desktops of Linux box projects run in their VM; the GUI installer sets up the desktop stack there.
-  const desktops = new BoxDesktops({ registry, hub, tooling, installer: gui });
+  const desktops = new BoxDesktops({ registry, hub, tooling, installer: gui, ...(deps.voxlStatus ? { voxl: deps.voxlStatus } : {}) });
   // A box project's chat forwards temporary-box ports into its own box (the hub's `host-tcp` channels).
   const projectForwards = new ProjectBoxForwards({ hub, registry, logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") } });
 

@@ -74,6 +74,17 @@ const SYNC_EVERY = 50;
 const CLICK_INTERVAL_MS = 60;
 const DRAG_STEPS = 10;
 const DRAG_STEP_MS = 20;
+/**
+ * The spare keycodes voxl (spec 2026-11-10 §5) binds keysyms it lacks onto (voxl `src/input.rs`
+ * `SAFE_SCRATCH`, 0.3.4). The engine binds its own outside them while it can, so the two never
+ * rebind each other's keycode while a viewer types through voxl and an agent types here.
+ */
+const VOXL_SCRATCH_KEYCODES: ReadonlySet<number> = new Set([
+  92, 109, 120, 126, 138, 147, 149, 153, 154, 155, 156, 157, 159, 161, 162, 165, 168, 170, 178, 183, 184, 185, 186, 203, 204, 205,
+  206, 207, 208, 210, 211, 213, 219, 220, 221, 222, 223, 224, 226, 227, 228, 229, 230, 231, 234, 235, 244, 245, 246, 247, 248, 249,
+  250, 251, 253, 254, 255
+]);
+
 /** Keysyms bound to spare keycodes at once. */
 const TEMP_BINDINGS = 8;
 const CLIPBOARD_TIMEOUT_MS = 2_000;
@@ -779,8 +790,13 @@ class X11DesktopAutomation implements DesktopAutomation {
       await io.flush();
     } else {
       const taken = new Set(this.bindings.values());
-      for (let candidate = keyboard.maxKeycode; candidate >= keyboard.minKeycode && keycode === undefined; candidate--) {
-        if (!taken.has(candidate) && this.keysymsOf(keyboard, candidate).every((sym) => sym === 0)) keycode = candidate;
+      const spare = (candidate: number) => !taken.has(candidate) && this.keysymsOf(keyboard, candidate).every((sym) => sym === 0);
+      // Keycodes voxl may claim come last: voxl takes its scratch keycodes from a fixed list of the
+      // ones empty at its start and never looks again, so a binding of ours there could be overwritten.
+      for (const avoidVoxl of [true, false]) {
+        for (let candidate = keyboard.maxKeycode; candidate >= keyboard.minKeycode && keycode === undefined; candidate--) {
+          if (spare(candidate) && (!avoidVoxl || !VOXL_SCRATCH_KEYCODES.has(candidate))) keycode = candidate;
+        }
       }
     }
     if (keycode === undefined) throw new DesktopAutomationError("INVALID_ARGUMENT", `No spare keycode to type keysym 0x${keysym.toString(16)}`);

@@ -286,10 +286,15 @@ export function isDesktopVideoBackend(value: unknown): value is DesktopVideoBack
   return value === "rfb" || value === "voxl";
 }
 
-/** A `voxl` desktop's stream: `ready` once voxl answers; `unavailable` means viewers use RFB. */
+/**
+ * A `voxl` desktop's stream. `ready`: viewers may open {@link desktopRoutes.voxlSocket} (the daemon
+ * starts voxl on the first viewer and stops it a while after the last one left, so `ready` does not
+ * mean a voxl process runs now); `unavailable`: viewers use RFB (`reason` says why). `starting`: the
+ * desktop itself is starting, or its VM's voxl is being checked.
+ */
 export interface DesktopVoxlStream {
   state: "starting" | "ready" | "unavailable";
-  /** Why it is unavailable (no binary, it exited, …). */
+  /** Why it is unavailable (no binary, it would not start, it exited, …). */
   reason?: string;
 }
 

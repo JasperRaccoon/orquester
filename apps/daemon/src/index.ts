@@ -116,6 +116,7 @@ import { DesktopHostProbe, resolveTool } from "./desktops/host-status.ts";
 import { desktopQueryTokenAllowed, registerDesktopHttpRoutes } from "./desktops/http-routes.ts";
 import { DesktopManager } from "./desktops/manager.ts";
 import { registerDesktopWsRoutes } from "./desktops/ws-routes.ts";
+import { VoxlProbe } from "./desktops/voxl.ts";
 import { registerAuthRoutes } from "./auth/routes.ts";
 import { AuthSessionStore } from "./auth/sessions.ts";
 import { LoginThrottle, clientIp } from "./auth/throttle.ts";
@@ -744,7 +745,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   publishPluginEvents(plugins, broadcaster);
   // Ephemeral AI VMs (spec 2026-10-19): the hub, the box service, sync, tooling and the box
   // terminals the session manager wraps (`boxes/wiring.ts` says what is wired when).
+  // voxl, the optional H.264 desktop streamer (spec 2026-11-10 §5): this host's binary, which VM
+  // desktops get a copy of.
+  const voxlProbe = new VoxlProbe({ baseDir: paths.baseDir, env: () => env });
   const boxes: DaemonBoxes = createDaemonBoxes({
+    voxlStatus: () => voxlProbe.status(),
     baseDir: paths.baseDir,
     keysDir: resolved.keysDir,
     home: resolved.vars.userhome,
@@ -1466,7 +1471,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Desktop tabs (desktop spec §5): virtual X displays in tmux service sessions
   // on the sessions' tmux server, so they outlive the daemon like terminals do.
   // Reattached after `sessions.reattach()` (above); best-effort like it.
-  const desktopHost = new DesktopHostProbe();
+  const desktopHost = new DesktopHostProbe({ voxl: () => voxlProbe.status() });
   const desktopAudio = new DesktopAudioHub({
     ffmpegPath: resolveTool("ffmpeg"),
     log: (message, error) => console.warn(message, error ?? "")
@@ -1482,7 +1487,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxes: boxes.desktops,
     // Agents' screenshots, input and waits (spec 2026-11-10 §2).
     openAutomation: openDesktopAutomation,
-    encodeScreenshot: encodeDesktopScreenshot
+    encodeScreenshot: encodeDesktopScreenshot,
+    voxlStatus: () => voxlProbe.status()
   });
   await desktops.load();
   desktops.on("created", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.created", d));
@@ -5386,6 +5392,8 @@ export function createServer(
       vncSocketPath: (id) => services.desktops.vncSocketPath(id),
       // boxes: a VM desktop's RFB socket is reached through its box link.
       vncStream: (id) => services.desktops.vncStream(id),
+      // voxl: the relay dials the desktop's voxl, started for its first viewer.
+      voxlUpstream: (id) => services.desktops.voxlUpstream(id),
       audioSource: (id) => services.desktops.audioSource(id),
       audio: services.desktopAudio
     });

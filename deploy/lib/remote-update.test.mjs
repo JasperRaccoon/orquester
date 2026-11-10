@@ -67,9 +67,13 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-/** Commit a release whose daemon is healthy or not, push it to origin main; returns its sha. */
-function release(health, version) {
+/** Commit a release whose daemon is healthy or not (plus `files`), push it to origin main; returns its sha. */
+function release(health, version, files = {}) {
   writeFileSync(join(work, "HEALTH"), `${health}\n`);
+  for (const [path, body] of Object.entries(files)) {
+    mkdirSync(dirname(join(work, path)), { recursive: true });
+    writeFileSync(join(work, path), body);
+  }
   writeFileSync(join(work, "package.json"), `{\n  "name": "orquester",\n  "version": "${version}"\n}\n`);
   git(work, "add", "-A");
   git(work, "commit", "-q", "-m", `${version} (${health})`);
@@ -199,4 +203,30 @@ test("an unknown ref fails before touching the tree", () => {
   assert.equal(head(), good);
   assert.match(result.err, /ref not found/);
   assert.deepEqual(restarts(), []);
+});
+
+test("voxl's install is best-effort: its version is reported, and a failure only warns", () => {
+  const ok = release("ok", "1.1.0", {
+    "deploy/install-voxl.sh": "echo '[install-voxl] voxl 0.3.4 already installed at /opt/orquester-tools/voxl/0.3.4/voxl'\necho '[install-voxl] voxl 0.3.4 at /opt/orquester-tools/voxl/0.3.4/voxl'\n"
+  });
+  const installed = deploy();
+  assert.equal(installed.code, 0, installed.err);
+  assert.match(installed.out, /voxl=0\.3\.4$/m);
+
+  const failing = release("ok", "1.2.0", {
+    "deploy/install-voxl.sh": "echo '[install-voxl] ERROR: cargo install voxl-server 0.3.4 failed' >&2\nexit 1\n"
+  });
+  const failed = deploy();
+  assert.equal(failed.code, 0, failed.err);
+  assert.equal(head(), failing);
+  assert.deepEqual(restarts(), [ok, failing], "the daemon is restarted all the same");
+  assert.match(failed.out, /voxl=FAILED: cargo install voxl-server 0\.3\.4 failed$/m);
+  assert.match(failed.err, /WARNING: voxl not installed/);
+});
+
+test("a release without install-voxl.sh skips it", () => {
+  release("ok", "1.1.0");
+  const result = deploy();
+  assert.equal(result.code, 0, result.err);
+  assert.match(result.out, /voxl=skipped$/m);
 });

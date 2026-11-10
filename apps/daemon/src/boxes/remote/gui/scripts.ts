@@ -80,7 +80,7 @@ export function desktopInstallScript(plan: { manager: BoxPackageManager; require
     );
   }
   if (plan.optional.length > 0) {
-    lines.push(shSay(`Installing sound, OpenGL, compositor, terminal and font packages: ${label(plan.optional)}`), `if ! install_set ${words(plan.optional)}; then`);
+    lines.push(shSay(`Installing sound, OpenGL, compositor, terminal, font and video streaming packages: ${label(plan.optional)}`), `if ! install_set ${words(plan.optional)}; then`);
     lines.push("  say 'Installing them one at a time'");
     for (const choice of plan.optional) {
       const attempts = choice.map((name) => `add ${shQuote(name)}`).join(" || ");

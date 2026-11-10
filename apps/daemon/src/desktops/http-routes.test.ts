@@ -25,7 +25,12 @@ interface Harness {
   inject: ReturnType<typeof createServer>["inject"];
   root: string;
   project: string;
-  calls: { create: CreateDesktopInput[]; launch: Array<{ id: string; input: LaunchAppInput }>; list: Array<string | undefined> };
+  calls: {
+    create: CreateDesktopInput[];
+    launch: Array<{ id: string; input: LaunchAppInput }>;
+    list: Array<string | undefined>;
+    update: Array<{ id: string; request: unknown }>;
+  };
   createError: Error | null;
 }
 
@@ -69,7 +74,7 @@ async function makeHarness(t: any, mode: "local" | "remote" = "local"): Promise<
     inject: undefined as never,
     root,
     project,
-    calls: { create: [], launch: [], list: [] },
+    calls: { create: [], launch: [], list: [], update: [] },
     createError: null
   };
   const known = () => summary(project);
@@ -95,6 +100,11 @@ async function makeHarness(t: any, mode: "local" | "remote" = "local"): Promise<
     },
     close: async (id: string) => {
       if (id !== "d1") throw new DesktopError(404, "DESKTOP_NOT_FOUND", "No such desktop.");
+    },
+    update: async (id: string, request: unknown) => {
+      if (id !== "d1") throw new DesktopError(404, "DESKTOP_NOT_FOUND", "No such desktop.");
+      harness.calls.update.push({ id, request });
+      return known();
     },
     launchApp: async (id: string, input: LaunchAppInput) => {
       harness.calls.launch.push({ id, input });
@@ -224,6 +234,18 @@ test("launch: command and env validation (400), never echoing a value", async (t
     payload: { command: "x".repeat(4096), env: { _A1: "it's $fine" } }
   });
   assert.equal(ok.statusCode, 200);
+});
+
+test("PATCH switches the video backend; anything but rfb/voxl (or another field) is 400; create passes video on", async (t) => {
+  const h = await makeHarness(t);
+  assert.equal((await h.inject({ method: "PATCH", url: "/api/desktops/d1", payload: { video: "voxl" } })).statusCode, 200);
+  assert.equal((await h.inject({ method: "PATCH", url: "/api/desktops/d1", payload: { video: "h264" } })).statusCode, 400);
+  assert.equal((await h.inject({ method: "PATCH", url: "/api/desktops/d1", payload: { title: "x" } })).statusCode, 400);
+  assert.equal((await h.inject({ method: "PATCH", url: "/api/desktops/nope", payload: { video: "rfb" } })).statusCode, 404);
+  assert.deepEqual(h.calls.update, [{ id: "d1", request: { video: "voxl" } }]);
+  assert.equal((await h.inject({ method: "POST", url: "/api/desktops", payload: { projectPath: h.project, video: "voxl" } })).statusCode, 200);
+  assert.equal(h.calls.create.at(-1)?.video, "voxl");
+  assert.equal((await h.inject({ method: "POST", url: "/api/desktops", payload: { projectPath: h.project, video: "vnc" } })).statusCode, 400);
 });
 
 test("unknown desktop ids are 404", async (t) => {

@@ -10,7 +10,7 @@
  * box (desktops need Linux; the routes refuse them before that).
  */
 
-import { DESKTOP_UNAVAILABLE_CODE, type DesktopHostStatus } from "@orquester/api";
+import { DESKTOP_UNAVAILABLE_CODE, type DesktopHostStatus, type DesktopVoxlStatus } from "@orquester/api";
 import type { StoredBox } from "@orquester/config";
 
 import type { DesktopBoxes } from "../../../desktops/desktop-host.ts";
@@ -29,6 +29,8 @@ export interface BoxDesktopsDeps {
   tooling?: Pick<BoxToolingProvisioner, "contribution">;
   /** The private tmux server desktops use in each box (tests use their own). */
   tmuxServer?: string;
+  /** The host's voxl, copied into each VM for its desktops (absent: none). */
+  voxl?: () => Promise<DesktopVoxlStatus>;
 }
 
 /** A box record that no longer runs anything a desktop could use. */
@@ -88,7 +90,8 @@ export class BoxDesktops implements DesktopBoxes {
         boxId,
         connection: () => this.deps.hub.get(boxId),
         ...(this.deps.tooling ? { tooling: this.deps.tooling } : {}),
-        ...(this.deps.tmuxServer ? { tmuxServer: this.deps.tmuxServer } : {})
+        ...(this.deps.tmuxServer ? { tmuxServer: this.deps.tmuxServer } : {}),
+        ...(this.deps.voxl ? { hostVoxl: this.deps.voxl } : {})
       });
       this.hosts.set(boxId, host);
     }
@@ -98,7 +101,15 @@ export class BoxDesktops implements DesktopBoxes {
   async status(boxId: string): Promise<DesktopHostStatus> {
     const connection = this.connection(boxId);
     if (!(await this.unixChannels(boxId))) return agentTooOldStatus();
-    return this.deps.installer.desktopStatus(connection);
+    const status = await this.deps.installer.desktopStatus(connection);
+    // voxl is optional: a status read only checks a copy already there.
+    const voxl = await this.host(boxId)!.voxl({ probeOnly: true }).catch((error: unknown) => ({
+      available: false,
+      version: null,
+      path: null,
+      reason: `voxl could not be checked in the VM: ${error instanceof Error ? error.message : String(error)}`
+    }));
+    return { ...status, voxl };
   }
 
   async ensure(boxId: string, onProgress: (line: string) => void): Promise<DesktopHostStatus> {
