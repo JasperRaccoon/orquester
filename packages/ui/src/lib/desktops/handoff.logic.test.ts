@@ -9,6 +9,7 @@ import {
   desktopControlPill,
   desktopHasHandoff,
   EMPTY_DESKTOP_RING,
+  implicitTakeover,
   inputTakesOver,
   liveDesktopActions,
   mergeDesktopActionLog,
@@ -66,6 +67,29 @@ describe("implicit takeover", () => {
     assert.equal(inputTakesOver(agent("a"), "a"), false);
     // The agent took the desktop back later: a new stint, so input takes over again.
     assert.equal(inputTakesOver(agent("b"), "a"), true);
+  });
+
+  it("asks once per agent stint, and again on the next input after a call that did not take control", async () => {
+    const calls: Array<(took: boolean) => void> = [];
+    const asked: Promise<boolean>[] = [];
+    const takeover = implicitTakeover(() => {
+      const call = new Promise<boolean>((resolve) => calls.push(resolve));
+      asked.push(call);
+      return call;
+    });
+    takeover(agent("a"));
+    takeover(agent("a"));
+    assert.equal(calls.length, 1, "one call in flight");
+    calls[0]!(false); // failed, or skipped while another call ran
+    await asked[0];
+    takeover(agent("a"));
+    assert.equal(calls.length, 2, "the next input retries");
+    calls[1]!(true);
+    await asked[1];
+    takeover(agent("a"));
+    assert.equal(calls.length, 2, "taken: not asked again for this stint");
+    takeover(agent("b"));
+    assert.equal(calls.length, 3);
   });
 
   it("counts only input that reaches the desktop: a touch takes over once a gesture sends something", () => {

@@ -27,7 +27,7 @@ import {
   desktopControlPill,
   desktopHasHandoff,
   EMPTY_DESKTOP_RING,
-  inputTakesOver,
+  implicitTakeover,
   liveDesktopActions,
   sizeLockNotice,
   takeoverToastText,
@@ -110,19 +110,24 @@ export function useDesktopHandoff(targets: DesktopHandoffTargets, desktop: Deskt
     loadDesktopActionLog(api, desktop.id).catch(() => undefined);
   }, [api, desktop.id, live]);
 
+  /** Settles `true` once the daemon applied the change, `false` when it failed or did not run (busy). */
   const apply = React.useCallback(
-    (controller: DesktopController, why: "button" | "input", from: DesktopActor | undefined) => {
-      if (!api || busyRef.current) return;
+    (controller: DesktopController, why: "button" | "input", from: DesktopActor | undefined): Promise<boolean> => {
+      if (!api || busyRef.current) return Promise.resolve(false);
       busyRef.current = true;
       setBusy(true);
-      api
+      return api
         .setDesktopControl(desktop.id, controller)
         .then((summary) => {
           const parsed = parseDesktopSummary(summary);
           if (parsed) upsertDesktop(parsed);
           setToast(why === "input" ? { text: takeoverToastText(from), tone: "info", giveBack: true } : null);
+          return true;
         })
-        .catch((err: unknown) => setToast({ text: errorText(err), tone: "danger", giveBack: false }))
+        .catch((err: unknown) => {
+          setToast({ text: errorText(err), tone: "danger", giveBack: false });
+          return false;
+        })
         .finally(() => {
           busyRef.current = false;
           setBusy(false);
@@ -132,21 +137,17 @@ export function useDesktopHandoff(targets: DesktopHandoffTargets, desktop: Deskt
   );
 
   const changeControl = React.useCallback(
-    (controller: DesktopController) => apply(controller, "button", desktop.control?.actor),
+    (controller: DesktopController) => void apply(controller, "button", desktop.control?.actor),
     [apply, desktop.control?.actor]
   );
 
   // --- Implicit takeover ---------------------------------------------------------------------
   const latest = React.useRef({ control, live, apply });
   latest.current = { control, live, apply };
-  /** The `since` of the agent control this view already took over. */
-  const tookFrom = React.useRef<string | null>(null);
+  const [takeover] = React.useState(() => implicitTakeover((now) => latest.current.apply("user", "input", now.actor)));
   const inputReachedDesktop = React.useCallback(() => {
-    const { control: now, live: streaming, apply: take } = latest.current;
-    if (!streaming || !inputTakesOver(now, tookFrom.current)) return;
-    tookFrom.current = now!.since;
-    take("user", "input", now!.actor);
-  }, []);
+    if (latest.current.live) takeover(latest.current.control);
+  }, [takeover]);
   const { root: rootRef, viewport: viewportRef, stage: stageRef } = targets;
   React.useEffect(() => {
     const root = rootRef.current;

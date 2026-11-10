@@ -164,6 +164,27 @@ export function inputTakesOver(control: DesktopControl | null | undefined, tookF
   return control?.controller === "agent" && control.since !== tookFrom;
 }
 
+/**
+ * One view's implicit takeover (R2.2): call the returned function on every input that reaches the
+ * desktop. It asks `take` once per agent stint; `take` settles `true` once the daemon gave the user
+ * control, `false` when the call failed or did not run (another one was in flight), and then the
+ * next input asks again.
+ */
+export function implicitTakeover(take: (control: DesktopControl) => Promise<boolean>): (control: DesktopControl | null) => void {
+  let tookFrom: string | null = null;
+  return (control) => {
+    if (!control || !inputTakesOver(control, tookFrom)) return;
+    const since = control.since;
+    tookFrom = since;
+    const retry = () => {
+      if (tookFrom === since) tookFrom = null;
+    };
+    take(control).then((took) => {
+      if (!took) retry();
+    }, retry);
+  };
+}
+
 /** A DOM input event the view saw, as the implicit takeover weighs it. */
 export interface DesktopViewInput {
   kind: "pointerdown" | "wheel" | "keydown";
