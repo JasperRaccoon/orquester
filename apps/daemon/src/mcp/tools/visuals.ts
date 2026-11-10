@@ -34,7 +34,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { defineTool, type AnyOrquesterTool, type ScopeClaim, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
-import { resolveChatImages, storeChatImage } from "../chat-images.ts";
+import { chatImageScopePaths, resolveChatImages, storeChatImage } from "../chat-images.ts";
 import { ToolError } from "../errors.ts";
 import { imageResult } from "../../session-tools/results.ts";
 
@@ -184,7 +184,12 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
     tier: "act",
     // Showing a picture explains a plan as well as a page does.
     planSafe: true,
-    scope: async (_args, ctx) => ownThread(ctx.caller, true),
+    // The caller's own chat, and every workspace file it reads, which the gate classifies as read_file's path: another
+    // project's image is that project's card (the Act row: the call also changes this chat), a workflow's chat is refused.
+    scope: async (args, ctx) => {
+      const paths = await chatImageScopePaths(ctx.api, ctx.caller, args.images);
+      return paths.length > 0 ? { ...ownThread(ctx.caller, true), reads: "content", paths } : ownThread(ctx.caller, true);
+    },
     // Read-only in the MCP sense: it copies images into the caller's own chat and touches no workspace.
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     resultKind: "json",

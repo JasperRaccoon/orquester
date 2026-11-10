@@ -24,7 +24,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { defineTool, type AnyOrquesterTool, type ScopeClaim, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
-import { resolveChatImages, storeChatImage, type ChatImageInput } from "../chat-images.ts";
+import { chatImageScopePaths, resolveChatImages, storeChatImage, type ChatImageInput } from "../chat-images.ts";
 import type { DaemonApi, DaemonOutcome } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
 import { imageResult } from "../../session-tools/results.ts";
@@ -80,15 +80,22 @@ const generateImage = defineTool({
   audiences: ["chat"],
   toolset: "images",
   tier: "act",
-  // It shows an image in the caller's own chat and may add a file to its own project.
-  scope: async (_args, ctx): Promise<ScopeClaim> => ({
-    projects: [],
-    sessions: ctx.caller.kind === "thread" ? [ctx.caller.threadId] : [],
-    self: "allow",
-    reads: "content",
-    writes: true,
-    causesTurnIn: []
-  }),
+  // It shows an image in the caller's own chat and may add a file to its own project. The workspace files it reads (and
+  // sends upstream) are claimed as read_file claims its path, so another project's is that project's card and a
+  // workflow's chat is refused. `save_as` is not claimed: it is written only inside the caller's own project
+  // (`gpt-image/storage.ts` refuses anything else before generating), the gate's own row, which allows it.
+  scope: async (args, ctx): Promise<ScopeClaim> => {
+    const paths = await chatImageScopePaths(ctx.api, ctx.caller, (args.images ?? []).map(imageInput));
+    return {
+      projects: [],
+      sessions: ctx.caller.kind === "thread" ? [ctx.caller.threadId] : [],
+      self: "allow",
+      reads: "content",
+      writes: true,
+      causesTurnIn: [],
+      ...(paths.length > 0 ? { paths } : {})
+    };
+  },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   resultKind: "image",
   async run(args, ctx) {

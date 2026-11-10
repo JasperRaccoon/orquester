@@ -228,7 +228,9 @@ describe("show_image", () => {
       chatImageRoots: () => ({ attachmentsDir: attachments, tempDirs: [] }),
       chatAttachmentPath: async (_threadId: string, id: string) => (id === "thread-1-kept-png" ? stored : null)
     });
-    return { ws, api };
+    // A chat of the project acme/app, at the workspaces root.
+    const inProject = chatCaller({ projectPath: join(ws, "acme", "app"), workspace: "acme", cwd: ws });
+    return { ws, api, inProject };
   }
 
   it("copies each image into the CALLING chat and answers the image row's reference and Markdown, never the bytes", async (t) => {
@@ -237,7 +239,7 @@ describe("show_image", () => {
     const result = await call(s.api, "show_image", {
       title: "Logo",
       images: [{ path: "acme/app/logo.png", caption: "the new logo" }, { ref: "attachment:thread-1-kept-png" }]
-    }, { caller: chatCaller({ cwd: s.ws }) });
+    }, { caller: s.inProject });
     assert.equal(result.isError, undefined);
     // The project file is stored as this chat's attachment; one already stored here is shown as it is, not copied.
     assert.deepEqual(s.api.uploads.map((upload) => [upload.sessionId, upload.meta, upload.bytes]), [[THREAD, { name: "logo.png", type: "image/png" }, PNG]]);
@@ -263,9 +265,21 @@ describe("show_image", () => {
     const s = await sandbox(t);
     await writeFile(join(s.ws, "acme", "app", "logo.png"), PNG);
     await writeFile(join(s.ws, "acme", "app", "readme.png"), "# not an image");
-    const error = errorOf(await call(s.api, "show_image", { images: [{ path: "acme/app/logo.png" }, { path: "acme/app/readme.png" }] }, { caller: chatCaller({ cwd: s.ws }) }));
+    const error = errorOf(await call(s.api, "show_image", { images: [{ path: "acme/app/logo.png" }, { path: "acme/app/readme.png" }] }, { caller: s.inProject }));
     assert.equal(error.code, "INVALID_ARGUMENT");
     assert.match(error.message, /^images\[1\]: not a PNG, JPEG, WebP or GIF image/);
+    assert.equal(s.api.uploads.length, 0);
+  });
+
+  it("an image in another project is that project's card, as read_file's path is, and a workflow's chat is refused", async (t) => {
+    const s = await sandbox(t);
+    await mkdir(join(s.ws, "acme", "other"), { recursive: true });
+    await writeFile(join(s.ws, "acme", "other", "secret.png"), PNG);
+    for (const caller of [s.inProject, { ...s.inProject, workflowOwned: true }]) {
+      const error = errorOf(await call(s.api, "show_image", { images: [{ path: "acme/other/secret.png" }] }, { caller }));
+      assert.equal(error.code, "PERMISSION_DENIED");
+      assert.match(error.message, caller.workflowOwned ? /automated workflow/ : /approval/);
+    }
     assert.equal(s.api.uploads.length, 0);
   });
 

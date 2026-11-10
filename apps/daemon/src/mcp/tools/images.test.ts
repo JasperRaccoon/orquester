@@ -34,8 +34,8 @@ const caller: ThreadCaller = {
   runtimeMode: "approval-required", planning: false, workflowOwned: false, exchange: null
 };
 
-const call = (api: FakeDaemonApi, args: unknown): Promise<CallToolResult> =>
-  executeToolCall({ approvals: null }, { name: "generate_image", arguments: args }, { caller, api, signal: new AbortController().signal });
+const call = (api: FakeDaemonApi, args: unknown, as: ThreadCaller = caller): Promise<CallToolResult> =>
+  executeToolCall({ approvals: null }, { name: "generate_image", arguments: args }, { caller: as, api, signal: new AbortController().signal });
 
 async function setup(t: { after(fn: () => Promise<void>): void }, made: GptImageToolResult) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "generate-image-")));
@@ -58,7 +58,9 @@ async function setup(t: { after(fn: () => Promise<void>): void }, made: GptImage
       return { ok: true, value: made };
     }
   });
-  return { api, ws, sent };
+  // A chat of the project acme/app, working at its root.
+  const inProject: ThreadCaller = { ...caller, projectPath: join(ws, "acme", "app"), workspace: "acme", cwd: join(ws, "acme", "app") };
+  return { api, ws, sent, inProject };
 }
 
 describe("generate_image", () => {
@@ -92,10 +94,23 @@ describe("generate_image", () => {
     assert.equal(body.account, "Work Plus");
   });
 
+  it("a reference image in another project is that project's card, as read_file's path is: nothing is sent", async (t) => {
+    const s = await setup(t, made);
+    await mkdir(join(s.ws, "acme", "other"), { recursive: true });
+    await writeFile(join(s.ws, "acme", "other", "logo.png"), png(64, 64));
+    for (const as of [s.inProject, { ...s.inProject, workflowOwned: true }]) {
+      const result = await call(s.api, { prompt: "restyle", images: ["../other/logo.png"] }, as);
+      assert.equal(result.isError, true);
+      assert.equal((result.structuredContent as { code: string }).code, "PERMISSION_DENIED");
+    }
+    assert.equal(s.sent.length, 0);
+    assert.equal(s.api.uploads.length, 0);
+  });
+
   it("sends nothing upstream when a reference is refused", async (t) => {
     const s = await setup(t, made);
     await writeFile(join(s.ws, "acme", "app", "notes.png"), "not an image");
-    const result = await call(s.api, { prompt: "restyle", images: [join(s.ws, "acme", "app", "notes.png")] });
+    const result = await call(s.api, { prompt: "restyle", images: ["notes.png"] }, s.inProject);
     assert.equal(result.isError, true);
     assert.match((result.structuredContent as { message: string }).message, /^images\[0\]: not a PNG, JPEG, WebP or GIF image/);
     assert.equal(s.sent.length, 0);
