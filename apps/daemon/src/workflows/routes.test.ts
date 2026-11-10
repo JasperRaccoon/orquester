@@ -451,6 +451,20 @@ test("an engine refusal keeps its status, code and problems (never a generic 500
   assert.equal(tested.json().error.code, "ENGINE_UNAVAILABLE");
 });
 
+test("an INVALID_INPUT refusal carries every input error (spec 2026-11-10 §4.2)", async () => {
+  const h = await harness();
+  const workflow = await createWorkflow(h);
+  const engine = fakeEngine(() => h);
+  const inputErrors = [{ input: "env", message: "input `env` must be one of: stg, prd (got \"dev\")" }, { message: "1 more" }];
+  engine.run = async () => {
+    throw new WorkflowEngineError(400, "INVALID_INPUT", "The input does not fit the workflow's inputs: …", undefined, inputErrors);
+  };
+  h.setEngine(engine);
+  const run = await h.app.inject({ method: "POST", url: `/api/workflows/${workflow.id}/run`, payload: { input: { env: "dev" } } });
+  assert.equal(run.statusCode, 400);
+  assert.deepEqual(run.json(), { error: { code: "INVALID_INPUT", message: "The input does not fit the workflow's inputs: …", inputErrors } });
+});
+
 test("DELETE of a secret refuses prototype names and unknown workflows", async () => {
   const h = await harness();
   const polluted = await h.app.inject({ method: "DELETE", url: "/api/workflow-secrets/hasOwnProperty?workflowId=__proto__" });

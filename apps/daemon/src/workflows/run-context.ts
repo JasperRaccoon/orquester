@@ -6,6 +6,7 @@ import {
   WORKFLOW_LIMITS,
   type WorkflowBlockRun,
   type WorkflowErrorCode,
+  type WorkflowInputError,
   type WorkflowNode,
   type WorkflowProblem,
   type WorkflowRun,
@@ -18,13 +19,14 @@ import type { Clock, PersistedBlockState, PersistedRun } from "./contracts.ts";
 // Errors the engine throws at its callers (routes, MCP)
 // ---------------------------------------------------------------------------
 
-/** A refusal with a wire code and an HTTP status; `problems` for INVALID_WORKFLOW. */
+/** A refusal with a wire code and an HTTP status; `problems` for INVALID_WORKFLOW, `inputErrors` for INVALID_INPUT. */
 export class WorkflowEngineError extends Error {
   constructor(
     readonly statusCode: number,
     readonly code: WorkflowErrorCode,
     message: string,
-    readonly problems?: WorkflowProblem[]
+    readonly problems?: WorkflowProblem[],
+    readonly inputErrors?: WorkflowInputError[]
   ) {
     super(message);
     this.name = "WorkflowEngineError";

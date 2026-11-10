@@ -6,6 +6,8 @@
 import { basename } from "node:path";
 import {
   isTriggerType,
+  manualTriggerFor,
+  workflowRunInputs,
   repoDisplayName,
   triggerSummaryText,
   validateWorkflow,
@@ -80,6 +82,7 @@ function workflowProjectName(workflow: Workflow): string | undefined {
 export function buildWorkflowSummary(workflow: Workflow, deps: WorkflowSummaryDeps): WorkflowSummary {
   const projectName = deps.projectName ?? workflowProjectName(workflow);
   const triggers: WorkflowTriggerSummary[] = [];
+  const runTrigger = manualTriggerFor(workflow);
   for (const node of workflow.nodes) {
     if (!isTriggerType(node.type)) continue;
     const state = deps.triggerState?.(workflow.id, node.id);
@@ -96,6 +99,12 @@ export function buildWorkflowSummary(workflow: Workflow, deps: WorkflowSummaryDe
     if (state?.nextRunAt !== undefined) trigger.nextRunAt = state.nextRunAt;
     if (state?.lastPollAt !== undefined) trigger.lastPollAt = state.lastPollAt;
     if (state?.lastError !== undefined) trigger.lastError = state.lastError;
+    // What a run must pass (spec 2026-11-10 §8), on the manual trigger a run starts from: the Run
+    // now form and `list_workflows` read it here.
+    if (node.id === runTrigger?.id) {
+      const inputs = workflowRunInputs(workflow, node.id);
+      if (inputs !== undefined) trigger.inputs = [...inputs];
+    }
     triggers.push(trigger);
   }
   const summary: WorkflowSummary = {

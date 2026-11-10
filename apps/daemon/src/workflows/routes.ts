@@ -272,11 +272,16 @@ function sendError(reply: FastifyReply, error: unknown): FastifyReply {
   if (error instanceof WorkflowError) {
     return reply.code(error.status).send(error.body());
   }
-  // The engine's refusals carry their status, code and (INVALID_WORKFLOW) problems.
+  // The engine's refusals carry their status, code, (INVALID_WORKFLOW) problems and (INVALID_INPUT) input errors.
   if (error instanceof WorkflowEngineError) {
     const status = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 500;
     return reply.code(status).send({
-      error: { code: error.code, message: error.message, ...(error.problems !== undefined ? { problems: error.problems } : {}) }
+      error: {
+        code: error.code,
+        message: error.message,
+        ...(error.problems !== undefined ? { problems: error.problems } : {}),
+        ...(error.inputErrors !== undefined ? { inputErrors: error.inputErrors } : {})
+      }
     });
   }
   // A body over the route's limit (Fastify refuses it before the handler runs).

@@ -31,6 +31,9 @@ import {
   topologicalOrder,
   upstreamOf,
   validateWorkflow,
+  validateWorkflowInput,
+  workflowInputErrorsText,
+  workflowRunInputs,
   type AccountSelectionDecision,
   type AgentChainEntry,
   type ExpressionContext,
@@ -40,6 +43,7 @@ import {
   type Workflow,
   type WorkflowBlockError,
   type WorkflowBlockRun,
+  type WorkflowInputError,
   type WorkflowNode,
   type WorkflowNodeType,
   type WorkflowRun,
@@ -253,6 +257,11 @@ function isWaitState(waitingOn: WaitingOn): boolean {
 
 const MAX_BLOCK_WARNINGS = 50;
 const DAY_MS = 24 * 60 * 60_000;
+
+/** INVALID_INPUT: every problem with a run's input against the declared inputs (spec 2026-11-10 §4.2). */
+function invalidInput(lead: string, errors: WorkflowInputError[]): WorkflowEngineError {
+  return new WorkflowEngineError(400, "INVALID_INPUT", `${lead}: ${workflowInputErrorsText(errors)}.`, undefined, errors);
+}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -1895,11 +1904,20 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     if (problems) {
       throw new WorkflowEngineError(400, "INVALID_WORKFLOW", `The sub-workflow "${workflow.name}" has errors: ${problems[0]!.message}`, problems);
     }
+    // The child's declared inputs (spec 2026-11-10 §11): the value must fit them, defaults applied —
+    // a test run's child, like a test run, does not need every required input.
+    let childInput = input.input;
+    const declared = workflowRunInputs(workflow);
+    if (declared !== undefined) {
+      const check = validateWorkflowInput(declared, input.input, { requireAll: !(parent?.run.test ?? false) });
+      if (check.errors.length > 0) throw invalidInput(`The input does not fit the inputs of the sub-workflow "${workflow.name}"`, check.errors);
+      childInput = check.value;
+    }
     const launched = await launch(structuredClone(workflow), {
       trigger: { kind: "subworkflow", text: parent ? `From ${parent.run.workflowName}` : undefined },
       payload: {
         kind: "subworkflow",
-        input: input.input,
+        input: childInput,
         parentRunId: input.parentRunId,
         parentNodeId: input.parentNodeId,
         ...(input.untrusted ? { untrusted: true as const } : {})
@@ -2139,6 +2157,17 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       }
       const test = request.test === true || (fromNodeId !== undefined && request.retryOf === undefined);
       const kind: WorkflowTriggerKind = request.retryOf !== undefined ? "retry" : test ? "test" : "manual";
+      // Typed inputs (spec 2026-11-10 §4.2): the run stores the validated, defaulted input. A retry
+      // reuses its source run's payload as it was, never re-checked against a later inputs change;
+      // a test run applies defaults but does not need every required input (§7.5).
+      if (request.retryOf === undefined) {
+        const declared = workflowRunInputs(workflow, triggerNodeId);
+        if (declared !== undefined) {
+          const check = validateWorkflowInput(declared, request.input, { requireAll: !test });
+          if (check.errors.length > 0) throw invalidInput("The input does not fit the workflow's inputs", check.errors);
+          payload = { kind: "manual", input: check.value };
+        }
+      }
       const spec: RunSpec = {
         trigger: triggerNodeId !== undefined ? { kind, nodeId: triggerNodeId } : { kind },
         payload,
@@ -2161,10 +2190,12 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       const problems = validationErrors(workflow);
       if (problems) throw new WorkflowEngineError(400, "INVALID_WORKFLOW", `The workflow has errors: ${problems[0]!.message}`, problems);
       const manual = workflow.nodes.find((candidate) => candidate.type === "trigger.manual" && !candidate.disabled)?.id;
+      // No input is given: the declared inputs' defaults, without requiring the rest (§7.5).
+      const defaults = validateWorkflowInput(workflowRunInputs(workflow, manual), null, { requireAll: false });
       return (
         await launch(workflow, {
           trigger: manual !== undefined ? { kind: "test", nodeId: manual } : { kind: "test" },
-          payload: { kind: "manual", input: null },
+          payload: { kind: "manual", input: defaults.errors.length === 0 ? (defaults.value ?? null) : null },
           test: true,
           force: true,
           depth: 0,
