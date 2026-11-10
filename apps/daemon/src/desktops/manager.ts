@@ -1496,7 +1496,9 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       audio: record.audio === true ? "available" : "unavailable",
       apps: record.apps.map(appSummary),
       windows: rt.windows,
-      activeWindowId: rt.activeWindowId
+      activeWindowId: rt.activeWindowId,
+      control: null,
+      video: "rfb"
     };
   }
 

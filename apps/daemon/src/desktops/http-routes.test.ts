@@ -43,7 +43,9 @@ function summary(projectPath: string): DesktopSummary {
     audio: "available",
     apps: [],
     windows: [],
-    activeWindowId: null
+    activeWindowId: null,
+    control: null,
+    video: "rfb"
   };
 }
 

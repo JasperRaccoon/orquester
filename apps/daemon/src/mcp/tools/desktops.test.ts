@@ -35,7 +35,7 @@ function desktop(overrides: Partial<DesktopSummary> = {}): DesktopSummary {
   return {
     id: "dt-1", projectPath: GAME, title: "Desktop", order: 0, createdAt: stamp, display: 1,
     size: { width: 1280, height: 800 }, renderThreads: 4, status: "running", audio: "available",
-    apps: [app()], windows: [{ id: "0x400001", title: "xterm", appId: "app-1", wmClass: "XTerm", maximized: false }], activeWindowId: "0x400001",
+    apps: [app()], windows: [{ id: "0x400001", title: "xterm", appId: "app-1", wmClass: "XTerm", maximized: false }], activeWindowId: "0x400001", control: null, video: "rfb",
     ...overrides
   };
 }
