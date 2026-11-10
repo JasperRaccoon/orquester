@@ -521,6 +521,12 @@ describe("DesktopAutomation input", () => {
     await engine.key("shift+A", 1);
     assert.deepEqual(server.inputs, [press(SHIFT), press(8), release(8), release(SHIFT)]);
     server.inputs.length = 0;
+    // "+" itself is the key after a "+"; the keymap lacks it, so it is bound.
+    await engine.key("ctrl++", 1);
+    assert.deepEqual(server.mappingChanges, [{ keycode: 31, keysyms: [0x2b, 0x2b] }]);
+    assert.deepEqual(server.inputs, [press(CONTROL), press(31), release(31), release(CONTROL)]);
+    server.inputs.length = 0;
+    await assert.rejects(engine.key("ctrl+", 1), (error: unknown) => error instanceof DesktopAutomationError && error.code === "INVALID_ARGUMENT");
     await assert.rejects(engine.key("ctrl+nosuchkey", 1), (error: unknown) => error instanceof DesktopAutomationError && error.code === "INVALID_ARGUMENT");
     await assert.rejects(engine.type("a\u0007b"), (error: unknown) => error instanceof DesktopAutomationError && error.code === "INVALID_ARGUMENT");
     assert.deepEqual(server.inputs, [], "a refused call presses nothing");

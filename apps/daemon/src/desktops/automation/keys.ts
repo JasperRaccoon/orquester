@@ -203,7 +203,7 @@ const KEYSYM_NAMES: Readonly<Record<string, number>> = {
 const KEYSYM_NAMES_LOWER: ReadonlyMap<string, number> = new Map(Object.entries(KEYSYM_NAMES).map(([name, keysym]) => [name.toLowerCase(), keysym]));
 
 /** The keysym for a Unicode code point: Latin-1 printable code points are their own keysym, others `0x01000000 + cp`. */
-export function keysymForCodePoint(codePoint: number): number {
+function keysymForCodePoint(codePoint: number): number {
   if ((codePoint >= 0x20 && codePoint <= 0x7e) || (codePoint >= 0xa0 && codePoint <= 0xff)) return codePoint;
   return 0x0100_0000 + codePoint;
 }
@@ -243,7 +243,9 @@ export function parseCombo(combo: string): ComboKey[] {
 }
 
 /** C0, DEL and C1 controls. */
-export const isControl = (codePoint: number): boolean => codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f);
+function isControl(codePoint: number): boolean {
+  return codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f);
+}
 
 /** `type`'s text as keysyms: `\n` → Return, `\t` → Tab; any other control character is refused. */
 export function keysymsForText(text: string): number[] {
