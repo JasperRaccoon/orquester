@@ -133,6 +133,30 @@ describe("the GPT Image plugin section", () => {
     assert.deepEqual(puts, [{ saveTo: { kind: "project", folder: "assets/generated" } }]);
   });
 
+  it("a read that started before a save never puts back what the save replaced", async () => {
+    await show();
+    // The Codex accounts change: the pane reads the settings again, and that read is slow.
+    const before = answer;
+    let answerRead: (value: GptImageSettingsResponse) => void = () => undefined;
+    api.getGptImageSettings = () => new Promise<GptImageSettingsResponse>((resolve) => (answerRead = resolve));
+    try {
+      await act(async () =>
+        useAppStore.setState({ agentAccounts: { ...ACCOUNTS, accounts: [...ACCOUNTS.accounts, codex("c", "third")] } })
+      );
+      await settle();
+      await click(button("Project folder"));
+      await click(button("Save"));
+      assert.equal(puts.length, 1);
+
+      // The read answers what was there before the save.
+      await act(async () => answerRead(before));
+      await settle();
+      assert.ok(doc().querySelector('input[placeholder="assets/generated"]'), "the saved project folder stays");
+    } finally {
+      api.getGptImageSettings = async () => answer;
+    }
+  });
+
   it("with no Codex account connected, the pane opens Settings → Accounts", async () => {
     answer = { ...answer, accounts: [], activeAccountId: null };
     await show();
