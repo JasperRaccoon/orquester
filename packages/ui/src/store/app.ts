@@ -35,7 +35,7 @@ import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/work
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
 import { observePushEvent } from "../lib/desktop-host";
 import { clearDesktopPrefs } from "../lib/desktop-prefs";
-import { applyDesktopActionEvent, dropDesktopActions, resetDesktopActions } from "../lib/desktops/actions-store";
+import { applyDesktopActionEvent, dropDesktopActions, reloadDesktopActionLogs, resetDesktopActions } from "../lib/desktops/actions-store";
 import {
   applyDesktopWindows,
   parseDesktopList,
@@ -1712,6 +1712,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       }
     );
+    // Desktop action logs: the daemon keeps them in memory and the stream has no replay, so each
+    // desktop view loads its log again (a restarted daemon's is empty).
+    reloadDesktopActionLogs();
 
     // Health probe: detect a dropped/restarted transport and auto-reconnect.
     // A silently stalled /events stream (killed while the tab was frozen, no

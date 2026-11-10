@@ -240,7 +240,7 @@ export interface DesktopActionRing {
   readonly entries: readonly DesktopActionEntry[];
   /** Live actions since the log was last looked at (the Activity badge). */
   readonly unseen: number;
-  /** The daemon's log was loaded once on this connection. */
+  /** The daemon's log was loaded since the event stream last opened. */
   readonly loaded: boolean;
   /** Ids of the entries that arrived as events (the overlay draws only those, never history). */
   readonly liveIds: readonly string[];
@@ -269,6 +269,20 @@ export function mergeDesktopActionLog(ring: DesktopActionRing, loaded: readonly 
   const fresh = loaded.filter((entry) => !ids.has(entry.id));
   const entries = fresh.length === 0 ? ring.entries : [...ring.entries, ...fresh].sort(byTime).slice(-DESKTOP_ACTION_LOG_LIMIT);
   return { ...ring, entries, loaded: true };
+}
+
+/**
+ * The daemon's log in place of the ring's history: entries the ring held when the request went out
+ * (`asked`) are the daemon's to keep or drop (a restarted daemon has none), and only what arrived
+ * since — newer than the answer — stays besides it.
+ */
+export function replaceDesktopActionLog(ring: DesktopActionRing, loaded: readonly DesktopActionEntry[], asked: ReadonlySet<string>): DesktopActionRing {
+  const ids = new Set(loaded.map((entry) => entry.id));
+  const newer = ring.entries.filter((entry) => !asked.has(entry.id) && !ids.has(entry.id));
+  const entries = [...loaded, ...newer].sort(byTime).slice(-DESKTOP_ACTION_LOG_LIMIT);
+  const kept = new Set(entries.map((entry) => entry.id));
+  const liveIds = ring.liveIds.filter((id) => kept.has(id));
+  return { entries, liveIds, unseen: Math.min(ring.unseen, liveIds.length), loaded: true };
 }
 
 /** The entries that arrived live, oldest first: what the overlay may draw. */

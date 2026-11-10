@@ -104,11 +104,12 @@ export function useDesktopHandoff(targets: DesktopHandoffTargets, desktop: Deskt
   const [toast, setToast] = React.useState<DesktopToast | null>(null);
   const busyRef = React.useRef(false);
 
-  // The daemon's log, once per desktop and connection, so a desktop agents used shows its Activity.
+  // The daemon's log, once per desktop and event stream, so a desktop agents used shows its Activity.
+  const epoch = React.useSyncExternalStore(desktopActionsStore.subscribe, () => desktopActionsStore.getState().epoch, () => 0);
   React.useEffect(() => {
     if (!api || !live) return;
     loadDesktopActionLog(api, desktop.id).catch(() => undefined);
-  }, [api, desktop.id, live]);
+  }, [api, desktop.id, live, epoch]);
 
   /** Settles `true` once the daemon applied the change, `false` when it failed or did not run (busy). */
   const apply = React.useCallback(
