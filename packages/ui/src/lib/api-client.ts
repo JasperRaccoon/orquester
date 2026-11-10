@@ -268,7 +268,8 @@ import type {
   DesktopSuggestionsResponse,
   DesktopSummary,
   DesktopWindowAction,
-  LaunchAppRequest
+  LaunchAppRequest,
+  UpdateDesktopRequest
 } from "@orquester/api";
 import type {
   AgentProfileAgentId,
@@ -2529,6 +2530,11 @@ export class ApiClient {
 
   createDesktop(body: CreateDesktopRequest): Promise<DesktopSummary> {
     return this.send("POST", desktopRoutes.create, { body });
+  }
+
+  /** Change a desktop's settings (its video backend: only the stream restarts, spec 2026-11-10 R4.1). */
+  updateDesktop(id: string, body: UpdateDesktopRequest): Promise<DesktopSummary> {
+    return this.send("PATCH", desktopRoutes.desktop(id), { body });
   }
 
   stopDesktop(id: string): Promise<DesktopSummary> {

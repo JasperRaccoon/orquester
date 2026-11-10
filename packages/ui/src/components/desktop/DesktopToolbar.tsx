@@ -3,7 +3,7 @@ import {
   AppWindow, Check, Clipboard, Copy, Expand, Info, Keyboard, LayoutGrid, Maximize2, Monitor, MoreHorizontal,
   Plus, Power, RotateCw, Shrink, Volume2, VolumeX, X
 } from "lucide-react";
-import type { DesktopSummary, DesktopWindow, DesktopWindowAction } from "@orquester/api";
+import type { DesktopSummary, DesktopVideoBackend, DesktopWindow, DesktopWindowAction } from "@orquester/api";
 import type { DesktopAudioState } from "../../lib/desktop-audio";
 import { DESKTOP_FIXED_SIZES, type DesktopPrefs, type DesktopTextSize } from "../../lib/desktop-prefs";
 import { cn } from "../../lib/cn";
@@ -258,14 +258,25 @@ const TEXT_SIZES: { id: DesktopTextSize; label: string }[] = [
   { id: "more", label: "More space" }
 ];
 
+/** The View menu's Video choice (spec 2026-11-10 R4.1); null while the daemon does not know voxl. */
+export interface DesktopVideoChoice {
+  current: DesktopVideoBackend;
+  /** A switch is in flight. */
+  busy: boolean;
+  /** Why Fast cannot be used here (the host's voxl, this browser), or null when it can. */
+  fastUnavailable: string | null;
+  onChange: (video: DesktopVideoBackend) => void;
+}
+
 const DesktopViewMenu: React.FC<{
+  video: DesktopVideoChoice | null;
   prefs: DesktopPrefs;
   onPrefs: (patch: Partial<DesktopPrefs>) => void;
   /** Touch devices: the input mode and text-size presets. */
   touch: boolean;
   /** Actual size (drag to pan) is offered: not while touch drives the view (pinch zoom does that). */
   panAvailable: boolean;
-}> = ({ prefs, onPrefs, touch, panAvailable }) => {
+}> = ({ video, prefs, onPrefs, touch, panAvailable }) => {
   // A text-size preset sizes the display itself; picking a display size ends it.
   const preset = touch && prefs.textSize !== undefined && prefs.textSize !== "fit";
   const endPreset: Partial<DesktopPrefs> = preset ? { textSize: "fit" } : {};
@@ -331,6 +342,25 @@ const DesktopViewMenu: React.FC<{
           </DropdownItem>
           <DropdownItem icon={mark(inputMode === "touch")} onClick={() => onPrefs({ inputMode: "touch" })}>
             Touch
+          </DropdownItem>
+        </>
+      )}
+      {video && (
+        <>
+          <DropdownSeparator />
+          <DropdownLabel>Video</DropdownLabel>
+          <DropdownItem
+            icon={mark(video.current === "voxl")}
+            disabled={video.busy || (video.fastUnavailable !== null && video.current !== "voxl")}
+            onClick={() => video.onChange("voxl")}
+          >
+            <span className="flex min-w-0 flex-col">
+              <span>Fast (H.264)</span>
+              {video.fastUnavailable && <span className="truncate text-[11px] text-neutral-500">{video.fastUnavailable}</span>}
+            </span>
+          </DropdownItem>
+          <DropdownItem icon={mark(video.current === "rfb")} disabled={video.busy} onClick={() => video.onChange("rfb")}>
+            Compatible (VNC)
           </DropdownItem>
         </>
       )}
@@ -423,6 +453,8 @@ export interface DesktopToolbarProps {
   panAvailable: boolean;
   prefs: DesktopPrefs;
   onPrefs: (patch: Partial<DesktopPrefs>) => void;
+  /** The Video choice in the View menu, or null to hide it. */
+  video: DesktopVideoChoice | null;
   audio: DesktopAudioState;
   connected: boolean;
   remoteClipboard: string | null;
@@ -457,7 +489,7 @@ export const DesktopToolbar: React.FC<DesktopToolbarProps> = (props) => {
       </IconButton>
       <DesktopSound desktop={desktop} audio={audio} prefs={prefs} onPrefs={onPrefs} compact={narrow} />
       {props.handoff}
-      <DesktopViewMenu prefs={prefs} onPrefs={onPrefs} touch={props.touch} panAvailable={props.panAvailable} />
+      <DesktopViewMenu video={props.video} prefs={prefs} onPrefs={onPrefs} touch={props.touch} panAvailable={props.panAvailable} />
       {props.touch && (
         // Focusing inside a button CLICK is the trusted-gesture path iOS
         // reliably raises the soft keyboard for.

@@ -12,6 +12,7 @@ import {
   type DesktopSize,
   type DesktopSuggestionsResponse,
   type DesktopSummary,
+  type DesktopVideoBackend,
   type LaunchAppRequest,
   type RecentLaunch
 } from "@orquester/api";
@@ -175,21 +176,31 @@ export function clampRenderThreads(value: number): number {
   return Math.min(MAX_RENDER_THREADS, Math.max(MIN_RENDER_THREADS, Math.round(value)));
 }
 
+/** The create dialog's Video choice: `default` leaves it to the daemon (voxl where it works). */
+export type DesktopVideoChoiceId = "default" | DesktopVideoBackend;
+
+export const DESKTOP_VIDEO_CHOICES: readonly { id: DesktopVideoChoiceId; label: string }[] = [
+  { id: "default", label: "Default" },
+  { id: "voxl", label: "Fast (H.264)" },
+  { id: "rfb", label: "Compatible (VNC)" }
+];
+
 /**
- * `POST /api/desktops` for a new desktop running `app`. Size and render
- * threads are sent only when they differ from the defaults, so the daemon's
+ * `POST /api/desktops` for a new desktop running `app`. Size, render threads
+ * and video are sent only when they differ from the defaults, so the daemon's
  * own defaults apply otherwise.
  */
 export function buildCreateRequest(
   projectPath: string,
   app: LaunchAppRequest,
-  advanced: { sizeId: string; renderThreads: number }
+  advanced: { sizeId: string; renderThreads: number; video?: DesktopVideoChoiceId }
 ): CreateDesktopRequest {
   const request: CreateDesktopRequest = { projectPath, app };
   const size = DESKTOP_SIZE_PRESETS.find((p) => p.id === advanced.sizeId)?.size ?? null;
   if (size) request.size = { ...size };
   const threads = clampRenderThreads(advanced.renderThreads);
   if (threads !== DEFAULT_RENDER_THREADS) request.renderThreads = threads;
+  if (advanced.video && advanced.video !== "default") request.video = advanced.video;
   return request;
 }
 

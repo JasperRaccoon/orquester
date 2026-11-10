@@ -154,3 +154,73 @@ const NAMED_KEYS: Record<string, number> = {
 export function keysymForNamedKey(key: string): number | null {
   return NAMED_KEYS[key] ?? null;
 }
+
+/** Keysyms by `KeyboardEvent.key` for keys without a left/right pair (X11 `keysymdef.h`). */
+const EVENT_KEYS: Record<string, number> = {
+  ...NAMED_KEYS,
+  Insert: 0xff63,
+  Pause: 0xff13,
+  ScrollLock: 0xff14,
+  PrintScreen: 0xff61,
+  ContextMenu: 0xff67,
+  CapsLock: 0xffe5,
+  NumLock: 0xff7f,
+  AltGraph: XK.ISO_Level3_Shift
+};
+
+/** Modifier keys by `KeyboardEvent.key`: [left, right] keysyms. */
+const SIDED_KEYS: Record<string, readonly [number, number]> = {
+  Shift: [XK.Shift_L, 0xffe2],
+  Control: [XK.Control_L, 0xffe4],
+  Alt: [XK.Alt_L, XK.Alt_R],
+  Meta: [XK.Super_L, XK.Super_R],
+  OS: [XK.Super_L, XK.Super_R]
+};
+
+/** The parts of a `KeyboardEvent` the keysym depends on. */
+export interface KeyEventLike {
+  key: string;
+  code: string;
+}
+
+/**
+ * The keysym a hardware key event sends, the way noVNC's keyboard derives it for the RFB path
+ * (`core/input/util.js` `getKeysym`, `core/input/keyboard.js`): named keys and modifiers by
+ * `key` (the side from `code`), F1–F24, printable characters by code point (layout-aware: the
+ * browser's `key` already went through the local layout), and on Apple platforms Cmd → Alt_L /
+ * Super_L and Option → Mode_switch / ISO_Level3_Shift (TigerVNC's mapping, which
+ * {@link pasteKeystroke} releases). Null for keys with no keysym (dead keys, IME processing).
+ */
+export function keysymForKeyEvent(e: KeyEventLike, apple: boolean): number | null {
+  const sided = SIDED_KEYS[e.key];
+  if (sided) {
+    // Chromium reports a Meta key for Alt on some layouts; noVNC sends Meta_L/R then.
+    if (e.key === "Meta" && (e.code === "AltLeft" || e.code === "AltRight")) return e.code === "AltLeft" ? 0xffe7 : 0xffe8;
+    const keysym = e.code.endsWith("Right") ? sided[1] : sided[0];
+    if (!apple) return keysym;
+    switch (keysym) {
+      case XK.Super_L:
+        return XK.Alt_L;
+      case XK.Super_R:
+        return XK.Super_L;
+      case XK.Alt_L:
+        return XK.Mode_switch;
+      case XK.Alt_R:
+        return XK.ISO_Level3_Shift;
+      default:
+        return keysym;
+    }
+  }
+  const named = EVENT_KEYS[e.key];
+  if (named !== undefined) return named;
+  const fn = /^F([1-9]|1[0-9]|2[0-4])$/.exec(e.key);
+  if (fn) return functionKeysym(Number(fn[1]));
+  const chars = [...e.key];
+  if (chars.length !== 1) return null; // Dead, Unidentified, Process, other named keys
+  return keysymForCodePoint(chars[0]!.codePointAt(0)!);
+}
+
+/** A modifier key's `code`: these stay held while Cmd is down on a Mac. */
+export function isModifierCode(code: string): boolean {
+  return /^(Shift|Control|Alt|Meta|OS)/.test(code);
+}
