@@ -141,6 +141,44 @@ describe("engine: loop edges (spec 2026-11-10 §7.2)", () => {
     assert.deepEqual(updates.at(-1)!.loopCounters, { "Rev-loop-Fix": 2 });
   });
 
+  test("a block that ran in an earlier pass but is skipped in the latest reads as skipped, with no output (live and after a restart)", async () => {
+    // T → C; C.true → X, C.false → Y; X, Y → M (first) → L; L.false ↺ C. Pass 1 runs X, pass 2 runs Y.
+    const wf = workflow(
+      "w1",
+      [T(), node("C", "if"), node("X", "code"), node("Y", "code"), node("M", "merge", { mode: "first" }), node("L", "if"), node("Done", "code")],
+      [edge("T", "C"), edge("C", "X", "true"), edge("C", "Y", "false"), edge("X", "M"), edge("Y", "M"), edge("M", "L"), loopEdge("L", "C", "false", 2), edge("L", "Done", "true")]
+    );
+    const env = restartable([wf]);
+    const branch = () => scripted("if", { C: (ctx) => ({ status: "succeeded", output: null, handle: (ctx.expressionContext().loop?.pass ?? 1) === 1 ? "true" : "false" }) });
+    const lastCheck = controlledExecutor("if");
+    const first = env.boot({ if: { type: "if", execute: (ctx) => (ctx.node.name === "L" ? lastCheck.execute(ctx) : branch().execute(ctx)) }, code: scripted("code", { X: () => ({ status: "succeeded", output: "x pass 1" }) }) });
+    const { runId } = await first.engine.run("w1", {});
+    await flush();
+    assert.equal((lastCheck.calls[0]!.ctx.expressionContext().nodes.X as { output: unknown }).output, "x pass 1");
+    lastCheck.calls[0]!.resolve({ status: "succeeded", output: null, handle: "false" });
+    await flush();
+    assert.equal(lastCheck.calls.length, 2, "pass 2 reached L");
+    const live = lastCheck.calls[1]!.ctx.expressionContext().nodes.X as { output?: unknown; status: string };
+    assert.deepEqual([live.status, live.output], ["skipped", undefined], "skipped in pass 2: no earlier pass's output");
+    assert.deepEqual(await first.engine.nodeOutput(runId!, "X"), { found: true });
+    await first.engine.stop();
+
+    let read: unknown = "unread";
+    const second = env.boot({
+      if: scripted("if", {
+        L: (ctx) => {
+          read = ctx.expressionContext().nodes.X;
+          return { status: "succeeded", output: null, handle: "true" };
+        }
+      }),
+      code: scripted("code")
+    });
+    await second.engine.resume();
+    assert.equal((await second.engine.waitForRun(runId!)).status, "succeeded");
+    assert.deepEqual([(read as { status?: string }).status, (read as { output?: unknown }).output], ["skipped", undefined], "after a restart too");
+    assert.deepEqual(await second.engine.nodeOutput(runId!, "X"), { found: true });
+  });
+
   test("taken at its limit, the source waits on a person gate; Stop fails the pass with loop_limit: not retried, the run fails without an error edge", async () => {
     const agent = scripted("agent", { Rev: reviewing("Rev", ["changes"]) });
     const pushed: WorkflowGateState[] = [];

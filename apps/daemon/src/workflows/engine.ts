@@ -1455,6 +1455,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       if (!block || !isPending(a, id)) continue;
       block.status = "skipped";
       block.endedAt = now;
+      // Loops: an earlier pass's output is no longer what `nodes.<Name>` reads (the pass is skipped).
+      a.outputs.delete(id);
       markDirty(a, id);
       changed = true;
     }
@@ -1811,6 +1813,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       if (isFinishedBlockStatus(block.status)) continue;
       block.status = a.ending !== null ? "cancelled" : "skipped";
       block.endedAt = now;
+      a.outputs.delete(id);
       delete block.waitingOn;
       delete block.waitingUntil;
       a.dirty.add(id);
@@ -2576,8 +2579,16 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       }
       for (const [id, block] of Object.entries(a.run.blocks)) {
         // Loops: a block waiting for its next pass reads as its latest finished one; one waiting at a
-        // loop's limit has finished its work (its output is its own).
-        const state = block.status === "succeeded" || block.status === "failed" ? block : isLoopLimitWait(block.waitingOn) ? { ...block, status: "succeeded" as const } : latestPass(block);
+        // loop's limit has finished its work (its output is its own). One that finished otherwise
+        // (skipped, cancelled) in its latest pass has no output: never an earlier pass's.
+        const state =
+          block.status === "succeeded" || block.status === "failed"
+            ? block
+            : isLoopLimitWait(block.waitingOn)
+              ? { ...block, status: "succeeded" as const }
+              : isFinishedBlockStatus(block.status)
+                ? undefined
+                : latestPass(block);
         if (state && (state.status === "succeeded" || state.status === "failed")) {
           const whole = await readWholeOutput(state);
           if (whole !== undefined) a.outputs.set(id, whole);
