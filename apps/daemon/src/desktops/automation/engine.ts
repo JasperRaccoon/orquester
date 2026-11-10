@@ -523,6 +523,8 @@ class X11DesktopAutomation implements DesktopAutomation {
   }
 
   private onDamage(area: DamageRect): void {
+    // A closing engine's sequence stays where it was (the service numbers the next engine after it).
+    if (this.closed) return;
     this.sequence += 1;
     const now = Date.now();
     const damaged = this.blocks(area);
@@ -546,7 +548,7 @@ class X11DesktopAutomation implements DesktopAutomation {
   }
 
   private onRootResize(size: DesktopSize): void {
-    if (size.width === this.display.width && size.height === this.display.height) return;
+    if (this.closed || (size.width === this.display.width && size.height === this.display.height)) return;
     this.display = size;
     this.sequence += 1;
     this.resetGrid();

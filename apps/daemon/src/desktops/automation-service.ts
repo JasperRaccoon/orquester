@@ -4,6 +4,14 @@
 // (`control.ts`, runtime only) with the agent's control lapsing 2 minutes after its last action;
 // the action log (`action-log.ts`); and the kept screenshots (`screenshots.ts`). The manager owns
 // one and delegates to it; the routes reach it through the manager.
+//
+// The screen sequence (`seq`, and a wait's `since`) is the service's, not the engine's: each engine
+// counts from 0, so the service adds a per-desktop base. A reopened engine's base is one past the
+// last number the previous engine could have reported, so a desktop's numbers only rise; and the
+// first base of a daemon run is its start time in microseconds, above any number the run before
+// reached (that would take more than one change per microsecond on average). A `since` from an
+// earlier engine therefore lies before everything the current one saw and counts as changed (it
+// cannot tell what happened meanwhile); a `since` past the current number (none can be) means "from now".
 
 import {
   DESKTOP_AGENT_CONTROL_LAPSE_MS,
@@ -103,6 +111,8 @@ interface DesktopAutomationState {
   lapseTimer: NodeJS.Timeout | null;
   /** Aborted (and replaced) when the user takes control: input claimed before then stops. */
   inputAbort: AbortController;
+  /** The base the next engine's sequence gets (one past the last one's highest). */
+  nextSeqBase: number;
 }
 
 /** What one action did, before it is logged. */
@@ -126,6 +136,10 @@ const BUTTONS: Record<DesktopMouseButton, XButton> = { left: 1, middle: 2, right
 
 export class DesktopAutomationService {
   private readonly states = new Map<string, DesktopAutomationState>();
+  /** Each open engine's sequence base (see the header). */
+  private readonly seqBases = new WeakMap<DesktopAutomation, number>();
+  /** The first base of this daemon run: its start in microseconds. */
+  private readonly seqOrigin: number;
   private readonly log = new DesktopActionLog({ now: () => this.now() });
   private readonly idleCloseMs: number;
   private readonly now: () => Date;
@@ -135,6 +149,7 @@ export class DesktopAutomationService {
     this.idleCloseMs = options.idleCloseMs ?? IDLE_CLOSE_MS;
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? console;
+    this.seqOrigin = this.now().getTime() * 1_000;
   }
 
   /** Who controls the desktop's input now (`null`: nobody). */
@@ -179,7 +194,8 @@ export class DesktopAutomationService {
     try {
       if (!isReadOnlyDesktopAction(request.action) && state.control?.controller === "user") throw controlledByUser();
       const automation = await this.automationFor(desktopId, state, desktop);
-      const outcome = await this.perform(desktopId, state, epoch, automation, desktop, request, signal);
+      const seqBase = this.seqBases.get(automation) ?? state.nextSeqBase;
+      const outcome = await this.perform(desktopId, state, epoch, automation, seqBase, desktop, request, signal);
       // Closed meanwhile: its log is gone.
       if (this.states.get(desktopId) !== state) throw notRunning();
       const entry = this.record(desktopId, {
@@ -195,7 +211,7 @@ export class DesktopAutomationService {
         desktopId,
         action: request.action,
         summary: entry.summary,
-        seq: outcome.seq ?? automation.seq(),
+        seq: seqBase + (outcome.seq ?? automation.seq()),
         display: automation.size(),
         ...(cursor ? { cursor } : {}),
         ...(outcome.wait ?? {}),
@@ -240,6 +256,7 @@ export class DesktopAutomationService {
     const automation = state.automation;
     state.automation = null;
     if (!automation) return Promise.resolve();
+    this.retireSeq(state, automation);
     return automation.close().catch((error: unknown) => this.logger.warn(`Desktop ${desktopId}: closing its automation failed`, error));
   }
 
@@ -286,6 +303,7 @@ export class DesktopAutomationService {
     state: DesktopAutomationState,
     epoch: number,
     automation: DesktopAutomation,
+    seqBase: number,
     desktop: DesktopAutomationDesktop,
     request: DesktopActionRequest,
     signal: AbortSignal | undefined
@@ -333,7 +351,8 @@ export class DesktopAutomationService {
         const result = await automation.wait({
           for: kind,
           idleMs: request.idleMs ?? DESKTOP_IDLE_DEFAULT_MS,
-          ...(request.since !== undefined ? { since: request.since } : {}),
+          // In the engine's numbers: before its first one when older, "now" when past the current one.
+          ...(request.since !== undefined ? { since: Math.min(request.since - seqBase, automation.seq()) } : {}),
           ...(request.region !== undefined ? { region: displayRegion(request.region, automation.size()) } : {}),
           timeoutMs: request.timeoutMs ?? DESKTOP_WAIT_DEFAULT_TIMEOUT_MS,
           ...(signal ? { signal } : {})
@@ -462,6 +481,7 @@ export class DesktopAutomationService {
       // Its connection dropped: a new one replaces it.
       const dropped = state.automation;
       state.automation = null;
+      this.retireSeq(state, dropped);
       void dropped.close().catch(() => undefined);
     }
     if (state.opening) return state.opening;
@@ -474,6 +494,7 @@ export class DesktopAutomationService {
           throw notRunning();
         }
         state.automation = automation;
+        this.seqBases.set(automation, state.nextSeqBase);
         return automation;
       }
     );
@@ -485,6 +506,12 @@ export class DesktopAutomationService {
       if (state.opening === opening) state.opening = null;
     });
     return opening;
+  }
+
+  /** An engine let go: the next one's numbers start past every number it could have reported. */
+  private retireSeq(state: DesktopAutomationState, automation: DesktopAutomation): void {
+    const base = this.seqBases.get(automation);
+    if (base !== undefined) state.nextSeqBase = Math.max(state.nextSeqBase, base + automation.seq() + 1);
   }
 
   private changeControl(desktopId: string, state: DesktopAutomationState, control: DesktopControl | null): void {
@@ -533,7 +560,7 @@ export class DesktopAutomationService {
   private state(desktopId: string): DesktopAutomationState {
     let state = this.states.get(desktopId);
     if (!state) {
-      state = { automation: null, opening: null, epoch: 0, inFlight: 0, idleTimer: null, control: null, lapseTimer: null, inputAbort: new AbortController() };
+      state = { automation: null, opening: null, epoch: 0, inFlight: 0, idleTimer: null, control: null, lapseTimer: null, inputAbort: new AbortController(), nextSeqBase: this.seqOrigin };
       this.states.set(desktopId, state);
     }
     return state;

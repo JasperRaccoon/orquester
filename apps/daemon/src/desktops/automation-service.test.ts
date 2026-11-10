@@ -35,7 +35,7 @@ interface Harness {
   engine(): FakeDesktopAutomation;
 }
 
-async function harness(t: TestContext): Promise<Harness> {
+async function harness(t: TestContext, now?: () => Date): Promise<Harness> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-desktop-automation-"));
   t.after(() => rm(appdir, { recursive: true, force: true }));
   const h: Harness = {
@@ -72,6 +72,7 @@ async function harness(t: TestContext): Promise<Harness> {
       h.controlChanges += 1;
     },
     actionLogged: (payload) => h.logged.push(payload),
+    ...(now ? { now } : {}),
     logger: { warn: () => {} }
   });
   t.after(() => h.service.shutdown());
@@ -242,4 +243,21 @@ test("daemon shutdown waits for the automations to close, at most a second", asy
   const bounded = other.service.shutdown();
   t.mock.timers.tick(1_000);
   await bounded;
+});
+
+test("a desktop's seq only rises, across an engine reopen and a daemon restart; a since from an earlier engine counts as changed", async (t) => {
+  let clock = Date.parse("2026-11-10T12:00:00.000Z");
+  const h = await harness(t, () => new Date(clock));
+  const first = (await act(h, { action: "screenshot" })).seq;
+  // Its connection drops: the next action opens a new engine, which counts from its own start.
+  h.engine().closed = true;
+  const reopened = (await act(h, { action: "screenshot" })).seq;
+  assert.equal(h.engines.length, 2);
+  assert.ok(reopened > first, `${reopened} > ${first}`);
+  assert.equal((await act(h, { action: "wait", for: "change", since: first })).changed, true, "the new engine cannot tell what changed since");
+  assert.equal((await act(h, { action: "wait", for: "change", since: reopened })).changed, false);
+
+  clock += 1;
+  const restarted = await harness(t, () => new Date(clock));
+  assert.ok((await act(restarted, { action: "screenshot" })).seq > reopened, "a restarted daemon numbers above the run before");
 });

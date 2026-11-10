@@ -49,7 +49,9 @@ export class FakeDesktopAutomation implements DesktopAutomation {
   async wait(options: DesktopWaitOptions): Promise<DesktopWaitResult> {
     const { signal: _signal, ...rest } = options;
     this.calls.push({ kind: "wait", options: rest });
-    return { changed: false, timedOut: false, seq: this.sequence, waitedMs: 1_200 };
+    // A change wait since an earlier sequence than this engine's own has its change already.
+    const changed = options.for === "change" && options.since !== undefined && options.since < this.sequence;
+    return { changed, timedOut: false, seq: this.sequence, waitedMs: changed ? 0 : 1_200 };
   }
 
   // Input with an aborted signal never starts, as the engine's queue has it.
