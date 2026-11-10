@@ -270,7 +270,7 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
                     FOCUS,
                     COLOR[choice.color ?? "default"],
                     on && "ring-2 ring-neutral-300",
-                    node ? "min-h-7 px-2 text-[11px]" : sheet ? "min-h-11 w-full justify-between px-3.5 text-[13.5px]" : "min-h-8 px-3 text-xs"
+                    node ? "min-h-8 px-2.5 text-[11px]" : sheet ? "min-h-11 w-full justify-between px-3.5 text-[13.5px]" : "min-h-8 px-3 text-xs"
                   )}
                 >
                   <span className="flex min-w-0 items-center gap-1.5">
@@ -325,7 +325,7 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
                   className={cn(
                     "inline-flex items-center rounded-md px-2.5 text-xs font-medium text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-50",
                     FOCUS,
-                    sheet ? "min-h-11" : node ? "min-h-7" : "min-h-8"
+                    sheet ? "min-h-11" : "min-h-8"
                   )}
                 >
                   Cancel
@@ -347,7 +347,7 @@ export const GateDecisionCard: React.FC<GateDecisionCardProps> = ({
                     "disabled:pointer-events-none disabled:opacity-50",
                     FOCUS,
                     COLOR[selectedChoice.color ?? "default"],
-                    sheet ? "min-h-11" : node ? "min-h-7" : "min-h-8"
+                    sheet ? "min-h-11" : "min-h-8"
                   )}
                 >
                   {sending === selectedChoice.id ? <Loader2 size={12} aria-hidden className="motion-safe:animate-spin" /> : null}
