@@ -95,7 +95,7 @@ describe("generate_image", () => {
   it("sends nothing upstream when a reference is refused", async (t) => {
     const s = await setup(t, made);
     await writeFile(join(s.ws, "acme", "app", "notes.png"), "not an image");
-    const result = await call(s.api, { prompt: "restyle", images: ["acme/app/notes.png"] });
+    const result = await call(s.api, { prompt: "restyle", images: [join(s.ws, "acme", "app", "notes.png")] });
     assert.equal(result.isError, true);
     assert.match((result.structuredContent as { message: string }).message, /^images\[0\]: not a PNG, JPEG, WebP or GIF image/);
     assert.equal(s.sent.length, 0);

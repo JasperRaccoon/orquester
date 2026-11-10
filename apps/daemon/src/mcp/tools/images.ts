@@ -60,7 +60,7 @@ const generateImage = defineTool({
   name: GENERATE_IMAGE_TOOL_NAME,
   title: "Generate an image",
   description:
-    "Make a picture, icon, logo, illustration or mockup, or edit/restyle images, with GPT Image on the user's ChatGPT plan (no API key, no cost). Use this for every image request: never write a script against an image API. images (≤ 5) switch it to editing: recent:1 is the latest image in this chat (pasted or generated; recent:2 the one before), attachment:<id> one from an earlier result, or a file path. transparent: a transparent background. save_as also writes it into the project (a path, or a folder ending in /); a taken name gets -v2. The user sees the image in the chat and you get it back.",
+    "Make a picture, icon, logo, illustration or mockup, or edit/restyle images, with GPT Image on the user's ChatGPT plan (no API key, no cost). Use this for every image request: never write a script against an image API. images (≤ 5) switch it to editing: recent:1 is the latest image in this chat (pasted or generated; recent:2 the one before), attachment:<id> one from an earlier result, or a file path (relative: from this chat's directory). transparent: a transparent background. save_as also writes it into the project (a path, or a folder ending in /); a taken name gets -v2. The user sees the image in the chat and you get it back.",
   chatNote: "It takes seconds to a couple of minutes. The result's markdown shows the image again in a reply.",
   input: {
     prompt: z.string().min(1).max(32_000).describe("What to make, or what to change in the images."),

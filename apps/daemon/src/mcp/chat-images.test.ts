@@ -123,9 +123,10 @@ test("paths: the workspaces, this chat's own attachments and the temp folders ar
   await writeFile(join(s.elsewhere, "secret.png"), png(1, 1));
   await writeFile(join(s.other, "t2-x.png"), png(1, 1));
   await symlink(join(s.elsewhere, "secret.png"), join(s.ws, "acme", "app", "escape.png"));
-  const resolve = (inputs: ChatImageInput[]) => resolveChatImages(s.api, chatCaller(), inputs);
+  // A relative path is taken from the chat's working directory, as read_file takes it.
+  const resolve = (inputs: ChatImageInput[]) => resolveChatImages(s.api, chatCaller({ cwd: join(s.ws, "acme", "app") }), inputs);
 
-  const images = await resolve([{ path: "acme/app/logo.png" }, { path: join(s.own, "pasted.webp") }, { path: join(s.temp, "screenshot.jpeg") }]);
+  const images = await resolve([{ path: "logo.png" }, { path: join(s.own, "pasted.webp") }, { path: join(s.temp, "screenshot.jpeg") }]);
   assert.deepEqual(
     images.map(({ name, mimeType, width, height, path }) => ({ name, mimeType, width, height, path })),
     [

@@ -237,7 +237,7 @@ describe("show_image", () => {
     const result = await call(s.api, "show_image", {
       title: "Logo",
       images: [{ path: "acme/app/logo.png", caption: "the new logo" }, { ref: "attachment:thread-1-kept-png" }]
-    });
+    }, { caller: chatCaller({ cwd: s.ws }) });
     assert.equal(result.isError, undefined);
     // The project file is stored as this chat's attachment; one already stored here is shown as it is, not copied.
     assert.deepEqual(s.api.uploads.map((upload) => [upload.sessionId, upload.meta, upload.bytes]), [[THREAD, { name: "logo.png", type: "image/png" }, PNG]]);
@@ -263,7 +263,7 @@ describe("show_image", () => {
     const s = await sandbox(t);
     await writeFile(join(s.ws, "acme", "app", "logo.png"), PNG);
     await writeFile(join(s.ws, "acme", "app", "readme.png"), "# not an image");
-    const error = errorOf(await call(s.api, "show_image", { images: [{ path: "acme/app/logo.png" }, { path: "acme/app/readme.png" }] }));
+    const error = errorOf(await call(s.api, "show_image", { images: [{ path: "acme/app/logo.png" }, { path: "acme/app/readme.png" }] }, { caller: chatCaller({ cwd: s.ws }) }));
     assert.equal(error.code, "INVALID_ARGUMENT");
     assert.match(error.message, /^images\[1\]: not a PNG, JPEG, WebP or GIF image/);
     assert.equal(s.api.uploads.length, 0);

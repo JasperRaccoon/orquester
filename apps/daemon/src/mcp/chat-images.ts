@@ -4,8 +4,8 @@
  * calling chat.
  *
  * An input names an image by `path` or by `ref`, and is read only from:
- * - the workspaces sandbox (`api.fsRoot`), a path taken as `read_file` takes it (`callerHostPath`, relative = under
- *   the root);
+ * - the workspaces sandbox (`api.fsRoot`), a path taken as `read_file` takes it (`callerHostPath`, relative = from
+ *   the chat's working directory);
  * - the CALLING thread's own attachments directory (resolved from `caller.threadId`, never from an argument);
  * - the host's temp directories (the daemon's `TMPDIR`, and the one its agents get) — where screenshots land;
  * - in a box chat, the chat's own project box: every path is the box's, read there (`DaemonApi.boxReadChatFile`);
@@ -147,8 +147,8 @@ async function hostRoots(api: DaemonApi, threadId: string): Promise<{ lexical: s
 
 async function readHostPath(api: DaemonApi, caller: ThreadCaller, raw: string): Promise<ResolvedChatImage> {
   if (raw.includes("\0")) throw new ToolError("INVALID_ARGUMENT", "path is not a usable path.");
-  // As read_file takes it: a box's spelling mapped first, a relative path under the sandbox root.
-  const target = resolve(api.fsRoot, callerHostPath(caller, raw, api.fsRoot));
+  // As read_file takes it: a box's spelling mapped first, a relative path from the chat's working directory.
+  const target = resolve(callerHostPath(caller, raw, caller.cwd || "/"));
   const roots = await hostRoots(api, caller.threadId);
   const allowed = [roots.sandbox, roots.attachments, ...roots.temp].filter((root): root is string => root !== null);
   let real: string;
