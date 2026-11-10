@@ -17,7 +17,8 @@ import {
 import { UNSET_SUBWORKFLOW_ID } from "./block-types.ts";
 import { parseTemplate, templateReferences, hasTemplate, type TemplateReference } from "./expressions.ts";
 import { nodeTemplateFields } from "./fields.ts";
-import { acceptsInput, findCycles, outputHandles, reachableFromTriggers, upstreamOf } from "./graph.ts";
+import { acceptsInput, agentOutcomeIds, findCycles, outputHandles, reachableFromTriggers, upstreamOf } from "./graph.ts";
+import { pinnedOutcomeProblem } from "./outcomes.ts";
 import { presetToCron, scheduleIntervalProblem, validateCron, isValidTimeZone } from "./schedule.ts";
 import {
   isTriggerType,
@@ -302,7 +303,9 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         message:
           handles.length === 0
             ? `${source.name} has no outputs`
-            : `${source.name} has no "${edge.sourceHandle}" output (it has ${handles.join(", ")})`,
+            : edge.sourceHandle === "success" && agentOutcomeIds(source).length > 0
+              ? `${source.name} declares outcomes, so it has no "success" output: connect from one of ${handles.join(", ")}`
+              : `${source.name} has no "${edge.sourceHandle}" output (it has ${handles.join(", ")})`,
         edgeId: edge.id,
         nodeId: source.id
       });
@@ -641,6 +644,7 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
           }
         }
         timeoutMax(config.maxMinutes, WORKFLOW_LIMITS.agentMaxMinutes.max, node, "config.maxMinutes", "the working time");
+        checkAgentReport(node, config, push);
         break;
       }
       case "code": {
@@ -768,6 +772,11 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         push({ severity: "warning", code: "pinned_unknown_node", message: `Pinned data for a missing block (${nodeId})`, field: `pinned.${nodeId}` });
         continue;
       }
+      const pinnedNode = byId.get(nodeId);
+      const outcomeProblem = pinnedNode ? pinnedOutcomeProblem(pinnedNode, value) : null;
+      if (outcomeProblem !== null) {
+        push({ severity: "error", code: "pinned_outcome_missing", message: `${label(nodeId)}: ${outcomeProblem}`, nodeId, field: `pinned.${nodeId}` });
+      }
       const size = sizeOf(value);
       if (size === null || size > WORKFLOW_LIMITS.maxPinnedBytes) {
         push({
@@ -787,6 +796,76 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
 
   const full = workflowRecordSchema.safeParse(input);
   return { workflow: full.success ? full.data : null, problems };
+}
+
+type Push = (problem: WorkflowProblem) => void;
+
+/**
+ * An agent block's declared outcomes and outputs (spec 2026-11-10 §5.1): 2–12 outcomes with unique
+ * ids, at most `maxOutputs` outputs with unique names, enum outputs with 1–50 unique values; a
+ * disabled block with outcomes passes through on its first one (§7.5), which is worth a warning.
+ */
+function checkAgentReport(node: Extract<WorkflowNode, { type: "agent" }>, config: Extract<WorkflowNode, { type: "agent" }>["config"], push: Push): void {
+  const where = (field: string) => ({ nodeId: node.id, field });
+  const describeLimit = WORKFLOW_LIMITS.inputDescriptionChars;
+  if (config.outcomes !== undefined) {
+    const { min, max } = WORKFLOW_LIMITS.outcomes;
+    if (config.outcomes.length < min || config.outcomes.length > max) {
+      push({
+        severity: "error",
+        code: "outcomes_count",
+        message: `${node.name}: declare ${min}–${max} outcomes (it has ${config.outcomes.length})${config.outcomes.length < min ? " — remove the list for a block without outcomes" : ""}`,
+        ...where("config.outcomes")
+      });
+    }
+    const seen = new Set<string>();
+    config.outcomes.forEach((outcome, index) => {
+      if (seen.has(outcome.id)) {
+        push({ severity: "error", code: "duplicate_outcome", message: `${node.name}: two outcomes share the id "${outcome.id}"`, ...where(`config.outcomes.${index}.id`) });
+      }
+      seen.add(outcome.id);
+      if ((outcome.description?.length ?? 0) > describeLimit) {
+        push({ severity: "error", code: "description_too_long", message: `${node.name}: the outcome "${outcome.id}"'s description is longer than ${describeLimit} characters`, ...where(`config.outcomes.${index}.description`) });
+      }
+    });
+    if (node.disabled === true && config.outcomes.length > 0) {
+      push({
+        severity: "warning",
+        code: "disabled_takes_first_outcome",
+        message: `${node.name} is disabled: it passes its input on through its first outcome, "${config.outcomes[0]!.id}"`,
+        ...where("disabled")
+      });
+    }
+  }
+  if (config.outputs !== undefined) {
+    if (config.outputs.length > WORKFLOW_LIMITS.maxOutputs) {
+      push({ severity: "error", code: "outputs_count", message: `${node.name}: at most ${WORKFLOW_LIMITS.maxOutputs} outputs (it has ${config.outputs.length})`, ...where("config.outputs") });
+    }
+    const seen = new Set<string>();
+    config.outputs.forEach((output, index) => {
+      const field = `config.outputs.${index}`;
+      if (seen.has(output.name)) {
+        push({ severity: "error", code: "duplicate_output", message: `${node.name}: two outputs are named "${output.name}"`, ...where(`${field}.name`) });
+      }
+      seen.add(output.name);
+      if ((output.description?.length ?? 0) > describeLimit) {
+        push({ severity: "error", code: "description_too_long", message: `${node.name}: the output "${output.name}"'s description is longer than ${describeLimit} characters`, ...where(`${field}.description`) });
+      }
+      if (output.type === "enum") {
+        const values = output.values ?? [];
+        const { min, max } = WORKFLOW_LIMITS.enumValues;
+        if (values.length < min || values.length > max) {
+          push({ severity: "error", code: "enum_values", message: `${node.name}: the enum output "${output.name}" needs ${min}–${max} values (it has ${values.length})`, ...where(`${field}.values`) });
+        } else if (new Set(values).size !== values.length) {
+          push({ severity: "error", code: "enum_values", message: `${node.name}: the enum output "${output.name}" lists a value twice`, ...where(`${field}.values`) });
+        } else if (values.some((value) => value.length === 0)) {
+          push({ severity: "error", code: "enum_values", message: `${node.name}: the enum output "${output.name}" has an empty value`, ...where(`${field}.values`) });
+        }
+      } else if (output.values !== undefined) {
+        push({ severity: "warning", code: "enum_values", message: `${node.name}: "${output.name}" is a ${output.type} output, so its values are ignored`, ...where(`${field}.values`) });
+      }
+    });
+  }
 }
 
 /** A block's own `timeoutMinutes` cap (§5.9). */

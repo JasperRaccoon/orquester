@@ -123,7 +123,8 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       read("get_turn_diff"),
       read("read_tool_output"),
       read("list_conversations"),
-      act("notify_user")
+      act("notify_user"),
+      act("report_step_result")
     ]
   },
   {

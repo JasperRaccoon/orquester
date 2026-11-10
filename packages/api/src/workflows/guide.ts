@@ -253,9 +253,38 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
       items: [
         {
           term: "text",
-          text: `Always a string: the agent's final message (\`""\` when it wrote none), cut at ${mib(WORKFLOW_LIMITS.maxAgentTextBytes)} (then \`textTruncated: true\`). A JSON reply is still text: parse it in a Code block.`
+          text: `Always a string: the agent's final message (\`""\` when it wrote none), cut at ${mib(WORKFLOW_LIMITS.maxAgentTextBytes)} (then \`textTruncated: true\`). Templates never parse it: for values to branch on or pass on, declare \`outcomes\` / \`outputs\` (below).`
+        },
+        {
+          term: "outcome, outputs",
+          text: "With `outcomes`/`outputs` declared: `outcome` (the id the agent reported), `summary` (its words, ≤ 2,000 characters) and `outputs` (the typed values: `{{ nodes.Review.output.outputs.pr_url }}`)."
         },
         { term: "failure", text: "A failed agent block's output holds `{ sessionId, hops }` once a session exists." }
+      ]
+    },
+    {
+      title: "Outcomes and outputs",
+      items: [
+        {
+          term: "outcomes",
+          text: `\`outcomes: [{ id, label?, description? }]\`, ${WORKFLOW_LIMITS.outcomes.min}–${WORKFLOW_LIMITS.outcomes.max}, ids \`^[a-z][a-z0-9_]*\` and unique. Each is an output handle \`outcome:<id>\` (in this order) beside \`error\`; there is no \`success\` handle. The block takes the outcome the agent reported; the other outcomes' connections are dead, so no Code or Switch block is needed to branch.`
+        },
+        {
+          term: "outputs",
+          text: `\`outputs: [{ name, type, values?, required?, description? }]\`, at most ${WORKFLOW_LIMITS.maxOutputs}; \`type\` string, number, boolean, enum (\`values\`: the allowed strings) or json; \`required\` defaults to true. Declared alone, the handles stay \`success\` / \`error\`.`
+        },
+        {
+          term: "report",
+          text: "The prompt gets a protocol block naming the outcomes and outputs, and the agent ends its work with report_step_result { outcome, summary, outputs }. The tool refuses a wrong call with what is allowed; a later valid call replaces the earlier one."
+        },
+        {
+          term: "no_report",
+          text: "A turn that ends with no report gets one reminder turn in the same chat; still none, the block fails with error kind `no_report` (retried by `retry`, else its `error` connection)."
+        },
+        {
+          term: "disabled, pinned",
+          text: "A disabled block with outcomes passes its input on through its first outcome. Pinned data of a block with outcomes must include `outcome` (a declared id): it picks the handle."
+        }
       ]
     },
     {
@@ -500,7 +529,7 @@ export const WORKFLOW_EXPRESSION_RULES: readonly WorkflowGuideItem[] = [
   },
   {
     term: "no parsing",
-    text: "Templates never parse JSON text: an agent's `text` is a string, so `{{ input.text.severity }}` reads nothing. Parse it in a Code block (`JSON.parse`) and read the fields of its output; `| json` only encodes."
+    text: "Templates never parse JSON text: an agent's `text` is a string, so `{{ input.text.severity }}` reads nothing. Declare the agent block's `outputs` (and `outcomes` to branch) and read `{{ input.outputs.severity }}` / `{{ nodes.Triage.output.outcome }}`; `| json` only encodes."
   },
   { term: "escape", text: "Write `\\{{` for a literal `{{`." }
 ];
@@ -577,15 +606,6 @@ export interface WorkflowRecipe {
 const CLAUDE = [{ agent: "claude", model: "default" }];
 const SLACK_URL = "https://hooks.slack.com/services/{{ secrets.SLACK_PATH }}";
 
-const PARSE_REPLY_SOURCE = [
-  "export default async function ({ input }) {",
-  "  const match = /\\{[\\s\\S]*\\}/.exec(input.text);",
-  "  if (!match) throw new Error(`No JSON in the reply: ${input.text.slice(0, 200)}`);",
-  "  return JSON.parse(match[0]);",
-  "}",
-  ""
-].join("\n");
-
 const CLOSE_EACH_SOURCE = [
   "export default async function ({ input, secrets, log }) {",
   "  const results = [];",
@@ -645,12 +665,13 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
     ]
   },
   {
-    id: "agent-json",
-    title: "Agent replies in JSON, Code parses it, If branches on a field",
+    id: "agent-outcomes",
+    title: "Agent reports an outcome and typed outputs; each outcome has its own connection",
     notes: [
-      `An agent's \`text\` is always a string, and templates cannot parse it: \`{{ input.text.severity }}\` inserts nothing and records the warning \`${MISSING_PATH_EXAMPLE}\`. \`| json\` only encodes a value as JSON text.`,
-      "Parse it in a Code block (a reply without JSON throws, failing the block); its output is a real object: `{{ input.severity }}`, `{{ nodes.Parse.output.summary }}`.",
-      "If passes its input on, so Page still reads Parse's object as `input`."
+      "`outcomes` turn the block's handles into `outcome:high` and `outcome:low` (plus `error`): the run follows the one the agent reported with report_step_result, and the other connection is dead. No Code or If block is needed to branch.",
+      "`outputs` are typed values the agent reports beside its outcome: `{{ input.outputs.summary_line }}` in the next block, `{{ nodes.Triage.output.outputs.summary_line }}` anywhere later; `{{ nodes.Triage.output.summary }}` is the report's own summary.",
+      `An agent's \`text\` stays a string that templates cannot parse: \`{{ input.text.severity }}\` inserts nothing and records the warning \`${MISSING_PATH_EXAMPLE}\`.`,
+      "A turn that ends without a report gets one reminder; still none, the block fails `no_report`."
     ],
     nodes: [
       { type: "trigger.manual", name: "Start" },
@@ -658,28 +679,26 @@ export const WORKFLOW_RECIPES: readonly WorkflowRecipe[] = [
         type: "agent",
         name: "Triage",
         config: {
-          prompt: {
-            kind: "text",
-            text: "Classify the newest error in logs/app.log. Reply with ONLY this JSON: {\"severity\": \"high\" or \"low\", \"summary\": \"one line\"}"
-          },
-          chain: CLAUDE
+          prompt: { kind: "text", text: "Classify the newest error in logs/app.log." },
+          chain: CLAUDE,
+          outcomes: [
+            { id: "high", label: "Urgent", description: "Users are affected now." },
+            { id: "low", label: "Can wait", description: "Nobody is blocked." }
+          ],
+          outputs: [{ name: "summary_line", type: "string", description: "The error in one line." }]
         }
       },
-      { type: "code", name: "Parse", config: { source: PARSE_REPLY_SOURCE } },
-      { type: "if", name: "Urgent", config: { combine: "all", rules: [{ left: "{{ input.severity }}", op: "equals", right: "high" }] } },
       {
         type: "http",
         name: "Page",
-        config: { method: "POST", url: SLACK_URL, body: { kind: "json", value: "{ \"text\": {{ input.summary | json }} }" } }
+        config: { method: "POST", url: SLACK_URL, body: { kind: "json", value: "{ \"text\": {{ input.outputs.summary_line | json }} }" } }
       },
-      { type: "stop", name: "Calm", config: { as: "success", message: "Low severity: {{ nodes.Parse.output.summary }}" } }
+      { type: "stop", name: "Calm", config: { as: "success", message: "Low severity: {{ nodes.Triage.output.outputs.summary_line }}" } }
     ],
     edges: [
       { source: "Start", target: "Triage" },
-      { source: "Triage", target: "Parse" },
-      { source: "Parse", target: "Urgent" },
-      { source: "Urgent", sourceHandle: "true", target: "Page" },
-      { source: "Urgent", sourceHandle: "false", target: "Calm" }
+      { source: "Triage", sourceHandle: "outcome:high", target: "Page" },
+      { source: "Triage", sourceHandle: "outcome:low", target: "Calm" }
     ]
   },
   {
