@@ -22,6 +22,29 @@ describe("workflow deep links", () => {
     assert.equal(parseWorkflowDeepLink(""), null);
   });
 
+  it("parses a gate's link: only with a run, and only a well-formed id", () => {
+    assert.deepEqual(parseWorkflowDeepLink("?workflow=wf-1&run=run-2&gate=g-3"), { workflowId: "wf-1", runId: "run-2", gateId: "g-3" });
+    assert.deepEqual(parseWorkflowDeepLink("?workflow=wf-1&gate=g-3"), { workflowId: "wf-1", runId: null });
+    assert.deepEqual(parseWorkflowDeepLink("?workflow=wf-1&run=run-2&gate=..%2Fx"), { workflowId: "wf-1", runId: "run-2" });
+    assert.deepEqual(
+      parseWorkflowRunMessage({ type: "orquester:open-workflow-run", workflowId: "w", runId: "r", gateId: "g" }),
+      { workflowId: "w", runId: "r", gateId: "g" }
+    );
+    assert.deepEqual(parseWorkflowRunMessage({ type: "orquester:open-workflow-run", workflowId: "w", runId: null, gateId: "g" }), {
+      workflowId: "w",
+      runId: null
+    });
+    assert.deepEqual(parseWorkflowRunMessage({ type: "orquester:open-workflow-run", workflowId: "w", runId: "r", gateId: 4 }), {
+      workflowId: "w",
+      runId: "r"
+    });
+    assert.equal(stripWorkflowDeepLink("https://o.example.com/?workflow=a&run=b&gate=c&x=1"), "/?x=1");
+    requestWorkflowDeepLink({ workflowId: "a", runId: "r", gateId: "g" });
+    assert.deepEqual(takeWorkflowDeepLink(), { workflowId: "a", runId: "r", gateId: "g" });
+    requestWorkflowDeepLink({ workflowId: "a", runId: null, gateId: "g" });
+    assert.deepEqual(takeWorkflowDeepLink(), { workflowId: "a", runId: null });
+  });
+
   it("strips its parameters and keeps the rest", () => {
     assert.equal(stripWorkflowDeepLink("https://o.example.com/?workflow=a&run=b"), "/");
     assert.equal(stripWorkflowDeepLink("https://o.example.com/app?x=1&workflow=a#h"), "/app?x=1#h");

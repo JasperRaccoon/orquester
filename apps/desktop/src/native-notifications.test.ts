@@ -32,6 +32,19 @@ describe("orquester:notify payloads", () => {
       parseNotificationRequest({ title: "x", tag: "workflow-w1", target: { kind: "workflow", workflowId: "w1", runId: "../r" } })?.target,
       { kind: "workflow", workflowId: "w1", runId: null }
     );
+    // A gate's notification keeps its gate, only with a run and only when well-formed.
+    assert.deepEqual(
+      parseNotificationRequest({ title: "x", tag: "gate-g1", target: { kind: "workflow", workflowId: "w1", runId: "r1", gateId: "g1" } })?.target,
+      { kind: "workflow", workflowId: "w1", runId: "r1", gateId: "g1" }
+    );
+    assert.deepEqual(
+      parseNotificationRequest({ title: "x", tag: "gate-g1", target: { kind: "workflow", workflowId: "w1", runId: null, gateId: "g1" } })?.target,
+      { kind: "workflow", workflowId: "w1", runId: null }
+    );
+    assert.deepEqual(
+      parseNotificationRequest({ title: "x", tag: "gate-g1", target: { kind: "workflow", workflowId: "w1", runId: "r1", gateId: "../g" } })?.target,
+      { kind: "workflow", workflowId: "w1", runId: "r1" }
+    );
   });
 
   it("refuses anything else", () => {

@@ -132,6 +132,14 @@ describe("a notification's tap", () => {
       [{ sessionId: "s-1" }, "/?session=s-1", { type: "orquester:open-session", sessionId: "s-1" }],
       [{ workflowId: "wf-1", runId: "r-2" }, "/?workflow=wf-1&run=r-2", { type: "orquester:open-workflow-run", workflowId: "wf-1", runId: "r-2" }],
       [{ workflowId: "wf-1", runId: "run 2" }, "/?workflow=wf-1", { type: "orquester:open-workflow-run", workflowId: "wf-1", runId: null }],
+      // A gate's notification selects the gate in its run; a gate without a run, or a malformed one, is dropped.
+      [
+        { workflowId: "wf-1", runId: "r-2", gateId: "g-3" },
+        "/?workflow=wf-1&run=r-2&gate=g-3",
+        { type: "orquester:open-workflow-run", workflowId: "wf-1", runId: "r-2", gateId: "g-3" }
+      ],
+      [{ workflowId: "wf-1", gateId: "g-3" }, "/?workflow=wf-1", { type: "orquester:open-workflow-run", workflowId: "wf-1", runId: null }],
+      [{ workflowId: "wf-1", runId: "r-2", gateId: "g/3" }, "/?workflow=wf-1&run=r-2", { type: "orquester:open-workflow-run", workflowId: "wf-1", runId: "r-2" }],
       ...[{ sessionId: "" }, { sessionId: "../etc/passwd" }, { sessionId: "a&b=c" }, { sessionId: 7 }, {}, null, undefined].map((data) => [data, "/", null])
     ];
     for (const [data, url, message] of targets) {
@@ -167,6 +175,15 @@ describe("a notification's tap", () => {
     await waited;
     assert.deepEqual(shown[0].options.data, { sessionId: "s-1" });
     assert.equal(shown[0].options.tag, "session-s-1");
+
+    listeners.push({
+      data: { json: () => ({ title: "Decide: Deploy?", tag: "gate-r-2-g-3", workflowId: "wf-1", runId: "r-2", gateId: "g-3", sessionId: "" }) },
+      waitUntil: (promise) => {
+        waited = promise;
+      }
+    });
+    await waited;
+    assert.deepEqual(shown[1].options.data, { sessionId: "", workflowId: "wf-1", runId: "r-2", gateId: "g-3" });
   });
 });
 
