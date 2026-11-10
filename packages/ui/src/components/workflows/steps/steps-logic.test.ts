@@ -13,6 +13,7 @@ import {
   duplicateStepAfter,
   moveCandidates,
   moveStepToOutput,
+  outputTone,
   setStepsDisabled
 } from "./steps-logic.ts";
 
@@ -191,5 +192,28 @@ describe("loops in the step list", () => {
     const loops = result.workflow.edges.filter((e) => e.loop);
     assert.equal(loops.length, 1);
     assert.equal(loops[0]!.source, "chk");
+  });
+});
+
+describe("an agent with outcomes on the phone's step list (spec 2026-11-10 §5)", () => {
+  it("lists one output per outcome, labelled, in declared order, then failure", () => {
+    const wf = workflow(
+      [
+        node("t", "trigger.manual", {}, { name: "Start" }),
+        node("a", "agent", { outcomes: [{ id: "approved", label: "Approved" }, { id: "changes_requested" }] }, { name: "Review" }),
+        node("b", "code", {}, { name: "Ship" })
+      ],
+      [edge("t", "a"), edge("a", "b", "outcome:approved")]
+    );
+    const review = deriveSteps(wf, [], () => "").rows.find((row) => row.nodeId === "a")!;
+    assert.deepEqual(
+      review.outputs.map((output) => [output.handle, output.label, output.tone, output.connected]),
+      [
+        ["outcome:approved", "Approved", "info", true],
+        ["outcome:changes_requested", "changes_requested", "info", false],
+        ["error", "failure", "danger", false]
+      ]
+    );
+    assert.equal(outputTone("outcome:x"), "info");
   });
 });

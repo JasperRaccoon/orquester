@@ -184,7 +184,7 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
   const outputPath = `nodes.${node.name}.output`;
   const pinnedMessages = fieldMessages(problems, `pinned.${node.id}`);
   // Parsed once per edit, not per render (the text can be up to 1 MiB).
-  const draft = useMemo(() => (editing === null ? null : parsePinnedText(editing)), [editing]);
+  const draft = useMemo(() => (editing === null ? null : parsePinnedText(editing, node)), [editing, node]);
 
   const pinnedSection =
     !trigger && (pinnable || hasPin || node.type === "if" || node.type === "switch") ? (

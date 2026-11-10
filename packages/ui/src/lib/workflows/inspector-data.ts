@@ -9,8 +9,10 @@
 
 import {
   isLoopEdge,
+  agentOutcomeIds,
   isTriggerType,
   outputHandles,
+  pinnedOutcomeProblem,
   WORKFLOW_LIMITS,
   type RunWorkflowResponse,
   type Workflow,
@@ -50,7 +52,10 @@ export function blockInputOf(
 }
 
 /** Parse a pinned-output editor's text: JSON within the pinned-data size limit, or an error to show. */
-export function parsePinnedText(text: string): { ok: true; value: unknown } | { ok: false; error: string } {
+export function parsePinnedText(
+  text: string,
+  node?: Pick<WorkflowNode, "id" | "type" | "config">
+): { ok: true; value: unknown } | { ok: false; error: string } {
   if (text.trim() === "") return { ok: false, error: "Write the output as JSON, e.g. { \"text\": \"…\" }." };
   let value: unknown;
   try {
@@ -64,17 +69,22 @@ export function parsePinnedText(text: string): { ok: true; value: unknown } | { 
   if (bytes > WORKFLOW_LIMITS.maxPinnedBytes) {
     return { ok: false, error: `Too big to pin: pinned data is limited to ${WORKFLOW_LIMITS.maxPinnedBytes / 1024} KiB of JSON.` };
   }
+  // An agent block with outcomes: the pin picks the output it leaves by (spec 2026-11-10 §7.5).
+  const outcome = node ? pinnedOutcomeProblem(node, value) : null;
+  if (outcome !== null) return { ok: false, error: `The ${outcome.replace(/^pinned data/, "pin")}.` };
   return { ok: true, value };
 }
 
 /**
  * Whether a block's output can be pinned — used in place of running it when a
  * block after it is tested. Only blocks that finish on a plain "success"
- * output: the engine never uses a pin on a trigger, an If / Switch (they pick
+ * output, or an agent block with outcomes (its pin's `outcome` picks one): the engine never uses a pin on a trigger, an If / Switch (they pick
  * a branch) or a Stop (nothing comes after it).
  */
 export function canPin(node: Pick<WorkflowNode, "id" | "type" | "config">): boolean {
-  return !isTriggerType(node.type) && node.type !== "note" && outputHandles(node).includes("success");
+  if (isTriggerType(node.type) || node.type === "note") return false;
+  // An agent block with outcomes has no "success": its pin names the outcome to leave by.
+  return outputHandles(node).includes("success") || agentOutcomeIds(node).length > 0;
 }
 
 /**

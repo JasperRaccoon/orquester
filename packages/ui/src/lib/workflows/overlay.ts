@@ -21,7 +21,15 @@
  * Pure: the caller passes `now` for a running block's elapsed time.
  */
 
-import { isLoopEdge, type Workflow, type WorkflowBlockRun, type WorkflowBlockStatus, type WorkflowRunStatus } from "@orquester/api";
+import {
+  isLoopEdge,
+  workflowHandleLabel,
+  type Workflow,
+  type WorkflowBlockRun,
+  type WorkflowBlockStatus,
+  type WorkflowNode,
+  type WorkflowRunStatus
+} from "@orquester/api";
 
 import { loopCounterOf, type LoopCounter } from "./loops";
 
@@ -49,6 +57,11 @@ export interface OverlayNodeState {
   /** A loop ran it again: its current pass (1-based) and how many passes it has had. */
   pass?: number;
   passCount?: number;
+  /**
+   * An agent block with outcomes (spec 2026-11-10 §5): the outcome it finished on, or — still
+   * running — the one its agent reported so far (`final: false`, a later report may replace it).
+   */
+  outcome?: { id: string; label: string; final: boolean };
 }
 
 export interface RunOverlay {
@@ -88,7 +101,16 @@ function finishedHandle(block: WorkflowBlockRun): string | null {
   return null;
 }
 
-function nodeState(block: WorkflowBlockRun, now: number): OverlayNodeState {
+/** The outcome chip of an agent block: the outcome handle it took, else a running pass's report. */
+function outcomeOf(block: WorkflowBlockRun, node: Pick<WorkflowNode, "id" | "type" | "config">): OverlayNodeState["outcome"] | undefined {
+  const taken = block.handle?.startsWith("outcome:") ? block.handle.slice("outcome:".length) : undefined;
+  const reported = LIVE.has(block.status) ? block.report?.outcome : undefined;
+  const id = taken ?? reported;
+  if (id === undefined) return undefined;
+  return { id, label: workflowHandleLabel(node, `outcome:${id}`), final: taken !== undefined };
+}
+
+function nodeState(block: WorkflowBlockRun, now: number, node: Pick<WorkflowNode, "id" | "type" | "config">): OverlayNodeState {
   const state: OverlayNodeState = { status: block.status, attempt: block.attempt };
   const duration = durationOf(block, now);
   if (duration !== undefined) state.durationMs = duration;
@@ -111,6 +133,8 @@ function nodeState(block: WorkflowBlockRun, now: number): OverlayNodeState {
     state.pass = block.pass ?? passCount;
     state.passCount = passCount;
   }
+  const outcome = outcomeOf(block, node);
+  if (outcome) state.outcome = outcome;
   return state;
 }
 
@@ -122,7 +146,7 @@ export function deriveRunOverlay(
   const nodes: Record<string, OverlayNodeState> = {};
   for (const node of workflow.nodes) {
     const block = run.blocks[node.id];
-    if (block) nodes[node.id] = nodeState(block, now);
+    if (block) nodes[node.id] = nodeState(block, now, node);
   }
   const taken = new Set(run.takenEdges);
   const dead = new Set(run.deadEdges);

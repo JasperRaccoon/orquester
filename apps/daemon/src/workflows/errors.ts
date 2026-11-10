@@ -8,7 +8,7 @@
 
 import type { WorkflowErrorBody, WorkflowErrorCode, WorkflowProblem } from "@orquester/api";
 
-export type WorkflowErrorStatus = 400 | 404 | 409 | 413 | 500 | 503;
+export type WorkflowErrorStatus = 400 | 403 | 404 | 409 | 413 | 500 | 503;
 
 export class WorkflowError extends Error {
   constructor(

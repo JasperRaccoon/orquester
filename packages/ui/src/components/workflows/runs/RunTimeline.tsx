@@ -229,6 +229,11 @@ const TimelineRow: React.FC<{
             {item.liveLine ? (
               <span className="mt-0.5 block truncate text-xs leading-5 text-neutral-300">{item.liveLine}</span>
             ) : null}
+            {item.reportSummary ? (
+              <span className="mt-0.5 block truncate text-xs leading-5 text-neutral-400" title={item.reportSummary}>
+                {item.reportSummary}
+              </span>
+            ) : null}
             {item.error ? (
               <span className="mt-0.5 block text-xs leading-5 text-danger">
                 <span className="line-clamp-2 break-words">

@@ -17,3 +17,4 @@ export * from "./guide.ts";
 export * from "./templates.ts";
 export * from "./outline.ts";
 export * from "./references.ts";
+export * from "./outcomes.ts";

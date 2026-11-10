@@ -1916,8 +1916,9 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   `{{ secrets.NAME }}`, with filters (`| json`, `| compact`, `| default("x")`, `| length`, …). The
   `expressionGuide` has the full grammar.
 - Output handles: triggers `success`; agent, code, shell, http, merge, wait and workflow `success`
-  and `error`; if `true` / `false` / `error`; switch `case:0`, `case:1`, …, `default`, `error`;
-  stop and note none. A failed block with no `error` edge fails the run. A block all of whose
+  and `error`; an agent block with `outcomes` one `outcome:<id>` per outcome (in declared order) and
+  `error`, no `success`; if `true` / `false` / `error`; switch `case:0`, `case:1`, …, `default`,
+  `error`; stop and note none. A failed block with no `error` edge fails the run. A block all of whose
   incoming edges are dead (an if's other branch) is skipped.
 - **Shell scripts never contain `{{ }}`** (validation refuses it): map values to environment
   variables in the block's `env` list and read `"$NAME"` in the script.
@@ -1926,13 +1927,31 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   the run as stopped.
 - **Agent blocks run full-access and unattended** in a new chat session (no approvals, no
   questions) until the agent finishes; the output is `{text, sessionId, agent, model, accountId,
-  durationMs, hops}` — ask for JSON in the prompt to parse `text` downstream. `chain` is the
+  durationMs, hops}`, plus `outcome`, `summary` and `outputs` when the block declares outcomes or
+  outputs (below). `text` is always a string and templates never parse it. `chain` is the
   agent/model fallback order (take the models from `list_agents`); accounts are chosen by usage and
   switched on usage limits. An optional `profileId` (an Agent Profile's id from `list_agents`
   `profiles`) launches the block's new chat with that profile; absent, it is Global. A profile that
   is gone or cannot be prepared fails the block at once (never Global, no failover), and validation
   warns (`unknown_profile`) about a block naming a profile that no longer exists. Deleting a profile
   in the right rail lists the workflows whose agent blocks use it and asks before going ahead.
+- **Typed outcomes and outputs** replace "ask for JSON and parse it in a Code block". An agent
+  block may declare `outcomes: [{id, label?, description?}]` (2–12, ids `^[a-z][a-z0-9_]*`,
+  unique) and/or `outputs: [{name, type, values?, required?, description?}]` (≤ 20; `type`
+  `string`, `number`, `boolean`, `enum` with `values`, or `json`; `required` defaults to true).
+  With `outcomes`, each outcome is its own handle `outcome:<id>`: the run follows the one the agent
+  reported, and the other outcomes' edges are dead — no Code or Switch block needed. With `outputs`
+  only, the handles stay `success` / `error`. The prompt gets a protocol block naming the outcomes
+  and outputs, and the agent reports with `report_step_result` (chat-only, below). A turn that ends
+  with no report gets **one** reminder turn in the same chat; still none, the block fails with error
+  kind `no_report` (retryable: its `retry` and `error` edge apply). Read the values as
+  `{{ nodes.Review.output.outcome }}`, `{{ nodes.Review.output.outputs.pr_url }}`. A disabled agent
+  block with outcomes passes its input on through its **first** outcome (a warning says so);
+  pinned data of a block with outcomes must include `outcome` (it picks the handle;
+  `pinned_outcome_missing` otherwise). Validation codes: `outcomes_count`, `duplicate_outcome`,
+  `outputs_count`, `duplicate_output`, `enum_values`, `description_too_long`,
+  `disabled_takes_first_outcome`, and `edge_invalid_handle` for a `success` edge from a block with
+  outcomes.
 - **`rename_node` rewrites every `{{ }}` reference** (and an agent's `session.fromNode`), **not a
   name inside a code block's JavaScript** — update that source yourself.
 - **Edit with `update_workflow` ops, never by recreating a workflow**, and call `get_workflow` first
@@ -1995,8 +2014,9 @@ chats, which can already read the secrets store, so a Code edit under a grant re
 A run's view lists every block in the definition's order: `status` (`pending`, `queued`,
 `running`, `waiting`, `succeeded`, `failed`, `skipped`, `cancelled`), `handle` (the output it
 finished on), `attempt`, `error {kind, message}`, `warnings`, and for an agent block its
-`sessionId` (open it with `read_transcript`), `hops` (account switches and handoffs) and
-`selection` (why that account). **Outputs are fitted to one result**: small ones come back whole
+`sessionId` (open it with `read_transcript`), `hops` (account switches and handoffs),
+`selection` (why that account) and — for a block with outcomes or outputs — `report {outcome?,
+summary, outputs?, reportedAt}`, the agent's latest valid `report_step_result`. **Outputs are fitted to one result**: small ones come back whole
 as `output`, and when they do not all fit, the largest become `outputText` — the head of their
 JSON — with `outputTruncated: true` (the daemon's own preview cut sets it too). Read a whole
 output with `get_workflow_runs {runId, nodeId}`: it answers `output` when it fits, else a window of
@@ -2031,6 +2051,30 @@ Errors keep the daemon's codes, with a hint: `WORKFLOW_NOT_FOUND` (`list_workflo
 already ended), `SECRET_INVALID`, `LIMIT_EXCEEDED`, `WORKFLOWS_UNAVAILABLE` (the daemon cannot
 write its workflows file right now).
 
+### Reporting a step's result (chat-only): `report_step_result`
+
+| Tool | Input | Returns |
+|---|---|---|
+| `report_step_result` | `outcome?` (one of the step's outcome ids), `summary` (≤ 2 000 characters), `outputs?` (the step's declared outputs by name) | the text `Recorded. End your turn now.` |
+
+Advertised to every chat (there is no per-chat tool switch) and to no external client; Act tier
+with nothing to card, so it never opens an approval card — a workflow-owned chat included. It
+succeeds only for the chat that is the current session of a **running** agent block that declares
+`outcomes` or `outputs`: the daemon matches the calling chat (the request's agent principal, never
+an argument) against the sessions that block's pass recorded, failover sessions included — not the
+session's owner, since a `session: continue` block reuses another block's chat. If two running
+passes held the same chat, the most recently started owns the report. Anyone else is refused
+`NOT_A_WORKFLOW_STEP`: "This chat is not a workflow step that reports a result."
+
+The call is checked against the block's declarations and refused `INVALID_REPORT` with **every**
+problem and what is allowed (``outcome "lgtm" is not one of this step's outcomes: use `approved` or
+`changes_requested`.``, ``outputs.pr_url is required: a string.``, unknown outputs, enum values);
+`"42"` and `"true"`/`"false"` are accepted for number and boolean outputs, nothing else is coerced.
+A valid call is stored on the block's run (persisted before the answer); a later valid call in the
+same pass replaces it until the block settles. The tool does not end the turn; the agent should.
+Route: `POST /api/workflow-step-report` (`workflowRoutes.stepReport`), honoured only with an
+in-chat agent principal.
+
 ### Worked example: the Jira fixer
 
 The request: *"Every 15 minutes, fetch new Jira tickets labelled orquester-fix; if there are none,
@@ -2055,10 +2099,11 @@ create_workflow {
     { "type": "stop", "name": "NothingToDo", "config": { "as": "success", "message": "No new tickets" } },
     { "type": "agent", "name": "FixTickets",
       "config": {
-        "prompt": { "kind": "text", "text": "Fix these Jira tickets in {project} on {branch}, one commit per ticket (\"KEY: …\"). Do not push.\n{{ nodes.FetchTickets.output.tickets | json }}\nReply with ONLY this JSON: {\"fixed\": [\"KEY-1\"]}" },
-        "chain": [{ "agent": "claude", "model": "opus" }] } },
+        "prompt": { "kind": "text", "text": "Fix these Jira tickets in {project} on {branch}, one commit per ticket (\"KEY: …\"). Do not push.\n{{ nodes.FetchTickets.output.tickets | json }}" },
+        "chain": [{ "agent": "claude", "model": "opus" }],
+        "outputs": [{ "name": "fixed", "type": "json", "description": "The keys of the tickets you fixed, e.g. [\"KEY-1\"]." }] } },
     { "type": "code", "name": "MarkDone",
-      "config": { "source": "export default async function ({ nodes, secrets }) {\n  const { fixed } = JSON.parse(/\\{[\\s\\S]*\\}/.exec(nodes.FixTickets.output.text)[0]);\n  for (const key of fixed) {\n    await fetch(`${secrets.JIRA_BASE_URL}/rest/api/3/issue/${key}/transitions`, { method: \"POST\", headers: { Authorization: `Basic ${secrets.JIRA_AUTH}`, \"Content-Type\": \"application/json\" }, body: JSON.stringify({ transition: { id: secrets.JIRA_DONE_ID } }) });\n  }\n  return { moved: fixed };\n}\n" } }
+      "config": { "source": "export default async function ({ nodes, secrets }) {\n  const fixed = nodes.FixTickets.output.outputs.fixed ?? [];\n  for (const key of fixed) {\n    await fetch(`${secrets.JIRA_BASE_URL}/rest/api/3/issue/${key}/transitions`, { method: \"POST\", headers: { Authorization: `Basic ${secrets.JIRA_AUTH}`, \"Content-Type\": \"application/json\" }, body: JSON.stringify({ transition: { id: secrets.JIRA_DONE_ID } }) });\n  }\n  return { moved: fixed };\n}\n" } }
   ],
   "edges": [
     { "source": "Every15Min", "target": "FetchTickets" },

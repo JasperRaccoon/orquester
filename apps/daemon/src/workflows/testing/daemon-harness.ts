@@ -17,6 +17,7 @@ import { workflowRunsDir, workflowSecretsPath, workflowStatePath, workflowsPath 
 import { Broadcaster } from "../../broadcaster.ts";
 import { GitService } from "../../git.ts";
 import { InjectDaemonApi, type DaemonApi } from "../../mcp/daemon-api.ts";
+import { registerPrincipalHook } from "../../mcp/principal.ts";
 import type { LsRemoteResult } from "../git-remote/index.ts";
 import type { ConditionalListOptions, ConditionalPage, PullRequestInfo, ReleaseInfo } from "../../providers/types.ts";
 import type { AccountsReader, UsageReader, WorkflowEngine } from "../contracts.ts";
@@ -126,6 +127,8 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
 
   let engine: WorkflowEngine | null = null;
   const app = Fastify({ logger: false });
+  // As both daemon apps do: a request's principal (an in-chat tool call's agent) is resolved first.
+  registerPrincipalHook(app);
   registerWorkflowRoutes(app, {
     service,
     secrets,

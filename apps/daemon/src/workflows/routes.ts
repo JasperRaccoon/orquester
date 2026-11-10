@@ -41,6 +41,8 @@ import {
   type ProfileReferencesResponse,
   type PromptReferencesResponse,
   type ReplaceWorkflowRequest,
+  type ReportWorkflowStepRequest,
+  type ReportWorkflowStepResponse,
   type RunWorkflowRequest,
   type RunWorkflowResponse,
   type SchedulePreviewResponse,
@@ -835,6 +837,30 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
       const engine = requireEngine();
       await requireRunSummary(request.params.runId);
       return { deleted: await engine.deleteTempProject(request.params.runId) };
+    })
+  );
+
+  // ---- report_step_result (spec 2026-11-10 §5.2) -------------------------------------------------
+
+  // The calling chat is the request's agent principal (minted in-process by the catalog executor for
+  // an in-chat tool call), never a body field: any other caller — the GUI, a REST client, an external
+  // MCP client — is not a workflow step and is refused the same way.
+  app.post(
+    workflowRoutes.stepReport,
+    guarded(async (request): Promise<ReportWorkflowStepResponse> => {
+      const principal = request.principal;
+      if (principal?.kind !== "agent" || !principal.threadId) {
+        throw new WorkflowError(403, "NOT_A_WORKFLOW_STEP", "This chat is not a workflow step that reports a result.");
+      }
+      const engine = requireEngine();
+      if (!isRecord(request.body)) throw invalidRequest("The body must be {outcome?, summary, outputs?}.");
+      const body = request.body;
+      const report: ReportWorkflowStepRequest = {
+        ...(body.outcome !== undefined ? { outcome: body.outcome as string } : {}),
+        summary: body.summary as string,
+        ...(body.outputs !== undefined ? { outputs: body.outputs as Record<string, unknown> } : {})
+      };
+      return engine.reportStepResult(principal.threadId, report);
     })
   );
 

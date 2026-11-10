@@ -545,6 +545,7 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   read_tool_output: "Read a tool's output",
   list_conversations: "Listed resumable conversations",
   notify_user: "Sent you a notification",
+  report_step_result: "Reported the workflow step's result",
   // files-git
   read_file: "Read a file",
   get_git_state: "Checked git",

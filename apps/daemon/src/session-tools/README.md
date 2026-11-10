@@ -61,7 +61,7 @@ No dynamic `import()` either.
 | `core` | `list_projects`, `list_agents`, `list_sessions`, `get_session`, `read_transcript`, `search_sessions`, `create_session`, `send_message`, `wait_for_session`, `control_session`, `fork_session`, `merge_back_session`, `get_usage`, `html_preview`, `html_render`, `show_image`, `request_secret` (17) |
 | `reads` | `list_workflows`, `get_workflow`, `get_workflow_runs`, `get_agent_profile`, `list_saved_prompts` (5) |
 | `notes` | `list_todos`, `update_todos`, `update_saved_prompts` (3) |
-| `chat-extras` | `update_session`, `respond_to_request`, `get_turn_diff`, `read_tool_output`, `list_conversations`, `notify_user` (6) |
+| `chat-extras` | `update_session`, `respond_to_request`, `get_turn_diff`, `read_tool_output`, `list_conversations`, `notify_user`, `report_step_result` (7; the last chat-only: a workflow step's report, refused to any chat that is not one) |
 | `files-git` | `read_file`, `get_git_state` (2) |
 | `workflow-authoring` | `list_workflow_block_types`, `create_workflow`, `update_workflow`, `delete_workflow`, `preview_expression`, `run_workflow`, `cancel_workflow_run`, `list_workflow_secrets`, `set_workflow_secret` (9) |
 | `agent-profile-editing` | `edit_agent_profile` (1) |
@@ -70,7 +70,7 @@ No dynamic `import()` either.
 | `boxes` | the temporary-box tools (8), advertised only while a box can be rented |
 | `knowledge` | `knowledge_search`, `knowledge_get`, `knowledge_save`, `knowledge_update`, `knowledge_delete`, `knowledge_merge`, `knowledge_collections`, `knowledge_insights`, `knowledge_worker_next_task`, `knowledge_worker_submit` (10), advertised only while the Knowledge Graph plugin is on — search, get, insights, update, delete and merge only to a chat that sees a collection, the worker tools only (and alone) to the plugin's own indexing sessions |
 
-47 chat tools (the 42 external ones plus `html_preview`, `html_render`, `show_image`, `request_secret`, `push_secret_files`), **all
+48 chat tools (the 42 external ones plus `html_preview`, `html_render`, `show_image`, `request_secret`, `push_secret_files`, `report_step_result`), **all
 advertised to every chat** of every agent. A toolset is only a group: a label in `@orquester/api`
 `TOOLSETS` and the `orquester/toolset` tag external clients see. There is no master switch, no
 per-agent default and no per-chat override, and no `request_toolset`. Older builds kept such

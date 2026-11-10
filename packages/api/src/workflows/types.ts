@@ -846,7 +846,12 @@ export const workflowRoutes = {
   gates: "/api/workflow-gates",
   /** POST: decide (or escalate) one gate of a run (`DecideWorkflowGateRequest`). */
   gateDecide: (runId: string, gateId: string): string =>
-    `/api/workflow-runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateId)}/decide`
+    `/api/workflow-runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateId)}/decide`,
+  /**
+   * POST: an in-chat agent's `report_step_result` (`ReportWorkflowStepRequest`, spec 2026-11-10
+   * §5.2). The step is found from the request's agent principal (the calling chat), never a body field.
+   */
+  stepReport: "/api/workflow-step-report"
 } as const;
 
 export type WorkflowErrorCode =
@@ -866,7 +871,11 @@ export type WorkflowErrorCode =
   | "INVALID_INPUT"
   | "GATE_NOT_FOUND"
   /** An in-chat caller that is not the gate's assigned decider (§6.3). */
-  | "GATE_NOT_DECIDER";
+  | "GATE_NOT_DECIDER"
+  /** `report_step_result` from a chat that is not the current session of a running reporting step (§5.2). */
+  | "NOT_A_WORKFLOW_STEP"
+  /** A `report_step_result` call that does not fit the step's declared outcomes/outputs; the message lists every problem. */
+  | "INVALID_REPORT";
 
 /** Error body: `{ error: { code, message, problems? } }`. */
 export interface WorkflowErrorBody {
@@ -999,6 +1008,27 @@ export interface ListWorkflowGatesQuery {
 export interface ListWorkflowGatesResponse {
   /** Oldest first. */
   gates: WorkflowGateState[];
+}
+
+/** POST /api/workflow-step-report (spec 2026-11-10 §5.2). */
+export interface ReportWorkflowStepRequest {
+  /** One of the step's declared outcome ids; required when it declares outcomes, refused when it declares none. */
+  outcome?: string;
+  /** ≤ `WORKFLOW_LIMITS.reportSummaryChars`. */
+  summary: string;
+  /** The step's declared outputs by name. */
+  outputs?: Record<string, unknown>;
+}
+export interface ReportWorkflowStepResponse {
+  /** Persisted on the block's run before this answer. */
+  recorded: true;
+  runId: string;
+  workflowId: string;
+  nodeId: string;
+  nodeName: string;
+  /** An earlier valid report of the same pass was replaced. */
+  replaced: boolean;
+  report: WorkflowStepReport;
 }
 
 /** GET /api/workflows/:id/runs?before=&limit= */

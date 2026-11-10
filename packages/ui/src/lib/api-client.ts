@@ -2763,7 +2763,9 @@ const WORKFLOW_ERROR_CODES: ReadonlySet<string> = new Set<WorkflowErrorCode>([
   "ENGINE_UNAVAILABLE",
   "INVALID_INPUT",
   "GATE_NOT_FOUND",
-  "GATE_NOT_DECIDER"
+  "GATE_NOT_DECIDER",
+  "NOT_A_WORKFLOW_STEP",
+  "INVALID_REPORT"
 ]);
 
 /** One validation problem off the wire, field by field; `null` when unusable. */

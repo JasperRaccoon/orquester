@@ -23,8 +23,10 @@ import {
   accountText,
   agentLiveLine,
   blockElapsedMs,
+  blockErrorKindHint,
   blockErrorKindLabel,
   blockInput,
+  blockReportView,
   blockSkipReason,
   blockStatusView,
   blockTypeLabel,
@@ -259,6 +261,9 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
         />
       ) : null}
 
+      {/* An agent block's report (outcomes / outputs, spec 2026-11-10 §5). */}
+      {type === "agent" ? <ReportPanel node={node} block={block} name={name} variant={variant} /> : null}
+
       {/* Wait. */}
       {type === "wait" && block?.status === "waiting" ? (
         <p className="rounded-lg border border-warn/25 bg-warn/5 px-3 py-2 text-xs text-warn">{waitLine(block, now)}</p>
@@ -357,6 +362,9 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
           <div className="space-y-2">
             <div className="rounded-lg border border-danger-500/30 bg-danger-500/5 px-3 py-2">
               <p className="text-xs font-medium text-danger">{blockErrorKindLabel(block.error.kind)}</p>
+              {blockErrorKindHint(block.error.kind) ? (
+                <p className="mt-1 text-xs leading-5 text-neutral-300">{blockErrorKindHint(block.error.kind)}</p>
+              ) : null}
               <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-neutral-200">
                 {block.error.message}
               </p>
@@ -398,6 +406,26 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
         ) : null}
       </div>
     </section>
+  );
+};
+
+/** The agent's report: the outcome it chose, its summary and its typed outputs. */
+const ReportPanel: React.FC<{ node: WorkflowNode | undefined; block: WorkflowBlockRun | undefined; name: string; variant: RunsVariant }> = ({ node, block, name, variant }) => {
+  const report = blockReportView(node, block);
+  if (!report) return null;
+  return (
+    <div className="space-y-1.5 rounded-lg border border-info/25 bg-info-soft/10 px-3 py-2" aria-label="Reported result">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <RunSectionLabel>{report.provisional ? "Reported so far" : "Reported result"}</RunSectionLabel>
+        {report.outcome ? (
+          <span className="rounded-full bg-info-soft/40 px-2 text-[11px] font-medium leading-5 text-info">{report.outcome}</span>
+        ) : null}
+      </div>
+      <p className="whitespace-pre-wrap break-words text-xs leading-5 text-neutral-200">{report.summary}</p>
+      {report.outputs.length > 0 ? (
+        <JsonTree value={Object.fromEntries(report.outputs.map((entry) => [entry.name, entry.value]))} rootLabel="outputs" rootPath={`nodes.${name}.output.outputs`} variant={variant} />
+      ) : null}
+    </div>
   );
 };
 

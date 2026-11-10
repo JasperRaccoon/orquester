@@ -19,14 +19,18 @@
 //     written or published by this instance, whatever its executors still report.
 
 import {
+  checkStepReport,
   computeReadiness,
   downstreamOf,
   executableNodes,
   hasWorkflowErrors,
   isRunActive,
   isTriggerType,
-  outputHandles,
+  passThroughHandle,
+  pinnedHandle,
   renderTemplate,
+  reportRequired,
+  stepReportDecl,
   renderTemplateValue,
   topologicalOrder,
   upstreamOf,
@@ -35,6 +39,8 @@ import {
   type AgentChainEntry,
   type ExpressionContext,
   type ListWorkflowRunsResponse,
+  type ReportWorkflowStepRequest,
+  type ReportWorkflowStepResponse,
   type RunWorkflowRequest,
   type RunWorkflowResponse,
   type Workflow,
@@ -46,6 +52,7 @@ import {
   type WorkflowRunErrorKind,
   type WorkflowRunStatus,
   type WorkflowRunSummary,
+  type WorkflowStepReport,
   type WorkflowSummary,
   type WorkflowTriggerKind,
   type WorkflowTriggerPayload,
@@ -233,6 +240,9 @@ function childRunIdFor(parentRunId: string, nodeId: string, attempt: number): st
 }
 
 /** Failures a retry cannot fix: every account of the chain is burnt, or a hard limit was hit. */
+/** `report_step_result` from any chat that is not a reporting step's (spec 2026-11-10 §5.2), in the spec's words. */
+const NOT_A_REPORTING_STEP = "This chat is not a workflow step that reports a result.";
+
 const NOT_RETRIED: ReadonlySet<WorkflowBlockError["kind"]> = new Set<WorkflowBlockError["kind"]>(["all_burnt", "limit_exceeded"]);
 
 function isRetryable(error: WorkflowBlockError): boolean {
@@ -585,12 +595,41 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     }
   };
 
-  const pinFor = (a: ActiveRun, node: WorkflowNode): { value: unknown } | null => {
+  /** A test run's pinned output for `node`, and the handle it takes (an agent with outcomes: the pin's `outcome`, §7.5). */
+  /**
+   * `report_step_result`'s step (spec 2026-11-10 §5.2): the running pass of an agent block that
+   * declares outcomes/outputs and whose recorded sessions — the agent block's persisted
+   * `knownSessionIds`, failover sessions included — hold `sessionId`. Matched on the run's own
+   * records, never on the session's `owner.nodeId` (a `continue` block reuses another block's chat).
+   * When several could match, the most recently started pass owns the report.
+   */
+  const reportingPassOf = (sessionId: string): { a: ActiveRun; node: WorkflowNode; block: PersistedBlockState } | null => {
+    let best: { a: ActiveRun; node: WorkflowNode; block: PersistedBlockState } | null = null;
+    for (const a of active.values()) {
+      if (!alive(a)) continue;
+      for (const [id, block] of Object.entries(a.run.blocks)) {
+        if (block.type !== "agent" || (block.status !== "running" && block.status !== "waiting") || !a.inFlight.has(id)) continue;
+        const waiting = block.waitingOn;
+        if (waiting?.kind !== "agent") continue;
+        const node = a.nodes.get(id);
+        if (!node || !reportRequired(stepReportDecl(node))) continue;
+        const known = (waiting.state as { knownSessionIds?: unknown } | undefined)?.knownSessionIds;
+        const sessions = new Set<string>(Array.isArray(known) ? known.filter((v): v is string => typeof v === "string") : []);
+        if (waiting.sessionId) sessions.add(waiting.sessionId);
+        if (!sessions.has(sessionId)) continue;
+        if (best === null || (block.startedAt ?? "") > (best.block.startedAt ?? "")) best = { a, node, block };
+      }
+    }
+    return best;
+  };
+
+  const pinFor = (a: ActiveRun, node: WorkflowNode): { value: unknown; handle: string } | null => {
     if (!a.run.usePinned || node.id === a.run.fromNodeId) return null;
     const pinned = a.def.pinned;
     if (!pinned || !Object.prototype.hasOwnProperty.call(pinned, node.id)) return null;
-    if (!outputHandles(node).includes("success")) return null;
-    return { value: pinned[node.id] };
+    const handle = pinnedHandle(node, pinned[node.id]);
+    if (handle === null) return null;
+    return { value: pinned[node.id], handle };
   };
 
   const currentBranch = async (path: string): Promise<string | undefined> => {
@@ -700,6 +739,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       depth: a.run.depth,
       startedAt: block.startedAt ?? nowIso(),
       liveInputs: () => liveInputsOf(a, node.id),
+      stepReport: () => (block.report ? structuredClone(block.report) : undefined),
       services,
       log: nodeLog
     };
@@ -740,12 +780,13 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         block.attempt = Math.max(1, block.attempt);
       }
       if (node.disabled) {
-        return { status: "succeeded", output: isTriggerType(node.type) ? a.run.triggerPayload : inputOf(a, node.id) };
+        // An agent block with outcomes passes through on its first outcome (spec 2026-11-10 §7.5).
+        return { status: "succeeded", output: isTriggerType(node.type) ? a.run.triggerPayload : inputOf(a, node.id), handle: passThroughHandle(node) };
       }
       const pin = pinFor(a, node);
       if (pin) {
         block.pinned = true;
-        return { status: "succeeded", output: pin.value };
+        return { status: "succeeded", output: pin.value, handle: pin.handle };
       }
     }
 
@@ -798,6 +839,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         delete block.waitingOn;
         delete block.waitingUntil;
         delete block.handle;
+        // A new attempt reports afresh: an earlier attempt's report never finishes this one (§5.2).
+        delete block.report;
         appendEvent(a, { type: "block.started", nodeId: node.id, attempt });
       } else if (resumingAWait) {
         block.status = "waiting";
@@ -1622,10 +1665,11 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       const fromRuns: string[] = [];
       for (const id of wanted) {
         const node = byId.get(id)!;
-        if (Object.prototype.hasOwnProperty.call(pinned, id) && outputHandles(node).includes("success")) {
+        const pinHandle = Object.prototype.hasOwnProperty.call(pinned, id) ? pinnedHandle(node, pinned[id]) : null;
+        if (pinHandle !== null) {
           const prepared = await prepareOutput(runId, id, 1, pinned[id], redactor);
           if (!("error" in prepared)) {
-            seeds.set(id, { ...prepared, status: "succeeded", handle: "success", attempt: 0, pinned: true });
+            seeds.set(id, { ...prepared, status: "succeeded", handle: pinHandle, attempt: 0, pinned: true });
             continue;
           }
         }
@@ -2225,6 +2269,24 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       emit("workflowRun.updated", { run: toRunSummary(run), blocks: [] });
       emitUpserted(run.workflowId);
       return true;
+    },
+
+    async reportStepResult(sessionId: string, request: ReportWorkflowStepRequest): Promise<ReportWorkflowStepResponse> {
+      const found = reportingPassOf(sessionId);
+      if (!found) throw new WorkflowEngineError(403, "NOT_A_WORKFLOW_STEP", NOT_A_REPORTING_STEP);
+      const { a, node, block } = found;
+      const check = checkStepReport(stepReportDecl(node), request ?? {});
+      if (!check.ok) {
+        throw new WorkflowEngineError(400, "INVALID_REPORT", `The report was not recorded:\n${check.problems.map((problem) => `- ${problem}`).join("\n")}`);
+      }
+      const report: WorkflowStepReport = a.redactor.value({ ...check.report, sessionId, reportedAt: nowIso() });
+      const replaced = block.report !== undefined;
+      block.report = report;
+      markDirty(a, node.id);
+      appendEvent(a, { type: "block.report", nodeId: node.id, attempt: block.attempt, ...(report.outcome !== undefined ? { outcome: report.outcome } : {}), replaced });
+      // Persisted before the tool answers (§5.2): the executor reads it from the run after a restart.
+      await save(a);
+      return { recorded: true, runId: a.run.id, workflowId: a.run.workflowId, nodeId: node.id, nodeName: node.name, replaced, report: structuredClone(report) };
     },
 
     async accountPreview(chain: AgentChainEntry[], projectPath?: string): Promise<AccountSelectionDecision> {

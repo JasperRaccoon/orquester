@@ -112,7 +112,9 @@ export type ProviderStep =
   /** Background work ends and wakes the parent — after `delayMs` with the thread idle meanwhile (a Claude wake still held), else at once. */
   | { kind: "wake"; steps: ProviderStep[]; delayMs?: number }
   /** Never finishes on its own. */
-  | { kind: "hang" };
+  | { kind: "hang" }
+  /** A tool call the agent makes mid-turn (e.g. report_step_result), simulated by the callback; awaited. */
+  | { kind: "call"; fn: (sessionId: string) => void | Promise<void> };
 
 export interface FakeTurnInfo {
   sessionId: string;
@@ -619,6 +621,9 @@ export class FakeChatHost implements DaemonApi {
         case "hang":
           await new Promise(() => undefined);
           return "stopped";
+        case "call":
+          await step.fn(s.id);
+          break;
       }
     }
     return "completed";

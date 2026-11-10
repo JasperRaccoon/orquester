@@ -10,7 +10,8 @@ import type {
   AgentAccountsResponse,
   UsageResponse,
   WorkflowBlockRun,
-  WorkflowNode
+  WorkflowNode,
+  WorkflowStepReport
 } from "@orquester/api";
 import { workflowRecordSchema, type AccountCooldown, type AgentBlockConfig, type WorkflowRecord } from "@orquester/config";
 import type {
@@ -138,6 +139,8 @@ export interface FakeContextOptions {
   gitStatus?: string | ((path: string) => Promise<string>);
   signal?: AbortSignal;
   services?: Partial<EngineServices>;
+  /** What `ctx.stepReport()` reads: the pass's report as the engine holds it (a test sets `current`). */
+  report?: { current?: WorkflowStepReport };
 }
 
 export interface FakeContext {
@@ -226,6 +229,7 @@ export function createFakeContext(opts: FakeContextOptions): FakeContext {
     },
     timeoutMs: 240 * 60_000,
     depth: 0,
+    ...(opts.report ? { stepReport: () => (opts.report!.current ? structuredClone(opts.report!.current) : undefined) } : {}),
     services,
     log: silentLogger
   };

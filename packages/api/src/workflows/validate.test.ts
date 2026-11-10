@@ -540,3 +540,75 @@ describe("workflowSummaryErrors", () => {
     assert.equal(many.errorsOmitted, 3);
   });
 });
+
+describe("agent outcomes and outputs (spec 2026-11-10 §5.1, §7.5)", () => {
+  const outcomes = [{ id: "approved", label: "Approved" }, { id: "changes_requested" }];
+  const reviewer = (extra: Record<string, unknown> = {}, nodeExtra: Record<string, unknown> = {}) =>
+    testNode("Review", "agent", { prompt: { kind: "text", text: "Review it" }, ...extra }, { name: "Review", ...nodeExtra });
+  const post = () => testNode("Post", "http", { url: "https://x.test" });
+
+  it("accepts 2–12 unique outcomes with edges from their handles", () => {
+    const wf = testWorkflow([manual(), reviewer({ outcomes }), post()], [testEdge("t", "Review"), testEdge("Review", "Post", "outcome:approved")]);
+    assert.deepEqual(problemsOf(wf), []);
+  });
+
+  it("refuses one outcome, thirteen, and duplicate ids", () => {
+    const one = testWorkflow([manual(), reviewer({ outcomes: [{ id: "a" }] })], [testEdge("t", "Review")]);
+    assert.match(only(problemsOf(one), "outcomes_count")[0]!.message, /declare 2–12 outcomes \(it has 1\)/);
+    const many = Array.from({ length: 13 }, (_, i) => ({ id: `o${i}` }));
+    assert.equal(only(problemsOf(testWorkflow([manual(), reviewer({ outcomes: many })], [testEdge("t", "Review")])), "outcomes_count").length, 1);
+    const dup = testWorkflow([manual(), reviewer({ outcomes: [{ id: "a" }, { id: "a" }] })], [testEdge("t", "Review")]);
+    const [problem] = only(problemsOf(dup), "duplicate_outcome");
+    assert.equal(problem!.field, "config.outcomes.1.id");
+  });
+
+  it("refuses a malformed outcome id through the schema", () => {
+    const wf = testWorkflow([manual()], [], {});
+    const raw = { ...wf, nodes: [...wf.nodes, { ...reviewer(), config: { ...reviewer().config, outcomes: [{ id: "Approved" }, { id: "x" }] } }] };
+    assert.ok(only(problemsOf(raw), "schema").some((p) => (p.field ?? "").startsWith("config.outcomes.0.id")));
+  });
+
+  it("an edge from an agent with outcomes must leave an outcome or error handle — never success", () => {
+    const wf = testWorkflow([manual(), reviewer({ outcomes }), post()], [testEdge("t", "Review"), testEdge("Review", "Post")]);
+    const [problem] = only(problemsOf(wf), "edge_invalid_handle");
+    assert.match(problem!.message, /declares outcomes, so it has no "success" output: connect from one of outcome:approved, outcome:changes_requested, error/);
+    const viaError = testWorkflow([manual(), reviewer({ outcomes }), post()], [testEdge("t", "Review"), testEdge("Review", "Post", "error")]);
+    assert.deepEqual(only(problemsOf(viaError), "edge_invalid_handle"), []);
+    const unknown = testWorkflow([manual(), reviewer({ outcomes }), post()], [testEdge("t", "Review"), testEdge("Review", "Post", "outcome:nope")]);
+    assert.match(only(problemsOf(unknown), "edge_invalid_handle")[0]!.message, /has no "outcome:nope" output/);
+  });
+
+  it("outputs only: success and error stay", () => {
+    const wf = testWorkflow([manual(), reviewer({ outputs: [{ name: "pr_url", type: "string" }] }), post()], [testEdge("t", "Review"), testEdge("Review", "Post")]);
+    assert.deepEqual(problemsOf(wf), []);
+  });
+
+  it("checks output counts, unique names and enum values", () => {
+    const tooMany = Array.from({ length: 21 }, (_, i) => ({ name: `o${i}`, type: "string" }));
+    const at = (outputs: unknown[]) => problemsOf(testWorkflow([manual(), reviewer({ outputs })], [testEdge("t", "Review")]));
+    assert.equal(only(at(tooMany), "outputs_count").length, 1);
+    assert.equal(only(at([{ name: "a", type: "string" }, { name: "a", type: "number" }]), "duplicate_output")[0]!.field, "config.outputs.1.name");
+    assert.match(only(at([{ name: "env", type: "enum" }]), "enum_values")[0]!.message, /needs 1–50 values \(it has 0\)/);
+    assert.match(only(at([{ name: "env", type: "enum", values: ["a", "a"] }]), "enum_values")[0]!.message, /twice/);
+    assert.deepEqual(only(at([{ name: "env", type: "enum", values: ["stg", "prd"] }]), "enum_values"), []);
+    const ignored = only(at([{ name: "n", type: "number", values: ["1"] }]), "enum_values");
+    assert.equal(ignored[0]!.severity, "warning");
+  });
+
+  it("warns about a disabled agent with outcomes: it passes through on its first outcome", () => {
+    const wf = testWorkflow([manual(), reviewer({ outcomes }, { disabled: true }), post()], [testEdge("t", "Review"), testEdge("Review", "Post", "outcome:approved")]);
+    const [problem] = only(problemsOf(wf), "disabled_takes_first_outcome");
+    assert.equal(problem!.severity, "warning");
+    assert.match(problem!.message, /first outcome, "approved"/);
+  });
+
+  it("a pin on an agent with outcomes must name a declared outcome", () => {
+    const nodes = [manual(), reviewer({ outcomes }), post()];
+    const edges = [testEdge("t", "Review"), testEdge("Review", "Post", "outcome:approved")];
+    const missing = problemsOf(testWorkflow(nodes, edges, { pinned: { Review: { text: "ok" } } }));
+    assert.match(only(missing, "pinned_outcome_missing")[0]!.message, /must include "outcome": one of `approved` or `changes_requested`/);
+    const wrong = problemsOf(testWorkflow(nodes, edges, { pinned: { Review: { outcome: "nope" } } }));
+    assert.equal(only(wrong, "pinned_outcome_missing").length, 1);
+    assert.deepEqual(problemsOf(testWorkflow(nodes, edges, { pinned: { Review: { outcome: "approved", text: "ok" } } })), []);
+  });
+});

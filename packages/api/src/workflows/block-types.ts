@@ -79,10 +79,10 @@ export const WORKFLOW_BLOCK_CATALOG: Record<WorkflowNodeType, WorkflowBlockCatal
     type: "agent",
     title: "Agent",
     description:
-      "Runs a coding agent (Claude, Codex, Grok, OpenCode…) in the project with a prompt, fully autonomous. Picks the account by usage and fails over across accounts and agents on usage limits. Optional `profileId`: the Agent Profile its new chat launches with (default Global); a missing or failed profile fails the block.",
+      "Runs a coding agent (Claude, Codex, Grok, OpenCode…) in the project with a prompt, fully autonomous. Picks the account by usage and fails over across accounts and agents on usage limits. Optional `profileId`: the Agent Profile its new chat launches with (default Global); a missing or failed profile fails the block. Optional `outcomes` (2–12 `{ id, label?, description? }`) make each outcome its own output handle `outcome:<id>` (no `success`); optional `outputs` (`{ name, type, values?, required?, description? }`) are typed values the agent reports with report_step_result.",
     category: WORKFLOW_NODE_CATEGORY.agent,
     output:
-      "{ text, sessionId, agent, model, accountId, durationMs, hops } — `text` is the agent's final message, always a string: ask for JSON in the prompt and parse it in a Code block.",
+      "{ text, sessionId, agent, model, accountId, durationMs, hops, outcome?, summary?, outputs? } — `text` is the agent's final message, always a string. With `outcomes`/`outputs` declared, `outcome` is the reported outcome id, `summary` its summary and `outputs` the typed values (`nodes.Review.output.outputs.pr_url`).",
     example: {
       prompt: { kind: "text", text: "Fix the failing tests in {project} on {branch}. Reply with a one-line summary." },
       session: { kind: "new", title: "Nightly test fix" },

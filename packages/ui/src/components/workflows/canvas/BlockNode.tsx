@@ -41,7 +41,7 @@ export function handleTone(handle: string): { dot: string; text: string } {
   if (handle === "success" || handle === "true") return { dot: "var(--sem-ok-400)", text: "text-ok" };
   if (handle === "error") return { dot: "var(--sem-danger-400)", text: "text-danger" };
   if (handle === "false") return { dot: "var(--n-400)", text: "text-neutral-400" };
-  if (handle.startsWith("case:")) return { dot: "var(--sem-info-400)", text: "text-info" };
+  if (handle.startsWith("case:") || handle.startsWith("outcome:")) return { dot: "var(--sem-info-400)", text: "text-info" };
   return { dot: "var(--n-400)", text: "text-neutral-400" };
 }
 
@@ -162,8 +162,26 @@ function OverlayLine({ overlay }: { overlay: OverlayNodeState }): React.ReactEle
       <Icon size={12} className={cn("shrink-0", view.tone, overlay.status === "running" && "motion-safe:animate-spin")} />
       <span className={cn("shrink-0 font-medium", view.tone)}>{view.label}</span>
       {bits.length > 0 ? <span className="min-w-0 truncate text-neutral-500">{bits.join(" · ")}</span> : null}
+      {overlay.outcome ? <OutcomeChip outcome={overlay.outcome} /> : null}
       {overlay.pinned ? <Pin size={11} className="ml-auto shrink-0 text-neutral-500" aria-label="Pinned output" /> : null}
     </div>
+  );
+}
+
+/** The outcome an agent block took (or, while it runs, reported so far): spec 2026-11-10 §5. */
+function OutcomeChip({ outcome }: { outcome: NonNullable<OverlayNodeState["outcome"]> }): React.ReactElement {
+  const text = outcome.final ? `Outcome: ${outcome.label}` : `Reported so far: ${outcome.label}`;
+  return (
+    <span
+      className={cn(
+        "ml-auto max-w-[45%] shrink-0 truncate rounded-full px-1.5 text-[10.5px] font-medium leading-4",
+        outcome.final ? "bg-info-soft/40 text-info" : "border border-dashed border-info/40 text-info"
+      )}
+      title={text}
+      aria-label={text}
+    >
+      {outcome.label}
+    </span>
   );
 }
 
