@@ -7,8 +7,21 @@
 
 import type { DesktopSummary, DesktopVideoBackend } from "@orquester/api";
 
-/** Consecutive voxl connection failures (closed before its `hello`) after which the view uses RFB. */
+/** Consecutive voxl connection failures after which the view uses RFB (see {@link voxlFailuresAfterClose}). */
 export const VOXL_MAX_FAILURES = 3;
+
+/** A voxl connection that ends sooner than this after its `hello` failed too: voxl keeps dropping the viewer. */
+export const VOXL_STABLE_MS = 10_000;
+
+/**
+ * The consecutive voxl failure count once a voxl connection ended (times in ms on one clock):
+ * one more when it never had voxl's `hello` or ended within VOXL_STABLE_MS of it; back to 0 when it
+ * streamed for longer.
+ */
+export function voxlFailuresAfterClose(failures: number, connection: { helloAt: number | null; closedAt: number }): number {
+  const { helloAt, closedAt } = connection;
+  return helloAt === null || closedAt - helloAt < VOXL_STABLE_MS ? failures + 1 : 0;
+}
 
 /** What this browser offers voxl. */
 export interface VoxlViewerSupport {

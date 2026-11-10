@@ -36,7 +36,7 @@ import {
 import { TEXT_SIZE_DEBOUNCE_MS, textSizeDisplaySize } from "./desktop-text-size";
 import { sharpFitAllowed } from "./desktop-viewport.logic";
 import { createDesktopStreamClient, voxlViewerSupport } from "./stream/create-stream-client";
-import { VOXL_MAX_FAILURES, desktopVideo, viewerUnsupportedReason, voxlStreamUsable } from "./stream/backend-choice.logic";
+import { VOXL_MAX_FAILURES, desktopVideo, viewerUnsupportedReason, voxlFailuresAfterClose, voxlStreamUsable } from "./stream/backend-choice.logic";
 import type { DesktopStreamClient, DesktopStreamEvents, DesktopViewMode } from "./stream/types";
 import { DesktopHandoffControls, DesktopHandoffLayer, useDesktopHandoff } from "./handoff/DesktopHandoff";
 import { takeoverSink } from "../../lib/desktops/handoff.logic";
@@ -128,9 +128,10 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   /** The backend of the current connection attempt, and why a voxl desktop fell back to RFB. */
   const [stream, setStream] = useState<{ backend: DesktopVideoBackend; fallback: string | null } | null>(null);
   /**
-   * Consecutive voxl connections that closed before their `hello` (spec R4.6): kept across
-   * reconnects, so the third failure falls back to RFB; reset when voxl connects, the desktop's
-   * stream changes, or its stream becomes `ready`.
+   * Consecutive voxl connections that closed before their `hello` or soon after it (spec R4.6,
+   * `voxlFailuresAfterClose`): kept across reconnects, so the third failure falls back to RFB;
+   * reset when a voxl connection streamed past that, the desktop's stream changes, or its stream
+   * becomes `ready`.
    */
   const voxlFailuresRef = useRef(0);
   const voxlUsable = voxlStreamUsable(desktop);
@@ -301,10 +302,11 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       client = c;
       clientRef.current = c;
       setStream({ backend: c.backend, fallback: plan.choice.backend === "rfb" ? plan.choice.reason : null });
-      let reachedConnected = false;
-      /** A voxl client that ends before its `hello` counts toward the RFB fallback. */
-      const failed = () => {
-        if (c.backend === "voxl" && !reachedConnected) voxlFailuresRef.current += 1;
+      /** When the voxl client had its `hello` (it reported `connected`). */
+      let helloAt: number | null = null;
+      /** A voxl client that ends before its `hello`, or soon after it, counts toward the RFB fallback. */
+      const ended = () => {
+        if (c.backend === "voxl") voxlFailuresRef.current = voxlFailuresAfterClose(voxlFailuresRef.current, { helloAt, closedAt: performance.now() });
       };
       c.setNativeInput(!touchRef.current);
       c.setViewMode(clientViewMode());
@@ -314,8 +316,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
           if (!current()) return;
           if (state === "connected") {
             attempt = 0;
-            reachedConnected = true;
-            if (c.backend === "voxl") voxlFailuresRef.current = 0;
+            helloAt = performance.now();
             setConn("connected");
             setConnError(null);
             // Opening/activating the tab in a focused window counts as local
@@ -329,7 +330,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
             // once `conn` flips to "connected".
           } else if (state === "disconnected") {
             if (reason) setConnError(reason);
-            failed();
+            ended();
             drop();
             scheduleRetry();
           }
@@ -354,7 +355,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       } catch (err) {
         if (!current()) return;
         setConnError(errorText(err));
-        failed();
+        ended();
         drop();
         scheduleRetry();
       }
