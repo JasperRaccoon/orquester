@@ -7,11 +7,8 @@ import { previewExpressions } from "./expression-preview.ts";
 import { edge, node, workflow } from "./testing/fakes.ts";
 
 test("expression preview: {{ loop.* }} reads the block's pass and feedback in the run; a loop edge is never an input", async () => {
-  const wf = workflow(
-    "w1",
-    [node("T", "trigger.manual"), node("Fix", "code"), node("Check", "if")],
-    [edge("T", "Fix"), edge("Fix", "Check"), { ...edge("Check", "Fix", "false", "back"), loop: { maxLoops: 2, session: "continue" as const } }]
-  );
+  const back = { ...edge("Check", "Fix", "false", "back"), loop: { maxLoops: 2, session: "continue" as const } };
+  const wf = workflow("w1", [node("T", "trigger.manual"), node("Fix", "code"), node("Check", "if")], [edge("T", "Fix"), edge("Fix", "Check"), back]);
   const run: WorkflowRun = {
     id: "run-1",
     workflowId: "w1",
