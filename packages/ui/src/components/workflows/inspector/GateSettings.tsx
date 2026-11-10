@@ -189,6 +189,7 @@ const ChoiceCard: React.FC<{
             <TextInput
               value={choice.label}
               aria-label={`Choice ${index + 1} label`}
+              maxLength={LIMIT.labelChars}
               placeholder={`Choice ${index + 1}`}
               invalid={label.error !== null}
               onValue={onLabel}

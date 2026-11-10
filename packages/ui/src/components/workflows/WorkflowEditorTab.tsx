@@ -512,8 +512,9 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
           ...(input !== undefined ? { input } : {}),
           ...(options.force ? { force: true } : {})
         },
-        // The typed form shows an input refusal beside its fields, not as a rail notice.
-        { quiet: manualInputs !== undefined }
+        // Both Run now surfaces show the refusal and the overlap "Run anyway" themselves (the typed
+        // form beside its fields), so the rail posts neither a second time.
+        { quiet: true }
       );
       if (!result.ok) return { ok: false, error: result.error, ...(result.inputErrors ? { inputErrors: result.inputErrors } : {}) };
       const answer = result.value;

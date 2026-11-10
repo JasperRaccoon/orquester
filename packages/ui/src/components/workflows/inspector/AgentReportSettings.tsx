@@ -146,6 +146,7 @@ const OutcomeRow: React.FC<{ outcome: WorkflowOutcomeDecl; index: number; count:
           <TextInput
             value={outcome.label ?? ""}
             aria-label={`Outcome ${index + 1} label`}
+            maxLength={WORKFLOW_LIMITS.labelChars}
             placeholder={outcome.id}
             onValue={(label) => strip({ label }, "outcome-label")}
             className="min-w-0 flex-1 font-medium"
