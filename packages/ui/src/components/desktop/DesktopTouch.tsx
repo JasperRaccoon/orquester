@@ -11,7 +11,7 @@ import {
   type Point,
   type ViewTransform
 } from "./desktop-viewport.logic";
-import type { DesktopInputSink, DesktopStreamClient } from "./stream/types";
+import type { DesktopInputSink, DesktopPointerButton, DesktopStreamClient } from "./stream/types";
 
 /**
  * The touch input layer of the desktop view (spec 2026-11-10 R3.1–R3.2, R3.6–R3.7).
@@ -22,9 +22,9 @@ import type { DesktopInputSink, DesktopStreamClient } from "./stream/types";
  * sharp fit) is a CSS transform on the stage, written straight to its style;
  * the cursor overlay and other overlays read it from the returned store.
  *
- * Mouse and pen input pass through untouched. Using one drops any zoom first,
- * synchronously: the client maps mouse positions itself and a transformed
- * stage would skew them.
+ * Mouse input passes through untouched (and pen input while the client's touch
+ * handling is on). Using a mouse drops any zoom first, synchronously: the
+ * client maps mouse positions itself and a transformed stage would skew them.
  */
 
 export interface DesktopTouchSnapshot {
@@ -53,8 +53,10 @@ export interface DesktopTouchOptions {
   connected: boolean;
   /** Touch rendering (local zoom, sharp fit) is on: the last input was a touch. */
   rendering: boolean;
-  /** Sharp fit is allowed (the client is not resizing the display to fit). */
+  /** Sharp fit is allowed. */
   sharp: boolean;
+  /** A pen drives the sink directly (the client's own touch handling is off). */
+  directPen: boolean;
   mode: DesktopInputMode;
   /** Keysyms of the latched key-bar modifiers for the next click (spends the one-shots). */
   takeModifiers: () => number[];
@@ -65,6 +67,9 @@ export interface DesktopTouchOptions {
   /** Give the keyboard to the display (the hidden input while the soft keyboard is up). */
   focusDisplay: () => void;
 }
+
+/** `PointerEvent.button` of a pen: the tip, the barrel button (right), the middle one. */
+const PEN_BUTTONS: Record<number, DesktopPointerButton> = { 0: 1, 1: 2, 2: 3 };
 
 const EMPTY: DesktopTouchSnapshot = { transform: IDENTITY, geometry: null, cursor: null, zoomed: false };
 
@@ -204,6 +209,7 @@ export function useDesktopTouch(options: DesktopTouchOptions): DesktopTouchStore
     const el = options.viewportRef.current;
     if (!el) return;
     const touches = new Set<number>();
+    const pens = new Set<number>();
     let fine = false;
     const point = (e: PointerEvent): GesturePointer => {
       const rect = el.getBoundingClientRect();
@@ -228,7 +234,27 @@ export function useDesktopTouch(options: DesktopTouchOptions): DesktopTouchStore
       }
     };
 
+    // With the client's touch handling off, a pen goes through the sink as a
+    // direct pointer (its touch events, on iPad, are blocked with the rest).
+    const penDirect = (e: PointerEvent) => e.pointerType === "pen" && opts.current.directPen && opts.current.connected;
+    const penButton = (e: PointerEvent): DesktopPointerButton | null => PEN_BUTTONS[e.button] ?? null;
+
     const onPointerDown = (e: PointerEvent) => {
+      if (penDirect(e)) {
+        if (!onDisplay(e.target)) return;
+        const button = penButton(e);
+        if (button === null) return;
+        e.preventDefault();
+        pens.add(e.pointerId);
+        try {
+          el.setPointerCapture(e.pointerId);
+        } catch {
+          /* the pointer is already gone */
+        }
+        opts.current.focusDisplay();
+        recognizer.penButton(button, true, point(e));
+        return;
+      }
       if (e.pointerType !== "touch") {
         if (onDisplay(e.target)) finePointer();
         return;
@@ -250,6 +276,10 @@ export function useDesktopTouch(options: DesktopTouchOptions): DesktopTouchStore
       recognizer.down(point(e));
     };
     const onPointerMove = (e: PointerEvent) => {
+      if (penDirect(e)) {
+        if (pens.has(e.pointerId) || onDisplay(e.target)) recognizer.penMove(point(e));
+        return;
+      }
       if (e.pointerType !== "touch") {
         if (!fine && e.pointerType === "mouse" && onDisplay(e.target)) finePointer();
         return;
@@ -259,11 +289,21 @@ export function useDesktopTouch(options: DesktopTouchOptions): DesktopTouchStore
       recognizer.move(point(e));
     };
     const onPointerUp = (e: PointerEvent) => {
+      if (pens.delete(e.pointerId)) {
+        const button = penButton(e);
+        e.preventDefault();
+        if (button !== null) recognizer.penButton(button, false, point(e));
+        return;
+      }
       if (!touches.delete(e.pointerId)) return;
       e.preventDefault();
       recognizer.up(point(e));
     };
     const onPointerCancel = (e: PointerEvent) => {
+      if (pens.delete(e.pointerId)) {
+        recognizer.cancel();
+        return;
+      }
       if (!touches.delete(e.pointerId)) return;
       recognizer.cancelPointer(point(e));
     };
@@ -275,6 +315,7 @@ export function useDesktopTouch(options: DesktopTouchOptions): DesktopTouchStore
     // Nothing stays held when the page goes away mid-gesture.
     const release = () => {
       touches.clear();
+      pens.clear();
       recognizer.cancel();
       opts.current.client()?.releaseAll();
     };

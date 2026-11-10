@@ -528,6 +528,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     connected: conn === "connected",
     rendering: touchRendering,
     sharp: touchRendering,
+    directPen: touch,
     mode: inputMode,
     takeModifiers,
     onTouch: () => {

@@ -242,3 +242,21 @@ test("latched modifiers are held around a tap's click (Shift-tap = Shift-click),
   up(1, 100, 50, 50);
   assert.deepEqual(clicks(calls), [`key ${SHIFT.toString(16)} down`, "down 1", "up 1", `key ${SHIFT.toString(16)} up`, "down 1", "up 1"]);
 });
+
+test("a pen is a direct pointer: hover moves, the tip clicks where it touches, with latched modifiers", () => {
+  const { recognizer, calls } = setup("trackpad", [SHIFT]);
+  recognizer.penMove({ x: 100, y: 50 });
+  recognizer.penButton(1, true, { x: 100, y: 50 });
+  recognizer.penMove({ x: 110, y: 50 });
+  recognizer.penButton(1, false, { x: 110, y: 50 });
+  assert.deepEqual(calls, [
+    "move 200,100",
+    "move 200,100",
+    `key ${SHIFT.toString(16)} down`,
+    "down 1",
+    "move 220,100",
+    "move 220,100",
+    "up 1",
+    `key ${SHIFT.toString(16)} up`
+  ]);
+});

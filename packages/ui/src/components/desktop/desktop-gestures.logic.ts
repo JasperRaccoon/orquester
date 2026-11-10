@@ -15,6 +15,8 @@
  * | pinch (> 15 %)      | local zoom 1–5× around the midpoint, snaps to 1× below 1.05× | same         |
  * | double tap          | double click (the second tap lands on the first's point) | same             |
  *
+ * A pen is a direct pointer (`penMove`, `penButton`) in both modes.
+ *
  * A tap is shorter than 350 ms and stays within 10 CSS px. Latched key-bar
  * modifiers are held around taps, clicks and drags (Shift-tap = Shift-click).
  * Points are viewport CSS px (relative to the view's top-left).
@@ -227,11 +229,44 @@ export class DesktopGestureRecognizer {
 
   /** Drop any gesture in progress, letting go of a held button and keys. */
   cancel(): void {
+    for (const [button, keys] of this.penHeld) {
+      this.host.sink.pointerButton(button, false);
+      this.releaseKeys(keys);
+    }
+    this.penHeld.clear();
     const g = this.gesture;
     if (!g) return;
     this.end(g);
     this.gesture = null;
   }
+
+  // ---- Pen ------------------------------------------------------------------
+
+  /** A pen is a direct pointer: the remote pointer follows its tip (hovering too). */
+  penMove(p: Point): void {
+    const geo = this.host.geometry();
+    if (geo) this.moveTo(this.displayAt(geo, p));
+  }
+
+  /** A pen button (the tip is the left one) at `p`, with the latched modifiers held while it is down. */
+  penButton(button: DesktopPointerButton, down: boolean, p: Point): void {
+    this.penMove(p);
+    if (down) {
+      if (this.penHeld.has(button)) return;
+      const keys = this.host.takeModifiers();
+      for (const k of keys) this.host.sink.key(k, true);
+      this.penHeld.set(button, keys);
+      this.host.sink.pointerButton(button, true);
+      return;
+    }
+    const keys = this.penHeld.get(button);
+    if (!keys) return;
+    this.penHeld.delete(button);
+    this.host.sink.pointerButton(button, false);
+    this.releaseKeys(keys);
+  }
+
+  private readonly penHeld = new Map<DesktopPointerButton, number[]>();
 
   // ---- Zoom -----------------------------------------------------------------
 
