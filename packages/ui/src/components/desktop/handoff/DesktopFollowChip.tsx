@@ -36,8 +36,10 @@ export function DesktopFollowChip({ sessionId }: { sessionId: string }): React.R
   const currentPath = useAppStore((s) => s.currentProject?.path ?? null);
   const activeTabs = useAppStore((s) => s.activeTabByProject);
   const serverView = useAppStore(serverViewOpen);
-  const rings = React.useSyncExternalStore(desktopActionsStore.subscribe, () => desktopActionsStore.getState().rings);
-  React.useSyncExternalStore(subscribeDismissed, () => version);
+  const readRings = () => desktopActionsStore.getState().rings;
+  const rings = React.useSyncExternalStore(desktopActionsStore.subscribe, readRings, readRings);
+  const readVersion = () => version;
+  React.useSyncExternalStore(subscribeDismissed, readVersion, readVersion);
 
   const tabShown = React.useCallback(
     (desktop: FollowChipDesktop) => !serverView && currentPath === desktop.projectPath && activeTabs[desktop.projectPath] === desktop.id,
