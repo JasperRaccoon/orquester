@@ -4,6 +4,7 @@ import { beforeEach,describe,it } from "node:test";
 import {
 messageStreamingContext,
 sessionToolMarkedData,
+type ImageToolReference,
 type MessageStreamingContext,
 type ThreadItem,
 type ThreadMessageItem,
@@ -25,6 +26,7 @@ type TimelineRowsInput,
 type TimelineRowsProjection
 } from "./rows.logic";
 import { EMPTY_HISTORY_ROWS,mergeTimelineRows } from "./history.logic";
+import { workEntryDisplayLabel } from "./presentation.logic";
 import { activity,message,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
@@ -1665,6 +1667,19 @@ describe("images in the chat — the image row (design 2026-11-10 §9)", () => {
     assert.equal(kinds(rows).at(-1), "thinking", JSON.stringify(kinds(rows)));
   });
 
+  it("a generate_image call its turn left running no longer reads as generating", () => {
+    const rows = rowsOf(call("mcp_tool_call", marked("generate_image"), 1, "inProgress"), {
+      latestTurn: { turnId: "t1", state: "interrupted", startedAt: stamp(1), completedAt: stamp(2) },
+      expandedTurnIds: new Set(["t1"])
+    });
+    assert.ok(!kinds(rows).includes("image-pending"), JSON.stringify(kinds(rows)));
+    const row = rows.find((candidate) => candidate.kind === "work");
+    assert.ok(row?.kind === "work", JSON.stringify(kinds(rows)));
+    const entry = row.groupedEntries[0]!;
+    // What the row renders (`ToolEntryRow`): its own label, else its entry's.
+    assert.notEqual(row.displayLabel ?? workEntryDisplayLabel(entry), workEntryDisplayLabel(entry));
+  });
+
   it("a failed generate_image call stays an ordinary tool row", () => {
     const rows = rowsOf(call("mcp_tool_call", marked("generate_image"), 1, "failed"), {
       expandedTurnIds: new Set(["t1"])
@@ -1693,7 +1708,7 @@ describe("images in the chat — the image row (design 2026-11-10 §9)", () => {
   });
 
   it("an image shown again in a later turn keeps both rows through the history and live merge", () => {
-    const shown = (turnId: string, callId: string, ref: typeof imageRef, at: number): ThreadItem =>
+    const shown = (turnId: string, callId: string, ref: ImageToolReference, at: number): ThreadItem =>
       activity(
         "tool.completed",
         {

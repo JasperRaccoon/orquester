@@ -64,6 +64,7 @@ import { agentPromptOf } from "./agent-prompt.logic";
 import { delegateCallOf, mergeDelegateRefs } from "./delegates.logic";
 import { isStreamingMessageTextUpdate, type TimelineEntry } from "./entries.logic";
 import {
+  IMAGE_GENERATION_STOPPED_LABEL,
   omitSupersededLifecycleMarkers,
   singleToolCallLabel,
   summarizeToolGroup,
@@ -1428,7 +1429,9 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
           id: timelineEntry.id,
           createdAt: timelineEntry.createdAt,
           groupedEntries: [entry],
-          isExpandedToolGroup: false
+          isExpandedToolGroup: false,
+          // Its turn is over: no image is coming.
+          displayLabel: IMAGE_GENERATION_STOPPED_LABEL
         });
       }
       continue;
