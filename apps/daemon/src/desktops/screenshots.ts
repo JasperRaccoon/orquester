@@ -2,15 +2,15 @@
 // of each under `desktopScreenshotsDir` (0700) as `<screenshotId>.<png|jpg>` with its facts in
 // `<screenshotId>.json` (0600 both), so a chat row's thumbnail loads (`GET desktopRoutes.screenshot`)
 // and an action naming the screenshot maps its coordinates through the scale and origin it was taken
-// with. A VM desktop's are kept here too: its captures come back over the box link. Everything goes
-// when the desktop closes. Ids are generated here and checked on every read: a request can never
+// with. A VM desktop's are kept here too: its captures come back over the box link. They outlive a
+// stop (the desktop's runtime dir does not) and go when the desktop closes. Ids are generated here and checked on every read: a request can never
 // name a path.
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DESKTOP_SCREENSHOTS_KEPT, type DesktopScreenshotInfo, type DesktopSize } from "@orquester/api";
-import { desktopRuntimeDir, desktopScreenshotsDir } from "@orquester/config";
+import { desktopScreenshotsDir } from "@orquester/config";
 
 type ImageType = DesktopScreenshotInfo["mimeType"];
 
@@ -113,8 +113,6 @@ export class DesktopScreenshotStore {
     if (!DESKTOP_ID.test(desktopId)) return;
     const run = async (): Promise<void> => {
       await rm(desktopScreenshotsDir(this.baseDir, desktopId), { recursive: true, force: true }).catch(() => undefined);
-      // A VM desktop's dir here held only them (this machine's own dir went with the desktop).
-      await rmdir(desktopRuntimeDir(this.baseDir, desktopId)).catch(() => undefined);
     };
     const result = this.writes.then(run, run);
     this.writes = result;

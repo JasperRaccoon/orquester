@@ -115,9 +115,9 @@ export interface DesktopManagerOptions {
   boxes?: DesktopBoxes;
   logger?: Pick<Console, "warn" | "error">;
   now?: () => Date;
-  // Automation (spec 2026-11-10 §2–§3; automation-service.ts). INTEGRATION: index.ts passes the
-  // engine (`automation/engine.ts`) and the image workers' encoder; without them every action is
-  // refused (503 DESKTOP_AUTOMATION_UNAVAILABLE).
+  // Automation (spec 2026-11-10 §2–§3; automation-service.ts). index.ts passes the engine
+  // (`automation/engine.ts`) and the image workers' encoder; without them every action is refused
+  // (503 DESKTOP_AUTOMATION_UNAVAILABLE).
   /** Opens a desktop's automation engine (tests: a fake). */
   openAutomation?: OpenDesktopAutomation;
   /** Encodes a capture as an action's screenshot, in the image workers. */

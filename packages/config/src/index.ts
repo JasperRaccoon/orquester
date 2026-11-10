@@ -389,9 +389,13 @@ export function desktopRuntimeDir(baseDir: string, desktopId: string): string {
   return joinPath(desktopsRuntimeDir(baseDir), desktopId);
 }
 
-/** A desktop's kept automation screenshots (`<id>.<png|jpg>` + `<id>.json`; 0700), on the daemon's host for every desktop. */
+/**
+ * A desktop's kept automation screenshots (`<id>.<png|jpg>` + `<id>.json`; 0700), on the daemon's
+ * host for every desktop. Outside {@link desktopRuntimeDir}, which a stop clears: chat thumbnails
+ * outlive a stop and go only when the desktop closes.
+ */
 export function desktopScreenshotsDir(baseDir: string, desktopId: string): string {
-  return joinPath(desktopRuntimeDir(baseDir, desktopId), "screenshots");
+  return joinPath(daemonConfigDir(baseDir), "desktop-screenshots", desktopId);
 }
 
 export function todosIndexPath(baseDir: string): string {

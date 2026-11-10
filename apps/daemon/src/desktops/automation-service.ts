@@ -37,6 +37,7 @@ import {
   type XButton
 } from "./automation/types.ts";
 import { agentInputControl, requestedControl, sameActor } from "./control.ts";
+import { ImagePoolBusyError } from "../devices/image-pool.ts";
 import { DesktopError } from "./errors.ts";
 import type { DesktopScreenshotStore } from "./screenshots.ts";
 
@@ -55,9 +56,10 @@ export type DesktopScreenshotEncoder = (capture: DesktopCapture, maxSize: number
 
 const UNAVAILABLE = "automation engine unavailable";
 
-// INTEGRATION: the daemon passes the engine's `openDesktopAutomation` (`automation/engine.ts`) and
-// the image workers' screenshot encoder as `DesktopManagerOptions.openAutomation` /
-// `.encodeScreenshot` (index.ts). Until then these defaults refuse every action.
+// The daemon passes the engine's `openDesktopAutomation` (`automation/engine.ts`) and the image
+// workers' `encodeDesktopScreenshot` (`automation/screenshot.ts`) as
+// `DesktopManagerOptions.openAutomation` / `.encodeScreenshot` (index.ts); without them (a manager
+// built for a test that needs no automation) these defaults refuse every action.
 export const automationEngineUnavailable: OpenDesktopAutomation = async () => {
   throw new DesktopError(503, "DESKTOP_AUTOMATION_UNAVAILABLE", UNAVAILABLE);
 };
@@ -561,5 +563,6 @@ function screenshotNotFound(): DesktopError {
 function desktopErrorOf(error: unknown): DesktopError {
   if (error instanceof DesktopError) return error;
   if (error instanceof DesktopAutomationError) return new DesktopError(error.code === "INVALID_ARGUMENT" ? 400 : 409, error.code, error.message);
+  if (error instanceof ImagePoolBusyError) return new DesktopError(503, "DESKTOP_BUSY", "Too many screenshots are being encoded right now; try again shortly.");
   return new DesktopError(500, "DESKTOP_AUTOMATION_FAILED", error instanceof Error ? error.message : String(error));
 }

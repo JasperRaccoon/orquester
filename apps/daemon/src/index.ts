@@ -110,6 +110,8 @@ import {
 import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { DesktopAudioHub } from "./desktops/audio.ts";
+import { openDesktopAutomation } from "./desktops/automation/engine.ts";
+import { encodeDesktopScreenshot } from "./desktops/automation/screenshot.ts";
 import { DesktopHostProbe, resolveTool } from "./desktops/host-status.ts";
 import { desktopQueryTokenAllowed, registerDesktopHttpRoutes } from "./desktops/http-routes.ts";
 import { DesktopManager } from "./desktops/manager.ts";
@@ -1477,7 +1479,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     installHost: () => desktopHost.install(),
     audio: desktopAudio,
     // boxes: desktops of Linux box projects run in their VM.
-    boxes: boxes.desktops
+    boxes: boxes.desktops,
+    // Agents' screenshots, input and waits (spec 2026-11-10 §2).
+    openAutomation: openDesktopAutomation,
+    encodeScreenshot: encodeDesktopScreenshot
   });
   await desktops.load();
   desktops.on("created", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.created", d));

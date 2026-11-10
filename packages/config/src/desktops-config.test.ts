@@ -29,7 +29,7 @@ test("desktop paths live under the daemon dir", () => {
   assert.equal(desktopsIndexPath("/appdir"), "/appdir/daemon/desktops.json");
   assert.equal(desktopsRuntimeDir("/appdir"), "/appdir/daemon/desktops");
   assert.equal(desktopRuntimeDir("/appdir", "abc"), "/appdir/daemon/desktops/abc");
-  assert.equal(desktopScreenshotsDir("/appdir", "abc"), "/appdir/daemon/desktops/abc/screenshots");
+  assert.equal(desktopScreenshotsDir("/appdir", "abc"), "/appdir/daemon/desktop-screenshots/abc");
 });
 
 test("defaults are applied to desktop and app records", () => {
