@@ -54,6 +54,12 @@ test("the protocol block names the outcomes, the outputs and the call to make, a
   assert.match(block, /Do not end your turn to wait on background work/);
 });
 
+test("an outcome label in the protocol block is clipped to 80 characters", () => {
+  const text = stepProtocolBlock({ outcomes: [{ id: "approved", label: "L".repeat(400) }, { id: "changes" }] });
+  const line = text.split("\n").find((candidate) => candidate.startsWith("- `approved`"))!;
+  assert.equal(line, `- \`approved\` (${"L".repeat(79)}…)`);
+});
+
 test("a reported outcome: the output gains outcome, summary and outputs, and the block takes its outcome handle", async () => {
   const { holder, call } = reporting();
   const sc = new Scenario({ accounts: CLAUDE, behaviour: () => [call(), { kind: "say", text: "Done." }] });

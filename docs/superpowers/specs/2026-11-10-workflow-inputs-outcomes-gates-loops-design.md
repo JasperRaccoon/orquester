@@ -135,7 +135,7 @@ How a `workflow` (sub-workflow) block's input relates to the child's declared in
 `agent` config gains two optional fields:
 
 ```ts
-outcomes?: Array<{ id: string; label?: string; description?: string }>;
+outcomes?: Array<{ id: string; label?: string; description?: string }>;   // label ≤ 80 chars
   // id ^[a-z][a-z0-9_]{0,39}$, unique, 2–12 entries
 outputs?: Array<{
   name: string;                // same rules as input names
@@ -206,7 +206,7 @@ New node type `gate` (category `flow`):
   details?: string;          // template, Markdown, ≤ 8 KB rendered
   choices: Array<{
     id: string;              // ^[a-z][a-z0-9_]{0,39}$, unique, 2–8 entries
-    label: string;
+    label: string;           // ≤ 80 chars
     color?: "default" | "primary" | "success" | "warning" | "danger";
     comment?: "none" | "optional" | "required";   // default "none"
   }>;
@@ -284,7 +284,8 @@ for unknown types (`run-context.ts:114`).
   If the run was not started by a chat, or that chat is gone or archived, the gate goes straight to
   the person phase; if the launcher does not decide within `decider.maxMinutes`, it escalates.
 - **Rules for every agent decider:** only the assigned chat may decide; any other in-chat caller gets
-  "Only <decider label> may decide this gate." A comment is required when an agent decides. While an
+  one generic refusal that never names the decider (another project's chat title), the same whether
+  the gate, its block or its run exists. A comment is required when an agent decides. While an
   agent is deciding, the person can still decide first. Escalation sends the push and attention
   entries of §6.4 and records `escalated: true`.
 - If `run_workflow` was called with `wait: true` and a gate opens for the launcher anywhere in the

@@ -711,6 +711,15 @@ describe("agent outcomes and outputs (spec 2026-11-10 §5.1, §7.5)", () => {
     assert.equal(problem!.field, "config.outcomes.1.id");
   });
 
+  it("an outcome's label is at most 80 characters", () => {
+    const at = (label: string) => testWorkflow([manual(), reviewer({ outcomes: [{ id: "a", label }, { id: "b" }] })], [testEdge("t", "Review")]);
+    assert.deepEqual(only(problemsOf(at("x".repeat(80))), "label_too_long"), []);
+    const [problem] = only(problemsOf(at("x".repeat(81))), "label_too_long");
+    assert.equal(problem!.severity, "error");
+    assert.equal(problem!.field, "config.outcomes.0.label");
+    assert.match(problem!.message, /at most 80 characters/);
+  });
+
   it("refuses a malformed outcome id through the schema", () => {
     const wf = testWorkflow([manual()], [], {});
     const raw = { ...wf, nodes: [...wf.nodes, { ...reviewer(), config: { ...reviewer().config, outcomes: [{ id: "Approved" }, { id: "x" }] } }] };

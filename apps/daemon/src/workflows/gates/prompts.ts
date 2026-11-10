@@ -16,10 +16,13 @@ import {
   PROMPT_DATA_TAG_PREFIX,
   promptDataNote,
   redactCredentialText,
+  WORKFLOW_LIMITS,
   type AgentPrompt,
   type GateBlockConfig,
   type WorkflowGateState
 } from "@orquester/api";
+
+import { clipChars } from "./state.ts";
 
 /** Text that renders to itself through the agent prompt's `{{…}}` pass and its `{variables}` pass. */
 export function literal(text: string): string {
@@ -33,8 +36,9 @@ function braces(text: string): string {
 
 const call = (runId: string, gateId: string, rest: string): string => `decide_workflow_gate {"runId": ${JSON.stringify(runId)}, "gateId": ${JSON.stringify(gateId)}, ${rest}}`;
 
+/** The choices as listed to a decider: each label clipped to `labelChars` (an older definition may hold a longer one). */
 function choiceLines(gate: Pick<WorkflowGateState, "choices">): string {
-  return gate.choices.map((choice) => `- \`${choice.id}\`: ${choice.label}`).join("\n");
+  return gate.choices.map((choice) => `- \`${choice.id}\`: ${clipChars(choice.label, WORKFLOW_LIMITS.labelChars).text}`).join("\n");
 }
 
 function minutes(n: number): string {
@@ -131,7 +135,7 @@ export function launcherMessage(
   lines.push(
     "",
     "Choices:",
-    gate.choices.map((choice) => `- \`${choice.id}\`: ${choice.label}`).join("\n"),
+    choiceLines(gate),
     "",
     "Decide (a comment saying why is required):",
     `  ${call(gate.runId, gate.gateId, '"choice": "<id>", "comment": "<why>"')}`,

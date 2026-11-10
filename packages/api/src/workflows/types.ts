@@ -142,6 +142,8 @@ export const WORKFLOW_LIMITS = {
   reportOutputsBytes: 64 * 1024,
   /** A gate's `choices` (§6.1). */
   gateChoices: { min: 2, max: 8 },
+  /** An outcome's or a gate choice's `label`, in characters (prompts clip an older, longer one). */
+  labelChars: 80,
   /** A gate's rendered `question`, in characters. */
   gateQuestionChars: 300,
   /** A gate's rendered `details`, in UTF-8 bytes. */

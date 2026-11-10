@@ -52,6 +52,17 @@ test("the launcher's message is plain text: question, details, choices, the call
   assert.match(text, /within 30 minutes/);
 });
 
+test("a choice label is clipped to 80 characters wherever it reaches a prompt (an older definition may hold a longer one)", () => {
+  const long: WorkflowGateState = { ...gate, choices: [{ id: "approve", label: "A".repeat(500), comment: "none" }, gate.choices[1]!] };
+  const reviewer = reviewerPrompt({ kind: "agent", prompt: { kind: "text", text: "R" }, chain: [] as never, maxMinutes: 60 }, long, "W", 5, "f00d");
+  const launcher = launcherMessage(long, { workflowName: "W", rootRunId: "r-1", maxMinutes: 5 }, "beef");
+  for (const text of [twoPasses(reviewer.kind === "text" ? reviewer.text : ""), launcher]) {
+    const line = text.split("\n").find((candidate) => candidate.startsWith("- `approve`: "))!;
+    assert.equal([...line.slice("- `approve`: ".length)].length, 80);
+    assert.ok(line.endsWith("…"));
+  }
+});
+
 test("the launcher's message frames the run's question and details as untrusted data under a per-message id", () => {
   const hostile: WorkflowGateState = {
     ...gate,
