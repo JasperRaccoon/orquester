@@ -11,13 +11,16 @@
  *   opens its menu (or, on empty canvas, adds a block there); an output is
  *   connected by tapping it, then the block it should feed;
  * - the inspector as a full-height sheet; the add menu as a sheet;
- * - a floating toolbar: Add · Undo · Redo · Fit · Tidy · Run.
+ * - a floating toolbar: Add · Undo · Redo · Fit · Tidy · Run;
+ * - a loop (spec 2026-11-10 §7.4) — its "↺ back to …" row in Steps, its label
+ *   on the canvas — opens its settings in a sheet.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Cable, X } from "lucide-react";
 
 import {
+  isLoopEdge,
   isTriggerType,
   outputHandles,
   workflowHandleLabel,
@@ -28,7 +31,7 @@ import {
 import type { NodeSummaryContext } from "../../../lib/workflows/catalog-ui";
 import type { WorkflowEditor, WorkflowEditorState } from "../../../lib/workflows/editor-store";
 import type { AddMenuRequest } from "../canvas/canvas-context";
-import { connectBlocks } from "../canvas/connection";
+import { classifyConnection, connectBlocks } from "../canvas/connection";
 import { addBlock } from "../canvas/ops";
 import { reduceTapConnect, TAP_CONNECT_IDLE, tapConnectPrompt, type TapConnectEvent, type TapConnectState } from "../canvas/tap-connect";
 import type { EditorMode } from "../EditorToolbar";
@@ -45,6 +48,7 @@ import {
   type OutputRef,
   type StepRow
 } from "../steps/steps-logic";
+import { LoopEdgeSheet } from "../steps/LoopSheet";
 import { StepsView } from "../steps/StepsView";
 import { AddBlockSheet } from "./AddBlockSheet";
 import { PhoneToolbar, PhoneTopBar, PhoneViewSwitch, type PhoneEditorView } from "./PhoneEditorChrome";
@@ -58,6 +62,8 @@ export interface PhoneCanvasHooks {
   onLongPressNode: (nodeId: string) => void;
   onLongPressPane: (request: AddMenuRequest) => void;
   onOpenAddMenu: (request: AddMenuRequest) => void;
+  /** A loop's label on the canvas: its settings sheet. */
+  onOpenEdge: (edgeId: string) => void;
 }
 
 export interface PhoneEditorProps {
@@ -115,6 +121,8 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
   const [picker, setPicker] = useState<Picker | null>(null);
   const [tapConnect, setTapConnect] = useState<TapConnectState>(TAP_CONNECT_IDLE);
   const [toast, setToast] = useState<string | null>(null);
+  /** The loop edge whose settings sheet is open. */
+  const [loopFor, setLoopFor] = useState<string | null>(null);
 
   const nodeOf = useCallback((id: string | null | undefined) => (id ? draft.nodes.find((node) => node.id === id) ?? null : null), [draft.nodes]);
 
@@ -122,7 +130,16 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
   useEffect(() => {
     if (inspectorFor && !nodeOf(inspectorFor)) setInspectorFor(null);
     if (menu && !nodeOf(menu.nodeId)) setMenu(null);
-  }, [inspectorFor, menu, nodeOf]);
+    if (loopFor && !draft.edges.some((edge) => edge.id === loopFor)) setLoopFor(null);
+  }, [inspectorFor, menu, nodeOf, loopFor, draft.edges]);
+
+  /** What a new connection says: "Connected to X", or that it loops back. */
+  const connectedText = (workflow: Workflow, edge: { source: string; sourceHandle: string; target: string }): string => {
+    const verdict = classifyConnection(workflow, edge);
+    const target = workflow.nodes.find((node) => node.id === edge.target);
+    if (verdict.kind === "loop") return `Loops back to ${verdict.targetName} — tap the loop to set its limit`;
+    return target ? `Connected to ${target.name}` : "Connected";
+  };
 
   useEffect(() => {
     if (!toast) return;
@@ -199,7 +216,7 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
   // ---- A step's menu --------------------------------------------------------
 
   const parentOf = (nodeId: string): OutputRef | null => {
-    const edge = draft.edges.find((candidate) => candidate.target === nodeId);
+    const edge = draft.edges.find((candidate) => candidate.target === nodeId && !isLoopEdge(candidate));
     return edge ? { nodeId: edge.source, handle: edge.sourceHandle } : null;
   };
 
@@ -234,9 +251,8 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
       setTapConnect(result.state);
       const edge = result.connect;
       if (edge) {
+        setToast(connectedText(current, edge));
         editor.change((wf) => connectBlocks(wf, edge, editor.mintId));
-        const target = current.nodes.find((node) => node.id === edge.target);
-        setToast(target ? `Connected to ${target.name}` : "Connected");
       }
     },
     [editor, draft]
@@ -264,7 +280,11 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
           request.from
             ? { kind: "after", from: request.from }
             : { kind: "at", request }
-        )
+        ),
+      onOpenEdge: (edgeId) => {
+        if (tapConnect.mode === "picking") return;
+        setLoopFor(edgeId);
+      }
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tapConnect, onTapConnect, editor, draft.edges]
@@ -326,6 +346,7 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
             onAddAfter={(from) => setAddTarget({ kind: "after", from })}
             onAddFirst={(kind) => setAddTarget({ kind: "first", triggers: kind === "trigger" })}
             onStepMenu={openMenu}
+            onOpenLoop={setLoopFor}
             triggerErrors={props.triggerErrors}
           />
         </div>
@@ -501,9 +522,8 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
           if (picker?.kind !== "connect") return;
           const from = picker.from;
           setPicker(null);
+          setToast(connectedText(draft, { source: from.nodeId, sourceHandle: from.handle, target: targetId }));
           editor.change((wf) => connectStep(wf, from, targetId, editor.mintId));
-          const target = nodeOf(targetId);
-          if (target) setToast(`Connected to ${target.name}`);
         }}
       />
       <MoveSheet
@@ -517,6 +537,21 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
           const { nodeId, current } = picker;
           setPicker(null);
           editor.change((wf) => moveStepToOutput(wf, nodeId, current, to, editor.mintId));
+        }}
+      />
+      <LoopEdgeSheet
+        open={loopFor !== null && shown !== "runs"}
+        onClose={() => setLoopFor(null)}
+        workflow={draft}
+        edgeId={loopFor}
+        problems={state.problems}
+        readOnly={readOnly}
+        onChange={(recipe) => editor.change(recipe)}
+        onDelete={() => {
+          const id = loopFor;
+          setLoopFor(null);
+          if (id) editor.change((wf) => ({ ...wf, edges: wf.edges.filter((edge) => edge.id !== id) }));
+          setToast("Loop deleted — Undo brings it back");
         }}
       />
     </div>

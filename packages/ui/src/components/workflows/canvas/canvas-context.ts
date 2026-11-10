@@ -9,7 +9,9 @@ import { createContext, useContext } from "react";
 
 import type { WorkflowNode, WorkflowProblem } from "@orquester/api";
 
+import type { LoopCounter } from "../../../lib/workflows/loops";
 import type { OverlayEdgeState, OverlayNodeState } from "../../../lib/workflows/overlay";
+import type { ConnectionClass, ConnectionRequest } from "./connection";
 
 /** Where an add menu opens and what the new block wires to. */
 export interface AddMenuRequest {
@@ -34,6 +36,10 @@ export interface CanvasActions {
   touch: boolean;
   /** Start tap-to-connect from an output (touch only). */
   startTapConnect: ((from: { nodeId: string; handle: string }) => void) | null;
+  /** Open an edge's settings (a loop's label): selected beside the inspector, or a sheet on a phone. */
+  openEdge: ((edgeId: string) => void) | null;
+  /** While a connection is dragged: what dropping it there makes (an edge, a loop, or why not). */
+  classifyConnection: (request: ConnectionRequest) => ConnectionClass | null;
 }
 
 const NOOP_ACTIONS: CanvasActions = {
@@ -45,7 +51,9 @@ const NOOP_ACTIONS: CanvasActions = {
   setHoveredEdgeId: () => undefined,
   clearHoveredEdge: () => undefined,
   touch: false,
-  startTapConnect: null
+  startTapConnect: null,
+  openEdge: null,
+  classifyConnection: () => null
 };
 
 export const CanvasActionsContext = createContext<CanvasActions>(NOOP_ACTIONS);
@@ -81,6 +89,23 @@ export interface EdgeData extends Record<string, unknown> {
   label: string | null;
   overlay: OverlayEdgeState | null;
   runView: boolean;
+  /** A loop edge (spec 2026-11-10 §7.4): drawn dashed, back over the blocks it runs again, always labelled. */
+  loop?: EdgeLoopData | null;
+  /** The validator's worst problem on this edge. */
+  problem?: { severity: "error" | "warning"; message: string } | null;
+}
+
+export interface EdgeLoopData {
+  /** "↺ changes · max 2", or "↺ changes · 1/2" in a run. */
+  label: string;
+  /** The same in words, for screen readers and the tooltip. */
+  description: string;
+  /** The run's use of it (a run view). */
+  counter: LoopCounter | null;
+  /** Its nesting level: outer loops run above inner ones. */
+  level: number;
+  /** "new chat" when the loop starts new chats (shown beside the label). */
+  newChat: boolean;
 }
 
 /** The invisible hit area of a handle is this wide; edges attach at its centre. */

@@ -151,6 +151,8 @@ function OverlayLine({ overlay }: { overlay: OverlayNodeState }): React.ReactEle
   const Icon = view.icon;
   const bits: string[] = [];
   if (overlay.durationMs !== undefined) bits.push(formatDuration(overlay.durationMs) || "0s");
+  // A loop ran it again (spec 2026-11-10 §7.4): which pass this is.
+  if (overlay.pass !== undefined && (overlay.passCount ?? 1) > 1) bits.push(`pass ${overlay.pass}`);
   if (overlay.attempt > 1) bits.push(`try ${overlay.attempt}`);
   if (overlay.accountLabel) bits.push(overlay.accountLabel);
   if (overlay.hopCount && overlay.hopCount > 1) bits.push(`${overlay.hopCount} hops`);

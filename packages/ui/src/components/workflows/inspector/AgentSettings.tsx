@@ -18,6 +18,7 @@ import { Braces, Maximize2 } from "lucide-react";
 import {
   isPromptVariableName,
   upstreamOf,
+  withoutLoopEdges,
   WORKFLOW_LIMITS,
   WORKFLOW_SECRETS_GUIDE,
   type AgentBlockConfig,
@@ -404,7 +405,8 @@ const ChatSection: React.FC<{ config: AgentBlockConfig }> = ({ config }) => {
   const setConfig = useConfigSetter<AgentBlockConfig>();
   const titleEditor = useRef<TemplateEditorHandle | null>(null);
   const upstreamAgents = useMemo(() => {
-    const upstream = upstreamOf(workflow, node.id);
+    // Chats a loop edge leads back from are not upstream: only the forward graph is.
+    const upstream = upstreamOf(withoutLoopEdges(workflow), node.id);
     return workflow.nodes.filter((candidate) => candidate.type === "agent" && upstream.has(candidate.id));
   }, [workflow, node.id]);
   const session = config.session;

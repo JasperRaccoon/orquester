@@ -7,20 +7,29 @@
  * and the options, the way CodeMirror's completion source wants them
  * (`TemplateEditor` adapts it without importing `@codemirror/autocomplete`).
  * The scope — the blocks upstream of the one being edited, the triggers, the
- * secret names — comes from `completionScopeFor`.
+ * secret names, whether a loop runs it again — comes from `completionScopeFor`.
+ *
+ * `loop.pass` / `loop.feedback` (spec 2026-11-10 §7.2) are offered inside a
+ * loop's body once `loop` is an expression root of this build (until then the
+ * validator would refuse them, so they are not suggested).
  */
 
 import {
   EXPRESSION_FILTERS,
+  EXPRESSION_ROOTS,
+  isLoopEdge,
   isTriggerType,
   PROMPT_VARIABLES,
   upstreamOf,
   WORKFLOW_EXPRESSION_FILTER_GUIDE,
   WORKFLOW_EXPRESSION_ROOT_GUIDE,
+  withoutLoopEdges,
   type ExpressionRoot,
   type Workflow,
   type WorkflowNodeType
 } from "@orquester/api";
+
+import { inLoopBody } from "./loops";
 
 export interface CompletionOption {
   label: string;
@@ -55,6 +64,8 @@ export interface CompletionScope {
   secretNames: readonly string[];
   /** An agent prompt: `{variables}` complete too. */
   promptVariables: boolean;
+  /** A loop runs this block again: the `loop` root (pass, feedback) completes too. */
+  loop?: boolean;
 }
 
 /** What a block's `output` is known to hold (spec §3.2). */
@@ -95,6 +106,25 @@ const ROOTS: { label: ExpressionRoot; detail: string }[] = [
 ];
 
 const SECRET_INFO = pathInfo("secrets.<NAME>");
+
+/** `loop` is an expression root of this build (the daemon reads `{{ loop.* }}`). */
+export const LOOP_ROOT_AVAILABLE = (EXPRESSION_ROOTS as readonly string[]).includes("loop");
+
+const LOOP_ROOT: CompletionOption = {
+  label: "loop",
+  detail: "pass, feedback",
+  info: pathInfo("loop") ?? "The loop running this block again: `loop.pass` and `loop.feedback`.",
+  type: "variable"
+};
+const LOOP_FIELDS: CompletionOption[] = [
+  prop("pass", "1, 2, 3…", pathInfo("loop.pass") ?? "This block's pass in the run: 1 the first time, 2 once a loop ran it again, and so on."),
+  prop(
+    "feedback",
+    "why it loops",
+    pathInfo("loop.feedback") ??
+      "What the loop brought back: the reviewer's report summary, or the gate's choice and comment. Empty on the first pass."
+  )
+];
 
 const RUN_FIELDS = ["id", "startedAt", "workflowId", "workflowName", "attempt"];
 const PROJECT_FIELDS = ["path", "name", "workspace", "branch"];
@@ -149,12 +179,13 @@ function prop(label: string, detail?: string, info?: string): CompletionOption {
 /** Options for the path segment after `parents` (dotted, bracket-free). */
 function pathOptions(parents: string[], scope: CompletionScope): CompletionOption[] {
   if (parents.length === 0) {
-    return ROOTS.map((root) => {
+    const roots = ROOTS.map((root) => {
       const option: CompletionOption = { label: root.label, detail: root.detail, type: "variable" };
       const info = rootInfo(root.label);
       if (info) option.info = info;
       return option;
     });
+    return scope.loop ? [...roots, LOOP_ROOT] : roots;
   }
   const [root, ...rest] = parents;
   switch (root) {
@@ -182,6 +213,8 @@ function pathOptions(parents: string[], scope: CompletionScope): CompletionOptio
       return rest.length === 0 ? PROJECT_FIELDS.map((field) => prop(field)) : [];
     case "workflow":
       return rest.length === 0 ? WORKFLOW_FIELDS.map((field) => prop(field)) : [];
+    case "loop":
+      return scope.loop && rest.length === 0 ? LOOP_FIELDS : [];
     case "secrets":
       if (rest.length > 0) return [];
       return scope.secretNames.map((name) => {
@@ -252,14 +285,15 @@ export function templateCompletions(text: string, pos: number, scope: Completion
 export function completionScopeFor(
   workflow: Pick<Workflow, "nodes" | "edges">,
   nodeId: string,
-  options: { secretNames?: readonly string[]; promptVariables?: boolean } = {}
+  options: { secretNames?: readonly string[]; promptVariables?: boolean; loopRoot?: boolean } = {}
 ): CompletionScope {
-  const upstreamIds = upstreamOf(workflow, nodeId);
+  // What runs before it: the forward graph (a loop edge brings feedback, not outputs).
+  const upstreamIds = upstreamOf(withoutLoopEdges(workflow), nodeId);
   const upstream = workflow.nodes
     .filter((node) => upstreamIds.has(node.id))
     .map((node) => ({ name: node.name, type: node.type }));
   const parents = workflow.edges
-    .filter((edge) => edge.target === nodeId)
+    .filter((edge) => edge.target === nodeId && !isLoopEdge(edge))
     .map((edge) => workflow.nodes.find((node) => node.id === edge.source))
     .filter((node): node is NonNullable<typeof node> => node !== undefined);
   const distinct = [...new Map(parents.map((node) => [node.id, node])).values()];
@@ -269,6 +303,7 @@ export function completionScopeFor(
     triggerTypes: workflow.nodes.filter((node) => isTriggerType(node.type)).map((node) => node.type),
     inputFields,
     secretNames: options.secretNames ?? [],
-    promptVariables: options.promptVariables ?? false
+    promptVariables: options.promptVariables ?? false,
+    loop: (options.loopRoot ?? LOOP_ROOT_AVAILABLE) && inLoopBody(workflow, nodeId)
   };
 }

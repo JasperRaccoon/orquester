@@ -7,6 +7,9 @@
  * "waiting until …"; a sub-workflow's child run; then **Input | Output |
  * Error | Logs** — a JSON tree each ("Load full output" when the run carries
  * only a preview), the live log for code and shell blocks.
+ *
+ * A block a loop ran again (spec 2026-11-10 §7.4) shows its passes as chips;
+ * everything below them is the picked pass (`BlockPasses`).
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
@@ -35,7 +38,9 @@ import {
   skipText,
   waitLine
 } from "../../../lib/workflows/run-view";
+import { blockAtPass, latestPassOf, shownPass } from "../../../lib/workflows/passes";
 import type { WorkflowRunEntry } from "../../../lib/workflows/store";
+import { PassChips, PassNotes } from "./BlockPasses";
 import { JsonTree } from "./JsonTree";
 import { LogViewer } from "./LogViewer";
 import { focusWorkflowSession, type OpenSessionResult } from "./open-run";
@@ -65,6 +70,8 @@ export interface BlockRunDetailsProps {
   onOpenRun?: (runId: string) => void;
   /** The tab to start on (else chosen by the block's state). */
   initialTab?: BlockDetailsTab;
+  /** The pass to show first (a loop ran the block again); else the latest, following new passes. */
+  initialPass?: number;
   className?: string;
 }
 
@@ -96,13 +103,20 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
   onOpenSession = focusWorkflowSession,
   onOpenRun,
   initialTab,
+  initialPass,
   className
 }) => {
   const sheet = variant === "sheet";
   const runId = entry.summary.id;
   const definition = entry.detail?.definition ?? null;
   const node = definition?.nodes.find((candidate) => candidate.id === nodeId);
-  const block = entry.blocks[nodeId];
+  // The latest pass, as the run holds it; `block` below is the pass shown (null: follow the latest).
+  const latest = entry.blocks[nodeId];
+  const [pickedPass, setPickedPass] = useState<number | null>(initialPass ?? null);
+  useEffect(() => setPickedPass(initialPass ?? null), [runId, nodeId, initialPass]);
+  const passShown = shownPass(latest, pickedPass);
+  const block = blockAtPass(latest, pickedPass === null ? null : passShown);
+  const earlierPass = block !== latest;
   const type = node?.type ?? block?.type;
   const name = block?.name || node?.name || nodeId;
   const logs = type === "code" || type === "shell";
@@ -121,9 +135,9 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, nodeId]);
 
-  // A retried block's new attempt has a new output: a loaded whole one is stale.
+  // A retried block's new attempt (or another pass) has another output: a loaded whole one is stale.
   const attempt = block?.attempt ?? 0;
-  useEffect(() => setFull({ status: "idle" }), [attempt]);
+  useEffect(() => setFull({ status: "idle" }), [attempt, passShown]);
 
   const loadFull = useCallback(() => {
     setFull({ status: "loading" });
@@ -176,6 +190,7 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
   const meta: string[] = [];
   if (block?.startedAt) meta.push(`Started ${formatClock(block.startedAt, now)}`);
   if (elapsed !== null) meta.push(formatStepDuration(elapsed));
+  if (latestPassOf(latest) > 1) meta.push(`Pass ${passShown} of ${latestPassOf(latest)}`);
   if (block && block.attempt > 0 && (block.attempt > 1 || (maxTries ?? 1) > 1)) {
     meta.push(maxTries ? `Attempt ${block.attempt} of ${maxTries}` : `Attempt ${block.attempt}`);
   }
@@ -215,6 +230,16 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
           ) : null}
         </div>
       </div>
+
+      <PassChips
+        block={latest}
+        node={node}
+        now={now}
+        selected={passShown}
+        onSelect={(pass) => setPickedPass(pass === latestPassOf(latest) ? null : pass)}
+        sheet={sheet}
+      />
+      <PassNotes block={block} />
 
       {skipReason ? <p className="text-xs text-neutral-500">Did not run · {skipReason}</p> : null}
 
@@ -304,6 +329,9 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
             <Muted>{runOver ? "No input reached this block." : "Nothing has reached this block yet."}</Muted>
           ) : (
             <>
+              {earlierPass ? (
+                <p className="pb-1.5 text-[11px] text-neutral-500">What the latest pass read; an earlier pass's input is not kept.</p>
+              ) : null}
               {input.from.length > 0 ? (
                 <p className="pb-1.5 text-[11px] text-neutral-500">
                   {input.kind === "merge" ? "Merged from " : "From "}
@@ -322,7 +350,7 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
         ) : null}
 
         {activeTab === "output" ? (
-          <OutputPanel block={block} name={name} full={full} onLoadFull={loadFull} sheet={sheet} variant={variant} />
+          <OutputPanel block={block} name={name} full={full} onLoadFull={earlierPass ? null : loadFull} sheet={sheet} variant={variant} />
         ) : null}
 
         {activeTab === "error" && block?.error ? (
@@ -345,7 +373,10 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
         ) : null}
 
         {activeTab === "logs" && logs ? (
-          block && block.attempt > 0 ? (
+          // An earlier pass's log is readable when its attempt number is its own (attempts count on across passes).
+          earlierPass && !(block && latest && block.attempt > 0 && block.attempt < latest.attempt) ? (
+            <Muted>Only the latest pass's log can be shown here.</Muted>
+          ) : block && block.attempt > 0 ? (
             <LogViewer
               key={block.attempt}
               api={api}
@@ -380,7 +411,8 @@ const OutputPanel: React.FC<{
   block: WorkflowBlockRun | undefined;
   name: string;
   full: FullOutput;
-  onLoadFull: () => void;
+  /** Null for an earlier pass: only the latest pass's whole output can be loaded. */
+  onLoadFull: (() => void) | null;
   sheet: boolean;
   variant: RunsVariant;
 }> = ({ block, name, full, onLoadFull, sheet, variant }) => {
@@ -388,10 +420,16 @@ const OutputPanel: React.FC<{
     const live = block && (block.status === "running" || block.status === "waiting" || block.status === "queued");
     return <Muted>{live ? "No output yet — it arrives when the block finishes." : "This block has no output."}</Muted>;
   }
-  const value = full.status === "loaded" ? full.value : block.output;
+  // A whole output loaded for the latest pass never shows on an earlier one.
+  const value = full.status === "loaded" && onLoadFull ? full.value : block.output;
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-      {block.outputTruncated && full.status !== "loaded" ? (
+      {block.outputTruncated && !onLoadFull ? (
+        <p className="rounded-lg border border-neutral-800 bg-neutral-900/60 px-2.5 py-1.5 text-xs text-neutral-400">
+          A preview — the whole output of an earlier pass is not kept.
+        </p>
+      ) : null}
+      {block.outputTruncated && onLoadFull && full.status !== "loaded" ? (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-2.5 py-1.5 text-xs text-neutral-400">
           <span className="min-w-0 flex-1">
             {full.status === "error" ? (

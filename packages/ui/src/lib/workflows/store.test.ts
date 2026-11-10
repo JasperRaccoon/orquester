@@ -395,6 +395,48 @@ describe("events", () => {
     assert.deepEqual(state().summaries.get("a")?.activeRuns, []);
   });
 
+  it("loops: a new pass replaces the last one, edge lists are replaced, loop counters are kept", () => {
+    applyWorkflowsEvent(event("workflow.upserted", { workflow: summary({ id: "a" }) }));
+    const started = run({ id: "r9", workflowId: "a", status: "running" });
+    applyWorkflowsEvent(event("workflowRun.started", { run: started }));
+    applyWorkflowsEvent(
+      event("workflowRun.updated", {
+        run: started,
+        blocks: [block({ nodeId: "fix", status: "succeeded", attempt: 1 }), block({ nodeId: "rev", status: "succeeded", attempt: 1, handle: "false" })],
+        takenEdges: ["t-fix", "fix-rev"],
+        deadEdges: ["rev-dep"]
+      })
+    );
+    // The loop resets Fix and Review as pass 2: pending, no attempt yet — and Review's edges reopen.
+    applyWorkflowsEvent(
+      event("workflowRun.updated", {
+        run: started,
+        blocks: [
+          block({ nodeId: "fix", status: "pending", attempt: 0, pass: 2, passes: [{ pass: 1, status: "succeeded", attempt: 1 }] }),
+          block({ nodeId: "rev", status: "pending", attempt: 0, pass: 2, passes: [{ pass: 1, status: "succeeded", attempt: 1, handle: "false" }] })
+        ],
+        takenEdges: ["t-fix"],
+        deadEdges: [],
+        loopCounters: { "rev-loop-fix": 1, "": 4, bad: -1, odd: "x" },
+        loopLimits: { "rev-loop-fix": 3 }
+      })
+    );
+    const entry = state().runs.r9!;
+    assert.equal(entry.blocks.fix?.status, "pending", "pass 2 replaces pass 1 although its attempt is lower");
+    assert.equal(entry.blocks.fix?.pass, 2);
+    assert.deepEqual(entry.blocks.rev?.passes?.map((pass) => [pass.pass, pass.handle]), [[1, "false"]]);
+    assert.deepEqual(entry.takenEdges, ["t-fix"]);
+    assert.deepEqual(entry.deadEdges, []);
+    assert.deepEqual(entry.loopCounters, { "rev-loop-fix": 1 });
+    assert.deepEqual(entry.loopLimits, { "rev-loop-fix": 3 });
+
+    // A late delta of pass 1 never overwrites pass 2; an update without lists or counters keeps them.
+    applyWorkflowsEvent(event("workflowRun.updated", { run: started, blocks: [block({ nodeId: "fix", status: "succeeded", attempt: 1 })] }));
+    assert.equal(state().runs.r9?.blocks.fix?.pass, 2);
+    assert.deepEqual(state().runs.r9?.takenEdges, ["t-fix"]);
+    assert.deepEqual(state().runs.r9?.loopCounters, { "rev-loop-fix": 1 });
+  });
+
   it("a secrets change marks the scopes it touches stale", async () => {
     const api = new FakeApi();
     await loadWorkflowSecrets(api, null);
@@ -497,6 +539,40 @@ describe("runs", () => {
     await loadWorkflowRun(api, "r3", { force: true });
     assert.equal(state().runs.r3?.stale, false);
     assert.equal(state().runs.r3?.summary.status, "failed");
+  });
+
+  it("a loaded run carries its loop counters and its blocks' earlier passes", async () => {
+    const api = new FakeApi();
+    api.runDetail = {
+      run: {
+        ...run({ id: "r5", workflowId: "a" }),
+        definition: record({ id: "a" }),
+        triggerPayload: null,
+        blocks: {
+          n1: block({
+            nodeId: "n1",
+            pass: 2,
+            sessionNote: "new chat: previous session unavailable (archived)",
+            loopFeedback: "Fix the tests",
+            passes: [{ pass: 1, status: "failed", attempt: 1, error: { kind: "agent_error", message: "x" } }, { status: "succeeded" }, 7] as never
+          })
+        },
+        takenEdges: [],
+        deadEdges: [],
+        loopCounters: { e1: 2 },
+        loopLimits: { e1: 3 }
+      }
+    };
+    await loadWorkflowRun(api, "r5");
+    const entry = state().runs.r5!;
+    assert.deepEqual(entry.loopCounters, { e1: 2 });
+    assert.deepEqual(entry.loopLimits, { e1: 3 });
+    const held = entry.blocks.n1!;
+    assert.equal(held.pass, 2);
+    assert.equal(held.sessionNote, "new chat: previous session unavailable (archived)");
+    assert.equal(held.loopFeedback, "Fix the tests");
+    assert.deepEqual(held.passes, [{ pass: 1, status: "failed", attempt: 1, error: { kind: "agent_error", message: "x" } }], "passes without a number are dropped");
+    assert.equal("loopCounters" in entry.summary, false, "the counters are not summary fields");
   });
 
   it("a list refresh updates the summary of a run held whole", async () => {

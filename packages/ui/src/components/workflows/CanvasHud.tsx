@@ -1,6 +1,7 @@
 /**
  * What floats over the canvas's top-left corner: the workflow's problems (a
- * count that opens the list — each one selects its block) and the keyboard
+ * count that opens the list — each one selects its block, or its connection
+ * when it is about one, e.g. a loop edge) and the keyboard
  * shortcuts. Both are popovers, so the canvas keeps all its width.
  */
 
@@ -36,7 +37,9 @@ export const CanvasHud: React.FC<{
   problems: readonly WorkflowProblem[];
   nodeName: (nodeId: string) => string | undefined;
   onSelectNode: (nodeId: string) => void;
-}> = ({ problems, nodeName, onSelectNode }) => {
+  /** A problem about a connection (a loop edge) selects it, its settings beside the canvas. */
+  onSelectEdge?: (edgeId: string) => void;
+}> = ({ problems, nodeName, onSelectNode, onSelectEdge }) => {
   const [open, setOpen] = useState<"problems" | "keys" | null>(null);
   const problemsRef = useRef<HTMLButtonElement | null>(null);
   const keysRef = useRef<HTMLButtonElement | null>(null);
@@ -104,7 +107,8 @@ export const CanvasHud: React.FC<{
               problems={labelled}
               strip={false}
               onPick={(problem) => {
-                if (problem.nodeId) onSelectNode(problem.nodeId);
+                if (problem.edgeId && onSelectEdge) onSelectEdge(problem.edgeId);
+                else if (problem.nodeId) onSelectNode(problem.nodeId);
                 setOpen(null);
               }}
             />

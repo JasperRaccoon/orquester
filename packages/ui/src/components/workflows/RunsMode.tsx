@@ -74,9 +74,21 @@ function useRunsView(context: WorkflowRunsModeProps) {
   const blocks = entry?.blocks;
   const takenEdges = entry?.takenEdges;
   const deadEdges = entry?.deadEdges;
+  const loopCounters = entry?.loopCounters;
+  const loopLimits = entry?.loopLimits;
   const state = useMemo(
-    () => (status && blocks ? { status, blocks, takenEdges: takenEdges ?? [], deadEdges: deadEdges ?? [] } : null),
-    [status, blocks, takenEdges, deadEdges]
+    () =>
+      status && blocks
+        ? {
+            status,
+            blocks,
+            takenEdges: takenEdges ?? [],
+            deadEdges: deadEdges ?? [],
+            ...(loopCounters ? { loopCounters } : {}),
+            ...(loopLimits ? { loopLimits } : {})
+          }
+        : null,
+    [status, blocks, takenEdges, deadEdges, loopCounters, loopLimits]
   );
   const items = useMemo(() => (state && definition ? runTimeline(state, definition, now) : []), [state, definition, now]);
   const overlay = useMemo(() => (state && definition ? deriveRunOverlay(state, definition, now) : null), [state, definition, now]);
@@ -228,6 +240,8 @@ const PhoneRuns: React.FC<WorkflowRunsModeProps> = (context) => {
   const [pane, setPane] = useState<PhoneRunPane>("timeline");
   const [listOpen, setListOpen] = useState(false);
   const [detailsFor, setDetailsFor] = useState<string | null>(null);
+  /** The pass a timeline pass chip opened the step on (null: the latest). */
+  const [detailsPass, setDetailsPass] = useState<number | null>(null);
   const scroller = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     setDetailsFor(null);
@@ -242,8 +256,9 @@ const PhoneRuns: React.FC<WorkflowRunsModeProps> = (context) => {
     }
   }, [context.show]);
 
-  const openStep = (nodeId: string): void => {
+  const openStep = (nodeId: string, pass?: number): void => {
     view.setPicked(nodeId);
+    setDetailsPass(pass ?? null);
     setDetailsFor(nodeId);
   };
 
@@ -386,6 +401,7 @@ const PhoneRuns: React.FC<WorkflowRunsModeProps> = (context) => {
             nodeId={detailsFor}
             now={now}
             variant="sheet"
+            {...(detailsPass !== null ? { initialPass: detailsPass } : {})}
             onOpenSession={openSession}
             onOpenRun={(id) => {
               setDetailsFor(null);

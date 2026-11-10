@@ -52,6 +52,7 @@ import { isTriggerType, workflowSummaryErrors } from "@orquester/api";
 import {
   isRecord,
   sanitizeBlocks,
+  sanitizeEdgeCounts,
   sanitizeEdgeIds,
   sanitizeRunList,
   sanitizeRunSummary,
@@ -124,6 +125,9 @@ export interface WorkflowRunEntry {
   blocks: Readonly<Record<string, WorkflowBlockRun>>;
   takenEdges: readonly string[];
   deadEdges: readonly string[];
+  /** How often each loop edge was taken, and limits raised for this run (spec 2026-11-10 §7.2); absent = none. */
+  loopCounters?: Readonly<Record<string, number>>;
+  loopLimits?: Readonly<Record<string, number>>;
   /** The last load of the whole run failed. */
   error: string | null;
   /** The event stream was down since it was loaded (a reconnect): reload it when on screen. */
@@ -266,11 +270,14 @@ const BLOCK_RANK: Record<WorkflowBlockStatus, number> = {
 };
 
 /**
- * `incoming` replaces `current` unless it is behind it: an earlier attempt, or
- * the same attempt at an earlier stage (a loaded run that predates a delta).
+ * `incoming` replaces `current` unless it is behind it: an earlier pass (a
+ * loop ran the block again, spec 2026-11-10 §7.2), an earlier attempt, or the
+ * same attempt at an earlier stage (a loaded run that predates a delta).
  */
 function mergeBlock(current: WorkflowBlockRun | undefined, incoming: WorkflowBlockRun): WorkflowBlockRun {
   if (current === undefined) return incoming;
+  const pass = (block: WorkflowBlockRun): number => block.pass ?? 1;
+  if (pass(incoming) !== pass(current)) return pass(incoming) > pass(current) ? incoming : current;
   if (incoming.attempt !== current.attempt) return incoming.attempt > current.attempt ? incoming : current;
   return BLOCK_RANK[incoming.status] >= BLOCK_RANK[current.status] ? incoming : current;
 }
@@ -282,6 +289,19 @@ function mergeBlocks(
   const next: Record<string, WorkflowBlockRun> = { ...current };
   for (const [nodeId, block] of Object.entries(incoming)) next[nodeId] = mergeBlock(current[nodeId], block);
   return next;
+}
+
+/** A payload's loop counters and limits (whole maps when present), else the entry's. */
+function loopCountsOf(
+  payload: { loopCounters?: unknown; loopLimits?: unknown },
+  entry: Pick<WorkflowRunEntry, "loopCounters" | "loopLimits">
+): Pick<WorkflowRunEntry, "loopCounters" | "loopLimits"> {
+  const out: Pick<WorkflowRunEntry, "loopCounters" | "loopLimits"> = {};
+  const loopCounters = sanitizeEdgeCounts(payload.loopCounters) ?? entry.loopCounters;
+  if (loopCounters !== undefined) out.loopCounters = loopCounters;
+  const loopLimits = sanitizeEdgeCounts(payload.loopLimits) ?? entry.loopLimits;
+  if (loopLimits !== undefined) out.loopLimits = loopLimits;
+  return out;
 }
 
 function union(current: readonly string[], incoming: readonly string[]): string[] {
@@ -438,8 +458,10 @@ export function applyWorkflowsEvent(event: { type: string; payload: unknown }): 
           [run.id]: {
             ...entry,
             blocks: mergeBlocks(entry.blocks, sanitizeBlocks(payload.blocks)),
-            takenEdges: union(entry.takenEdges, sanitizeEdgeIds(payload.takenEdges)),
-            deadEdges: union(entry.deadEdges, sanitizeEdgeIds(payload.deadEdges))
+            // The daemon sends the whole lists when they change; a loop can reopen edges, so they replace.
+            takenEdges: Array.isArray(payload.takenEdges) ? sanitizeEdgeIds(payload.takenEdges) : entry.takenEdges,
+            deadEdges: Array.isArray(payload.deadEdges) ? sanitizeEdgeIds(payload.deadEdges) : entry.deadEdges,
+            ...loopCountsOf(payload, entry)
           }
         }
       });
@@ -631,7 +653,7 @@ export function loadWorkflowRun(api: WorkflowsApi, runId: string, options?: { fo
       const run = isRecord(response) ? sanitizeWorkflowRun(response.run) : null;
       if (run === null) throw new Error("The daemon answered the run in an unexpected shape.");
       if (tombstones.has(run.workflowId)) return;
-      const { definition: _d, triggerPayload: _t, blocks, takenEdges, deadEdges, finalOutput: _f, ...summaryFields } = run;
+      const { definition: _d, triggerPayload: _t, blocks, takenEdges, deadEdges, finalOutput: _f, loopCounters: _lc, loopLimits: _ll, ...summaryFields } = run;
       applyRunSummary(summaryFields);
       const state = getState();
       const entry = state.runs[runId];
@@ -646,6 +668,7 @@ export function loadWorkflowRun(api: WorkflowsApi, runId: string, options?: { fo
             blocks: mergeBlocks(blocks, entry.blocks),
             takenEdges: union(takenEdges, entry.takenEdges),
             deadEdges: union(deadEdges, entry.deadEdges),
+            ...loopCountsOf(run, entry),
             error: null,
             stale: false
           }

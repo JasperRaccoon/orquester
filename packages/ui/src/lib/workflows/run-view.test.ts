@@ -182,6 +182,37 @@ describe("the timeline", () => {
     assert.deepEqual(input.value, { A: 1, B: 2 });
     assert.equal(input.truncated, true);
   });
+
+  it("a loop edge is neither order, outline nor input (spec 2026-11-10 §7.1)", () => {
+    // Start → Fix → Check(if) ─true→ Done; false loops back to Fix.
+    const wf = {
+      nodes: [node("Start", "trigger.manual"), node("Fix", "agent"), node("Check", "if"), node("Done", "code")],
+      edges: [
+        edge("Start", "Fix"),
+        edge("Fix", "Check"),
+        edge("Check", "Done", "true"),
+        { ...edge("Check", "Fix", "false"), loop: { maxLoops: 2, session: "continue" as const } }
+      ]
+    };
+    const blocks = {
+      Start: block("Start", { output: { kind: "manual", input: {} } }),
+      Fix: block("Fix", { status: "running", pass: 2 }),
+      Check: block("Check", { status: "pending", pass: 2, passes: [{ pass: 1, status: "succeeded", attempt: 1, handle: "false", output: false }] })
+    };
+    const items = runTimeline({ status: "running", blocks }, wf, NOW);
+    assert.deepEqual(
+      items.map((item) => [item.kind, item.nodeId, item.step]),
+      [
+        ["step", "Start", 1],
+        ["step", "Fix", 2],
+        ["step", "Check", 3],
+        ["step", "Done", 4]
+      ],
+      "a topological order exists and no 'continues at Fix' row"
+    );
+    const input = blockInput({ blocks: { ...blocks, Check: block("Check", { handle: "false", output: "feedback" }) } }, wf, "Fix");
+    assert.deepEqual(input.from.map((source) => source.name), ["Start"], "the loop's source is no input of its target");
+  });
 });
 
 describe("actions", () => {

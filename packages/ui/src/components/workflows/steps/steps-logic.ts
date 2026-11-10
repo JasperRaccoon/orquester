@@ -7,6 +7,11 @@
  * output to a block, move a block to another output, delete a block and heal
  * the chain around it, duplicate a block right after itself, disable it.
  *
+ * Loop edges (spec 2026-11-10 §7.1) are never rows: the outline is the
+ * forward graph, and each loop is a "↺ back to …" line of its source's row,
+ * with its settings. Connecting an output to a block that runs before it
+ * makes a loop; moving, deleting and duplicating leave loops where they are.
+ *
  * A whole workflow is buildable from these alone, without the canvas.
  */
 
@@ -14,13 +19,16 @@ import {
   acceptsInput,
   buildStepOutline,
   downstreamOf,
+  isLoopEdge,
   isTriggerType,
   LAYOUT_NODE_WIDTH,
   LAYOUT_RANK_SEP,
   outputHandles,
   placeNewNodes,
+  withoutLoopEdges,
   workflowHandleLabel,
   type Workflow,
+  type WorkflowEdgeLoop,
   type WorkflowNode,
   type WorkflowNodeType,
   type WorkflowProblem
@@ -28,8 +36,9 @@ import {
 
 import { blockAgent } from "../../../lib/workflows/catalog-ui";
 import { duplicateWorkflowNodes } from "../../../lib/workflows/clipboard";
+import { loopRowText } from "../../../lib/workflows/loops";
 import { displayOutline } from "../../../lib/workflows/outline-display";
-import { connectBlocks, connectionRefusal } from "../canvas/connection";
+import { classifyConnection, connectBlocks } from "../canvas/connection";
 import { addBlock, GRID, removeElements } from "../canvas/ops";
 
 type Graph = Pick<Workflow, "nodes" | "edges"> & { pinned?: Workflow["pinned"] };
@@ -45,6 +54,23 @@ export interface StepOutput {
   connected: boolean;
   /** The names of the blocks it leads to. */
   targets: string[];
+  /** It loops back (it carries nothing else, so it offers no "+"). */
+  loop: boolean;
+}
+
+/** A loop edge leaving a step: its row under the step. */
+export interface StepLoop {
+  edgeId: string;
+  handle: string;
+  /** The output's label, when the step has several ("changes", "false"). */
+  handleLabel: string | null;
+  targetId: string;
+  targetName: string;
+  loop: WorkflowEdgeLoop;
+  /** "↺ back to Fix (max 2, same chat)". */
+  text: string;
+  /** The validator's words about this loop edge, errors first. */
+  problem: { severity: "error" | "warning"; message: string } | null;
 }
 
 export interface StepRow {
@@ -76,6 +102,8 @@ export interface StepRow {
   /** The first problem, errors first. */
   firstProblem: string | null;
   outputs: StepOutput[];
+  /** Its loop edges, in output order. */
+  loops: StepLoop[];
   /** The first unreachable row (the "Not connected to a trigger" heading goes above it). */
   firstUnreachable: boolean;
 }
@@ -104,7 +132,12 @@ export function deriveSteps(
   const byId = new Map(workflow.nodes.map((node) => [node.id, node]));
   const connected = new Set(workflow.edges.map((edge) => `${edge.source}\u0000${edge.sourceHandle}`));
   const problemsOf = new Map<string, WorkflowProblem[]>();
+  const edgeProblems = new Map<string, WorkflowProblem>();
   for (const problem of problems) {
+    if (problem.edgeId && problem.severity !== "info") {
+      const held = edgeProblems.get(problem.edgeId);
+      if (!held || (held.severity !== "error" && problem.severity === "error")) edgeProblems.set(problem.edgeId, problem);
+    }
     if (!problem.nodeId || problem.severity === "info") continue;
     const list = problemsOf.get(problem.nodeId) ?? [];
     list.push(problem);
@@ -153,22 +186,45 @@ export function deriveSteps(
       warnings: warnings.length,
       firstProblem: first ? first.message.replace(/^[A-Za-z][A-Za-z0-9_]*: /, "") : null,
       outputs: outputHandles(node).map((handle) => {
-        const targets = workflow.edges
-          .filter((edge) => edge.source === node.id && edge.sourceHandle === handle)
-          .map((edge) => byId.get(edge.target)?.name ?? edge.target);
+        const leaving = workflow.edges.filter((edge) => edge.source === node.id && edge.sourceHandle === handle);
         return {
           handle,
           label: workflowHandleLabel(node, handle),
           tone: outputTone(handle),
           connected: connected.has(`${node.id}\u0000${handle}`),
-          targets
+          targets: leaving.filter((edge) => !isLoopEdge(edge)).map((edge) => byId.get(edge.target)?.name ?? edge.target),
+          loop: leaving.some(isLoopEdge)
         };
       }),
+      loops: item.kind === "node" ? stepLoops(workflow, node, edgeProblems) : [],
       firstUnreachable
     });
   }
   const blocks = workflow.nodes.filter((node) => node.type !== "note");
   return { rows, hasTrigger: blocks.some((node) => isTriggerType(node.type)), blockCount: blocks.length };
+}
+
+/** The loop edges leaving `node`, in its outputs' order. */
+function stepLoops(workflow: Graph, node: WorkflowNode, problems: ReadonlyMap<string, WorkflowProblem>): StepLoop[] {
+  const handles = outputHandles(node);
+  const several = handles.length > 1;
+  return workflow.edges
+    .filter((edge) => edge.source === node.id && edge.loop)
+    .sort((a, b) => handles.indexOf(a.sourceHandle) - handles.indexOf(b.sourceHandle))
+    .map((edge) => {
+      const targetName = workflow.nodes.find((candidate) => candidate.id === edge.target)?.name ?? edge.target;
+      const problem = problems.get(edge.id);
+      return {
+        edgeId: edge.id,
+        handle: edge.sourceHandle,
+        handleLabel: several ? workflowHandleLabel(node, edge.sourceHandle) : null,
+        targetId: edge.target,
+        targetName,
+        loop: edge.loop!,
+        text: loopRowText(targetName, edge.loop!),
+        problem: problem ? { severity: problem.severity === "error" ? "error" : "warning", message: problem.message } : null
+      };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +241,7 @@ const snap = (value: number): number => Math.round(value / GRID) * GRID;
 
 /** Blocks at or right of `x` downstream of `nodeId` move one column right (room for a spliced block). */
 function shiftDownstream<W extends Graph>(workflow: W, nodeId: string, x: number): W {
-  const after = downstreamOf(workflow, nodeId);
+  const after = downstreamOf(withoutLoopEdges(workflow), nodeId);
   if (after.size === 0) return workflow;
   return {
     ...workflow,
@@ -197,7 +253,7 @@ function shiftDownstream<W extends Graph>(workflow: W, nodeId: string, x: number
 
 /** Put a freshly added block beside what it connects to (`placeNewNodes`), clear of the others. */
 function place<W extends Graph>(workflow: W, nodeId: string): W {
-  const at = placeNewNodes(workflow, [nodeId])[nodeId];
+  const at = placeNewNodes(withoutLoopEdges(workflow), [nodeId])[nodeId];
   if (!at) return workflow;
   return { ...workflow, nodes: workflow.nodes.map((node) => (node.id === nodeId ? { ...node, position: { x: snap(at.x), y: snap(at.y) } } : node)) };
 }
@@ -252,20 +308,26 @@ export interface ConnectCandidate {
   agent?: string;
   /** Why it cannot be connected, or null. */
   refusal: string | null;
+  /** It runs before the output: connecting makes a loop back to it. */
+  loop: boolean;
 }
 
 /** Every block an output could connect to, connectable ones first (in outline order), with why not. */
 export function connectCandidates(workflow: Graph, from: OutputRef): ConnectCandidate[] {
-  const order = new Map(buildStepOutline(workflow).map((item, index) => [item.nodeId, index]));
+  const order = new Map(buildStepOutline(withoutLoopEdges(workflow)).map((item, index) => [item.nodeId, index]));
   return workflow.nodes
     .filter((node) => node.id !== from.nodeId && node.type !== "note" && acceptsInput(node))
-    .map((node) => ({
-      nodeId: node.id,
-      name: node.name,
-      type: node.type,
-      agent: blockAgent(node),
-      refusal: connectionRefusal(workflow, { source: from.nodeId, sourceHandle: from.handle, target: node.id })
-    }))
+    .map((node) => {
+      const verdict = classifyConnection(workflow, { source: from.nodeId, sourceHandle: from.handle, target: node.id });
+      return {
+        nodeId: node.id,
+        name: node.name,
+        type: node.type,
+        agent: blockAgent(node),
+        refusal: verdict.kind === "refused" ? verdict.reason : null,
+        loop: verdict.kind === "loop"
+      };
+    })
     .sort(
       (a, b) =>
         Number(a.refusal !== null) - Number(b.refusal !== null) ||
@@ -297,8 +359,9 @@ export interface MoveCandidate extends OutputRef {
 export function moveCandidates(workflow: Graph, nodeId: string, current: OutputRef | null): MoveCandidate[] {
   const node = workflow.nodes.find((candidate) => candidate.id === nodeId);
   if (!node || !acceptsInput(node)) return [];
-  const below = downstreamOf(workflow, nodeId);
-  const order = new Map(buildStepOutline(workflow).map((item, index) => [item.nodeId, index]));
+  const forward = withoutLoopEdges(workflow);
+  const below = downstreamOf(forward, nodeId);
+  const order = new Map(buildStepOutline(forward).map((item, index) => [item.nodeId, index]));
   const out: MoveCandidate[] = [];
   const sources = [...workflow.nodes]
     .filter((source) => source.id !== nodeId && source.type !== "note")
@@ -306,7 +369,9 @@ export function moveCandidates(workflow: Graph, nodeId: string, current: OutputR
   for (const source of sources) {
     for (const handle of outputHandles(source)) {
       const isCurrent = current !== null && current.nodeId === source.id && current.handle === handle;
-      const already = workflow.edges.some((edge) => edge.source === source.id && edge.sourceHandle === handle && edge.target === nodeId);
+      const leaving = workflow.edges.filter((edge) => edge.source === source.id && edge.sourceHandle === handle);
+      const already = leaving.some((edge) => edge.target === nodeId);
+      const looping = leaving.find(isLoopEdge);
       out.push({
         nodeId: source.id,
         handle,
@@ -322,7 +387,9 @@ export function moveCandidates(workflow: Graph, nodeId: string, current: OutputR
             ? "That would make a loop — workflows run in one direction."
             : already
               ? "Already connected there."
-              : null
+              : looping
+                ? `It loops back to ${workflow.nodes.find((candidate) => candidate.id === looping.target)?.name ?? looping.target}.`
+                : null
       });
     }
   }
@@ -341,12 +408,15 @@ export function moveStepToOutput<W extends Graph>(
   mintId: () => string
 ): W {
   if (current && current.nodeId === to.nodeId && current.handle === to.handle) return workflow;
+  // The edge it hangs from — never a loop edge back into it, which stays.
   const dropped = workflow.edges.filter(
     (edge) =>
-      edge.target === nodeId && (current === null || (edge.source === current.nodeId && edge.sourceHandle === current.handle))
+      edge.target === nodeId &&
+      !isLoopEdge(edge) &&
+      (current === null || (edge.source === current.nodeId && edge.sourceHandle === current.handle))
   );
   const without: W = { ...workflow, edges: workflow.edges.filter((edge) => !dropped.includes(edge)) };
-  const next = connectBlocks(without, { source: to.nodeId, sourceHandle: to.handle, target: nodeId }, mintId);
+  const next = connectBlocks(without, { source: to.nodeId, sourceHandle: to.handle, target: nodeId }, mintId, { loops: false });
   return next === without ? workflow : next;
 }
 
@@ -358,9 +428,12 @@ export function moveStepToOutput<W extends Graph>(
 export function deleteStep<W extends Graph>(workflow: W, nodeId: string, mintId: () => string): W {
   const node = workflow.nodes.find((candidate) => candidate.id === nodeId);
   if (!node) return workflow;
-  const into = workflow.edges.filter((edge) => edge.target === nodeId);
+  // Loop edges into or out of it go with it; the chain heals over ordinary edges only.
+  const into = workflow.edges.filter((edge) => edge.target === nodeId && !isLoopEdge(edge));
   const primary = outputHandles(node)[0];
-  const onwards = primary ? workflow.edges.filter((edge) => edge.source === nodeId && edge.sourceHandle === primary) : [];
+  const onwards = primary
+    ? workflow.edges.filter((edge) => edge.source === nodeId && edge.sourceHandle === primary && !isLoopEdge(edge))
+    : [];
   let next = removeElements(workflow, [nodeId], []);
   if (into.length === 1) {
     const from = into[0]!;
@@ -385,7 +458,8 @@ export function duplicateStepAfter<W extends Graph>(workflow: W, nodeId: string,
   let next = copy.workflow;
   const primary = outputHandles(node)[0];
   if (primary && acceptsInput(node)) {
-    const onwards = next.edges.filter((edge) => edge.source === nodeId && edge.sourceHandle === primary);
+    // A loop edge stays on the original: the copy takes over its ordinary edges only.
+    const onwards = next.edges.filter((edge) => edge.source === nodeId && edge.sourceHandle === primary && !isLoopEdge(edge));
     const copyOut = primary;
     // Shift what follows BEFORE the edges go: with them gone nothing is downstream any more.
     next = shiftDownstream(next, nodeId, node.position.x + STEP_X);
@@ -393,7 +467,7 @@ export function duplicateStepAfter<W extends Graph>(workflow: W, nodeId: string,
     next = connectBlocks(next, { source: nodeId, sourceHandle: primary, target: copyId }, mintId);
     for (const edge of onwards) next = connectBlocks(next, { source: copyId, sourceHandle: copyOut, target: edge.target }, mintId);
   } else {
-    for (const edge of workflow.edges.filter((candidate) => candidate.target === nodeId)) {
+    for (const edge of workflow.edges.filter((candidate) => candidate.target === nodeId && !isLoopEdge(candidate))) {
       next = connectBlocks(next, { source: edge.source, sourceHandle: edge.sourceHandle, target: copyId }, mintId);
     }
   }

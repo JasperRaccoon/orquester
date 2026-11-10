@@ -9,10 +9,14 @@
  * Tap a card to open its settings; "+" on any output adds a block there and
  * connects it (splicing into a chain); ⋯ — or a long press — opens the step's
  * menu. A whole workflow can be built from here alone.
+ *
+ * A loop edge (spec 2026-11-10 §7.4) is a "↺ back to Fix (max 2, same chat)"
+ * row at the foot of its source's card; tapping it opens the loop's settings.
+ * Its output offers no "+": an output with a loop leads nowhere else.
  */
 
 import React, { useMemo } from "react";
-import { AlertCircle, AlertTriangle, CornerDownRight, MoreHorizontal, Plus, Unplug, Zap } from "lucide-react";
+import { AlertCircle, AlertTriangle, CornerDownRight, IterationCcw, MoreHorizontal, Plus, Settings2, Unplug, Zap } from "lucide-react";
 
 import type { Workflow, WorkflowProblem } from "@orquester/api";
 
@@ -33,6 +37,8 @@ export interface StepsViewProps {
   /** The empty workflow's "Add a trigger" / "Add the first step". */
   onAddFirst: (kind: "trigger" | "step") => void;
   onStepMenu: (row: StepRow) => void;
+  /** A loop row was tapped: open that loop edge's settings. */
+  onOpenLoop?: (edgeId: string) => void;
   /** Triggers whose last poll failed, by node id (`triggerErrorsOf`). */
   triggerErrors?: ReadonlyMap<string, string>;
   className?: string;
@@ -81,6 +87,7 @@ export const StepsView: React.FC<StepsViewProps> = ({
   onAddAfter,
   onAddFirst,
   onStepMenu,
+  onOpenLoop,
   triggerErrors,
   className
 }) => {
@@ -143,6 +150,7 @@ export const StepsView: React.FC<StepsViewProps> = ({
               onOpen={onOpenStep}
               onAddAfter={onAddAfter}
               onMenu={onStepMenu}
+              onOpenLoop={onOpenLoop}
               triggerError={triggerErrors?.get(row.nodeId) ?? null}
             />
           )}
@@ -205,9 +213,12 @@ const StepCard: React.FC<{
   onOpen: (nodeId: string) => void;
   onAddAfter: (from: OutputRef) => void;
   onMenu: (row: StepRow) => void;
+  onOpenLoop?: (edgeId: string) => void;
   triggerError?: string | null;
-}> = ({ row, continues, selected, readOnly, onOpen, onAddAfter, onMenu, triggerError = null }) => {
+}> = ({ row, continues, selected, readOnly, onOpen, onAddAfter, onMenu, onOpenLoop, triggerError = null }) => {
   const press = useLongPress(() => onMenu(row));
+  // An output with a loop carries nothing else: no "+" for it.
+  const addable = row.outputs.filter((output) => !output.loop);
   const onlyOne = row.outputs.length === 1;
   const chip = (output: StepRow["outputs"][number]): React.ReactNode => {
     const { text, leadsTo } = outputChipLabel(output, onlyOne);
@@ -305,9 +316,9 @@ const StepCard: React.FC<{
             <MoreHorizontal size={18} />
           </button>
         </div>
-        {!readOnly && row.outputs.length > 0 ? (
+        {!readOnly && addable.length > 0 ? (
           <div className="flex flex-wrap gap-1.5 px-3 pb-3">
-            {row.outputs.map((output) => (
+            {addable.map((output) => (
               <button
                 key={output.handle}
                 type="button"
@@ -329,10 +340,60 @@ const StepCard: React.FC<{
             ))}
           </div>
         ) : null}
+        {row.loops.length > 0 ? <LoopRows loops={row.loops} onOpen={onOpenLoop} readOnly={readOnly} /> : null}
       </div>
     </li>
   );
 };
+
+/** The loops leaving a step: one row each, opening its settings. */
+const LoopRows: React.FC<{ loops: StepRow["loops"]; onOpen?: (edgeId: string) => void; readOnly: boolean }> = ({ loops, onOpen, readOnly }) => (
+  <ul aria-label="Loops" className="space-y-1.5 px-3 pb-3">
+    {loops.map((loop) => {
+      const problem = loop.problem;
+      const words = `${loop.handleLabel ? `On ${loop.handleLabel}: ` : ""}${loop.text.replace(/^↺ /, "loops ")}`;
+      return (
+        <li key={loop.edgeId}>
+          <button
+            type="button"
+            disabled={!onOpen}
+            aria-label={`${words}${problem ? `. ${problem.message}` : ""} — ${readOnly ? "show" : "edit"} the loop`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen?.(loop.edgeId);
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            className={cn(
+              "flex min-h-10 w-full items-center gap-2 rounded-xl border border-dashed px-3 py-2 text-left text-[13px] transition-colors",
+              "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500 active:bg-neutral-800 disabled:pointer-events-none",
+              problem?.severity === "error"
+                ? "border-danger/50 bg-danger-soft/10 text-danger"
+                : problem
+                  ? "border-warn/50 bg-warn-soft/10 text-warn"
+                  : "border-info/40 bg-info/5 text-info hover:border-info/60"
+            )}
+          >
+            <IterationCcw size={15} aria-hidden className="shrink-0" />
+            <span className="min-w-0 flex-1">
+              {loop.handleLabel ? <span className="mr-1.5 font-medium text-neutral-300">{loop.handleLabel}</span> : null}
+              <span className="font-medium">{loop.text.replace(/^↺ /, "")}</span>
+              {problem ? <span className="mt-0.5 block text-[12px] leading-4">{problem.message}</span> : null}
+            </span>
+            {problem ? (
+              problem.severity === "error" ? (
+                <AlertCircle size={15} aria-hidden className="shrink-0" />
+              ) : (
+                <AlertTriangle size={15} aria-hidden className="shrink-0" />
+              )
+            ) : (
+              <Settings2 size={15} aria-hidden className="shrink-0 text-neutral-500" />
+            )}
+          </button>
+        </li>
+      );
+    })}
+  </ul>
+);
 
 const JoinRef: React.FC<{ row: StepRow; onOpen: (nodeId: string) => void }> = ({ row, onOpen }) => (
   <li className="relative" style={{ paddingLeft: row.depth * INDENT }}>
