@@ -1,17 +1,32 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { describe, it } from "node:test";
 
-import type { WorkflowNode } from "@orquester/api";
+import { nodeSummary, PALETTE_GROUPS } from "./catalog-ui.ts";
+import { node } from "./testing.ts";
 
-import { nodeSummary } from "./catalog-ui.ts";
+describe("the gate block in the editor (spec 2026-11-10 §6.1)", () => {
+  it("is in the palette's Flow group", () => {
+    assert.ok(PALETTE_GROUPS.find((group) => group.id === "flow")?.types.includes("gate"));
+  });
 
-const testNode = (id: string, type: "trigger.manual", config: Record<string, unknown> = {}): WorkflowNode =>
-  ({ id, name: "Manual", type, position: { x: 0, y: 0 }, config }) as WorkflowNode;
+  it("its line: the question, else its choices; who decides when it is not the user", () => {
+    assert.equal(nodeSummary(node("Gate", "gate")), "Approve / Reject");
+    assert.equal(nodeSummary(node("Gate", "gate", { question: "  Deploy\n {{ nodes.Build.output.version }}?" })), "Deploy {{ nodes.Build.output.version }}?");
+    const agent = node("Gate", "gate", {
+      decider: { kind: "agent", prompt: { kind: "text", text: "" }, chain: [{ agent: "claude", model: "default", accounts: { strategy: "least-used" } }], maxMinutes: 60 }
+    });
+    assert.equal(nodeSummary(agent, { agentLabel: () => "Claude Code" }), "Claude Code decides · Approve / Reject");
+    assert.equal(nodeSummary(node("Gate", "gate", { decider: { kind: "launcher", maxMinutes: 60 }, question: "Ship?" })), "The launching chat decides · Ship?");
+    assert.equal(nodeSummary(node("Gate", "gate", { choices: [] })), "No choices yet");
+  });
+});
 
-test("a manual trigger's line names its typed inputs, else says whether it has an example", () => {
-  assert.equal(nodeSummary(testNode("t", "trigger.manual")), "Run now");
-  assert.equal(nodeSummary(testNode("t", "trigger.manual", { inputExample: "{}" })), "Run now · with input");
-  assert.equal(nodeSummary(testNode("t", "trigger.manual", { inputs: [{ name: "env", type: "string" }] })), "Run now · 1 input: env");
-  const four = ["a", "b", "c", "d"].map((name) => ({ name, type: "string" }));
-  assert.equal(nodeSummary(testNode("t", "trigger.manual", { inputs: four, inputExample: "{}" })), "Run now · 4 inputs: a, b, c, …");
+describe("the manual trigger in the editor (spec 2026-11-10 §4)", () => {
+  it("a manual trigger's line names its typed inputs, else says whether it has an example", () => {
+    assert.equal(nodeSummary(node("t", "trigger.manual")), "Run now");
+    assert.equal(nodeSummary(node("t", "trigger.manual", { inputExample: "{}" })), "Run now · with input");
+    assert.equal(nodeSummary(node("t", "trigger.manual", { inputs: [{ name: "env", type: "string" }] })), "Run now · 1 input: env");
+    const four = ["a", "b", "c", "d"].map((name) => ({ name, type: "string" }));
+    assert.equal(nodeSummary(node("t", "trigger.manual", { inputs: four, inputExample: "{}" })), "Run now · 4 inputs: a, b, c, …");
+  });
 });

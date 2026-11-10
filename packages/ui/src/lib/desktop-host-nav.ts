@@ -21,7 +21,11 @@ export function viewingSessionId(): string | null {
 /** Open what a notification points at. */
 export function openNotificationTarget(target: DesktopNotificationTarget): void {
   if (target.kind === "workflow") {
-    requestWorkflowDeepLink({ workflowId: target.workflowId, runId: target.runId });
+    requestWorkflowDeepLink({
+      workflowId: target.workflowId,
+      runId: target.runId,
+      ...(target.gateId ? { gateId: target.gateId } : {})
+    });
     return;
   }
   requestSessionDeepLink({ sessionId: target.sessionId });

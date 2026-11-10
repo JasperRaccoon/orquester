@@ -9,12 +9,13 @@
  */
 
 import React, { useMemo } from "react";
-import { FlaskConical, Loader2, RotateCcw } from "lucide-react";
+import { FlaskConical, Loader2, RotateCcw, ShieldCheck } from "lucide-react";
 
 import type { WorkflowRunSummary } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
 import { formatAgo, formatDuration, runElapsedMs, runTriggerText } from "../../../lib/workflows/format";
+import { runGateBadge } from "../../../lib/workflows/gates";
 import {
   filterRuns,
   RUN_STATUS_FILTERS,
@@ -184,6 +185,9 @@ const RunRow: React.FC<{
 }> = ({ run, now, sheet, selected, onSelect }) => {
   const view = runStatusView(run);
   const skipped = run.status === "skipped";
+  // Gates (spec 2026-11-10 §6.4): a decision it waits on; why a queued or skipped run did not start.
+  const gateBadge = runGateBadge(run);
+  const held = skipped || (run.status === "queued" && run.skipDetail !== undefined);
   const elapsed = runElapsedMs(run, now);
   const started = formatAgo(run.startedAt ?? run.queuedAt, now);
   return (
@@ -210,11 +214,22 @@ const RunRow: React.FC<{
             {run.test ? <FlaskConical size={12} aria-label="Test run" className="shrink-0 text-neutral-400" /> : null}
           </span>
           <span className="flex min-w-0 items-center gap-1 text-[11px] leading-4 text-neutral-500">
-            {skipped ? (
+            {held ? (
               <span className="truncate">{runOutcomeText(run, now)}</span>
             ) : (
               <span className={cn("shrink-0", TONE_TEXT[view.tone])}>{view.label}</span>
             )}
+            {gateBadge ? (
+              <span
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-0.5 rounded px-1 text-[10.5px] font-medium leading-4",
+                  gateBadge.tone === "warn" ? "bg-warn/15 text-warn" : "bg-info/15 text-info"
+                )}
+              >
+                <ShieldCheck size={10} aria-hidden />
+                {gateBadge.text}
+              </span>
+            ) : null}
             {started ? <span className="shrink-0">· {started}</span> : null}
           </span>
         </span>

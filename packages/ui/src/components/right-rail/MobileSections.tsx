@@ -39,6 +39,8 @@ import { BottomSheet } from "../ui/sheet";
 import { useActiveChatTarget } from "./chat-target";
 import { setMobileSection, useMobileSection } from "./mobile-section";
 import { useDevicesEnabled } from "../../lib/devices/hooks";
+import { useGateAttention } from "../../lib/workflows/gate-hooks";
+import { useWorkflowAttention } from "../workflows/runs/WorkflowAttention";
 import { MOBILE_SECTION_ORDER, RIGHT_RAIL_PANEL_REGISTRY, visibleRailPanels } from "./panels";
 import type { RightRailPanelId } from "./types";
 
@@ -136,6 +138,8 @@ export interface MobileSectionBarProps {
   chatTab: boolean;
   /** The sections to offer, in order (default: all of `MOBILE_SECTION_ORDER`). */
   sections?: readonly RightRailPanelId[];
+  /** A dot on a section that is not showing: something in it wants the user. */
+  badges?: Partial<Record<RightRailPanelId, MobileSectionBadge>>;
 }
 
 /**
@@ -154,6 +158,11 @@ const ITEM =
   "flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-lg text-[11px] font-medium " +
   "transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500";
 
+/** A section's dot: something in it wants the user (a gate waiting for them, a failed run). */
+export type MobileSectionBadge = "warn" | "danger";
+
+const BADGE_WORDS: Record<MobileSectionBadge, string> = { warn: "needs you", danger: "has a failure" };
+
 const BarButton: React.FC<{
   label: string;
   title: string;
@@ -161,10 +170,12 @@ const BarButton: React.FC<{
   active: boolean;
   onClick: () => void;
   haspopup?: boolean;
-}> = ({ label, title, Icon, active, onClick, haspopup }) => (
+  badge?: MobileSectionBadge | null;
+}> = ({ label, title, Icon, active, onClick, haspopup, badge }) => (
   <button
     type="button"
-    title={title}
+    title={badge ? `${title} — ${BADGE_WORDS[badge]}` : title}
+    aria-label={badge ? `${label}, ${BADGE_WORDS[badge]}` : undefined}
     aria-current={active ? "page" : undefined}
     aria-haspopup={haspopup ? "dialog" : undefined}
     onClick={onClick}
@@ -176,7 +187,18 @@ const BarButton: React.FC<{
         active && "bg-neutral-800"
       )}
     >
-      <Icon size={18} aria-hidden />
+      <span className="relative inline-flex">
+        <Icon size={18} aria-hidden />
+        {badge ? (
+          <span
+            aria-hidden
+            className={cn(
+              "absolute -right-1 -top-0.5 h-2 w-2 rounded-full ring-2 ring-neutral-900",
+              badge === "warn" ? "bg-warn" : "bg-danger"
+            )}
+          />
+        ) : null}
+      </span>
     </span>
     <span className="max-w-full truncate px-1">{label}</span>
   </button>
@@ -186,7 +208,8 @@ export const MobileSectionBar: React.FC<MobileSectionBarProps> = ({
   active,
   onSelect,
   chatTab,
-  sections = MOBILE_SECTION_ORDER
+  sections = MOBILE_SECTION_ORDER,
+  badges = {}
 }) => {
   const [moreOpen, setMoreOpen] = React.useState(false);
   const closeMore = React.useCallback(() => setMoreOpen(false), []);
@@ -206,6 +229,10 @@ export const MobileSectionBar: React.FC<MobileSectionBarProps> = ({
   ];
   const { shown, more } = splitSectionItems(items);
   const moreActive = more.some((item) => item.id === active);
+  const badgeOf = (id: RightRailPanelId | null): MobileSectionBadge | null =>
+    id === null || id === active ? null : (badges[id] ?? null);
+  const moreBadges = more.map((item) => badgeOf(item.id));
+  const moreBadge = moreBadges.includes("danger") ? "danger" : moreBadges.includes("warn") ? "warn" : null;
   return (
     <nav
       aria-label="Sections"
@@ -218,6 +245,7 @@ export const MobileSectionBar: React.FC<MobileSectionBarProps> = ({
           title={item.title}
           Icon={item.Icon}
           active={item.id === active}
+          badge={badgeOf(item.id)}
           onClick={() => onSelect(item.id)}
         />
       ))}
@@ -228,6 +256,7 @@ export const MobileSectionBar: React.FC<MobileSectionBarProps> = ({
             title="More sections"
             Icon={MoreHorizontal}
             active={moreActive}
+            badge={moreBadge}
             haspopup
             onClick={() => setMoreOpen(true)}
           />
@@ -264,6 +293,13 @@ export const MobileSectionNav: React.FC = () => {
   // Devices: the Device section exists only while its plugin is on.
   const devicesOn = useDevicesEnabled();
   const sections = React.useMemo(() => visibleRailPanels(MOBILE_SECTION_ORDER, devicesOn), [devicesOn]);
+  // Workflows: a failed run, or a gate waiting for the user (spec 2026-11-10 §6.4).
+  const workflowFailed = useWorkflowAttention().length > 0;
+  const gateWaiting = useGateAttention().length > 0;
+  const badges = React.useMemo<Partial<Record<RightRailPanelId, MobileSectionBadge>>>(
+    () => (workflowFailed ? { workflows: "danger" } : gateWaiting ? { workflows: "warn" } : {}),
+    [workflowFailed, gateWaiting]
+  );
   if (isDesktop || !projectOpen || keyboardOpen) return null;
-  return <MobileSectionBar active={section} onSelect={setMobileSection} chatTab={chatTab} sections={sections} />;
+  return <MobileSectionBar active={section} onSelect={setMobileSection} chatTab={chatTab} sections={sections} badges={badges} />;
 };

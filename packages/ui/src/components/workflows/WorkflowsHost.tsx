@@ -7,7 +7,8 @@
  * - opens a push notification's run (`lib/workflows/deep-link.ts`: the
  *   service worker's message, or `/?workflow=…&run=…` on a cold start) once
  *   the app is connected and knows the workflow — in the workflow's own
- *   project, where the notification is about.
+ *   project, where the notification is about. A gate's notification
+ *   (`&gate=…`) also selects the gate's block in the run (`gate-focus.ts`).
  */
 
 import React, { useEffect, useSyncExternalStore } from "react";
@@ -21,6 +22,7 @@ import {
   takeWorkflowDeepLink,
   type WorkflowDeepLink
 } from "../../lib/workflows/deep-link";
+import { requestGateFocus } from "../../lib/workflows/gate-focus";
 import { markWorkflowRunViewed } from "../../lib/workflows/notifications";
 import { showRunInWorkflowTabs, subscribeOpenWorkflowRun } from "../../lib/workflows/open-bridge";
 import { loadWorkflows, workflowsStore } from "../../lib/workflows/store";
@@ -37,6 +39,7 @@ function openInProject(projectPath: string, link: WorkflowDeepLink, title: strin
     ...(title ? { title } : {})
   });
   if (link.runId) {
+    if (link.gateId) requestGateFocus({ runId: link.runId, gateId: link.gateId });
     showRunInWorkflowTabs({ workflowId: link.workflowId, runId: link.runId });
     markWorkflowRunViewed(link.runId);
   }

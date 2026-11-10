@@ -8,7 +8,7 @@
 /** What a clicked notification opens; handed back to the renderer unchanged. */
 export type NotificationTarget =
   | { kind: "session"; sessionId: string }
-  | { kind: "workflow"; workflowId: string; runId: string | null };
+  | { kind: "workflow"; workflowId: string; runId: string | null; gateId?: string };
 
 interface NotificationRequest {
   title: string;
@@ -39,7 +39,10 @@ function parseTarget(raw: unknown): NotificationTarget | null | undefined {
   if (raw.kind === "workflow") {
     const workflowId = idOf(raw.workflowId);
     if (!workflowId) return undefined;
-    return { kind: "workflow", workflowId, runId: raw.runId === null || raw.runId === undefined ? null : idOf(raw.runId) };
+    const runId = raw.runId === null || raw.runId === undefined ? null : idOf(raw.runId);
+    // A gate's notification (spec 2026-11-10 §6.4) names the gate of its run.
+    const gateId = runId ? idOf(raw.gateId) : null;
+    return gateId ? { kind: "workflow", workflowId, runId, gateId } : { kind: "workflow", workflowId, runId };
   }
   return undefined;
 }

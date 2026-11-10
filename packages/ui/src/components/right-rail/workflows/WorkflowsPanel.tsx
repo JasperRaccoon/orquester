@@ -30,6 +30,7 @@ import {
 import { createFromTemplate, type WorkflowTemplateId } from "../../../lib/workflows/templates";
 import { useAppStore } from "../../../store/app";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
+import { WorkflowGateCards } from "../../workflows/gates/WorkflowGateCards";
 import { openWorkflowRunInEditor } from "../../workflows/runs/open-run";
 import { RunInputsDialog } from "../../workflows/RunInputsDialog";
 import type { RunNowResult } from "../../workflows/RunNowPopover";
@@ -208,6 +209,20 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
         onSecrets={() => setSecretsFor({ workflowId: null })}
         onTemplate={(id) => void fromTemplate(id)}
         creatingTemplate={creatingTemplate}
+        renderGates={(workflow) => (
+          <WorkflowGateCards
+            workflow={workflow}
+            variant={variant}
+            now={now}
+            openRunDisabledReason={projectAvailable ? null : NO_PROJECT_REASON}
+            onOpenRun={(runId, gateId) => {
+              if (!projectAvailable) return;
+              if (openWorkflowRunInEditor({ runId, gateId, workflowId: workflow.id, workflowName: workflow.name, ...(projectPath ? { projectPath } : {}) })) {
+                onDelivered?.();
+              }
+            }}
+          />
+        )}
       />
       {inputsFor !== null ? (
         <RunInputsDialog

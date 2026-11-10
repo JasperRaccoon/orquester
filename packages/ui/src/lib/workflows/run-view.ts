@@ -279,6 +279,8 @@ export function runOutcomeText(run: WorkflowRunSummary, now: number): string {
   const error = run.error?.trim();
   switch (run.status) {
     case "queued":
+      // Held back by a previous run that waits (spec 2026-11-10 §6.2): say why, never a silent queue.
+      if (run.skipDetail) return `Queued — ${run.skipDetail}`;
       return took ? `Queued · ${took}` : "Queued";
     case "running": {
       const current = run.current;
@@ -303,6 +305,7 @@ export function runOutcomeText(run: WorkflowRunSummary, now: number): string {
     case "interrupted":
       return error ? `Interrupted — ${error}` : "Interrupted — it could not be resumed after a restart";
     case "skipped":
+      if (run.skipDetail) return `Skipped — ${run.skipDetail}`;
       if (run.skipReason === "overlap") return "Skipped — the previous run was still going";
       if (run.skipReason === "missed") return "Skipped — the daemon was down when it was due";
       return "Skipped";
@@ -433,6 +436,8 @@ export function agentLiveLine(block: WorkflowBlockRun, now: number): string | nu
   if (block.status === "running") return took ? `Working · ${took}` : "Working";
   if (block.status === "queued") return "Queued — waiting for a free agent slot";
   if (block.status === "waiting") {
+    // A loop that reached its limit asks the user (spec 2026-11-10 §7.2).
+    if (block.gateId) return "Waiting on a decision";
     const until = formatClock(block.waitingUntil, now);
     return until ? `Waiting for a reset · until ${until}` : "Waiting for a reset";
   }
@@ -642,7 +647,12 @@ export function runTimeline(
     if (block) {
       if (block.status === "running" && block.activity?.trim()) liveLine = block.activity.trim();
       else if (block.status === "waiting")
-        liveLine = (node.type === "wait" ? waitLine(block, now) : agentLiveLine(block, now)) ?? undefined;
+        liveLine =
+          (node.type === "gate" || block.gateId
+            ? "Waiting on a decision"
+            : node.type === "wait"
+              ? waitLine(block, now)
+              : agentLiveLine(block, now)) ?? undefined;
       else if (block.status === "queued") liveLine = node.type === "agent" ? "Waiting for a free agent slot" : "Queued";
     }
     const item: TimelineItem = {

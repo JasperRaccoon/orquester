@@ -21,6 +21,7 @@ import {
   type WorkflowAttentionEntry,
   type WorkflowNotificationsState
 } from "../../../lib/workflows/notifications";
+import { GateAttention } from "../gates/GateAttention";
 import { openWorkflowRunInEditor } from "./open-run";
 import { useNow } from "./shared";
 
@@ -102,24 +103,27 @@ const WorkflowAttentionRows: React.FC<WorkflowAttentionRowsProps> = ({
   );
 };
 
-/** The live group, as the sidebar mounts it. */
+/** The live group, as the sidebar mounts it: gates waiting for the user first (spec 2026-11-10 §6.4), then failed runs. */
 export const WorkflowAttention: React.FC<{ touch?: boolean }> = ({ touch }) => {
   const entries = useWorkflowAttention();
   const now = useNow(false);
   return (
-    <WorkflowAttentionRows
-      entries={entries}
-      now={now}
-      touch={touch}
-      onDismiss={dismissWorkflowAttention}
-      onOpen={(entry) =>
-        openWorkflowRunInEditor({
-          runId: entry.runId,
-          workflowId: entry.workflowId,
-          workflowName: entry.workflowName,
-          ...(entry.projectPath ? { projectPath: entry.projectPath } : {})
-        })
-      }
-    />
+    <>
+      <GateAttention touch={touch} />
+      <WorkflowAttentionRows
+        entries={entries}
+        now={now}
+        touch={touch}
+        onDismiss={dismissWorkflowAttention}
+        onOpen={(entry) =>
+          openWorkflowRunInEditor({
+            runId: entry.runId,
+            workflowId: entry.workflowId,
+            workflowName: entry.workflowName,
+            ...(entry.projectPath ? { projectPath: entry.projectPath } : {})
+          })
+        }
+      />
+    </>
   );
 };

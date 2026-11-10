@@ -43,6 +43,7 @@ import {
 import { blockAtPass, latestPassOf, shownPass } from "../../../lib/workflows/passes";
 import type { WorkflowRunEntry } from "../../../lib/workflows/store";
 import { PassChips, PassNotes } from "./BlockPasses";
+import { GateRunSection } from "../gates/GateDecision";
 import { JsonTree } from "./JsonTree";
 import { LogViewer } from "./LogViewer";
 import { focusWorkflowSession, type OpenSessionResult } from "./open-run";
@@ -268,6 +269,9 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
       {type === "wait" && block?.status === "waiting" ? (
         <p className="rounded-lg border border-warn/25 bg-warn/5 px-3 py-2 text-xs text-warn">{waitLine(block, now)}</p>
       ) : null}
+
+      {/* A gate's decision (spec 2026-11-10 §6.4) — also a loop-limit gate on any block. */}
+      <GateRunSection runId={runId} nodeId={nodeId} definition={definition} loopLimits={entry.detail?.loopLimits} now={now} variant={variant} />
 
       {/* Sub-workflow. */}
       {type === "workflow" && block?.childRunId ? (

@@ -1,10 +1,12 @@
 /**
  * Opening a workflow run from outside the app (workflows spec §5.11): a push
  * notification's click. The service worker either messages an open window
- * (`{type: "orquester:open-workflow-run", workflowId, runId}`) or opens
- * `/?workflow=<id>&run=<runId>`; the web host hands either to
+ * (`{type: "orquester:open-workflow-run", workflowId, runId, gateId?}`) or opens
+ * `/?workflow=<id>&run=<runId>[&gate=<gateId>]`; the web host hands either to
  * `requestWorkflowDeepLink`, and the mounted `WorkflowsHost` opens the tab once
- * it can — connected, and the workflow known.
+ * it can — connected, and the workflow known. A gate's notification (spec
+ * 2026-11-10 §6.4) names the gate too: the run opens with that gate's block
+ * selected.
  *
  * Everything off the wire (a URL, a message) is parsed here, strictly.
  */
@@ -14,13 +16,23 @@ export const WORKFLOW_RUN_MESSAGE = "orquester:open-workflow-run";
 export interface WorkflowDeepLink {
   workflowId: string;
   runId: string | null;
+  /** A gate of the run to select (a gate's notification); only with a run. */
+  gateId?: string;
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 const idOf = (value: unknown): string | null => (typeof value === "string" && ID.test(value) ? value : null);
 
-/** `?workflow=<id>[&run=<id>]`, or null. A malformed run id is dropped, a malformed workflow id drops the link. */
+/** The link, with its gate only when it names a run too. */
+function linkOf(workflowId: string, runId: string | null, gateId: string | null): WorkflowDeepLink {
+  return runId && gateId ? { workflowId, runId, gateId } : { workflowId, runId };
+}
+
+/**
+ * `?workflow=<id>[&run=<id>[&gate=<id>]]`, or null. A malformed run or gate id
+ * is dropped, a malformed workflow id drops the link.
+ */
 export function parseWorkflowDeepLink(search: string): WorkflowDeepLink | null {
   let params: URLSearchParams;
   try {
@@ -30,7 +42,7 @@ export function parseWorkflowDeepLink(search: string): WorkflowDeepLink | null {
   }
   const workflowId = idOf(params.get("workflow"));
   if (!workflowId) return null;
-  return { workflowId, runId: idOf(params.get("run")) };
+  return linkOf(workflowId, idOf(params.get("run")), idOf(params.get("gate")));
 }
 
 /** The URL without the deep-link parameters (the address bar should not reopen it on reload). */
@@ -43,6 +55,7 @@ export function stripWorkflowDeepLink(href: string): string {
   }
   url.searchParams.delete("workflow");
   url.searchParams.delete("run");
+  url.searchParams.delete("gate");
   const search = url.searchParams.toString();
   return `${url.pathname}${search ? `?${search}` : ""}${url.hash}`;
 }
@@ -54,7 +67,7 @@ export function parseWorkflowRunMessage(data: unknown): WorkflowDeepLink | null 
   if (record.type !== WORKFLOW_RUN_MESSAGE) return null;
   const workflowId = idOf(record.workflowId);
   if (!workflowId) return null;
-  return { workflowId, runId: idOf(record.runId) };
+  return linkOf(workflowId, idOf(record.runId), idOf(record.gateId));
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +79,7 @@ const listeners = new Set<() => void>();
 
 /** Ask the app to open a workflow (a run of it) as soon as it can. */
 export function requestWorkflowDeepLink(link: WorkflowDeepLink): void {
-  pending = { workflowId: link.workflowId, runId: link.runId };
+  pending = linkOf(link.workflowId, link.runId, link.gateId ?? null);
   for (const listener of [...listeners]) listener();
 }
 

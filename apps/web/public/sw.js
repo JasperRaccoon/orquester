@@ -288,9 +288,11 @@ self.addEventListener("push", function (event) {
     data: {
       // A session's notification names the session (its tap opens that tab).
       sessionId: typeof payload.sessionId === "string" ? payload.sessionId : undefined,
-      // A workflow run's notification names its run (daemon push.ts, notifyWorkflowRun).
+      // A workflow run's notification names its run (daemon push.ts, notifyWorkflowRun);
+      // a gate's (spec 2026-11-10 §6.4) names the gate of that run too.
       workflowId: typeof payload.workflowId === "string" ? payload.workflowId : undefined,
-      runId: typeof payload.runId === "string" ? payload.runId : undefined
+      runId: typeof payload.runId === "string" ? payload.runId : undefined,
+      gateId: typeof payload.gateId === "string" ? payload.gateId : undefined
     }
   };
   event.waitUntil(self.registration.showNotification(title, options));
@@ -306,7 +308,8 @@ function isLinkId(value) {
 // (the app reads the link on boot and drops it from the address bar), and
 // `message` for an open one (the app opens the same thing in place).
 //   - a workflow run's (daemon push.ts, notifyWorkflowRun): that run, in the
-//     workflow's tab — /?workflow=<id>&run=<runId>;
+//     workflow's tab — /?workflow=<id>&run=<runId>; a gate's adds
+//     &gate=<gateId>, and the run opens with that gate selected;
 //   - a session's (needs input, finished, plan ready, approval needed, an
 //     agent's notify_user): that session's tab — /?session=<id>;
 //   - anything else (the test push, an agent push without a session): the app.
@@ -315,9 +318,16 @@ function notificationTarget(data) {
   var workflowId = isLinkId(record.workflowId) ? record.workflowId : null;
   if (workflowId) {
     var runId = isLinkId(record.runId) ? record.runId : null;
+    var gateId = runId && isLinkId(record.gateId) ? record.gateId : null;
+    var message = { type: "orquester:open-workflow-run", workflowId: workflowId, runId: runId };
+    if (gateId) message.gateId = gateId;
     return {
-      url: "/?workflow=" + encodeURIComponent(workflowId) + (runId ? "&run=" + encodeURIComponent(runId) : ""),
-      message: { type: "orquester:open-workflow-run", workflowId: workflowId, runId: runId }
+      url:
+        "/?workflow=" +
+        encodeURIComponent(workflowId) +
+        (runId ? "&run=" + encodeURIComponent(runId) : "") +
+        (gateId ? "&gate=" + encodeURIComponent(gateId) : ""),
+      message: message
     };
   }
   var sessionId = isLinkId(record.sessionId) ? record.sessionId : null;

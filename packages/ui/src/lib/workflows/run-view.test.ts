@@ -15,6 +15,8 @@ import {
   retryRunRequest,
   runActions,
   runFilterCounts,
+  agentLiveLine,
+  runOutcomeText,
   runTimeline
 } from "./run-view.ts";
 
@@ -352,5 +354,28 @@ describe("agent outcomes in the run view (spec 2026-11-10 §5)", () => {
     assert.equal(blockErrorKindLabel("no_report"), "No result reported");
     assert.match(blockErrorKindHint("no_report")!, /once more after a reminder/);
     assert.equal(blockErrorKindHint("timeout"), null);
+  });
+});
+
+describe("a run held back by a gate (spec 2026-11-10 §6.2)", () => {
+  it("says why it was skipped or is queued", () => {
+    const detail = "previous run is waiting on gate “Deploy?”";
+    assert.equal(runOutcomeText(summary({ status: "skipped", skipReason: "overlap", skipDetail: detail }), NOW), `Skipped — ${detail}`);
+    assert.equal(runOutcomeText(summary({ status: "queued", skipDetail: detail }), NOW), `Queued — ${detail}`);
+    assert.equal(runOutcomeText(summary({ status: "skipped", skipReason: "overlap" }), NOW), "Skipped — the previous run was still going");
+  });
+});
+
+describe("a block waiting on a gate", () => {
+  it("says it waits on a decision, not on a reset", () => {
+    assert.equal(agentLiveLine(block("Review", { type: "agent", status: "waiting", gateId: "g1" }), NOW), "Waiting on a decision");
+    assert.equal(agentLiveLine(block("Review", { type: "agent", status: "waiting" }), NOW), "Waiting for a reset");
+    const definition = { nodes: [node("T", "trigger.manual"), node("Gate", "gate")], edges: [edge("T", "Gate")] };
+    const items = runTimeline(
+      { status: "running", blocks: { T: block("T", { type: "trigger.manual" }), Gate: block("Gate", { type: "gate", status: "waiting", attempt: 1 }) } },
+      definition,
+      NOW
+    );
+    assert.equal(items.find((item) => item.nodeId === "Gate")?.liveLine, "Waiting on a decision");
   });
 });

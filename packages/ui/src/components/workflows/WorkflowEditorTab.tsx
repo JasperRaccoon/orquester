@@ -521,7 +521,12 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
         selectRun(answer.runId);
         setMode("runs");
       }
-      return { ok: true, runId: answer.runId, ...(answer.skipped ? { skipped: answer.skipped } : {}) };
+      return {
+        ok: true,
+        runId: answer.runId,
+        ...(answer.skipped ? { skipped: answer.skipped } : {}),
+        ...(typeof answer.skipDetail === "string" && answer.skipDetail.trim() ? { skipDetail: answer.skipDetail.trim() } : {})
+      };
     },
     [api, editor, workflowId, selectRun, manualInputs]
   );
