@@ -797,6 +797,23 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
     assert.equal(row({ toolName: marked.toolName, result: liveResult }).deviceLink, undefined);
   });
 
+  it("links live and persisted desktop rows and reads them as what they did (desktops R2.6)", () => {
+    const desktopRef = { desktopId: "d1", projectPath: "/w/p", screenshotId: "s1", action: "click", summary: "Clicked at 412, 300" };
+    const row = (data: Record<string, unknown>) => workLogEntryFromActivity(activity("tool.completed", { itemType: "mcp_tool_call", title: "MCP tool call", data }));
+    const marked = (name: string) => ({ toolName: `mcp__orquester__${name}`, sessionTool: { name } });
+    const live = row({ ...marked("desktop_action"), result: { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ desktopRef, seq: 3 }) }] } });
+    assert.deepEqual(live.desktopLink, desktopRef);
+    assert.equal(workEntryDisplayLabel(live, undefined, undefined, () => "Firefox"), "Used Firefox · Clicked at 412, 300");
+    // After a reload the row is slimmed: only the kept reference remains.
+    const saved = row({ ...marked("desktop_action"), sessionTool: { name: "desktop_action", references: { desktopRef: { ...desktopRef, action: "screenshot" } } } });
+    assert.equal(saved.desktopLink?.screenshotId, "s1");
+    assert.equal(workEntryDisplayLabel(saved), "Took a screenshot of a desktop");
+    // `control_desktop` names its desktop by id in a live result; an unmarked row links nothing.
+    assert.deepEqual(row({ ...marked("control_desktop"), result: { structuredContent: { closed: true, desktopId: "d2" } } }).desktopLink, { desktopId: "d2" });
+    assert.equal(row({ toolName: "mcp__orquester__desktop_action", result: { structuredContent: { desktopRef } } }).desktopLink, undefined);
+    assert.equal(row({ ...marked("desktop_action"), result: { structuredContent: { desktopRef: { ...desktopRef, desktopId: "../x" } } } }).desktopLink, undefined);
+  });
+
   it("labels the visual-replies tools in words: a preview, and a render while it runs or when it failed", () => {
     for (const [name, label, status] of [
       ["html_preview", "Previewed HTML", "completed"],
