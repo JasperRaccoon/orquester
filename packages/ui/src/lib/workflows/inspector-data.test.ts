@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { outputReference, parsePinnedText, pinnableOutputOf } from "./inspector-data.ts";
+import { canPin, outputReference, parsePinnedText, pinnableOutputOf } from "./inspector-data.ts";
+import { node } from "./testing.ts";
 
 describe("parsePinnedText limits", () => {
   it("refuses JSON over the pinned-data limit", () => {
@@ -50,5 +51,19 @@ describe("pinnableOutputOf", () => {
 
   it("refuses a malformed answer rather than pinning the preview", async () => {
     await assert.rejects(pinnableOutputOf({ output: "p", outputTruncated: true }, async () => null), /whole output/i);
+  });
+});
+
+describe("pins on an agent block with outcomes (spec 2026-11-10 §7.5)", () => {
+  const review = node("r", "agent", { outcomes: [{ id: "approved" }, { id: "changes_requested" }] });
+
+  it("can be pinned, and the pin must name a declared outcome", () => {
+    assert.equal(canPin(review), true);
+    assert.equal(canPin(node("i", "if")), false);
+    const missing = parsePinnedText('{ "text": "ok" }', review);
+    assert.equal(missing.ok, false);
+    assert.match((missing as { error: string }).error, /^The pin must include "outcome": one of `approved` or `changes_requested`/);
+    assert.deepEqual(parsePinnedText('{ "outcome": "approved" }', review), { ok: true, value: { outcome: "approved" } });
+    assert.deepEqual(parsePinnedText('{ "text": "ok" }', node("a", "agent")), { ok: true, value: { text: "ok" } });
   });
 });

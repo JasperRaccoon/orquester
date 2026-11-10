@@ -4,7 +4,10 @@ import { describe, it } from "node:test";
 import type { AgentHop, WorkflowBlockRun, WorkflowNode, WorkflowRunSummary } from "@orquester/api";
 
 import {
+  blockErrorKindHint,
+  blockErrorKindLabel,
   blockInput,
+  blockReportView,
   defaultSelectedStep,
   filterRuns,
   mergeRunPages,
@@ -285,5 +288,38 @@ describe("runs mode", () => {
     assert.equal(pickRunId(null, runs), "r2");
     assert.equal(pickRunId(null, [runs[0]!, runs[2]!]), "r3");
     assert.equal(pickRunId(undefined, []), null);
+  });
+});
+
+describe("agent outcomes in the run view (spec 2026-11-10 §5)", () => {
+  const review = node("r", "agent", {
+    config: { outcomes: [{ id: "approved", label: "Approved" }, { id: "changes_requested" }], outputs: [{ name: "pr_url", type: "string" }, { name: "count", type: "number" }] }
+  });
+  const report = { outcome: "approved", summary: "Fixed  the\nnits.", outputs: { count: 2, pr_url: "https://x/1" }, sessionId: "s1", reportedAt: at(14, 2) };
+
+  it("the details show the outcome's label, the summary and the outputs in declared order", () => {
+    const view = blockReportView(review, block("r", { type: "agent", handle: "outcome:approved", report }));
+    assert.deepEqual(view, {
+      outcome: "Approved",
+      summary: "Fixed  the\nnits.",
+      outputs: [{ name: "pr_url", value: "https://x/1" }, { name: "count", value: 2 }],
+      provisional: false
+    });
+    assert.equal(blockReportView(review, block("r", { type: "agent", status: "running", report }))!.provisional, true);
+    assert.equal(blockReportView(review, block("r", { type: "agent" })), null);
+  });
+
+  it("the timeline names the outcome taken, with the summary on one line", () => {
+    const wf = { nodes: [node("t", "trigger.manual"), review, node("s", "stop")], edges: [edge("t", "r"), edge("r", "s", "outcome:approved")] };
+    const items = runTimeline({ status: "succeeded", blocks: { t: block("t"), r: block("r", { type: "agent", handle: "outcome:approved", report }) } }, wf, NOW);
+    const item = items.find((entry) => entry.nodeId === "r")!;
+    assert.equal(item.finishedOn, "Approved");
+    assert.equal(item.reportSummary, "Fixed the nits.");
+  });
+
+  it("no_report reads as what happened", () => {
+    assert.equal(blockErrorKindLabel("no_report"), "No result reported");
+    assert.match(blockErrorKindHint("no_report")!, /once more after a reminder/);
+    assert.equal(blockErrorKindHint("timeout"), null);
   });
 });

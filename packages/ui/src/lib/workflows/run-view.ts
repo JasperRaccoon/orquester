@@ -227,6 +227,43 @@ export function blockErrorKindLabel(kind: WorkflowBlockErrorKind | string): stri
   return ERROR_KIND_LABEL[kind as WorkflowBlockErrorKind] ?? "Error";
 }
 
+/** What an error kind means in plain words, when the label alone does not say what happened. */
+export function blockErrorKindHint(kind: WorkflowBlockErrorKind | string): string | null {
+  if (kind === "no_report") {
+    return "The agent ended its turn without reporting its result with report_step_result, and once more after a reminder. The block's retries and its failure connection apply.";
+  }
+  return null;
+}
+
+/** An agent block's report as the run view shows it (spec 2026-11-10 §5): outcome, summary, outputs. */
+export interface BlockReportView {
+  /** The outcome's label (else its id); absent when the block declares only outputs. */
+  outcome?: string;
+  summary: string;
+  /** Declared order first, then any other the report holds. */
+  outputs: { name: string; value: unknown }[];
+  /** The block still runs: a later report may replace this one. */
+  provisional: boolean;
+}
+
+export function blockReportView(node: TimelineNode | undefined, block: WorkflowBlockRun | undefined): BlockReportView | null {
+  const report = block?.report;
+  if (!report) return null;
+  const declared = ((node?.config ?? {}) as { outputs?: { name?: unknown }[] }).outputs ?? [];
+  const values = report.outputs ?? {};
+  const names = [
+    ...declared.map((output) => output.name).filter((name): name is string => typeof name === "string" && Object.prototype.hasOwnProperty.call(values, name)),
+    ...Object.keys(values)
+  ];
+  const outputs = [...new Set(names)].map((name) => ({ name, value: values[name] }));
+  return {
+    ...(report.outcome !== undefined ? { outcome: node ? workflowHandleLabel(node, `outcome:${report.outcome}`) : report.outcome } : {}),
+    summary: report.summary,
+    outputs,
+    provisional: block.status === "running" || block.status === "waiting" || block.status === "queued"
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Outcome in words
 // ---------------------------------------------------------------------------
@@ -468,6 +505,8 @@ export interface TimelineItem {
   skippedReason?: string;
   /** The latest activity line of a working agent, or a live wait/queue line. */
   liveLine?: string;
+  /** An agent block's report summary (spec 2026-11-10 §5), one line. */
+  reportSummary?: string;
   sessionId?: string;
   childRunId?: string;
   disabled: boolean;
@@ -630,6 +669,8 @@ export function runTimeline(
       item.skippedReason = notReached ? "Not reached" : skippedReasonFor(node, byId, edges, run.blocks);
     }
     if (liveLine !== undefined) item.liveLine = liveLine;
+    const summary = block?.report?.summary.replace(/\s+/g, " ").trim();
+    if (summary) item.reportSummary = summary;
     if (block?.sessionId) item.sessionId = block.sessionId;
     if (block?.childRunId) item.childRunId = block.childRunId;
     items.push(item);

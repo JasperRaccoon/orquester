@@ -91,3 +91,26 @@ describe("deriveRunOverlay", () => {
     assert.equal(recorded.edges["a-err-s"], "dead");
   });
 });
+
+describe("deriveRunOverlay: agent outcomes (spec 2026-11-10 §5)", () => {
+  const outcomes = [{ id: "approved", label: "Approved" }, { id: "changes_requested" }];
+  const graph = workflow(
+    [node("t", "trigger.manual"), node("r", "agent", { outcomes }), node("s", "stop"), node("f", "stop")],
+    [edge("t", "r"), edge("r", "s", "outcome:approved"), edge("r", "f", "outcome:changes_requested")]
+  );
+  const report = { summary: "x", sessionId: "s1", reportedAt: "2026-11-10T10:00:00.000Z" };
+
+  it("a finished block's outcome chip is its handle's label; the other outcome's edge is dead", () => {
+    const overlay = deriveRunOverlay({ status: "succeeded", blocks: { r: block("r", "succeeded", { handle: "outcome:approved", report: { ...report, outcome: "approved" } }) }, takenEdges: [], deadEdges: [] }, graph);
+    assert.deepEqual(overlay.nodes.r?.outcome, { id: "approved", label: "Approved", final: true });
+    assert.equal(overlay.edges["r-outcome:approved-s"], "taken");
+    assert.equal(overlay.edges["r-outcome:changes_requested-f"], "dead");
+  });
+
+  it("a running block shows the outcome reported so far; a label-less outcome reads as its id", () => {
+    const overlay = deriveRunOverlay({ status: "running", blocks: { r: block("r", "running", { report: { ...report, outcome: "changes_requested" } }) }, takenEdges: [], deadEdges: [] }, graph);
+    assert.deepEqual(overlay.nodes.r?.outcome, { id: "changes_requested", label: "changes_requested", final: false });
+    const failed = deriveRunOverlay({ status: "failed", blocks: { r: block("r", "failed", { handle: "error", error: { kind: "no_report", message: "m" } }) }, takenEdges: [], deadEdges: [] }, graph);
+    assert.equal(failed.nodes.r?.outcome, undefined);
+  });
+});

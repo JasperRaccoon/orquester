@@ -92,7 +92,7 @@ export interface StepsModel {
 export function outputTone(handle: string): OutputTone {
   if (handle === "success" || handle === "true") return "ok";
   if (handle === "error") return "danger";
-  if (handle.startsWith("case:")) return "info";
+  if (handle.startsWith("case:") || handle.startsWith("outcome:")) return "info";
   return "neutral";
 }
 
