@@ -127,10 +127,14 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const deviceRows = chat.filter((tool) => groups.get(tool.name) === "devices");
   // GPT Image: advertised only while the plugin can make images, so outside the base budget.
   const imageRows = chat.filter((tool) => groups.get(tool.name) === "images");
-  const baseRows = chat.filter((tool) => !boxRows.includes(tool) && !knowledgeRows.includes(tool) && !deviceRows.includes(tool) && !imageRows.includes(tool));
+  // report_step_result (workflow outcomes, spec 2026-11-10 §5.2): every chat gets it, on its own allowance.
+  const reportRows = chat.filter((tool) => tool.name === "report_step_result");
+  const baseRows = chat.filter((tool) => !boxRows.includes(tool) && !knowledgeRows.includes(tool) && !deviceRows.includes(tool) && !imageRows.includes(tool) && !reportRows.includes(tool));
   const added = (rows: readonly Tool[]) => rows.reduce((sum, row) => sum + total([row]) - 1, 0);
   assert.ok(total(baseRows) <= 57_344, `chat tools/list: ${total(baseRows)} bytes`);
   assert.ok(added(boxRows) <= 7_937, `box tools: ${added(boxRows)} bytes`);
   assert.ok(total(workerRows) <= 1_280, `worker tools/list: ${total(workerRows)} bytes`);
   assert.ok(added(imageRows) <= 2_560, `image tools: ${added(imageRows)} bytes`);
+  assert.equal(reportRows.length, 1);
+  assert.ok(added(reportRows) <= 768, `report_step_result: ${added(reportRows)} bytes`);
 });

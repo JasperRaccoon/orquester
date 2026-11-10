@@ -32,6 +32,8 @@ import { searchFamily } from "../tools/search.ts";
 import { secretFilesFamily } from "../tools/secret-files.ts";
 import { secretsFamily } from "../tools/secrets.ts";
 import { sessionsFamily } from "../tools/sessions.ts";
+// Workflow steps with outcomes/outputs: report_step_result, chat-only (spec 2026-11-10 §5.2).
+import { stepReportFamily } from "../tools/step-report.ts";
 import { todosFamily } from "../tools/todos.ts";
 import { usageFamily } from "../tools/usage.ts";
 import { visualsFamily } from "../tools/visuals.ts";
@@ -89,7 +91,9 @@ export const CATALOG: readonly AnyOrquesterTool[] = buildCatalog([
   // Devices: chat-only, advertised while the plugin is on and a platform is enabled.
   devicesFamily,
   // GPT Image: chat-only, advertised while the plugin is on and a Codex account can make images.
-  imagesFamily
+  imagesFamily,
+  // Workflow steps: chat-only, every chat (it refuses any chat that is not a reporting step).
+  stepReportFamily
 ]);
 
 const byAudience = new Map<Audience, readonly AnyOrquesterTool[]>();

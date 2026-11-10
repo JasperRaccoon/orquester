@@ -17,7 +17,10 @@
 //   switching     POST …/account {commandId, accountId}, then the continue message
 //   handing-off   build the handoff prompt (last messages + git status), then creating
 //   waiting-reset every candidate is burnt and `whenAllBurnt` waits: until the earliest reset
-//   output        read the final answer (before anything could close the tab) and finish
+//   output        read the final answer (before anything could close the tab) and finish; a block
+//                 that declares outcomes/outputs (step-report.ts) needs the agent's report here: with
+//                 none, ONE reminder turn goes back through `sending` (`reminderSent` persisted with
+//                 it), and a second report-less settle fails the block `no_report`
 //
 // The invariant (§5.4): a usage limit or an auth failure never fails the block while an eligible
 // candidate remains in its chain.
@@ -92,6 +95,7 @@ import {
   withAutonomyNote
 } from "./prompt.ts";
 import { protectSecrets, revealSecrets } from "./secret-text.ts";
+import { blockReports, noReportMessage, reminderMessage, reportHandle, reportOutputFields, withStepProtocol } from "./step-report.ts";
 import { describeSkips } from "./select.ts";
 import { autonomousAnswers, autonomousDecision, observe, waitForIdle, watchAgent } from "./watch.ts";
 
@@ -111,6 +115,12 @@ export interface AgentBlockOutput {
   hops: AgentHop[];
   /** Set only when `text` was cut at the cap. */
   textTruncated?: true;
+  /** The reported outcome id (a block with `outcomes`, spec 2026-11-10 §5.4). */
+  outcome?: string;
+  /** The report's summary (a block with `outcomes` / `outputs`). */
+  summary?: string;
+  /** The reported typed values (a block with `outputs`). */
+  outputs?: Record<string, unknown>;
 }
 
 const AGENT_PHASES = [
@@ -195,6 +205,8 @@ export interface AgentBlockState {
   firstWaitAt?: string;
   waitStartedAt?: string;
   waitUntil?: string;
+  /** The one reminder to call `report_step_result` was sent (spec 2026-11-10 §5.3). Absent = false. */
+  reminderSent?: boolean;
 }
 
 export function createAgentExecutor(deps: AgentExecutorDeps): NodeExecutor<"agent"> {
@@ -395,7 +407,7 @@ class AgentBlockRun {
       this.st.prompt = this.protect(vars.text);
     }
     this.st.next = c;
-    this.st.pendingInput = this.protect(withAutonomyNote(this.st.prompt, this.config.autonomyNote));
+    this.st.pendingInput = this.protect(this.firstMessage(this.st.prompt));
     this.st.hopVia = "initial";
     this.st.creatingSince = this.now().toISOString();
     this.st.phase = "creating";
@@ -458,7 +470,7 @@ class AgentBlockRun {
     });
     this.pushHop(current, sessionId, "initial");
     this.ctx.update({ sessionId, hops: this.hopsCopy() });
-    return this.enterSending(withAutonomyNote(this.st.prompt, this.config.autonomyNote));
+    return this.enterSending(this.firstMessage(this.st.prompt));
   }
 
   private async creating(): Promise<NodeResult | null> {
@@ -799,7 +811,8 @@ class AgentBlockRun {
     }
     const originalPrompt = this.st.prompt ?? "";
     this.st.pendingInput = this.protect(buildHandoffPrompt({
-      originalPrompt,
+      // A new session: it learns the reporting protocol again (spec 2026-11-10 §5.3).
+      originalPrompt: withStepProtocol(originalPrompt, this.config),
       previousAgent: previous.agent,
       previousReason: this.lastHopReason(),
       previousMessages,
@@ -830,7 +843,18 @@ class AgentBlockRun {
     return null;
   }
 
-  private async output(): Promise<NodeResult> {
+  private async output(): Promise<NodeResult | null> {
+    const reports = blockReports(this.config);
+    const report = reports ? this.ctx.stepReport?.() : undefined;
+    if (reports && !report) {
+      // §5.3: one reminder turn in the same session (persisted with `sending`, before the post).
+      if (!this.st.reminderSent) {
+        this.st.reminderSent = true;
+        this.ctx.update({ activity: "No report yet — reminding the agent" });
+        return this.enterSending(withAutonomyNote(reminderMessage(this.config), this.config.autonomyNote));
+      }
+      return this.fail("no_report", noReportMessage());
+    }
     const sessionId = this.st.sessionId!;
     const snap = await this.transient(() => readThread(this.api, sessionId), { ignoreDeadline: true });
     const { text, truncated } = finalText(snap, this.st.sessionStartTurnId ?? null);
@@ -844,11 +868,22 @@ class AgentBlockRun {
       accountId: current.accountId,
       durationMs: Math.max(0, this.now().getTime() - Date.parse(this.st.startedAt)),
       hops: this.hopsCopy(),
-      ...(truncated ? { textTruncated: true as const } : {})
+      ...(truncated ? { textTruncated: true as const } : {}),
+      ...(report ? reportOutputFields(report) : {})
     };
     this.ctx.update({ hops: output.hops });
     await this.ctx.setWaitingOn(undefined);
-    return { status: "succeeded", output, ...(this.st.warnings.length ? { warnings: [...this.st.warnings] } : {}) };
+    return {
+      status: "succeeded",
+      output,
+      ...(report ? { handle: reportHandle(report) } : {}),
+      ...(this.st.warnings.length ? { warnings: [...this.st.warnings] } : {})
+    };
+  }
+
+  /** The first message of the block's work: the prompt, the reporting protocol when it reports, the autonomy note. */
+  private firstMessage(prompt: string): string {
+    return withAutonomyNote(withStepProtocol(prompt, this.config), this.config.autonomyNote);
   }
 
   // --- helpers ------------------------------------------------------------------

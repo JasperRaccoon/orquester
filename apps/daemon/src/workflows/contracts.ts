@@ -7,6 +7,8 @@ import type {
   AccountSelectionDecision,
   AgentChainEntry,
   ListWorkflowRunsResponse,
+  ReportWorkflowStepRequest,
+  ReportWorkflowStepResponse,
   RunWorkflowRequest,
   RunWorkflowResponse,
   Workflow,
@@ -17,6 +19,7 @@ import type {
   WorkflowNode,
   WorkflowNodeType,
   WorkflowRun,
+  WorkflowStepReport,
   WorkflowRunSummary,
   WorkflowSecretName,
   WorkflowSummary,
@@ -226,6 +229,12 @@ export interface WorkflowEngine {
   /** Whether the block's log may still grow (follow mode ends when false). */
   isNodeLogLive(runId: string, nodeId: string): boolean;
   deleteTempProject(runId: string): Promise<boolean>;
+  /**
+   * `report_step_result` (spec 2026-11-10 §5.2): record `report` on the running pass of the agent
+   * block whose recorded sessions include `sessionId` (the calling chat), persisted before it
+   * resolves. Throws `WorkflowEngineError` NOT_A_WORKFLOW_STEP / INVALID_REPORT.
+   */
+  reportStepResult(sessionId: string, report: ReportWorkflowStepRequest): Promise<ReportWorkflowStepResponse>;
   accountPreview(chain: AgentChainEntry[], projectPath?: string): Promise<AccountSelectionDecision>;
   /** Summary rows for the rail (trigger texts, last run, active runs). */
   summarize(workflow: Workflow): WorkflowSummary;
@@ -326,6 +335,12 @@ export interface NodeExecutionContext<T extends WorkflowNodeType = WorkflowNodeT
    * order. Always set by the engine (optional only so hand-built test contexts need not).
    */
   liveInputs?(): { nodeId: string; name: string; output: unknown }[];
+  /**
+   * The current pass's latest valid `report_step_result` (spec 2026-11-10 §5.2), as the run holds it
+   * (persisted before the tool acknowledged it); undefined until the agent reports. Always set by the
+   * engine (optional only so hand-built test contexts need not).
+   */
+  stepReport?(): WorkflowStepReport | undefined;
   services: EngineServices;
   log: WorkflowLogger;
 }
