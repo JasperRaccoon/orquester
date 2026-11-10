@@ -9,7 +9,16 @@ import { exitPoint } from "../desktop-pointer";
 import { isModifierCode, keysymForKeyEvent } from "../desktop-keys";
 import type { DesktopPointerButton, DesktopStreamClient, DesktopStreamEvents, DesktopViewMode } from "./types";
 import { openVoxlConnection, type VoxlConnectionEvent, type VoxlConnectionHandle } from "./voxl/connection";
-import { actualSizeBox, containBox, cursorScale, fitRequestSize, voxlRequestSize, type DisplayBox } from "./voxl/layout";
+import {
+  actualSizeBox,
+  clientToDisplayPoint,
+  containBox,
+  cursorScale,
+  displayToClientPoint,
+  fitRequestSize,
+  voxlRequestSize,
+  type DisplayBox
+} from "./voxl/layout";
 import { parseVoxlCursor, voxlCmd, voxlCommandAllowed, type VoxlHello } from "./voxl/protocol";
 import type { VoxlFromWorker, VoxlToWorker } from "./voxl/worker-protocol";
 import VoxlWorker from "./voxl/voxl.worker.ts?worker";
@@ -201,28 +210,17 @@ export class VoxlStreamClient implements DesktopStreamClient {
   }
 
   clientToDisplay(clientX: number, clientY: number): { x: number; y: number } | null {
-    const canvas = this.canvas;
-    const hello = this.hello;
-    const root = this.root;
+    const { canvas, hello, root } = this;
     if (!canvas || !hello || !root) return null;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return null;
-    if (clientX < rect.left || clientX >= rect.right || clientY < rect.top || clientY >= rect.bottom) return null;
-    // Panned at actual size, the canvas reaches past what is shown.
-    const shown = root.getBoundingClientRect();
-    if (clientX < shown.left || clientX >= shown.right || clientY < shown.top || clientY >= shown.bottom) return null;
-    return {
-      x: ((clientX - rect.left) / rect.width) * hello.w,
-      y: ((clientY - rect.top) / rect.height) * hello.h
-    };
+    // Rendered rects: they include the view's zoom transform. Panned at actual size, the canvas
+    // reaches past what the root shows.
+    return clientToDisplayPoint(canvas.getBoundingClientRect(), { width: hello.w, height: hello.h }, clientX, clientY, root.getBoundingClientRect());
   }
 
   displayToClient(x: number, y: number): { x: number; y: number } | null {
-    const canvas = this.canvas;
-    const hello = this.hello;
+    const { canvas, hello } = this;
     if (!canvas || !hello) return null;
-    const rect = canvas.getBoundingClientRect();
-    return { x: rect.left + (x / hello.w) * rect.width, y: rect.top + (y / hello.h) * rect.height };
+    return displayToClientPoint(canvas.getBoundingClientRect(), { width: hello.w, height: hello.h }, x, y);
   }
 
   // ---- DesktopInputSink ------------------------------------------------------

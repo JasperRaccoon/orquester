@@ -67,3 +67,38 @@ export function cursorScale(displayScale: number, width: number, height: number)
   const scale = Number.isFinite(displayScale) && displayScale > 0 ? displayScale : 1;
   return Math.min(Math.max(scale, CURSOR_MIN_PX / size), CURSOR_MAX_PX / size);
 }
+
+/** A rendered box in client coordinates (a `getBoundingClientRect()`). */
+export interface ClientBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * A client point → display pixels through the surface's rendered (post-transform) rect, so the
+ * view's local zoom on an ancestor is accounted for; null outside the rect or `shown` (the part of
+ * a panned surface that is visible).
+ */
+export function clientToDisplayPoint(
+  surface: ClientBox,
+  display: DesktopSize,
+  clientX: number,
+  clientY: number,
+  shown: ClientBox = surface
+): { x: number; y: number } | null {
+  if (surface.width <= 0 || surface.height <= 0) return null;
+  const inside = (b: ClientBox) => clientX >= b.left && clientX < b.left + b.width && clientY >= b.top && clientY < b.top + b.height;
+  if (!inside(surface) || !inside(shown)) return null;
+  return {
+    x: ((clientX - surface.left) / surface.width) * display.width,
+    y: ((clientY - surface.top) / surface.height) * display.height
+  };
+}
+
+/** Display pixels → a client point on the surface's rendered (post-transform) rect. */
+export function displayToClientPoint(surface: ClientBox, display: DesktopSize, x: number, y: number): { x: number; y: number } | null {
+  if (display.width <= 0 || display.height <= 0) return null;
+  return { x: surface.left + (x / display.width) * surface.width, y: surface.top + (y / display.height) * surface.height };
+}
