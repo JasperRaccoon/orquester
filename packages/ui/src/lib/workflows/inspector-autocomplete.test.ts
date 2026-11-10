@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { completionScopeFor, templateCompletions, type CompletionScope } from "./inspector-autocomplete.ts";
-import { edge, node, workflow } from "./testing.ts";
+import { completionScopeFor, LOOP_ROOT_AVAILABLE, templateCompletions, type CompletionScope } from "./inspector-autocomplete.ts";
+import { edge, loopEdge, node, workflow } from "./testing.ts";
 
 const def = workflow(
   [
@@ -64,5 +64,43 @@ describe("templateCompletions", () => {
     assert.deepEqual(answer?.options.map((o) => [o.label, o.apply]), [["branch", "branch}"]]);
     assert.equal(labels("On {br", scope()), null);
     assert.ok(labels("On {", prompt)?.includes("diff"));
+  });
+});
+
+describe("loops (spec 2026-11-10 §7.2)", () => {
+  // Start → Fix → Check(if) ─true→ Ship; false loops back to Fix. Side hangs off Start.
+  const looped = workflow(
+    [
+      node("t", "trigger.manual", {}, { name: "Start" }),
+      node("fix", "agent", {}, { name: "Fix" }),
+      node("chk", "if", {}, { name: "Check" }),
+      node("ship", "code", {}, { name: "Ship" }),
+      node("side", "code", {}, { name: "Side" })
+    ],
+    [edge("t", "fix"), edge("fix", "chk"), edge("chk", "ship", "true"), loopEdge("chk", "fix", "false"), edge("t", "side")]
+  );
+
+  it("offers loop.pass and loop.feedback inside a loop's body", () => {
+    const inside = completionScopeFor(looped, "fix", { loopRoot: true });
+    assert.equal(inside.loop, true);
+    assert.ok(labels("{{ ", inside)!.includes("loop"));
+    assert.deepEqual(labels("{{ loop.", inside), ["pass", "feedback"]);
+    assert.deepEqual(labels("{{ loop.f", inside), ["feedback"]);
+    assert.equal(completionScopeFor(looped, "ship", { loopRoot: true }).loop, true, "downstream of the loop's target");
+  });
+
+  it("not outside a loop, nor before the root exists", () => {
+    const outside = completionScopeFor(looped, "side", { loopRoot: true });
+    assert.equal(outside.loop, false);
+    assert.equal(labels("{{ ", outside)!.includes("loop"), false);
+    assert.equal(labels("{{ loop.", outside), null);
+    assert.equal(completionScopeFor(looped, "fix", { loopRoot: false }).loop, false);
+    assert.equal(completionScopeFor(looped, "fix").loop, LOOP_ROOT_AVAILABLE, "by default: whether this build knows the root");
+  });
+
+  it("a loop edge adds no upstream block and no input to its target", () => {
+    const fix = completionScopeFor(looped, "fix");
+    assert.deepEqual(fix.upstream.map((n) => n.name), ["Start"]);
+    assert.deepEqual(fix.inputFields, ["kind", "input"], "the single forward input's fields");
   });
 });

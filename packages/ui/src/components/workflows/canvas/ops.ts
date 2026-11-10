@@ -1,7 +1,8 @@
 /**
  * The canvas's edits as pure functions over a definition: add a block (and
- * wire it from an output, or into an edge), remove blocks and edges, move and
- * nudge. The editor store turns each into one undo step.
+ * wire it from an output, or into an edge — a loop edge stays a loop, from
+ * the new block), remove blocks and edges, move and nudge. The editor store
+ * turns each into one undo step.
  */
 
 import {
@@ -50,7 +51,10 @@ export function addBlock<W extends Graph>(
       next = { ...next, edges: next.edges.filter((candidate) => candidate.id !== edge.id) };
       next = connectBlocks(next, { source: edge.source, sourceHandle: edge.sourceHandle, target: node.id }, mintId);
       const out = outputHandles(node)[0];
-      if (out) next = connectBlocks(next, { source: node.id, sourceHandle: out, target: edge.target }, mintId);
+      // Split a loop edge: the new block feeds the loop, with the loop's own settings.
+      if (out) {
+        next = connectBlocks(next, { source: node.id, sourceHandle: out, target: edge.target }, mintId, edge.loop ? { loop: edge.loop } : {});
+      }
     }
   } else if (options.from) {
     next = connectBlocks(next, { source: options.from.nodeId, sourceHandle: options.from.handle, target: node.id }, mintId);

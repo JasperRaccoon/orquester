@@ -226,6 +226,40 @@
   }
 }
 
+/* Loop edges (spec 2026-11-10 §7.4): dashed, in the info tone until a run paints them. */
+.wf-edge-loop {
+  stroke: rgb(var(--sem-info-400) / 0.75);
+  stroke-dasharray: 7 5;
+}
+
+.wf-edge-loop.wf-edge-taken {
+  stroke: rgb(var(--sem-ok-400) / 0.85);
+}
+
+.wf-edge-loop.wf-edge-active {
+  stroke: rgb(var(--sem-info-400));
+  stroke-dasharray: 8 6;
+}
+
+.wf-edge-loop.wf-edge-dead {
+  stroke: rgb(var(--n-700));
+  stroke-dasharray: 2 5;
+}
+
+/* Used up in this run: faded, like its label. */
+.wf-edge-loop-exhausted {
+  opacity: 0.55;
+}
+
+/* An edge the validator flags. */
+.wf-edge-problem {
+  stroke: rgb(var(--sem-danger-400) / 0.85);
+}
+
+.wf-edge-warning {
+  stroke: rgb(var(--sem-warn-400) / 0.85);
+}
+
 /* Handles: a small dot drawn inside a ≥ 28 px transparent hit area. */
 .wf-canvas .react-flow__handle.wf-handle {
   width: 28px;
@@ -313,6 +347,10 @@
   .wf-edge-active {
     animation: none;
     stroke-dasharray: none;
+  }
+  /* A loop stays dashed: that is what it is, not motion. */
+  .wf-edge-loop.wf-edge-active {
+    stroke-dasharray: 7 5;
   }
   /* Specific enough to beat the card's own Tailwind shadow. */
   .wf-block.wf-ring-running {
