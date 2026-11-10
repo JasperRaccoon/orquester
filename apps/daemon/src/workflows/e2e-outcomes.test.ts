@@ -212,4 +212,76 @@ describe("e2e: typed outcomes through the tool, the route and the engine", () =>
       await h.close();
     }
   });
+
+  test("a review loop: the continued chat learns the protocol again, gets its own reminder, reports for its new pass only", async (t) => {
+    const clock = new FakeClock("2026-11-10T12:00:00.000Z");
+    let h!: Booted;
+    let reviewSession: string | undefined;
+    let staleReport: CallToolResult | undefined;
+    let reviews = 0;
+    const host = new FakeChatHost({
+      clock,
+      accounts: [account("claude", "a1", "alpha")],
+      behaviour: (turn) => {
+        if (turn.input.includes("Review the change.") && !turn.input.startsWith("Your turn ended")) {
+          reviewSession = turn.sessionId;
+          return [{ kind: "say", text: "Looked at it." }];
+        }
+        if (turn.input.startsWith("Your turn ended without a report")) {
+          reviews += 1;
+          const args = reviews === 1 ? { outcome: "changes_requested", summary: "Add a test for the empty case." } : { outcome: "approved", summary: "Good now." };
+          return [{ kind: "call", fn: async (sessionId) => void (await reportVia(() => h.api, sessionId, { ...args, outputs: { pr_url: "https://x/9" } })) }, { kind: "say", text: "Reported." }];
+        }
+        // The fixer; on its second pass the reviewer's chat tries to report for a pass that is over.
+        if (reviewSession !== undefined) {
+          const stale = reviewSession;
+          return [{ kind: "call", fn: async () => void (staleReport = await reportVia(() => h.api, stale, { outcome: "approved", summary: "early" })) }, { kind: "say", text: "Fixed again." }];
+        }
+        return [{ kind: "say", text: "Fixed." }];
+      }
+    });
+    const s = await setup(host, clock, t);
+    h = s.h;
+    try {
+      const created = await json<WorkflowWriteResponse>(h, "POST", "/api/workflows", {
+        name: "Fix and review",
+        project: { kind: "existing", projectPath: s.projectPath },
+        nodes: [
+          { id: "start", type: "trigger.manual", name: "Start" },
+          { id: "fix", type: "agent", name: "Fix", config: { prompt: { kind: "text", text: "Fix the bug." }, chain: CHAIN } },
+          { id: "review", type: "agent", name: "Review", config: { prompt: { kind: "text", text: "Review the change." }, chain: CHAIN, outcomes: OUTCOMES, outputs: [{ name: "pr_url", type: "string" }] } },
+          { id: "ship", type: "stop", name: "Ship", config: { as: "success", message: "shipped" } }
+        ],
+        edges: [
+          { source: "Start", target: "Fix" },
+          { source: "Fix", target: "Review" },
+          { source: "Review", sourceHandle: "outcome:approved", target: "Ship" },
+          { source: "Review", sourceHandle: "outcome:changes_requested", target: "Fix", loop: { maxLoops: 2, session: "continue" } }
+        ]
+      });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      const runId = (await json<RunWorkflowResponse>(h, "POST", `/api/workflows/${created.body.workflow.id}/run`, {})).body.runId!;
+      await driveUntil(h, clock, finishedIn(h, runId), "the run");
+      const run = (await json<GetWorkflowRunResponse>(h, "GET", `/api/workflow-runs/${runId}`)).body.run as WorkflowRun;
+      assert.equal(run.status, "stopped", JSON.stringify(run.blocks.review, null, 2));
+      assert.equal(host.sessions.size, 2, "both blocks continued their own chats");
+      const inputs = host.turnLog.map((turn) => turn.input);
+      // Fix, Review, its reminder, Fix again, Review again, its own reminder.
+      assert.equal(inputs.length, 6, inputs.map((input) => input.slice(0, 40)).join(" | "));
+      const reviewAgain = inputs[4]!;
+      assert.match(reviewAgain, /^Workflow loop: pass 2 of up to 3\. The earlier steps ran again/);
+      assert.match(reviewAgain, /Pick exactly one `outcome`:/, "the reporting protocol applies again");
+      assert.match(inputs[5]!, /^Your turn ended without a report/, "the new pass starts with its reminder unsent");
+      assert.match(inputs[3]!, /Feedback from Review:\n<[^>]+>Add a test for the empty case\.<\//, "the fixer's feedback is the review's report summary");
+      assert.equal((staleReport?.structuredContent as { message?: string } | undefined)?.message, "This chat is not a workflow step that reports a result.", "a pass that is over takes no report");
+      const review = run.blocks.review!;
+      assert.equal(review.pass, 2);
+      assert.equal(review.report?.outcome, "approved");
+      assert.equal(review.handle, "outcome:approved");
+      assert.equal(review.passes![0]!.report?.outcome, "changes_requested", "the earlier report moved into its pass");
+      assert.equal(review.passes![0]!.report?.summary, "Add a test for the empty case.");
+    } finally {
+      await h.close();
+    }
+  });
 });
