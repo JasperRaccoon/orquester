@@ -136,10 +136,11 @@ export interface StorageScanRequest {
  * - `dir` / `file`: a real entry (`file` also covers symlinks, sockets and other
  *   non-directories).
  * - `smaller`: synthetic — the entries of one directory too small to keep in the
- *   saved scan, folded together (`items` says how many). Path = the parent's.
+ *   saved scan, folded together (`items` counts everything inside them, like a
+ *   folder's). Path = the parent's.
  * - `other`: synthetic — children folded together by the tree query because
- *   they are too small to draw at this zoom (`items` says how many). Path = the
- *   parent's.
+ *   they are too small to draw at this zoom (`items` counts everything inside
+ *   them; the name counts the folded entries). Path = the parent's.
  * - `unaccounted`: synthetic, only a child of the volume root — used space the
  *   scan could not see (unreadable dirs, other users' files, systemd's hidden
  *   /home and /root). Path = the volume root.
