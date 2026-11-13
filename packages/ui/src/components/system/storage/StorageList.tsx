@@ -22,7 +22,7 @@ function NodeIcon({ node }: { node: StorageNode }) {
 }
 
 const COLUMNS =
-  "grid grid-cols-[1rem_minmax(0,1fr)_auto_1.75rem] sm:grid-cols-[1rem_minmax(0,1fr)_5rem_3.5rem_6.5rem_1.75rem] items-center gap-x-3";
+  "grid grid-cols-[1rem_minmax(0,1fr)_4rem_1.75rem] sm:grid-cols-[1rem_minmax(0,1fr)_5rem_3.5rem_6.5rem_1.75rem] items-center gap-x-3";
 
 /** Where a keyboard-opened menu appears: just under the row's name. */
 function rowAnchor(el: HTMLElement): { x: number; y: number } {
