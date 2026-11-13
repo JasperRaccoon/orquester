@@ -92,8 +92,10 @@ function toStorageNode(node: ScanNode, name: string, path: string, depthLeft: nu
     actions: context.guard.actionsFor(path, kind)
   };
   if (node.unreadable) out.unreadable = true;
+  // The guard reads any second level under the workspaces root as a project: a loose file
+  // there (`<workspace>/README.md`) is not one.
   const project = context.guard.projectFor(path);
-  if (project) out.project = project;
+  if (project && !(kind === "file" && path === project.projectPath)) out.project = project;
   if (node.dir && depthLeft > 0) out.children = childrenOf(node, path, depthLeft - 1, context);
   return out;
 }

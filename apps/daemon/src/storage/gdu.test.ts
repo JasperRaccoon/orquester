@@ -5,14 +5,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, link, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { StorageNodeActions, StorageStatusResponse } from "@orquester/api";
-import { storageScansDir } from "@orquester/config";
+import { appBinDir, storageScansDir } from "@orquester/config";
 
-import { resolveGduBinary, runGduExport, ScanCancelledError } from "./gdu.ts";
+import { GduProbe, resolveGduBinary, runGduExport, ScanCancelledError } from "./gdu.ts";
 import { StorageScanService } from "./scan-service.ts";
 import type { StorageGuardPort } from "./types.ts";
 import { volumeSpace } from "./volumes.ts";
@@ -60,7 +60,9 @@ test("gdu scans a directory end to end: totals match du, hard links count once, 
     volumeSpace: async (path) =>
       path === root ? { totalBytes: null, usedBytes: null, freeBytes: null, inodesUsed: null } : volumeSpace(path),
     publish: (_channel, _type, payload) => {
-      if ((payload as StorageStatusResponse).scan.state === "idle") finished(payload as StorageStatusResponse);
+      const status = payload as StorageStatusResponse;
+      // The first idle status is the one published once the (no) saved scans are loaded.
+      if (status.scan.state === "idle" && (status.volumes[0]?.lastScan || status.lastError)) finished(status);
     }
   });
   t.after(() => service.dispose());
@@ -105,4 +107,62 @@ test("an aborted gdu run rejects as cancelled", async (t) => {
   const run = runGduExport({ bin, root, ignore: [], outFile, cwd: baseDir, signal: controller.signal });
   controller.abort();
   await assert.rejects(run, ScanCancelledError);
+});
+
+test("a gdu --version that failed is asked again instead of reading as not installed", async (t) => {
+  const baseDir = await mkdtemp(join(tmpdir(), "storage-gdu-appdir-"));
+  t.after(() => rm(baseDir, { recursive: true, force: true }));
+  // Fails the first time it is asked, answers after that (the binary itself is unchanged).
+  const asked = join(baseDir, "asked");
+  await mkdir(appBinDir(baseDir), { recursive: true });
+  await writeFile(
+    join(appBinDir(baseDir), "gdu"),
+    `#!/bin/sh\nif [ -e '${asked}' ]; then printf 'Version:\\t v5.39.0\\n'; exit 0; fi\n: > '${asked}'\nexit 1\n`,
+    { mode: 0o755 }
+  );
+  const probe = new GduProbe({ baseDir });
+  assert.equal((await probe.locate())?.version, null);
+  assert.equal((await probe.locate())?.version, "v5.39.0");
+});
+
+test("a gdu a dead daemon left running is killed when the next daemon starts", async (t) => {
+  const baseDir = await mkdtemp(join(tmpdir(), "storage-gdu-appdir-"));
+  const root = await mkdtemp(join(tmpdir(), "storage-gdu-root-"));
+  const tools = await mkdtemp(join(tmpdir(), "storage-gdu-tools-"));
+  t.after(async () => {
+    for (const dir of [baseDir, root, tools]) await rm(dir, { recursive: true, force: true });
+  });
+  // A stand-in gdu that says when it runs, then runs until killed.
+  const running = join(tools, "running");
+  assert.equal(spawnSync("mkfifo", [running]).status, 0);
+  const fake = join(tools, "gdu");
+  await writeFile(fake, `#!/bin/sh\necho running > '${running}'\nexec sleep infinity\n`, { mode: 0o755 });
+  const options = {
+    baseDir,
+    supported: true,
+    listVolumes: async () => [{ id: root, mountPoint: root, device: "/dev/test", fsType: "ext4", totalBytes: null, usedBytes: null, freeBytes: null }],
+    volumeSpace,
+    locateScanner: async () => ({ path: fake, version: "v5.39.0" })
+  };
+  let ended: (status: StorageStatusResponse) => void = () => undefined;
+  const scanEnded = new Promise<StorageStatusResponse>((resolve) => (ended = resolve));
+  const crashed = new StorageScanService({
+    ...options,
+    publish: (_channel, _type, payload) => {
+      const status = payload as StorageStatusResponse;
+      if (status.scan.state === "idle" && status.lastError) ended(status);
+    }
+  });
+  t.after(() => crashed.dispose());
+  await crashed.start();
+  const gduRunning = readFile(running, "utf8");
+  await crashed.startScan(root);
+  await gduRunning;
+
+  // The first daemon never stopped its scan (as after a SIGKILL); the next one starts.
+  const next = new StorageScanService(options);
+  t.after(() => next.dispose());
+  await next.start();
+  assert.match((await scanEnded).lastError?.message ?? "", /killed by SIGKILL/);
+  assert.deepEqual(await readdir(storageScansDir(baseDir)), []);
 });

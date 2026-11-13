@@ -15,8 +15,8 @@ import { storageScansDir } from "@orquester/config";
 
 import { storageErrors } from "./errors.ts";
 import { parseGduExport, type ParsedScan } from "./export-parser.ts";
-import { GduProbe, runGduExport, ScanCancelledError, type GduScanner } from "./gdu.ts";
-import { EXPORT_SUFFIX, loadSavedScans, writeSavedScan } from "./store.ts";
+import { GduProbe, killLeftoverScan, runGduExport, ScanCancelledError, type GduScanner } from "./gdu.ts";
+import { EXPORT_SUFFIX, loadSavedScans, SCAN_PID_FILE, writeSavedScan } from "./store.ts";
 import { findNode, removeFromScan, renameInScan, segmentsBelow, subtree, type SavedScan } from "./tree.ts";
 import type { StorageGuardPort, StorageTreeMutations } from "./types.ts";
 import { listVolumes, volumeSpace, type VolumeInfo, type VolumeSpace } from "./volumes.ts";
@@ -93,7 +93,8 @@ export async function runGduScan(run: ScannerRun): Promise<ParsedScan> {
       ignore: run.ignore,
       outFile,
       cwd: run.workDir,
-      signal: run.signal
+      signal: run.signal,
+      pidFile: join(run.workDir, SCAN_PID_FILE)
     });
     // Small chunks: parsing runs on the daemon's event loop, a few milliseconds per chunk.
     return await parseGduExport(createReadStream(outFile, { highWaterMark: 256 * 1024 }), {
@@ -128,24 +129,45 @@ export class StorageScanService implements StorageTreeMutations {
   private writes: Promise<unknown> = Promise.resolve();
   /** Keeps published events in order. */
   private publishes: Promise<unknown> = Promise.resolve();
+  /**
+   * Settles once {@link start} has loaded the saved scans (or failed to). The
+   * transports serve before that, so every request waits on it: a scan started
+   * earlier would have its export removed as stale, and a status would say
+   * "never scanned".
+   */
+  private readonly ready: Promise<void>;
+  private markReady!: () => void;
 
   constructor(private readonly options: StorageScanServiceOptions) {
     this.dir = storageScansDir(options.baseDir);
     this.supported = options.supported ?? process.platform === "linux";
     this.probe = new GduProbe({ baseDir: options.baseDir, path: options.path });
+    this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
 
-  /** Load saved scans (dropping stale exports) and schedule the nightly run. */
+  /**
+   * Kill a gdu a previous daemon left running, load saved scans (dropping stale
+   * exports), schedule the nightly run and publish the loaded status.
+   */
   async start(): Promise<void> {
-    if (!this.supported || this.disposed) return;
-    await mkdir(this.dir, { recursive: true });
-    this.scans = await loadSavedScans(this.dir);
-    this.schedule();
+    try {
+      if (!this.supported || this.disposed) return;
+      await mkdir(this.dir, { recursive: true });
+      if (await killLeftoverScan(join(this.dir, SCAN_PID_FILE))) {
+        this.options.logger?.warn("[storage] killed a gdu scan a previous daemon left running");
+      }
+      this.scans = await loadSavedScans(this.dir);
+      this.schedule();
+    } finally {
+      this.markReady();
+    }
+    this.publish();
   }
 
   /** Stop the schedule and any running scan (its gdu process group is killed). */
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.markReady();
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.nextAt = null;
@@ -179,6 +201,7 @@ export class StorageScanService implements StorageTreeMutations {
         nextScheduledAt: null
       };
     }
+    await this.ready;
     const [scanner, volumes] = await Promise.all([this.locate(), this.volumes()]);
     return {
       supported: true,
@@ -205,6 +228,7 @@ export class StorageScanService implements StorageTreeMutations {
   /** Start a manual scan of `volume`; resolves once it is running, with the status. */
   async startScan(volume: string, trigger: StorageScanTrigger = "manual"): Promise<StorageStatusResponse> {
     if (!this.supported) throw storageErrors.unsupported();
+    await this.ready;
     if (this.running) throw storageErrors.running(this.running.state.volume);
     const scanner = await this.locate();
     if (!scanner || scanner.version === null) throw storageErrors.scannerMissing();
@@ -220,6 +244,7 @@ export class StorageScanService implements StorageTreeMutations {
   /** Cancel the running scan (and the rest of a nightly run); resolves once it stopped. */
   async cancelScan(): Promise<StorageStatusResponse> {
     if (!this.supported) throw storageErrors.unsupported();
+    await this.ready;
     const running = this.running;
     if (running) {
       running.state.queued = [];
@@ -231,6 +256,7 @@ export class StorageScanService implements StorageTreeMutations {
 
   async tree(volume: string, query: { path?: string; depth?: number; guard: StorageGuardPort }): Promise<StorageTreeResponse> {
     if (!this.supported) throw storageErrors.unsupported();
+    await this.ready;
     if (!(await this.volumes()).some((candidate) => candidate.id === volume)) throw storageErrors.unknownVolume(volume);
     const scan = this.scans.get(volume);
     if (!scan) throw storageErrors.noScan(volume);
@@ -316,6 +342,8 @@ export class StorageScanService implements StorageTreeMutations {
     });
     running.controller.signal.throwIfAborted();
     const finishedAt = Date.now();
+    // Deletes/renames applied by now are already reflected in the used space read next.
+    const reflected = running.replay.length;
     const usedBytesAtScan = (await this.space(volume.mountPoint)).usedBytes;
     const root = parsed.root;
     const scan: SavedScan = {
@@ -331,12 +359,19 @@ export class StorageScanService implements StorageTreeMutations {
         apparentBytes: root.apparent,
         items: root.items,
         unreadableDirs: parsed.unreadableDirs,
-        usedBytesAtScan,
-        unaccountedBytes: usedBytesAtScan === null ? 0 : Math.max(0, usedBytesAtScan - root.size)
+        // Null through the first replay below (a replayed delete would lower it), then set.
+        usedBytesAtScan: null,
+        unaccountedBytes: 0
       }
     };
     await this.write(async () => {
-      for (const apply of running.replay) apply(scan);
+      // gdu may have walked a path deleted or renamed while it ran: correct the tree. The used
+      // space read above already left out what was deleted before it, so only later ones lower it.
+      for (const apply of running.replay.slice(0, reflected)) apply(scan);
+      scan.summary.usedBytesAtScan = usedBytesAtScan;
+      for (const apply of running.replay.slice(reflected)) apply(scan);
+      const used = scan.summary.usedBytesAtScan;
+      scan.summary.unaccountedBytes = used === null ? 0 : Math.max(0, used - scan.root.size);
       await writeSavedScan(this.dir, scan);
       this.scans.set(volume.id, scan);
     });
@@ -408,6 +443,8 @@ export class StorageScanService implements StorageTreeMutations {
    * every response is answered from, is still correct.
    */
   private async mutate(apply: (scan: SavedScan) => boolean): Promise<void> {
+    // Applied before the load would be overwritten by it.
+    await this.ready;
     this.running?.replay.push(apply);
     const changed = await this.write(async () => {
       const touched = [...this.scans.values()].filter((scan) => apply(scan));

@@ -38,6 +38,32 @@ function parsed(root: string): Promise<ParsedScan> {
   return parseGduExport([Buffer.from(exportOf(root))], { minKeepBytes: 1024 * 1024 });
 }
 
+/** A saved scan of `volume` a previous daemon wrote, finished at `finishedAt` after 10 minutes. */
+async function writeSaved(baseDir: string, volume: string, finishedAt: Date): Promise<void> {
+  const saved = await parsed(volume);
+  await mkdir(storageScansDir(baseDir), { recursive: true });
+  await writeFile(
+    join(storageScansDir(baseDir), scanFileName(volume)),
+    encodeSavedScan({
+      volume,
+      root: saved.root,
+      summary: {
+        startedAt: new Date(finishedAt.getTime() - 600_000).toISOString(),
+        finishedAt: finishedAt.toISOString(),
+        durationMs: 600_000,
+        trigger: "manual",
+        scannerVersion: "v5.39.0",
+        scannedBytes: saved.root.size,
+        apparentBytes: saved.root.apparent,
+        items: saved.root.items,
+        unreadableDirs: 0,
+        usedBytesAtScan: saved.root.size,
+        unaccountedBytes: 0
+      }
+    })
+  );
+}
+
 interface PendingRun {
   run: ScannerRun;
   resolve: (scan: ParsedScan) => void;
@@ -46,7 +72,7 @@ interface PendingRun {
 
 async function harness(
   t: TestContext,
-  options: { volumes?: VolumeInfo[]; workDirFree?: number; usedAfter?: number; baseDir?: string } = {}
+  options: { volumes?: VolumeInfo[]; workDirFree?: number; usedAfter?: number; baseDir?: string; start?: boolean } = {}
 ) {
   const baseDir = options.baseDir ?? (await mkdtemp(join(tmpdir(), "storage-service-")));
   if (!options.baseDir) t.after(() => rm(baseDir, { recursive: true, force: true }));
@@ -85,15 +111,21 @@ async function harness(
     }
   });
   t.after(() => service.dispose());
-  await service.start();
+  const nextEvent = (match: (status: StorageStatusResponse) => boolean) =>
+    new Promise<StorageStatusResponse>((resolve) => eventWaiters.push({ match, resolve }));
+  if (options.start !== false) {
+    // start() publishes the loaded status; a test's waiters start after it.
+    const loaded = nextEvent(() => true);
+    await service.start();
+    await loaded;
+  }
   return {
     baseDir,
     service,
     runs,
     events,
     nextRun: () => new Promise<PendingRun>((resolve) => runWaiters.push(resolve)),
-    nextEvent: (match: (status: StorageStatusResponse) => boolean) =>
-      new Promise<StorageStatusResponse>((resolve) => eventWaiters.push({ match, resolve }))
+    nextEvent
   };
 }
 
@@ -182,6 +214,22 @@ test("a scan does not start when the export would not fit on the disk", async (t
   assert.deepEqual((await h.service.status()).scan, { state: "idle" });
 });
 
+test("requests made before start() finishes wait for the saved scans, and the loaded status is published", async (t) => {
+  const baseDir = await mkdtemp(join(tmpdir(), "storage-service-"));
+  t.after(() => rm(baseDir, { recursive: true, force: true }));
+  const finishedAt = new Date(2026, 10, 12, 4, 10);
+  await writeSaved(baseDir, "/", finishedAt);
+  const h = await harness(t, { baseDir, start: false });
+  const published = h.nextEvent(() => true);
+  const early = h.service.status();
+  const scanning = h.service.startScan("/");
+  await h.service.start();
+  assert.equal((await early).volumes[0]!.lastScan?.finishedAt, finishedAt.toISOString());
+  assert.equal((await published).volumes[0]!.lastScan?.finishedAt, finishedAt.toISOString());
+  // The scan started after the load: it knows how long the last one took.
+  assert.equal(((await scanning).scan as { expectedDurationMs: number | null }).expectedDurationMs, 600_000);
+});
+
 test("a corrupt saved scan loads as no scan, and a stale export is removed", async (t) => {
   const baseDir = await mkdtemp(join(tmpdir(), "storage-service-"));
   t.after(() => rm(baseDir, { recursive: true, force: true }));
@@ -206,28 +254,7 @@ test("the nightly run at 04:00 scans each volume in turn, skipping one scanned i
   const baseDir = await mkdtemp(join(tmpdir(), "storage-service-"));
   t.after(() => rm(baseDir, { recursive: true, force: true }));
   // /data was scanned at 10:00 today: 18 h before tonight's run.
-  const recent = await parsed("/data");
-  await mkdir(storageScansDir(baseDir), { recursive: true });
-  await writeFile(
-    join(storageScansDir(baseDir), scanFileName("/data")),
-    encodeSavedScan({
-      volume: "/data",
-      root: recent.root,
-      summary: {
-        startedAt: new Date(2026, 10, 13, 9, 50).toISOString(),
-        finishedAt: new Date(2026, 10, 13, 10, 0).toISOString(),
-        durationMs: 600_000,
-        trigger: "manual",
-        scannerVersion: "v5.39.0",
-        scannedBytes: recent.root.size,
-        apparentBytes: recent.root.apparent,
-        items: recent.root.items,
-        unreadableDirs: 0,
-        usedBytesAtScan: recent.root.size,
-        unaccountedBytes: 0
-      }
-    })
-  );
+  await writeSaved(baseDir, "/data", new Date(2026, 10, 13, 10, 0));
   const h = await harness(t, { baseDir, volumes: [volume("/"), volume("/data"), volume("/srv")] });
   assert.equal((await h.service.status()).nextScheduledAt, new Date(2026, 10, 14, 4, 0, 0).toISOString());
 
@@ -306,4 +333,21 @@ test("deletes and renames update the saved tree, its file and its watchers; one 
   await finished;
   assert.equal(again.service.sizeOf("/swap"), 0);
   assert.equal(again.service.sizeOf("/var/lib/blob"), 50003968);
+});
+
+test("a delete made mid-scan, before the used space is read, leaves used and unaccounted as the disk reports them", async (t) => {
+  // The disk's used space, read once gdu is done, no longer holds /var/lib/blob.
+  const usedAfter = SCANNED - 50003968 + 5 * GB;
+  const h = await harness(t, { usedAfter });
+  const nextRun = h.nextRun();
+  await h.service.startScan("/");
+  const pending = await nextRun;
+  await h.service.applyDelete("/var/lib/blob");
+  const finished = h.nextEvent(idle);
+  pending.resolve(await parsed("/"));
+  const summary = (await finished).volumes.find((entry) => entry.id === "/")!.lastScan!;
+  assert.deepEqual(
+    [summary.scannedBytes, summary.usedBytesAtScan, summary.unaccountedBytes],
+    [SCANNED - 50003968, usedAfter, 5 * GB]
+  );
 });

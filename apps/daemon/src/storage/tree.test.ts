@@ -159,3 +159,28 @@ test("children too small to draw, or beyond 150, fold into one other node; a dir
     assert.ok(children[index - 1]!.sizeBytes >= children[index]!.sizeBytes);
   }
 });
+
+test("Open in Files: a project dir and what is inside it carry the project; a loose file in a workspace does not", () => {
+  // As the real guard: path logic only, so <workspaces>/<workspace>/README.md reads as a project.
+  const pathGuard: StorageGuardPort = {
+    actionsFor: () => ALLOWED,
+    projectFor: (path) => {
+      if (!path.startsWith("/srv/ws/")) return undefined;
+      const [workspace, project] = path.slice("/srv/ws/".length).split("/");
+      return workspace && project ? { workspace, project, projectPath: `/srv/ws/${workspace}/${project}` } : undefined;
+    }
+  };
+  const demo = dir("demo", [dir("app", [file("model.bin", 400_000_000)]), file("README.md", 300_000_000)]);
+  const root = dir("/", [dir("srv", [dir("ws", [demo])])]);
+  const scan: SavedScan = { volume: "/", root, summary: summary(root.size, null) };
+  const children = subtree(scan, { path: "/srv/ws/demo", depth: 2, guard: pathGuard }).root.children!;
+  const app = { workspace: "demo", project: "app", projectPath: "/srv/ws/demo/app" };
+  assert.deepEqual(
+    children.map((child) => [child.path, child.project]),
+    [
+      ["/srv/ws/demo/app", app],
+      ["/srv/ws/demo/README.md", undefined]
+    ]
+  );
+  assert.deepEqual(children[0]!.children![0]!.project, app);
+});
