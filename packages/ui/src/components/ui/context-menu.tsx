@@ -10,6 +10,12 @@ export interface ContextMenuItem {
   onClick: () => void;
   disabled?: boolean;
   danger?: boolean;
+  /**
+   * A second, muted line under the label (also its tooltip) — e.g. why a
+   * disabled item is refused. Shown as text because a disabled item takes no
+   * pointer events, so a tooltip alone would never appear on it.
+   */
+  description?: string;
 }
 
 export interface ContextMenuProps {
@@ -46,7 +52,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
   }, [onClose]);
 
   const left = Math.min(x, window.innerWidth - WIDTH - 8);
-  const top = Math.min(y, window.innerHeight - (items.length * 32 + 16));
+  const top = Math.min(y, window.innerHeight - (items.reduce((sum, item) => sum + (item.description ? 48 : 32), 0) + 16));
 
   return createPortal(
     <div
@@ -61,6 +67,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
           type="button"
           role="menuitem"
           disabled={item.disabled}
+          title={item.description}
           onClick={() => {
             item.onClick();
             onClose();
@@ -78,7 +85,14 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
               {item.icon}
             </span>
           )}
-          <span className="flex-1 truncate">{item.label}</span>
+          {item.description ? (
+            <span className="min-w-0 flex-1">
+              <span className="block truncate">{item.label}</span>
+              <span className="line-clamp-2 block text-[11px] leading-snug text-neutral-500">{item.description}</span>
+            </span>
+          ) : (
+            <span className="flex-1 truncate">{item.label}</span>
+          )}
         </button>
       ))}
     </div>,
