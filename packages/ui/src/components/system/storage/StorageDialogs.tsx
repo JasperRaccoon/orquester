@@ -63,7 +63,11 @@ export const StorageDeleteDialog: React.FC<{
                 This is outside the workspaces. Type <code className="text-neutral-200">{node.name}</code> to confirm.
               </p>
             )}
-            {error && <Notice tone="danger">{error}</Notice>}
+            {error && (
+              <Notice tone="danger">
+                <p className="break-words">{error}</p>
+              </Notice>
+            )}
           </div>
         ) : (
           ""
@@ -148,7 +152,7 @@ export const StorageRenameDialog: React.FC<{
         {problem && !unchanged && <p className="mt-1.5 text-xs text-danger">{problem}</p>}
         {error && (
           <Notice tone="danger" className="mt-3">
-            {error}
+            <p className="break-words">{error}</p>
           </Notice>
         )}
         <div className="mt-4 flex justify-end gap-2">
