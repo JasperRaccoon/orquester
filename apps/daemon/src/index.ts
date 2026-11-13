@@ -518,6 +518,12 @@ export function aggregateWorstAccountUsage(
 }
 
 export async function startDaemon(options: StartDaemonOptions = {}): Promise<RunningDaemon> {
+  // Boot timing for the journal: `performance.now()` counts from process start, so its value here
+  // is the time spent loading (and, on a cold tsx cache, transpiling) the module graph.
+  const bootPhases: string[] = [`modules ${bootSeconds(performance.now())}`];
+  const bootPhase = (name: string, since: number): void => {
+    bootPhases.push(`${name} ${bootSeconds(performance.now() - since)}`);
+  };
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
   const runtimePlatform = options.platform ?? osPlatform();
@@ -1150,6 +1156,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     }
   }
   await registry.init();
+  const reattachStarted = performance.now();
   // Reattach to any tmux sessions that outlived a previous daemon process
   // (KillMode=process keeps the tmux server alive across restarts). No-op on the
   // local backend. Best-effort: a tmux/socket error must not block startup.
@@ -1159,6 +1166,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       sessionsReattached = true;
     })
     .catch((error) => console.error("Session reattach failed", error));
+  bootPhase("sessions", reattachStarted);
   // The removed model proxy's one-time handover: stop it and hand the accounts
   // it refreshed back to the refresher started below, fresher tokens first.
   await retireModelProxy({
@@ -1813,7 +1821,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // chat tab records are already loaded, and before any transport serves.
   // Best-effort: a host failure must not block the daemon — every chat route
   // then answers 503 HOST_UNAVAILABLE.
+  const agentHostStarted = performance.now();
   await agentChat.init().catch((error) => console.error("Agent host init failed", error));
+  bootPhase("agent host", agentHostStarted);
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
   const webDir = webDirEnv ? resolve(cwd, webDirEnv) : undefined;
@@ -1908,8 +1918,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   attachWorkflowEngine(workflowDaemon.runtime.engine);
   // Runs resume and missed schedules fire as the engine starts, and their account selection reads
   // usage at once: let the first reading land first (the persisted one, usually no request at all).
+  const usageStarted = performance.now();
   await usage.whenFirstReading(15_000);
+  bootPhase("usage", usageStarted);
+  const workflowsStarted = performance.now();
   await workflowDaemon.start(services.internalApi).catch((error) => console.error("Workflow engine start failed", error));
+  bootPhase("workflows", workflowsStarted);
 
   // The external HTTP transport is opt-in and hot-reloadable: changing its
   // config (password / host / port / enabled) restarts THIS transport only —
@@ -1958,7 +1972,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     }
   };
 
+  const httpStarted = performance.now();
   await startHttp();
+  bootPhase("http", httpStarted);
   // Agent profile change detection (fs watchers on each installed agent's config), after boot.
   agentProfile.start();
   // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.
@@ -2069,6 +2085,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const running = buildInfo.commit ? ` ${buildInfo.version ?? "?"} (${buildInfo.commit.slice(0, 12)})` : "";
   console.log(`Orquester daemon${running} ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
+  console.log(`[boot] ready in ${bootSeconds(performance.now())} (${bootPhases.join(", ")})`);
 
   return {
     daemonId,
@@ -5719,6 +5736,11 @@ export function parseAppdir(args: string[]): string | undefined {
   }
 
   return undefined;
+}
+
+/** `1234.5` ms → `"1.2s"`, for the `[boot]` line. */
+function bootSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 /** Resolve a (possibly relative) appdir to an absolute path, or undefined. */
