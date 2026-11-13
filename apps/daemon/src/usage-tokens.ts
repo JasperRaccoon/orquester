@@ -220,6 +220,9 @@ const SYNTHETIC_MODEL = "<synthetic>";
  *  turns copied into resumed/branched transcripts are counted only once. An
  *  advisor call (`usage.iterations[i]` of type `advisor_message`) runs on its
  *  own model and is its own row; the top-level usage is the executor's only. */
+/** {@link UsageTokensScanner}'s default `readChunkBytes`. */
+const READ_CHUNK_BYTES = 32 * 1024 * 1024;
+
 function parseClaudeFile(text: string, mtimeMs: number, path: string, strings: Strings): RawRow[] {
   const rows: RawRow[] = [];
   const inSubagentsDir = path.split(/[\\/]/).includes("subagents");
@@ -464,6 +467,12 @@ export class UsageTokensScanner implements UsageRecordSource {
       accountHomes?: () => { agent: "claude" | "codex"; home: string }[];
       /** Called after every finished scan (the usage ledger folds the records in). */
       onScanned?: () => void;
+      /**
+       * Bytes read (and decoded) at a time, each cut at its last newline (default 32 MiB): a
+       * transcript can outgrow V8's longest string (~512 MiB), so it is never decoded whole.
+       */
+      readChunkBytes?: number;
+      logger?: Pick<Console, "warn">;
     }
   ) {}
 
@@ -580,7 +589,14 @@ export class UsageTokensScanner implements UsageRecordSource {
       const cached = this.fileCache.get(path);
       if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) continue;
       this.aggregateDirty = true;
-      await this.updateFile(path, agent, { mtimeMs: st.mtimeMs, size: st.size });
+      try {
+        await this.updateFile(path, agent, { mtimeMs: st.mtimeMs, size: st.size });
+      } catch (error) {
+        // One transcript that cannot be read or parsed must not stop the scan (or, from a
+        // fire-and-forget recompute, the daemon); it is retried on the next scan.
+        this.fileCache.delete(path);
+        (this.opts.logger ?? console).warn(`Usage: skipped transcript ${path}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
     this.scanned = true;
@@ -625,33 +641,50 @@ export class UsageTokensScanner implements UsageRecordSource {
       ? cached
       : { mtimeMs: 0, size: 0, bytesParsed: 0, rows: [], tailRows: [], codexState: initialCodexState(), strings: new Map() };
     const start = incremental ? entry.bytesParsed : 0;
-    let buf: Buffer;
+    const chunkBytes = Math.max(1, this.opts.readChunkBytes ?? READ_CHUNK_BYTES);
+    // Complete lines are parsed a chunk at a time (a line split across chunks is carried over), so
+    // no single decoded string is larger than a chunk plus one line; the Codex state advances
+    // across chunks exactly as across appends.
+    const parse = (bytes: Buffer, state: CodexParseState): RawRow[] =>
+      agent === "claude"
+        ? parseClaudeFile(bytes.toString("utf8"), st.mtimeMs, path, entry.strings)
+        : parseCodexFile(bytes.toString("utf8"), st.mtimeMs, state, entry.strings);
+    const rows: RawRow[] = [];
+    let parsedBytes = 0;
+    let carry: Buffer = Buffer.alloc(0);
     try {
       const fh = await open(path, "r");
       try {
-        const len = Math.max(0, st.size - start);
-        const b = Buffer.alloc(len);
-        const { bytesRead } = await fh.read(b, 0, len, start);
-        buf = b.subarray(0, bytesRead);
+        let pos = start;
+        while (pos < st.size) {
+          const len = Math.min(chunkBytes, st.size - pos);
+          const b = Buffer.alloc(len);
+          const { bytesRead } = await fh.read(b, 0, len, pos);
+          if (bytesRead === 0) break;
+          pos += bytesRead;
+          const data = carry.length > 0 ? Buffer.concat([carry, b.subarray(0, bytesRead)]) : b.subarray(0, bytesRead);
+          const lastNl = data.lastIndexOf(0x0a);
+          if (lastNl < 0) {
+            carry = data;
+            continue;
+          }
+          for (const row of parse(data.subarray(0, lastNl + 1), entry.codexState)) rows.push(row);
+          parsedBytes += lastNl + 1;
+          carry = data.subarray(lastNl + 1);
+        }
       } finally {
         await fh.close();
       }
-    } catch {
-      this.fileCache.delete(path);
-      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+        this.fileCache.delete(path);
+        return;
+      }
+      throw error;
     }
-    const lastNl = buf.lastIndexOf(0x0a);
-    const completeBuf = lastNl >= 0 ? buf.subarray(0, lastNl + 1) : Buffer.alloc(0);
-    const tailBuf = lastNl >= 0 ? buf.subarray(lastNl + 1) : buf;
-    if (agent === "claude") {
-      entry.rows.push(...parseClaudeFile(completeBuf.toString("utf8"), st.mtimeMs, path, entry.strings));
-      entry.tailRows = tailBuf.length > 0 ? parseClaudeFile(tailBuf.toString("utf8"), st.mtimeMs, path, entry.strings) : [];
-    } else {
-      entry.rows.push(...parseCodexFile(completeBuf.toString("utf8"), st.mtimeMs, entry.codexState, entry.strings));
-      entry.tailRows =
-        tailBuf.length > 0 ? parseCodexFile(tailBuf.toString("utf8"), st.mtimeMs, { ...entry.codexState }, entry.strings) : [];
-    }
-    entry.bytesParsed = start + completeBuf.length;
+    for (const row of rows) entry.rows.push(row);
+    entry.tailRows = carry.length > 0 ? parse(carry, { ...entry.codexState }) : [];
+    entry.bytesParsed = start + parsedBytes;
     entry.mtimeMs = st.mtimeMs;
     entry.size = st.size;
     this.fileCache.set(path, entry);

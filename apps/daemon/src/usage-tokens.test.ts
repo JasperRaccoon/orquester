@@ -574,3 +574,38 @@ test("a price change reprices the Cost tab's rows from the scanned sums, without
   setUsagePricingConfig({ overrides: {}, aliases: { "mystery-model": "claude-opus-5" } });
   assert.equal((await w.scanner.snapshot()).rows[0]?.costUsd, 30, "an alias prices it as its target (opus 5: 5 + 25)");
 });
+
+test("a transcript read in chunks smaller than its lines sums like one read whole, and appends continue from it", async () => {
+  // A transcript can outgrow V8's longest string, so it is decoded a chunk at a time: lines cut by
+  // a chunk boundary, lines longer than a chunk and the Codex state must come out as one read.
+  const home = await mkdtemp(join(fixtureRoot, "orq-utok-chunks-"));
+  const pdir = join(home, ".claude", "projects", "p");
+  const sdir = join(home, ".codex", "sessions");
+  await mkdir(pdir, { recursive: true });
+  await mkdir(sdir, { recursive: true });
+  const turn = (n: number) =>
+    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: `r${n}`, message: { id: `m${n}`, model: "claude-opus-4-8", usage: { input_tokens: n, output_tokens: 1 }, content: "x".repeat(n * 7) } });
+  const codex = (total: number, input: number) =>
+    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: total }, last_token_usage: { input_tokens: input, output_tokens: 0, cached_input_tokens: 0, total_tokens: input } } } });
+  await writeFile(join(pdir, "a.jsonl"), [turn(1), turn(20), turn(3)].join("\n") + "\n" + turn(4), "utf8");
+  await writeFile(join(sdir, "s.jsonl"), [codex(10, 10), codex(10, 10), codex(30, 20)].join("\n"), "utf8");
+
+  const sums = async (readChunkBytes?: number) => {
+    const scanner = new UsageTokensScanner({ userhome: home, cacheFile: join(home, `c-${readChunkBytes}.json`), now: T0, readChunkBytes });
+    await scanner.init();
+    const rows = (await scanner.snapshot(true)).rows;
+    return { scanner, claude: rows.find((r) => r.agent === "claude")?.inputTokens, codex: rows.find((r) => r.agent === "codex")?.inputTokens };
+  };
+  const whole = await sums();
+  assert.equal(whole.claude, 28);
+  assert.equal(whole.codex, 30);
+  const chunked = await sums(9);
+  assert.equal(chunked.claude, whole.claude);
+  assert.equal(chunked.codex, whole.codex);
+
+  await appendFile(join(pdir, "a.jsonl"), "\n" + turn(50), "utf8");
+  await appendFile(join(sdir, "s.jsonl"), "\n" + codex(35, 5), "utf8");
+  const after = (await chunked.scanner.snapshot(true)).rows;
+  assert.equal(after.find((r) => r.agent === "claude")?.inputTokens, 78);
+  assert.equal(after.find((r) => r.agent === "codex")?.inputTokens, 35);
+});
