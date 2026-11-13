@@ -148,7 +148,7 @@ import {
 } from "../../lib/agent-chat/status.logic";
 import { defaultMergeBackText } from "../../lib/agent-chat/lineage.logic";
 import { resolveMarkdownImageSource } from "./timeline/markdown/local-image";
-import { TurnDiffModal, type TurnDiffRequest } from "./timeline/TurnDiffModal";
+import { TurnDiffModal, type TurnDiffRequest } from "./TurnDiffModal";
 import {
   nextHeldTimeline,
   resolveThreadSwitchTimeline,

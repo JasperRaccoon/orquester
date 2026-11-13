@@ -63,7 +63,7 @@ import {
   composeQuotedPrompt,
   mergeQuotes,
   type ComposerQuote
-} from "./composer-quotes";
+} from "../../../lib/agent-chat/composer-quotes";
 import { restoreFailedSendDraft } from "./composer-failed-send";
 import { beginComposerSend, isComposerSending } from "./composer-sends";
 import { useComposerSending } from "./use-composer-sending";

@@ -17,7 +17,7 @@ import { cn } from "../../../../lib/cn";
 import { PROMPT_CUT_AT_REST_NOTE, type AgentPrompt } from "../../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
 import { ComposerPopover } from "../../composer/ComposerPopover";
-import { splitLeadingQuotes } from "../../composer/composer-quotes";
+import { splitLeadingQuotes } from "../../../../lib/agent-chat/composer-quotes";
 import {
   REWIND_BUSY_TITLE,
   REWIND_DISABLED_EXPLAINS_ITSELF,

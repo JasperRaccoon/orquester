@@ -23,7 +23,7 @@ import {
   type HistoryPrompt
 } from "../../../lib/prompt-history/prompts.logic";
 import { promptRewindTarget, rewindBusyReason } from "../../../lib/prompt-history/rewind.logic";
-import { TurnDiffModal, type TurnDiffRequest } from "../../agent-chat/timeline/TurnDiffModal";
+import { TurnDiffModal, type TurnDiffRequest } from "../../agent-chat/TurnDiffModal";
 import { useComposerSending } from "../../agent-chat/composer/use-composer-sending";
 import { RailEmptyState, RailSearchInput, RailSegmented, type RailSegmentOption } from "../primitives";
 import type { RightRailPanelProps } from "../types";

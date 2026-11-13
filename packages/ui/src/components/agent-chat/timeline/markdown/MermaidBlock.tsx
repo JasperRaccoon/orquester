@@ -4,7 +4,7 @@
 import React from "react";
 import { Code, Maximize2, Workflow } from "lucide-react";
 
-import { Modal, ModalCloseButton } from "../../../ui";
+import { Modal, ModalCloseButton } from "../../../ui/modal";
 import { ChatIconButton } from "../../primitives";
 import { CodeBlock } from "./CodeBlock";
 import {
