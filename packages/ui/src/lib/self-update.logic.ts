@@ -11,8 +11,8 @@ const SHA = /^[0-9a-f]{40}$/;
 /**
  * After an update started from `fromCommit`: what the latest poll means. `status` is null when the
  * request failed — the daemon is down for minutes while the update restarts it, so that is still
- * "updating". The server running another commit is "done". A failed or reverted run counts only
- * when it is this update's: right after the request the status file may still hold an older run
+ * "updating". The server running another commit, or this update's run succeeding, is "done". A
+ * finished run counts only when it is this update's: right after the request the status file may still hold an older run
  * until the updater writes "running" — one from another commit, or `staleRun`, the run the server
  * reported before the request (a retry after a failure starts from the same commit).
  */
@@ -25,6 +25,8 @@ export function nextUpdatePhase(
   if (typeof status.current === "string" && SHA.test(status.current) && status.current !== fromCommit) return "done";
   const run = status.run;
   if (!run || run.from !== fromCommit || (staleRun && run.startedAt === staleRun.startedAt)) return "updating";
+  // Succeeded without a new commit (the branch head was already running): nothing left to wait for.
+  if (run.state === "succeeded") return "done";
   return run.state === "failed" || run.state === "reverted" ? run.state : "updating";
 }
 

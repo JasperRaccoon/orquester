@@ -50,6 +50,7 @@ async function service(t: TestContext, deps: Partial<SelfUpdateDeps> = {}): Prom
     requestPath: join(dir, "daemon", "update-request"),
     statusPath: null,
     logger: { warn: () => undefined },
+    now: () => Date.parse("2026-11-13T10:30:00Z"),
     ...deps
   });
   t.after(() => s.stop());
@@ -212,6 +213,11 @@ test("status().run is the status file's run, null when missing or garbage", asyn
     await writeFile(statusPath, garbage);
     assert.equal((await s.status()).run, null);
   }
+
+  // Cut off without an outcome (a reboot mid-run): failed, and no longer blocking a new request.
+  await writeFile(statusPath, JSON.stringify({ state: "running", from: FROM, startedAt: "2026-11-13T07:00:00Z" }));
+  assert.equal((await s.status()).run?.state, "failed");
+  assert.equal(await s.requestUpdate(), "started");
 
   const without = await service(t, { statusPath: null });
   assert.equal((await without.status()).canUpdate, false);

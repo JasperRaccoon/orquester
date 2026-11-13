@@ -48,8 +48,9 @@ from one button.
 
 **Detection (daemon).** A module reads the checkout's `origin` URL from `.git/config` and the
 branch the install tracks (`main`). When origin is a GitHub repo it calls
-`GET https://api.github.com/repos/<owner>/<repo>/compare/<running commit>...<branch>`
-(unauthenticated; the repo is public, 1 request/hour per host is far under the limit). `status:
+`GET https://api.github.com/repos/<owner>/<repo>/compare/<branch>...<running commit>`
+(unauthenticated; the repo is public, 1 request/hour per host is far under the limit; base = branch, so
+`base_commit.sha` is the branch head). `status:
 "behind"` with `behind_by` → out of date; `identical`/`ahead`/`diverged` → not. Result cached in
 memory with `checkedAt`; network or API errors keep the last result and record the error. Checks at
 boot and hourly. Using the install's own origin means the check and the update always look at the

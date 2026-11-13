@@ -32,12 +32,21 @@ export interface SelfUpdateDeps {
   /** The branch the install tracks; default `main`. */
   branch?: string;
   logger?: SelfUpdateLogger;
+  /** Epoch ms; default `Date.now`. */
+  now?: () => number;
 }
 
 export type SelfUpdateRequestResult = "started" | "busy" | "unavailable";
 
 const DEFAULT_INTERVAL_MS = 3_600_000;
 const CHECK_TIMEOUT_MS = 15_000;
+/**
+ * A run still "running" this long after it started was cut off (the host rebooted or the updater was
+ * killed before it could record the outcome): it is reported as failed, so it neither blocks the
+ * next request nor keeps a client waiting. A real run — build, health wait, even a revert with its
+ * own rebuild and health wait — ends well within it.
+ */
+const STALE_RUN_MS = 3 * 60 * 60 * 1000;
 const SHA = /^[0-9a-f]{40}$/;
 const NAME = "[A-Za-z0-9._-]+";
 const GITHUB_REMOTES = [
@@ -212,7 +221,10 @@ export class SelfUpdateService {
   private async readRun(): Promise<SelfUpdateRun | null> {
     if (this.deps.statusPath === null) return null;
     try {
-      return parseSelfUpdateRun(JSON.parse(await readFile(this.deps.statusPath, "utf8")));
+      const run = parseSelfUpdateRun(JSON.parse(await readFile(this.deps.statusPath, "utf8")));
+      const now = (this.deps.now ?? Date.now)();
+      if (run?.state === "running" && now - Date.parse(run.startedAt) > STALE_RUN_MS) return { ...run, state: "failed" };
+      return run;
     } catch {
       return null;
     }

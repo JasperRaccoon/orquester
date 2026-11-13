@@ -36,6 +36,9 @@ test("nextUpdatePhase keeps waiting while the daemon is down or still runs the o
 test("nextUpdatePhase is done once the server runs another commit", () => {
   assert.equal(nextUpdatePhase(FROM, status({ current: NEW, behindBy: 0 })), "done");
   assert.equal(nextUpdatePhase(FROM, status({ current: NEW, run: run("succeeded", FROM) })), "done");
+  assert.equal(nextUpdatePhase(FROM, status({ run: run("succeeded", FROM) })), "done", "succeeded without a new commit");
+  const previous = run("succeeded", FROM);
+  assert.equal(nextUpdatePhase(FROM, status({ run: previous }), previous), "updating", "the run before this request");
 });
 
 test("nextUpdatePhase reports this run's failure or revert, not an older run's", () => {
