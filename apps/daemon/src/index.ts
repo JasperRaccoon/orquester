@@ -125,6 +125,11 @@ import { UrlWatcher } from "./url-watcher";
 import { AgentHooks, writeFileAtomic } from "./agent-hooks";
 import { DailyLogStream } from "./daily-log.ts";
 import { daemonBuildInfo, daemonRepoRoot, type BuildInfo } from "./build-info.ts";
+import { StorageScanService } from "./storage/scan-service.ts";
+import { registerStorageRoutes } from "./storage/routes.ts";
+import { createStorageGuard, readMountPoints, type StorageGuard } from "./storage/guard.ts";
+import { registerStorageActionRoutes } from "./storage/action-routes.ts";
+import { resolveGduBinary } from "./storage/gdu.ts";
 import { listAgentConversations } from "./agent-conversations.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import { createSessionStream } from "./session-stream";
@@ -160,7 +165,7 @@ import { agentHostRoutes, SESSION_TOOLS_REFRESH_TIMEOUT_MS, type SessionToolsRef
 import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
 import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/session-tools-refresh.ts";
-import { AGENT_PROFILE_CHANNEL, authRoutes, type AgentProfileAgentId } from "@orquester/api";
+import { AGENT_PROFILE_CHANNEL, authRoutes, storageRoutes, type AgentProfileAgentId } from "@orquester/api";
 import { PUSH_CHANNEL, PUSH_NOTIFICATION_EVENT_TYPE } from "@orquester/api";
 import { SECRET_FILES_CHANGED, SECRET_FILES_CHANNEL, SECRET_FILES_PLUGIN_ID, type PluginsResponse } from "@orquester/api";
 // umcp:t6 end
@@ -260,7 +265,8 @@ import { UsageStateFile } from "./usage-state";
 import { currentScopedWindows, currentWindow } from "./usage-parse";
 import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
-import { resolveZipTool, spawnDirZip } from "./zip";
+import { contentDisposition, sendFileDownload, sendFolderZip } from "./download";
+import { resolveZipTool } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
 import { InjectDaemonApi } from "./mcp/daemon-api.ts";
 import { HtmlPreviewBrowser } from "./html-preview/index.ts";
@@ -345,10 +351,11 @@ import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, realpathSync } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { fsPathFromQuery } from "./fs-path-query.js";
 import { randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
@@ -1616,6 +1623,34 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // GPT Image: generate_image on a connected Codex account's ChatGPT plan, while the plugin is on.
   // Its logins are read and renewed through the accounts service only (`gpt-image/accounts.ts`).
   const gptImage = new GptImageService({ plugins, accounts: agentAccounts, fsRoot: () => resolved.fsRoot, logger: console });
+  // Host storage (Settings → Host status → Storage): one scan service for both transports (one gdu
+  // scan at a time, the nightly schedule) and the action guard its tree query and the
+  // delete/rename/download routes share. The guard canonicalises its paths once, here.
+  const storageScans = new StorageScanService({
+    baseDir: paths.baseDir,
+    publish: (channel, type, payload) => broadcaster.publish(channel, type, payload),
+    logger: console
+  });
+  const gduAtBoot = (() => {
+    const bin = resolveGduBinary({ baseDir: paths.baseDir });
+    try {
+      return bin ? dirname(realpathSync(bin)) : null;
+    } catch {
+      return null;
+    }
+  })();
+  const storageGuard = createStorageGuard({
+    rootDir: "/",
+    mountPoints: () => readMountPoints(),
+    appdir: paths.baseDir,
+    homeDir: resolved.vars.userhome,
+    workspacesDir: resolved.workspacesDir,
+    fsRoot: resolved.fsRoot,
+    daemonCheckoutDir:
+      daemonRepoRoot() ?? fileURLToPath(new URL("../../..", import.meta.url)),
+    toolDirs: ["/opt/orquester-tools", ...(gduAtBoot ? [gduAtBoot] : [])],
+    secretPaths: ["/etc/orquester"]
+  });
   const services: Services = {
     buildInfo,
     authSessions,
@@ -1642,7 +1677,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxRegistry: boxes.registry,
     boxWiring: boxes,
     devices,
-    gptImage
+    gptImage,
+    storage: { scans: storageScans, guard: storageGuard }
   };
   // umcp:t3 begin
   // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
@@ -1922,6 +1958,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentProfile.start();
   // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.
   await secretFiles.start().catch((error) => console.error("Secret files start failed", error instanceof Error ? error.name : error));
+  // Host storage: kills a gdu a crashed daemon left running, loads the saved scans, arms the nightly
+  // scan and publishes the status; storage requests that arrived since the transports listen wait for it.
+  await storageScans.start().catch((error) => console.error("Storage scans start failed", error instanceof Error ? error.message : error));
   // Self-update: the first check runs in the background; then hourly.
   selfUpdate.start();
 
@@ -1929,6 +1968,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // First, while the event streams still flow: clients show "restarting"
     // instead of a bare network error for the gap that follows.
     publishDaemonStopping("shutdown");
+    // Host storage: the nightly timer stops and a running gdu scan's process group is signalled at
+    // once, so the 3 s backstop in cli.ts cannot cut it off. Awaited with the agent profile below.
+    const storageStopped = storageScans
+      .dispose()
+      .catch((error) => console.error("Storage scans stop failed", error instanceof Error ? error.message : error));
     usage.stop();
     selfUpdate.stop();
     clearTimeout(liveRecompute);
@@ -2004,7 +2048,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
     await logStream.close();
-    await agentProfileStopped;
+    await Promise.all([agentProfileStopped, storageStopped]);
     // Last, and bounded: a secret-files vault write in flight lands, a stuck one never holds the exit;
     // the same for the knowledge base's last writes.
     let secretFilesBound: ReturnType<typeof setTimeout> | undefined;
@@ -2188,6 +2232,8 @@ interface Services {
   devices?: DaemonDevices;
   /** GPT Image: the plugin's service (settings routes). Optional: route tests build a partial `services`. */
   gptImage?: GptImageService;
+  /** Host storage: the scan service and the action guard (Storage routes). Optional: route tests build a partial `services`. */
+  storage?: { scans: StorageScanService; guard: StorageGuard };
 }
 
 export function createServer(
@@ -2351,9 +2397,9 @@ export function createServer(
     }
 
     // A browser download navigation (<a download>) can't set an Authorization
-    // header, so /api/fs/download also accepts the token as ?token= — the
-    // same trick /ws uses. Scoped to that route (and the device media routes
-    // below); the token is redacted from logs by the request serializer
+    // header, so /api/fs/download (and the storage view's download) also accepts
+    // the token as ?token= — the same trick /ws uses. Scoped to those routes (and
+    // the device media routes below); the token is redacted from logs by the request serializer
     // above. Only a live session or API token
     // passes (auth/sessions.ts) — never the stored password hash.
     const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -2361,7 +2407,9 @@ export function createServer(
     // matched route patterns only, never a prefix; the hub proxy and every POST need the header).
     // Desktops: a kept automation screenshot (a chat row's thumbnail), likewise.
     const queryTokenRoute =
-      url === "/api/fs/download" || deviceQueryTokenAllowed(request.method, routePath) || desktopQueryTokenAllowed(request.method, routePath);
+      url === "/api/fs/download" ||
+      url === storageRoutes.download ||
+      deviceQueryTokenAllowed(request.method, routePath) || desktopQueryTokenAllowed(request.method, routePath);
     const queryToken = queryTokenRoute ? (request.query as { token?: string }).token : undefined;
     const session = authSessions.verify(headerToken ?? queryToken);
     if (!session) {
@@ -2604,6 +2652,17 @@ export function createServer(
       // boxes: boxes get tooling preloads that bake in the new root.
       services.boxWiring?.workspacesChanged();
     }
+  };
+
+  // Before a tree is deleted, close what is rooted in it (like the project/workspace
+  // delete routes) so a terminal can't keep running in a now-deleted cwd and leave an
+  // orphan tab. Sessions store the raw client-join path, so both the canonical and the
+  // raw resolved form are matched. Browser tabs and desktops rooted there too.
+  const closeTreeUsers = async (canonicalPath: string, rawPath: string): Promise<void> => {
+    sessions.closeByProjectPrefix(canonicalPath);
+    sessions.closeByProjectPrefix(rawPath);
+    await services.browsers.closeForProject(canonicalPath, rawPath);
+    await services.desktops.closeForProject(canonicalPath);
   };
 
   // Filesystem-backed workspaces & projects:
@@ -3569,55 +3628,19 @@ export function createServer(
     const name = basename(safe);
 
     // File: stream the bytes as-is. createReadStream (not readFile) means no
-    // memory cap; Content-Length from the stat gives the browser a progress bar.
+    // memory cap. MUST be returned (see sendFileDownload).
     if (info.isFile()) {
-      // MUST be `return reply.send(stream)`, NOT `void reply.send(stream); return;`.
-      // In an async handler a stream send is still piping when the function
-      // resolves to `undefined`, so Fastify sends that `undefined` and clobbers
-      // the stream — content-length:0, empty body. (A buffer send like
-      // /api/fs/raw is immune because it completes inline.) Returning the reply
-      // tells Fastify the response is taken.
-      return reply
-        .header("Content-Disposition", contentDisposition(name))
-        .header("Content-Length", String(info.size))
-        .header("X-Content-Type-Options", "nosniff")
-        .type("application/octet-stream")
-        .send(createReadStream(safe));
+      return sendFileDownload(reply, name, info.size, (range) => createReadStream(safe, range));
     }
 
-    // Directory: spawn a zip tool and stream its stdout (hijack pattern, as the
-    // session-output route does). Zip size is unknown up front, so it's chunked.
+    // Directory: spawn a zip tool and stream its stdout.
     if (info.isDirectory()) {
-      const child = spawnDirZip(safe);
-      if (!child) {
+      if (!sendFolderZip(request, reply, safe, name)) {
         void reply.code(501).send({
           code: "FS_UNSUPPORTED",
           message: "No zip tool (bsdtar/zip/7z) on the server PATH."
         });
-        return;
       }
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        "content-type": "application/zip",
-        "content-disposition": contentDisposition(`${name}.zip`),
-        "x-content-type-options": "nosniff",
-        "cache-control": "no-cache"
-      });
-      // pipe() ends reply.raw when stdout ends. Drain stderr so a chatty tool
-      // (zip warns on e.g. empty dirs) can't block on a full pipe. Kill the
-      // child if the client disconnects; destroy the socket on a spawn error.
-      child.stdout.pipe(reply.raw);
-      child.stderr.resume();
-      child.on("error", () => reply.raw.destroy());
-      // A non-zero exit (e.g. an unreadable subdir) means the zip is incomplete.
-      // stdout closing would otherwise end the chunked response cleanly, so the
-      // client would see a truncated body as a successful 200. Destroy the socket
-      // instead so the aborted transfer fails visibly. Harmless on a clean exit
-      // (code 0 → no-op; destroy() on an already-finished socket is idempotent).
-      child.on("close", (code) => {
-        if (code) reply.raw.destroy();
-      });
-      request.raw.on("close", () => child.kill());
       return;
     }
 
@@ -3872,15 +3895,7 @@ export function createServer(
         if (safe === realRoot) {
           return reply.code(400).send({ code: "FS_ERROR", message: "Cannot delete the workspaces root." });
         }
-        // Close any sessions rooted at the deleted tree first (like the project/
-        // workspace delete routes) so a terminal can't keep running in a now-
-        // deleted cwd and leave an orphan tab. Match both the realpath (`safe`)
-        // and the raw resolved form — sessions store the raw client-join path.
-        sessions.closeByProjectPrefix(safe);
-        sessions.closeByProjectPrefix(resolve(path));
-        // Browser tabs and desktops rooted in the deleted tree too.
-        await services.browsers.closeForProject(safe, resolve(path));
-        await services.desktops.closeForProject(safe);
+        await closeTreeUsers(safe, resolve(path));
         await rm(safe, { recursive: true, force: false });
         await notifyWorkspacesChanged(dirname(safe));
         return { ok: true };
@@ -4276,6 +4291,20 @@ export function createServer(
   );
 
   app.get("/api/system/ports", async (): Promise<SystemPortsResponse> => systemStatus.ports());
+
+  // Host storage (Settings → Host status → Storage): the gdu scans and the tree query, then the
+  // guarded delete/rename/download. Not confined to fsRoot — the storage guard decides
+  // (storage/guard.ts); both transports, like killing a process here.
+  if (services.storage) {
+    registerStorageRoutes(app, { service: services.storage.scans, guard: services.storage.guard });
+    registerStorageActionRoutes(app, {
+      guard: services.storage.guard,
+      tree: services.storage.scans,
+      closeTreeUsers,
+      notifyWorkspacesChanged,
+      supported: process.platform === "linux"
+    });
+  }
 
   // Past conversations of every installed agent for one project, merged and
   // newest-first, read out of each CLI's own history dir. Fail-soft on purpose:
@@ -5863,17 +5892,6 @@ async function listProjects(
       };
     })
   );
-}
-
-/**
- * Build a `Content-Disposition: attachment` value. The ASCII filename="" form is
- * a fallback with control/quote/backslash and non-ASCII bytes replaced by "_";
- * the RFC 5987 filename*=UTF-8'' form carries the real (possibly non-ASCII) name
- * for browsers that honor it.
- */
-function contentDisposition(name: string): string {
-  const ascii = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
 /**

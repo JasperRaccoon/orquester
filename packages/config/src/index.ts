@@ -167,6 +167,14 @@ export function pluginsDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "plugins");
 }
 
+/**
+ * `<appdir>/daemon/storage`: the latest saved storage scan of each volume (the
+ * pruned tree as JSON) and the scanner's temporary export while a scan runs.
+ */
+export function storageScansDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "storage");
+}
+
 /** `<appdir>/daemon/plugins/ts-rust`: holds preload.cjs, and tsc-rs's versions/<version>/ and .tmp/. */
 export function tsRustPluginDir(baseDir: string): string {
   return joinPath(pluginsDir(baseDir), "ts-rust");

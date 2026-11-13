@@ -242,9 +242,29 @@ test("voxl's install is best-effort: its version is reported, and a failure only
   assert.match(failed.err, /WARNING: voxl not installed/);
 });
 
-test("a release without install-voxl.sh skips it", () => {
+test("gdu's install is best-effort: its version is reported, and a failure only warns", () => {
+  const ok = release("ok", "1.1.0", {
+    "deploy/install-gdu.sh": "echo '[install-gdu] gdu v5.39.0 at /opt/orquester-tools/gdu/v5.39.0/gdu'\n"
+  });
+  const installed = deploy();
+  assert.equal(installed.code, 0, installed.err);
+  assert.match(installed.out, /gdu=v5\.39\.0$/m);
+
+  const failing = release("ok", "1.2.0", {
+    "deploy/install-gdu.sh": "echo '[install-gdu] ERROR: sha256 mismatch for gdu_linux_amd64_static.tgz (v5.39.0) — not installing' >&2\nexit 1\n"
+  });
+  const failed = deploy();
+  assert.equal(failed.code, 0, failed.err);
+  assert.equal(head(), failing);
+  assert.deepEqual(restarts(), [ok, failing], "the daemon is restarted all the same");
+  assert.match(failed.out, /gdu=FAILED: sha256 mismatch for gdu_linux_amd64_static\.tgz \(v5\.39\.0\) — not installing$/m);
+  assert.match(failed.err, /WARNING: gdu not installed/);
+});
+
+test("a release without install-voxl.sh or install-gdu.sh skips them", () => {
   release("ok", "1.1.0");
   const result = deploy();
   assert.equal(result.code, 0, result.err);
   assert.match(result.out, /voxl=skipped$/m);
+  assert.match(result.out, /gdu=skipped$/m);
 });

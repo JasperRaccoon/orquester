@@ -42,6 +42,16 @@ import type {
 } from "./desktops.ts";
 import { desktopRoutes } from "./desktops.ts";
 import {
+  storageRoutes,
+  type StorageDeleteRequest,
+  type StorageDeleteResponse,
+  type StorageRenameRequest,
+  type StorageRenameResponse,
+  type StorageScanRequest,
+  type StorageStatusResponse,
+  type StorageTreeResponse
+} from "./storage.ts";
+import {
   sessionProfileRoutes,
   type AddSessionProfilePluginRequest,
   type CopySessionProfileItemsRequest,
@@ -76,6 +86,7 @@ export * from "./changed-file-kind.ts";
 export * from "./secret-files.ts";
 export * from "./agent-profile.ts";
 export * from "./session-profiles.ts";
+export * from "./storage.ts";
 export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 export * from "./desktops.ts";
@@ -2387,6 +2398,35 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   getFsCapabilities(): Promise<FsCapabilitiesResponse> {
     return this.get("/api/fs/capabilities");
+  }
+
+  // Host storage (Settings → Host status → Storage); see ./storage.ts.
+
+  storageStatus(): Promise<StorageStatusResponse> {
+    return this.get(storageRoutes.status);
+  }
+
+  startStorageScan(request: StorageScanRequest): Promise<StorageStatusResponse> {
+    return this.post(storageRoutes.scan, request);
+  }
+
+  cancelStorageScan(): Promise<StorageStatusResponse> {
+    return this.delete(storageRoutes.scan);
+  }
+
+  storageTree(volume: string, path?: string, depth?: number): Promise<StorageTreeResponse> {
+    const query = new URLSearchParams({ volume });
+    if (path !== undefined) query.set("path", path);
+    if (depth !== undefined) query.set("depth", String(depth));
+    return this.get(`${storageRoutes.tree}?${query.toString()}`);
+  }
+
+  deleteStorageEntry(request: StorageDeleteRequest): Promise<StorageDeleteResponse> {
+    return this.post(storageRoutes.delete, request);
+  }
+
+  renameStorageEntry(request: StorageRenameRequest): Promise<StorageRenameResponse> {
+    return this.post(storageRoutes.rename, request);
   }
 
   usage(force?: boolean): Promise<UsageResponse> {

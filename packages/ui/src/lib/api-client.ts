@@ -86,6 +86,13 @@ import type {
   SystemProcessesResponse,
   SystemProcessesScope,
   SystemResourcesResponse,
+  StorageDeleteRequest,
+  StorageDeleteResponse,
+  StorageRenameRequest,
+  StorageRenameResponse,
+  StorageScanRequest,
+  StorageStatusResponse,
+  StorageTreeResponse,
   TodoListRecord,
   TodoScope,
   UpdateProjectRequest,
@@ -122,7 +129,7 @@ import { bindThreadCacheScope } from "./agent-chat/persistent-cache";
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, githubLinkRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
+import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, storageRoutes, agentProfileRoutes, agentToolsRoutes, desktopRoutes, githubLinkRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's routes and payloads.
 import { accountLendRoutes, boxRoutes, type AccountLendsResponse } from "@orquester/api";
 // Devices: the Device simulators plugin's routes and payloads (answers validated by `lib/devices/validate.ts`).
@@ -397,6 +404,15 @@ function serverFieldFromBody(body: unknown): string | null {
     }
   }
   return null;
+}
+
+/** A refusal's JSON body (`{ code, message }`) that arrived over a byte channel, or undefined when it isn't JSON. */
+function jsonBodyOf(data: ArrayBuffer): unknown {
+  try {
+    return JSON.parse(new TextDecoder().decode(data));
+  } catch {
+    return undefined;
+  }
 }
 
 /** A device request the caller sends with `fetch` (see {@link ApiClient.deviceHttpRequest}). */
@@ -885,7 +901,7 @@ export class ApiClient {
       signal
     });
     if (!response.ok) {
-      throw new ApiError(response.status, "GET", "/api/fs/download", response.headers, undefined);
+      throw new ApiError(response.status, "GET", "/api/fs/download", response.headers, jsonBodyOf(response.data));
     }
     return response.data;
   }
@@ -1675,14 +1691,7 @@ export class ApiClient {
     const path = sessionProfileRoutes.exportProfile(profileId);
     const response = await this.transporter.requestBytes({ method: "GET", path, signal });
     if (!response.ok) {
-      // The refusal's JSON body arrives as bytes: decode it so the reason reaches the UI.
-      let body: unknown;
-      try {
-        body = JSON.parse(new TextDecoder().decode(response.data));
-      } catch {
-        body = undefined;
-      }
-      throw new ApiError(response.status, "GET", path, response.headers, body);
+      throw new ApiError(response.status, "GET", path, response.headers, jsonBodyOf(response.data));
     }
     return response.data;
   }
@@ -2691,6 +2700,72 @@ export class ApiClient {
    */
   killSystemProcess(pid: number, signal: KillProcessSignal = "SIGTERM"): Promise<KillProcessResponse> {
     return this.send("POST", "/api/system/processes/kill", { body: { pid, signal } });
+  }
+
+  // Host storage (Settings → Host status → Storage). Read once when the tab
+  // opens; scan progress and finished scans then arrive as `storage.changed`
+  // events, so nothing here is polled. Refusals are `{ code, message }` bodies
+  // (`StorageErrorCode`), thrown as an ApiError.
+
+  storageStatus(signal?: AbortSignal): Promise<StorageStatusResponse> {
+    return this.send("GET", storageRoutes.status, { signal });
+  }
+
+  /** Start a scan of one volume (409 STORAGE_SCAN_RUNNING while any scan runs). */
+  startStorageScan(request: StorageScanRequest): Promise<StorageStatusResponse> {
+    return this.send("POST", storageRoutes.scan, { body: request });
+  }
+
+  /** Cancel the running scan (and whatever is queued behind it). */
+  cancelStorageScan(): Promise<StorageStatusResponse> {
+    return this.send("DELETE", storageRoutes.scan);
+  }
+
+  /** A subtree of the volume's saved scan; `path` defaults to the volume root. */
+  storageTree(volume: string, path?: string, depth?: number, signal?: AbortSignal): Promise<StorageTreeResponse> {
+    return this.send("GET", storageRoutes.tree, { query: { volume, path, depth }, signal });
+  }
+
+  deleteStorageEntry(request: StorageDeleteRequest): Promise<StorageDeleteResponse> {
+    return this.send("POST", storageRoutes.delete, { body: request });
+  }
+
+  renameStorageEntry(request: StorageRenameRequest): Promise<StorageRenameResponse> {
+    return this.send("POST", storageRoutes.rename, { body: request });
+  }
+
+  /**
+   * As {@link buildDownloadUrl}, for the storage download route (any path the
+   * storage guard lets through, not only those inside the fs sandbox); null on
+   * transports without a reachable URL (the desktop unix socket).
+   */
+  buildStorageDownloadUrl(path: string): string | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    const params = new URLSearchParams(fsPathQuery(path));
+    if (this.connection.password) {
+      params.set("token", this.connection.password);
+    }
+    return `${base}${storageRoutes.download}?${params.toString()}`;
+  }
+
+  /** As {@link downloadBytes}, for the storage download route. */
+  async downloadStorageBytes(path: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+    if (!this.transporter.requestBytes) {
+      throw new Error("Download is not supported on this connection.");
+    }
+    const response = await this.transporter.requestBytes({
+      method: "GET",
+      path: storageRoutes.download,
+      query: fsPathQuery(path),
+      signal
+    });
+    if (!response.ok) {
+      throw new ApiError(response.status, "GET", storageRoutes.download, response.headers, jsonBodyOf(response.data));
+    }
+    return response.data;
   }
 }
 
