@@ -15,8 +15,8 @@ import { storageScansDir } from "@orquester/config";
 
 import { storageErrors } from "./errors.ts";
 import { parseGduExport, type ParsedScan } from "./export-parser.ts";
-import { GduProbe, runGduExport, ScanCancelledError, type GduScanner } from "./gdu.ts";
-import { EXPORT_SUFFIX, loadSavedScans, writeSavedScan } from "./store.ts";
+import { GduProbe, killLeftoverScan, runGduExport, ScanCancelledError, type GduScanner } from "./gdu.ts";
+import { EXPORT_SUFFIX, loadSavedScans, SCAN_PID_FILE, writeSavedScan } from "./store.ts";
 import { findNode, removeFromScan, renameInScan, segmentsBelow, subtree, type SavedScan } from "./tree.ts";
 import type { StorageGuardPort, StorageTreeMutations } from "./types.ts";
 import { listVolumes, volumeSpace, type VolumeInfo, type VolumeSpace } from "./volumes.ts";
@@ -93,7 +93,8 @@ export async function runGduScan(run: ScannerRun): Promise<ParsedScan> {
       ignore: run.ignore,
       outFile,
       cwd: run.workDir,
-      signal: run.signal
+      signal: run.signal,
+      pidFile: join(run.workDir, SCAN_PID_FILE)
     });
     // Small chunks: parsing runs on the daemon's event loop, a few milliseconds per chunk.
     return await parseGduExport(createReadStream(outFile, { highWaterMark: 256 * 1024 }), {
@@ -145,13 +146,16 @@ export class StorageScanService implements StorageTreeMutations {
   }
 
   /**
-   * Load saved scans (dropping stale exports), schedule the nightly run and
-   * publish the loaded status.
+   * Kill a gdu a previous daemon left running, load saved scans (dropping stale
+   * exports), schedule the nightly run and publish the loaded status.
    */
   async start(): Promise<void> {
     try {
       if (!this.supported || this.disposed) return;
       await mkdir(this.dir, { recursive: true });
+      if (await killLeftoverScan(join(this.dir, SCAN_PID_FILE))) {
+        this.options.logger?.warn("[storage] killed a gdu scan a previous daemon left running");
+      }
       this.scans = await loadSavedScans(this.dir);
       this.schedule();
     } finally {

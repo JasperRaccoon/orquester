@@ -25,6 +25,8 @@ const PREFIX = "scan-";
 const SUFFIX = ".json";
 /** gdu's export while a scan runs. */
 export const EXPORT_SUFFIX = ".export.json";
+/** The running gdu's process group while a scan runs (gdu.ts `killLeftoverScan`). */
+export const SCAN_PID_FILE = "gdu.pid";
 
 type PackedFile = [string, number, number];
 type PackedSmaller = [number, number, number];

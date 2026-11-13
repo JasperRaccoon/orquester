@@ -1946,13 +1946,19 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentProfile.start();
   // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.
   await secretFiles.start().catch((error) => console.error("Secret files start failed", error instanceof Error ? error.name : error));
-  // Host storage: loads the saved scans and arms the nightly scan.
+  // Host storage: kills a gdu a crashed daemon left running, loads the saved scans, arms the nightly
+  // scan and publishes the status; storage requests that arrived since the transports listen wait for it.
   await storageScans.start().catch((error) => console.error("Storage scans start failed", error instanceof Error ? error.message : error));
 
   const stop = async () => {
     // First, while the event streams still flow: clients show "restarting"
     // instead of a bare network error for the gap that follows.
     publishDaemonStopping("shutdown");
+    // Host storage: the nightly timer stops and a running gdu scan's process group is signalled at
+    // once, so the 3 s backstop in cli.ts cannot cut it off. Awaited with the agent profile below.
+    const storageStopped = storageScans
+      .dispose()
+      .catch((error) => console.error("Storage scans stop failed", error instanceof Error ? error.message : error));
     usage.stop();
     clearTimeout(liveRecompute);
     await usageState.flush();
@@ -1971,8 +1977,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     await devices.stop().catch((error) => console.error("Device service stop failed", error instanceof Error ? error.message : error));
     // GPT Image: stops following the plugin and the accounts.
     gptImage.stop();
-    // Host storage: the nightly timer stops and a running gdu scan's process group is killed.
-    await storageScans.dispose().catch((error) => console.error("Storage scans stop failed", error instanceof Error ? error.message : error));
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
@@ -2029,7 +2033,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
     await logStream.close();
-    await agentProfileStopped;
+    await Promise.all([agentProfileStopped, storageStopped]);
     // Last, and bounded: a secret-files vault write in flight lands, a stuck one never holds the exit;
     // the same for the knowledge base's last writes.
     let secretFilesBound: ReturnType<typeof setTimeout> | undefined;
