@@ -20,6 +20,7 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
   the box. Idempotent — re-run to catch up an **existing** VPS, then `systemctl daemon-reload && systemctl restart orquester`.
 - `install-go.sh` → installs the pinned Go toolchain that builds `orq-agent` (see below); run as root.
 - `install-voxl.sh` → installs the pinned voxl H.264 desktop streamer (see below); run as root.
+- `install-gdu.sh` → installs the pinned gdu disk scanner for the Storage view (see below); run as root.
 - `install-unit.sh` → installs `orquester.service` (with `systemctl daemon-reload` when it changed)
   and `/etc/needrestart/conf.d/orquester.conf` (`$nrconf{override_rc}{qr(^orquester\.service$)} = 0;`,
   checked with `perl -c` first), so needrestart never restarts the daemon after an apt upgrade, and
@@ -124,6 +125,23 @@ release needs a newer rustc) in `install-voxl.sh`; the next deploy builds it.
 
 voxl links x264, which is GPL-2.0, so the built binary is GPL: it is built on each host for that
 host (and its VMs) and is not distributed.
+
+### Host status → Storage — gdu (disk scanner)
+
+The Storage view's treemap is built from scans by [gdu](https://github.com/dundee/gdu) (MIT).
+`install-gdu.sh` (run as root by provision and every deploy, best-effort like `install-voxl.sh`)
+downloads the official release tarball of a **pinned** gdu — currently **v5.39.0** —
+(`gdu_linux_amd64_static.tgz` or `gdu_linux_arm64.tgz`; other architectures fail with a clear
+message), verifies its sha256, checks that the binary reports the pinned version, and installs it at
+`/opt/orquester-tools/gdu/v5.39.0/gdu` (root-owned, 0755), symlinked at `/usr/local/bin/gdu` (an
+existing non-symlink there is left alone). It is a no-op when the pinned version is installed.
+
+A failure only warns (`gdu=FAILED: …` at the end of the deploy output, `gdu=<version>` on success):
+the daemon still restarts, and the Storage view shows that the scanner is not installed and how to
+install it. The daemon looks for gdu at `<appdir>/bin/gdu`, then the sessions' PATH, then
+`/usr/local/bin/gdu`. To bump: set `GDU_VERSION`, `GDU_SHA256_AMD64` and `GDU_SHA256_ARM64` in
+`install-gdu.sh` from the `gdu_linux_amd64_static.tgz` / `gdu_linux_arm64.tgz` lines of the
+release's `sha256sums.txt`; the next deploy installs it.
 
 Archive previews want `p7zip-full` or `libarchive-tools` (`bsdtar`) on PATH; `provision-devtools.sh`
 installs `libarchive-tools`. Without either, archives degrade to a download card.

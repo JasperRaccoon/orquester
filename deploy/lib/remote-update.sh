@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs ON the VPS (delivered by ./deploy.sh via scp — never `bash -s`).
 # Routine update cycle: fetch/reset -> pnpm install -> SPA build -> Go + orq-agent
-# build (best-effort) -> voxl (best-effort) -> native-module guard -> chown -> version stamp -> public URL
+# build (best-effort) -> voxl + gdu (best-effort) -> native-module guard -> chown -> version stamp -> public URL
 # + unit -> restart -> health. If the new release never turns healthy, the previous
 # release (the last successful deploy) is reset, rebuilt, restarted and
 # health-checked, and the deploy still fails. Inputs via env:
@@ -65,6 +65,7 @@ tree_version() { # the checked-out package.json's version (no node: it may be th
 # the revert path calls this from an `if`, where `set -e` does not apply.
 box_agent="skipped"
 voxl="skipped"
+gdu="skipped"
 build_tree() {
   # CI=1: non-interactive (a pnpm-version-mismatch prompt would wedge the deploy).
   # </dev/null: pnpm must never read stdin.
@@ -106,6 +107,23 @@ build_tree() {
       echo "[remote-update]          Continuing: desktops stream with RFB/noVNC until it is." >&2
     fi
     rm -f "$voxl_log"
+  fi
+  # gdu, the Storage view's disk scanner: the pinned release binary (a no-op once installed).
+  # Best-effort — a failure warns and the Storage view shows how to install it. Refs without the
+  # script (old rollbacks) skip this.
+  gdu="skipped"
+  if [ -f deploy/install-gdu.sh ]; then
+    gdu_log="$(mktemp)"
+    if $SUDO bash deploy/install-gdu.sh </dev/null 2>&1 | tee "$gdu_log"; then
+      gdu="$(sed -n 's/^\[install-gdu\] gdu \([^ ]*\) at .*/\1/p' "$gdu_log" | tail -n1)"
+      [ -n "$gdu" ] || gdu="ok"
+    else
+      gdu="FAILED: $(sed -n 's/^\[install-gdu\] ERROR: //p' "$gdu_log" | tail -n1)"
+      [ "$gdu" != "FAILED: " ] || gdu="FAILED: deploy/install-gdu.sh"
+      echo "[remote-update] WARNING: gdu not installed — $gdu (see output above)." >&2
+      echo "[remote-update]          Continuing: the Storage view shows an install hint until it is." >&2
+    fi
+    rm -f "$gdu_log"
   fi
   # The daemon loads better-sqlite3 and node-pty under /usr/bin/node (the unit's
   # ExecStart interpreter): prove they load there, rebuilding any that don't,
@@ -195,4 +213,5 @@ echo "[remote-update] version=$(tree_version) commit=$new_head"
 echo "[remote-update] bundle=$(curl -s "${HEALTH_URL%/health}/" | grep -o 'index-[^.]*\.js' | head -n1)"
 echo "[remote-update] box-agent=$box_agent"
 echo "[remote-update] voxl=$voxl"
+echo "[remote-update] gdu=$gdu"
 echo "[remote-update] OK"

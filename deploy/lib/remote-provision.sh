@@ -106,6 +106,17 @@ if [ -f deploy/install-voxl.sh ]; then
     echo "[provision] WARNING: voxl not installed — continuing; desktops stream with RFB. Deploy again to retry." >&2
   fi
 fi
+# gdu, the Storage view's disk scanner (best-effort: the view shows an install hint without it).
+GDU_STATUS="skipped"
+if [ -f deploy/install-gdu.sh ]; then
+  if bash deploy/install-gdu.sh </dev/null; then
+    GDU_STATUS="$(/usr/local/bin/gdu --version 2>/dev/null | sed -n 's/^Version:[[:space:]]*//p' | head -n1)"
+    [ -n "$GDU_STATUS" ] || GDU_STATUS="ok"
+  else
+    GDU_STATUS="FAILED: deploy/install-gdu.sh (see above)"
+    echo "[provision] WARNING: gdu not installed — continuing; the Storage view shows an install hint. Deploy again to retry." >&2
+  fi
+fi
 # The daemon loads better-sqlite3 and node-pty under /usr/bin/node (the unit's
 # ExecStart interpreter): prove they load there, rebuilding any that don't,
 # before the service is started below.
@@ -166,6 +177,7 @@ ufw --force enable
 
 log "DONE — https://$DOMAIN"
 echo "[provision] voxl=$VOXL_STATUS"
+echo "[provision] gdu=$GDU_STATUS"
 if [ -n "$BOX_AGENT_WARNING" ]; then
   echo "[provision] WARNING: $BOX_AGENT_WARNING — boxes fall back to an on-demand build; deploy again to retry." >&2
 fi
