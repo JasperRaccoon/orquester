@@ -11,7 +11,8 @@ import type {
   DismissCommandBody,
   ThreadHistoryPage,
   ThreadItemOutputResponse,
-  ThreadItemOutputWindowResponse
+  ThreadItemOutputWindowResponse,
+  ThreadItemResponse
 } from "@orquester/api/agent-chat";
 
 /**
@@ -32,11 +33,21 @@ export interface EmbedLoaders {
     request: { sessionId: string; before?: string; turns?: number; windowCut?: string },
     signal?: AbortSignal
   ) => Promise<ThreadHistoryPage>;
-  /** "Load full output": `GET /api/sessions/:id/items/:itemId/output?offset=&maxBytes=`. */
+  /**
+   * "Load full output", with `itemOutput` (offered only with both): one item,
+   * unslimmed — `GET /api/sessions/:id/items/:itemId`.
+   */
+  item?: (request: { sessionId: string; itemId: string }, signal?: AbortSignal) => Promise<ThreadItemResponse>;
+  /**
+   * "Load full output", with `item`: a tool call's streamed output —
+   * `GET /api/sessions/:id/items/:itemId/output?offset=&maxBytes=`; `null`
+   * where that route answers 404 (the call streamed none), and the item is
+   * read instead.
+   */
   itemOutput?: (
     request: { sessionId: string; itemId: string; offset?: number; maxBytes?: number },
     signal?: AbortSignal
-  ) => Promise<ThreadItemOutputResponse | ThreadItemOutputWindowResponse>;
+  ) => Promise<ThreadItemOutputResponse | ThreadItemOutputWindowResponse | null>;
 }
 
 /** `orquester-command`: POST `body` unchanged to `/api/sessions/:sessionId/<command>`. */

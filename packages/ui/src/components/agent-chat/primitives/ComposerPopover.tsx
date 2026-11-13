@@ -158,9 +158,15 @@ export function ComposerPopover({
 
   React.useEffect(() => {
     if (!open) return;
+    // The event's path, not its target: from the document, a press inside a
+    // shadow root (the embeddable chat) targets the shadow host, so a
+    // `contains(target)` check read every press on the panel or the trigger
+    // as outside.
     const onPointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (!triggerRef.current?.contains(target) && !panelRef.current?.contains(target)) {
+      const path = event.composedPath();
+      const trigger = triggerRef.current;
+      const panel = panelRef.current;
+      if (!(trigger !== null && path.includes(trigger)) && !(panel !== null && path.includes(panel))) {
         setOpenState(false);
       }
     };

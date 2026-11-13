@@ -20,7 +20,7 @@ import type { ChatHost } from "../../../../packages/ui/src/components/agent-chat
 import { EmbedChat, type EmbedCommandRequest } from "./EmbedChat";
 import { EmbedSettings, loadersOf, modeOf, schemeOf, type EmbedSettingsState } from "./settings";
 import { adoptEmbedStyles } from "./styles";
-import { EMBED_ROOT_CLASS } from "./contract";
+import { EMBED_PRELOAD_ERROR_EVENT, EMBED_ROOT_CLASS } from "./contract";
 import { EmbedThread } from "./thread";
 import type {
   EmbedCommandDetail,
@@ -75,8 +75,11 @@ function fire<T>(target: EventTarget, type: string, detail: T): void {
 let staleListening = false;
 
 /**
- * A lazy chunk that failed to load reaches the page as Vite's
- * `vite:preloadError`: typically the Orquester redeployed under the page.
+ * A lazy chunk that failed to load reaches the page as the embed's own
+ * `EMBED_PRELOAD_ERROR_EVENT` (the build renames Vite's shared
+ * `vite:preloadError` in the bundle's preload helper, so a failure of the host
+ * page's own chunks is never heard here): typically the Orquester redeployed
+ * under the page.
  * Every connected element says so once per failure (`orquester-stale`); the
  * block that wanted the chunk degrades on its own. A failure naming another
  * bundle's URL (a second version on the page) is not this bundle's.
@@ -87,7 +90,7 @@ function listenForStaleChunks(): void {
   // Not `new URL(".", import.meta.url)`: Vite reads that form as an asset reference
   // and would emit the entry's source as a file.
   const base = import.meta.url.slice(0, import.meta.url.lastIndexOf("/") + 1);
-  window.addEventListener("vite:preloadError", (event) => {
+  window.addEventListener(EMBED_PRELOAD_ERROR_EVENT, (event) => {
     const payload = (event as Event & { payload?: unknown }).payload;
     const message = payload instanceof Error ? payload.message : typeof payload === "string" ? payload : "";
     if (message.includes("://") && !message.includes(base)) return;
@@ -111,7 +114,8 @@ export function createEmbedElementClass(): CustomElementConstructor {
     readonly #portal: HTMLDivElement;
     readonly #host: ChatHost;
     #root: Root | null = null;
-    #pending: readonly EmbedPendingRequest[] = [];
+    /** The open requests last announced: the thread's own empty list at first, so its first frames announce none. */
+    #pending: readonly EmbedPendingRequest[] = this.#thread.getView().pending;
 
     constructor() {
       super();
@@ -154,8 +158,9 @@ export function createEmbedElementClass(): CustomElementConstructor {
         }
       };
 
-      // `orquester-pending` on every change of the open requests; the view
-      // keeps the list's identity while it holds the same requests.
+      // `orquester-pending` only when the set of open requests changes — never
+      // for frames, a reset or a new session that leave it as it was: the
+      // view keeps the list's identity while it holds the same requests.
       this.#thread.subscribe(() => {
         const view = this.#thread.getView();
         if (view.pending === this.#pending) return;

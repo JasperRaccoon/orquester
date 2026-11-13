@@ -15,3 +15,11 @@ export const EMBED_ELEMENT = "orquester-agent-chat";
  * `data-scheme`, and the embed's CSS targets it where the app's targets `body`.
  */
 export const EMBED_ROOT_CLASS = "orq-embed-root";
+
+/**
+ * What a failed lazy chunk of the embed dispatches on `window`, in place of
+ * Vite's shared `vite:preloadError`: the build renames it in the embed's
+ * preload helper (`embedPreloadErrorEvent`, `vite/embed-bundle.ts`), so a host
+ * page's own Vite chunks and the embed's never hear each other's failures.
+ */
+export const EMBED_PRELOAD_ERROR_EVENT = "orquester-embed:preloadError";

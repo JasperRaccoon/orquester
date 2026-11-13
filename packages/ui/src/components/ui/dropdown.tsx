@@ -255,11 +255,15 @@ export const Dropdown: React.FC<DropdownProps> = ({
       return;
     }
 
+    // The event's path, not its target: a press inside a shadow root
+    // targets its host as the document sees it.
     const onPointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
+      const path = event.composedPath();
+      const trigger = triggerRef.current;
+      const panel = panelRef.current;
       if (
-        !triggerRef.current?.contains(target) &&
-        !panelRef.current?.contains(target)
+        !(trigger !== null && path.includes(trigger)) &&
+        !(panel !== null && path.includes(panel))
       ) {
         setOpen(false);
       }

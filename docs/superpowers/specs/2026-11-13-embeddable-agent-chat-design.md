@@ -142,7 +142,7 @@ Each bundle carries its own React, so two versions on one page do not interfere 
 
 - `pushFrames(frames: AgentChatStreamFrame | AgentChatStreamFrame[]): void` applies frames in order through the existing `applyFrame`. Feed it the parsed JSON lines of `GET /api/sessions/:id/events`. Drop the `:hb` heartbeats yourself. Anything whose `kind` is not a frame kind the bundle knows (including `{ kind: "error" }` lines) is ignored with a console warning and never changes the thread, so a newer frame kind cannot break an older bundle.
 - `reset(): void` empties the thread. Use it before replaying another chat into the same element.
-- `loaders: { attachment, visualUrl, history, itemOutput }` is a property, settable at any time (§5.5).
+- `loaders: { attachment, visualUrl, history, item, itemOutput }` is a property, settable at any time (§5.5).
 - `respondFailed(commandId: string, message?: string): void` re-enables a question or approval card after the host could not deliver its command.
 - `sessionId: string | null` is read-only: the thread the frames describe, taken from the snapshot or events.
 
@@ -151,7 +151,7 @@ Each bundle carries its own React, so two versions on one page do not interfere 
 All events are `CustomEvent`s with `bubbles: true, composed: true`.
 
 - `orquester-command`. The user answered, dismissed or decided on a pending request. `detail` is `{ sessionId, command: "answer" | "dismiss" | "approval", body }`, where `body` is exactly `AnswerCommandBody`, `DismissCommandBody` or `ApprovalCommandBody` from `packages/api/src/agent-chat/wire.ts`, including a `commandId` minted by the element. The host POSTs `body` unchanged to `/api/sessions/:sessionId/<command>`. The card stays in its responding state until the frames show the request settled, or until `respondFailed(commandId)` is called. Retrying with the same `commandId` is safe: the daemon's receipts make commands idempotent.
-- `orquester-pending`. Fired whenever the set of open questions or approvals changes. `detail: { sessionId, pending: Array<{ requestId, kind: "question" | "approval" }> }`. A host with its own text field should hold it, or route the user to the card, while `pending` is non-empty: v1 has no "answer by typing" bridge.
+- `orquester-pending`. Fired only when the set of open questions or approvals changes (an element starts with an empty set). `detail: { sessionId, pending: Array<{ requestId, kind: "question" | "approval" }> }`. A host with its own text field should hold it, or route the user to the card, while `pending` is non-empty: v1 has no "answer by typing" bridge.
 - `orquester-stale`. A lazy chunk failed to load, which typically means the Orquester redeployed under the page. The affected block degrades: math and mermaid show their source, code shows unhighlighted. The host may re-read the manifest and reload the element. `detail: { build }`.
 - `orquester-resync`. A `synchronized` frame named a different host instance (`needsResync`), so the host should reopen the stream **without** `after`. The fresh `snapshot` frame replaces the thread. `detail: { sessionId }`.
 
@@ -160,25 +160,26 @@ All events are `CustomEvent`s with `bubbles: true, composed: true`.
 - Open `GET /api/sessions/:id/events` with **neither** `window` nor `agentRows`. The snapshot is then whole and needs no paging or agent-row loading, which v1 does not do.
 - Relay each NDJSON line to the page as-is (SSE or WebSocket) and `pushFrames` it.
 - On reconnect, use `?after=<last seq>`.
-- History of a closed chat: store one snapshot frame when the chat settles, built from `GET /api/sessions/:id/thread` as `{ kind: "snapshot", thread }`, and replay it with `reset()` + `pushFrames(snapshot)`. Storing every frame gives the same result at a much larger size, because replay folds through the same retained window (§3). Turns older than that window, and full tool outputs, come from the daemon on demand through `history` and `itemOutput`, so they need the chat to still exist on that Orquester. A newer bundle can replay older frames: the fold reads events written by older versions, as the daemon does with its own logs.
+- History of a closed chat: store one snapshot frame when the chat settles, built from `GET /api/sessions/:id/thread` as `{ kind: "snapshot", thread }`, and replay it with `reset()` + `pushFrames(snapshot)`. Storing every frame gives the same result at a much larger size, because replay folds through the same retained window (§3). Turns older than that window, and full tool outputs, come from the daemon on demand through `history`, `item` and `itemOutput`, so they need the chat to still exist on that Orquester. A newer bundle can replay older frames: the fold reads events written by older versions, as the daemon does with its own logs.
 
 ### 5.5 Loaders: images, HTML visuals, older history, full output
 
-The element never talks to Orquester. Everything beyond the frames comes through four async loaders the host sets on `el.loaders`. Each loader's result is the daemon's own response for that route, so QORVI's proxies forward it unchanged after checking that the viewer owns the session.
+The element never talks to Orquester. Everything beyond the frames comes through five async loaders the host sets on `el.loaders`. Each loader's result is the daemon's own response for that route, so QORVI's proxies forward it unchanged after checking that the viewer owns the session.
 
 | Loader | Called for | Returns | Daemon route the host proxies |
 |---|---|---|---|
 | `attachment({ sessionId, attachmentId, mimeType? }, signal)` | every image the thread shows: `show_image`, image attachments in messages and tool results | `Promise<Blob>` | `GET /api/sessions/:id/attachments/:attachmentId` |
 | `visualUrl({ sessionId, attachmentId })` | `html_render` pages | `Promise<string>`: a URL the iframe loads | `POST /api/sessions/:id/visuals/:attachmentId/url`, then `GET` of the returned signed `path` |
 | `history({ sessionId, before?, turns?, windowCut? }, signal)` | the "load older" row at the top of a thread whose window was cut | `Promise<ThreadHistoryResponse>` | `GET /api/sessions/:id/history?before=&turns=` |
-| `itemOutput({ sessionId, itemId, offset?, maxBytes? }, signal)` | "show full output" on a tool call | `Promise<ThreadItemOutputResponse \| ThreadItemOutputWindowResponse>` | `GET /api/sessions/:id/items/:itemId/output` |
+| `item({ sessionId, itemId }, signal)` | "show full output", with `itemOutput`: a cut tool result, compaction summary or agent prompt | `Promise<ThreadItemResponse>` | `GET /api/sessions/:id/items/:itemId` |
+| `itemOutput({ sessionId, itemId, offset?, maxBytes? }, signal)` | "show full output", with `item`: a command's streamed output | `Promise<ThreadItemOutputResponse \| ThreadItemOutputWindowResponse \| null>` (`null` for the route's 404) | `GET /api/sessions/:id/items/:itemId/output` |
 
 Notes:
 
 - `attachment` replaces what the app does today through the API client's bearer-authenticated binary channel (`chat-image.ts` `fetchAttachment`). The element turns the `Blob` into an object URL, as it does now.
 - `visualUrl`: the element loads the URL in the same iframe as today, `sandbox="allow-scripts allow-forms"`, never `allow-same-origin`. QORVI's proxy serves the page from its own origin with Orquester's response headers. It must keep `Content-Security-Policy: sandbox …` and should add a `frame-ancestors` for its own origin. The page stays an opaque origin with no access to QORVI's session. No Orquester-side `frame-ancestors` change is needed. A per-Orquester allow-list of framing origins is left for later, in case a host would rather frame Orquester's signed URL directly.
 - HTML snippets inside messages (the existing blob-URL `VisualSnippet`) need no loader.
-- A missing loader hides its affordance (no "load older", no "show full output"). A loader that rejects shows the same "unavailable" state the GUI shows when a read fails.
+- A missing loader hides its affordance (no "load older", no "show full output"). "Show full output" needs both `item` and `itemOutput`: which of the two reads a row needs is known only once the first answers (the app's `readFullOutput`). A loader that rejects shows the same "unavailable" state the GUI shows when a read fails.
 - Workspace-file images in markdown (`readFileBytes` today) are not loaded in v1; they render as their alt text or link.
 
 ### 5.6 Cutting the render path loose (`packages/ui`)
@@ -186,7 +187,7 @@ Notes:
 One React context, provided by whoever mounts the timeline, carries everything app-specific the render path needs:
 
 - the resolved mode and scheme;
-- the four loaders of §5.5 (the app fills them from its API client);
+- the five loaders of §5.5 (the app fills them from its API client);
 - the theme colours handed to agent HTML pages, read from the embed's own wrapper rather than `document.documentElement`;
 - the portal container for popovers, the lightbox and menus. The embed passes a node inside its shadow root; the app passes `document.body`;
 - optional callbacks or data for the app-only affordances: open a tab or thread, read profiles and accounts for activity labels, the tool-approval wait state, quote to composer, image save and reveal, the turn diff, and reading a full plan from the thread store.
@@ -248,7 +249,7 @@ The colour list is generated from `globals.css` at build time and documented in 
   - an `html_render` row calls `visualUrl`;
   - a `synchronized` frame from a new host instance fires `orquester-resync`;
   - an open question fires `orquester-pending`, and an unknown frame kind leaves the thread unchanged;
-  - "load older" calls `history`, and "show full output" calls `itemOutput`.
+  - "load older" calls `history`, and "show full output" reads through `item` and `itemOutput`.
 - **`apps/daemon`**: `/embed/*` carries the CORS, CORP and cache headers, and a missing embed file is a JSON 404, not `index.html`. Through the existing HTTP routing tests.
 - **Build**: the import guard (§5.6) and the generated-variables check (§5.8).
 - **Manual**, in a separate worktree, with no daemon involved:
