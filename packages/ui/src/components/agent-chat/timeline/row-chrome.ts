@@ -3,7 +3,7 @@
 import { IDENTITY_CHANGED_ACTIVITY_KIND, PROFILE_CHANGED_ACTIVITY_KIND, STOP_CASCADED_ACTIVITY_KIND } from "@orquester/api/agent-chat";
 
 import type { WorkLogEntry } from "../../../lib/agent-chat/contracts";
-import { skillMentionsInText } from "../composer/composer-menu";
+import { skillMentionsInText } from "../../../lib/agent-chat/skill-mentions";
 import {
   isStreamedOutputEntry,
   type WorkEntryIconName
@@ -235,10 +235,9 @@ export interface MessageTextRun {
 /**
  * Splits a message into text and skill-mention runs, for re-chipping (§4.6.7).
  *
- * **What counts as a mention is decided entirely by the composer's own
- * tokeniser** ({@link skillMentionsInText}) — the arbitration makes
- * `composer/composer-menu.ts` the one slash/skill implementation, so this must
- * not re-state its rules. It hands the text and the current per-cwd catalog to
+ * **What counts as a mention is decided entirely by the one `$skill`
+ * tokeniser** ({@link skillMentionsInText}, `lib/agent-chat/skill-mentions.ts`),
+ * so this must not re-state its rules. It hands the text and the current per-cwd catalog to
  * that tokeniser and only *locates* the names it came back with, so a mention
  * renders as a chip in exactly the cases the composer would have treated as
  * one: unknown names stay literal, the catalog match is case-insensitive while

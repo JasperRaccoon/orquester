@@ -1,5 +1,5 @@
 import React from "react";
-import { ArrowRightLeft, ArrowUp, Clock, GitFork, GitMerge, MessagesSquare, Undo2, X } from "lucide-react";
+import { ArrowRightLeft, ArrowUp, Clock, GitFork, GitMerge, MessagesSquare, X } from "lucide-react";
 
 import type { AttachmentRef } from "@orquester/api";
 import {
@@ -16,14 +16,8 @@ import { FileTypeIcon } from "../../../../icons/files";
 import { cn } from "../../../../lib/cn";
 import { PROMPT_CUT_AT_REST_NOTE, type AgentPrompt } from "../../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
-import { ComposerPopover } from "../../composer/ComposerPopover";
-import { splitLeadingQuotes } from "../../composer/composer-quotes";
-import {
-  REWIND_BUSY_TITLE,
-  REWIND_DISABLED_EXPLAINS_ITSELF,
-  RewindConfirmPanel,
-  rewindDroppedTurnCount
-} from "../../composer/RewindControl";
+import { splitLeadingQuotes } from "../../../../lib/agent-chat/composer-quotes";
+import { useChatHost } from "../../chat-host";
 import { ChatIconButton, CopyButton, DisclosureChevron, ShimmerText } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
@@ -150,73 +144,6 @@ function MessageBodyText({ text }: { text: string }): React.ReactElement {
 // ---------------------------------------------------------------------------
 // User message
 // ---------------------------------------------------------------------------
-
-/**
- * "Rewind to here" (§5.5, T3's "Edit from here").
- *
- * A micro icon in the hover-revealed meta row that opens a confirm anchored to
- * itself — never a modal: the confirm names what the rewind removes and that
- * files stay as they are, and Rewind is focused so Enter confirms. Disabled,
- * and saying why, while a turn runs or a revert is already in flight; the host
- * would refuse the first and the second is rewriting the very history the
- * button points at.
- *
- * *T3: `MessagesTimeline.tsx` `RevertUserMessageButton` (disabled while
- * working or reverting) and `ChatView.tsx`'s "Edit from here?" dialog.*
- */
-function RewindToHereButton({
-  messageId,
-  text,
-  revertTurnCount,
-  onOpenChange
-}: {
-  messageId: string;
-  text: string;
-  revertTurnCount: number;
-  onOpenChange: (open: boolean) => void;
-}): React.ReactElement {
-  const ctx = useTimelineRowContext();
-  const busy = ctx.revertBusy;
-  return (
-    <ComposerPopover
-      label="Rewind to here"
-      align="end"
-      width="w-80"
-      onOpenChange={onOpenChange}
-      renderTrigger={(triggerProps) => (
-        <ChatIconButton
-          {...triggerProps}
-          size="micro"
-          label="Rewind to here"
-          title={busy ? REWIND_BUSY_TITLE : "Rewind to here"}
-          disabled={busy}
-          // Still answers the pointer, so the title can say why it is disabled.
-          className={REWIND_DISABLED_EXPLAINS_ITSELF}
-        >
-          <Undo2 size={12} strokeWidth={1.8} aria-hidden />
-        </ChatIconButton>
-      )}
-    >
-      {(close) => (
-        <RewindConfirmPanel
-          text={text}
-          // The turns kept are `revertTurnCount`; everything the thread has
-          // started since — this message's own turn included — goes.
-          droppedTurnCount={rewindDroppedTurnCount({
-            startedTurnCount: ctx.startedTurnCount,
-            targetTurnCount: revertTurnCount
-          })}
-          busy={busy}
-          onBack={close}
-          onConfirm={() => {
-            close();
-            ctx.onRevert({ messageId, targetTurnCount: revertTurnCount });
-          }}
-        />
-      )}
-    </ComposerPopover>
-  );
-}
 
 /**
  * "Fork from here" (thread lineage, spec 2026-10-14 §6): a new chat tab whose
@@ -450,6 +377,8 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   row: Row<"message">;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
+  // "Rewind to here" (§5.5): the host's control, with its confirm; none where it has none.
+  const { RewindToHere } = useChatHost();
   // The meta row is hover-revealed; while the rewind confirm is open it stays
   // shown, so the button the popover is anchored to does not fade out under it.
   const [rewindOpen, setRewindOpen] = React.useState(false);
@@ -509,8 +438,8 @@ export const UserMessageRow = React.memo(function UserMessageRow({
         </span>
         {/* The rewind affordance is only offered where the adapter supports a
             conversation rollback, and never in the read-only drill-in. */}
-        {!ctx.readOnly && ctx.canRevert && typeof revertTurnCount === "number" ? (
-          <RewindToHereButton
+        {RewindToHere && !ctx.readOnly && ctx.canRevert && typeof revertTurnCount === "number" ? (
+          <RewindToHere
             messageId={row.message.id}
             text={text}
             revertTurnCount={revertTurnCount}

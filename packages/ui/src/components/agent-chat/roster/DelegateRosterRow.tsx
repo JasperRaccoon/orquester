@@ -11,7 +11,8 @@ import { Check, ChevronRight } from "lucide-react";
 import { cn } from "../../../lib/cn";
 import { isDelegateLive, type DelegateChildView } from "../../../lib/agent-chat/delegates.logic";
 import { ElapsedTicker, StatusDot } from "../primitives";
-import { DelegateAvatar, delegateStatusVisual, openDelegateTab, useDelegateMetaLine } from "../delegates/DelegateParts";
+import { DelegateAvatar, delegateStatusVisual } from "../delegates/DelegateParts";
+import { openDelegateTab, useDelegateMetaLine } from "../delegates/delegate-tabs";
 
 /** The grid every roster row shares (`AgentRosterRow`): changing one changes all of them. */
 const ROW_GRID = cn(

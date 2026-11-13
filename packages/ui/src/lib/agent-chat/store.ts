@@ -154,7 +154,7 @@ import {
   persistedDraftAfterSend,
   storedChip
 } from "../../components/agent-chat/composer/composer-draft";
-import { quotesFromText } from "../../components/agent-chat/composer/composer-quotes";
+import { quotesFromText } from "./composer-quotes";
 import {
   adoptOutboxLeftovers,
   holdOutboxQueuedAtFront,

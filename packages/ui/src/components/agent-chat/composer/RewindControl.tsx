@@ -3,11 +3,13 @@
 // (the "Edit from here?" confirm on `onRevertToTurnCount`'s path — a popover here, not a
 // modal). The picker is the Claude Code CLI's double Escape, which T3 does not have.
 import React from "react";
-import { History, Paperclip } from "lucide-react";
+import { History, Paperclip, Undo2 } from "lucide-react";
 
 import { cn } from "../../../lib/cn";
 import { rewindTargetPreview, type RewindTarget } from "../../../lib/agent-chat/rewind.logic";
+import type { RewindToHereProps } from "../chat-host";
 import { ChatIconButton, Kbd } from "../primitives";
+import { useTimelineRowContext } from "../timeline/context";
 import { formatRowTimestamp } from "../timeline/timestamp";
 import { ComposerMenuRow, ComposerPopover } from "../primitives/ComposerPopover";
 
@@ -430,6 +432,69 @@ export function RewindControl({
           onRewind={(target) => {
             close();
             onRewind(target);
+          }}
+        />
+      )}
+    </ComposerPopover>
+  );
+}
+
+/**
+ * "Rewind to here" (§5.5, T3's "Edit from here") — the app's chat host's
+ * `RewindToHere`, which a user message row renders where a rewind is offered.
+ *
+ * A micro icon in the hover-revealed meta row that opens a confirm anchored to
+ * itself — never a modal: the confirm names what the rewind removes and that
+ * files stay as they are, and Rewind is focused so Enter confirms. Disabled,
+ * and saying why, while a turn runs or a revert is already in flight; the host
+ * would refuse the first and the second is rewriting the very history the
+ * button points at.
+ *
+ * *T3: `MessagesTimeline.tsx` `RevertUserMessageButton` (disabled while
+ * working or reverting) and `ChatView.tsx`'s "Edit from here?" dialog.*
+ */
+export function RewindToHereButton({
+  messageId,
+  text,
+  revertTurnCount,
+  onOpenChange
+}: RewindToHereProps): React.ReactElement {
+  const ctx = useTimelineRowContext();
+  const busy = ctx.revertBusy;
+  return (
+    <ComposerPopover
+      label="Rewind to here"
+      align="end"
+      width="w-80"
+      onOpenChange={onOpenChange}
+      renderTrigger={(triggerProps) => (
+        <ChatIconButton
+          {...triggerProps}
+          size="micro"
+          label="Rewind to here"
+          title={busy ? REWIND_BUSY_TITLE : "Rewind to here"}
+          disabled={busy}
+          // Still answers the pointer, so the title can say why it is disabled.
+          className={REWIND_DISABLED_EXPLAINS_ITSELF}
+        >
+          <Undo2 size={12} strokeWidth={1.8} aria-hidden />
+        </ChatIconButton>
+      )}
+    >
+      {(close) => (
+        <RewindConfirmPanel
+          text={text}
+          // The turns kept are `revertTurnCount`; everything the thread has
+          // started since — this message's own turn included — goes.
+          droppedTurnCount={rewindDroppedTurnCount({
+            startedTurnCount: ctx.startedTurnCount,
+            targetTurnCount: revertTurnCount
+          })}
+          busy={busy}
+          onBack={close}
+          onConfirm={() => {
+            close();
+            ctx.onRevert({ messageId, targetTurnCount: revertTurnCount });
           }}
         />
       )}

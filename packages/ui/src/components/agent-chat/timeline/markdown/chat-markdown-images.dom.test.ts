@@ -10,11 +10,11 @@ import { createElement, type ReactNode } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
-import type { ApiClient } from "../../../../lib/api-client";
 
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
-let OrquesterProvider: typeof import("../../../../context/orquester-context").OrquesterProvider;
+let ChatHostProvider: typeof import("../../chat-host").ChatHostProvider;
+let STANDALONE_CHAT_HOST: typeof import("../../chat-host").STANDALONE_CHAT_HOST;
 let rowContext: typeof import("../context");
 let ChatMarkdown: typeof import("./ChatMarkdown").ChatMarkdown;
 
@@ -57,7 +57,7 @@ before(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
-  ({ OrquesterProvider } = await import("../../../../context/orquester-context"));
+  ({ ChatHostProvider, STANDALONE_CHAT_HOST } = await import("../../chat-host"));
   rowContext = await import("../context");
   ({ ChatMarkdown } = await import("./ChatMarkdown"));
 });
@@ -89,17 +89,16 @@ function InChat({ children }: { children: ReactNode }) {
 describe("Markdown images in a chat", () => {
   let mount: HTMLElement;
   let root: Root;
-  const api = {
-    agentChat: { fetchAttachment: async () => JPEG },
-    readFileBytes: async () => PNG
-  } as unknown as ApiClient;
+  const host = {
+    fetchAttachment: async () => JPEG,
+    readFileBytes: async () => PNG,
+    saveImageToProject: async (input: { relativePath: string }) => input.relativePath
+  };
   const render = async (text: string) => {
     await act(async () => {
       root.render(
-        createElement(OrquesterProvider, {
-          runtime: "web",
-          api,
-          useTitlebar: false,
+        createElement(ChatHostProvider, {
+          host: { ...STANDALONE_CHAT_HOST, ...host },
           children: createElement(InChat, null, createElement(ChatMarkdown, { text }))
         })
       );

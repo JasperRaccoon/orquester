@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { skillMentionsInText } from "./composer-menu.ts";
+import { skillMentionsInText } from "./skill-mentions.ts";
 
 /**
  * R2-8 — the `$skill` tokeniser. It was lost when W11's
  * `slash-commands.logic.ts` was deleted in the fix-wave arbitration (the
- * finding went from "dead code" to "absent"); it lives in `composer-menu.ts`
- * now, the one slash/skill implementation, and the timeline re-runs it over a
- * sent message so a mention renders as a chip rather than as raw `$name`.
+ * finding went from "dead code" to "absent"); it lives in `skill-mentions.ts`
+ * now, and the timeline re-runs it over a sent message so a mention renders as
+ * a chip rather than as raw `$name`.
  */
 
 test("R2-8: known $skill mentions are found in order, deduped", () => {

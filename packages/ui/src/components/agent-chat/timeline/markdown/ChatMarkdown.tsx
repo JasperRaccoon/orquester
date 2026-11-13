@@ -10,13 +10,12 @@ import { useChatImageUrl, type ChatImageItem } from "../../images/chat-image";
 import { ChatImageLightbox } from "../../images/ChatImageLightbox";
 import { ChatImageView } from "../../images/ChatImageView";
 import { isUrlText } from "../../../../lib/github-links/text-links";
-import { useAppStore } from "../../../../store/app";
 import { ForgeLinkPill } from "../../forge-links/ForgeLinkPill";
+import { useChatHost } from "../../chat-host";
 import { useTimelineRowContext } from "../context";
 import { CodeBlock } from "./CodeBlock";
 import { extractFenceLanguage } from "./highlight-core";
 import { createIncrementalMarkdownPlugin } from "./incremental";
-import { KnowledgeCitation } from "./KnowledgeCitation";
 import { resolveMarkdownImageSource } from "./local-image";
 import { MarkdownMath } from "./MarkdownMath";
 import { mathKind, mightContainMath, remarkChatMath } from "./math";
@@ -172,12 +171,18 @@ function MarkdownLink({
   children?: React.ReactNode;
 }): React.ReactElement {
   const { onOpenFile } = React.useContext(MarkdownConfigCtx);
+  // The host's citation chip; with none, a citation is its link's plain text.
+  const { KnowledgeCitation } = useChatHost();
   const target = href ?? "";
   const citation = parseKnowledgeCitationHref(target);
   return (
     <InsideLinkCtx.Provider value={true}>
       {citation ? (
-        <KnowledgeCitation entryId={citation.id}>{children}</KnowledgeCitation>
+        KnowledgeCitation ? (
+          <KnowledgeCitation entryId={citation.id}>{children}</KnowledgeCitation>
+        ) : (
+          <span data-knowledge-citation-text={citation.id}>{children}</span>
+        )
       ) : (
         <MarkdownAnchor target={target} onOpenFile={onOpenFile}>{children}</MarkdownAnchor>
       )}
@@ -387,7 +392,7 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
   remoteImages = "load",
   className
 }: ChatMarkdownProps): React.ReactElement {
-  const mode = useAppStore((state) => state.resolvedMode);
+  const { mode } = useChatHost().useAppearance();
 
   // One cache per renderer instance, as the port requires: it must survive the
   // whole streamed message, so it is a ref rather than a memo.

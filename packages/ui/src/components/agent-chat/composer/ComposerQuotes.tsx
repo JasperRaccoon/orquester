@@ -4,7 +4,7 @@ import { Code2, Quote, X } from "lucide-react";
 import { cn } from "../../../lib/cn";
 import { ChatIconButton, DisclosureChevron } from "../primitives";
 import { ChatMarkdown } from "../timeline/markdown/ChatMarkdown";
-import { isCodeQuote, quoteExcerpt, type ComposerQuote } from "./composer-quotes";
+import { isCodeQuote, quoteExcerpt, type ComposerQuote } from "../../../lib/agent-chat/composer-quotes";
 
 export interface ComposerQuotesProps {
   quotes: readonly ComposerQuote[];

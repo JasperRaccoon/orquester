@@ -3,19 +3,20 @@ import { createPortal } from "react-dom";
 import { LoaderCircle, Waypoints } from "lucide-react";
 import { KNOWLEDGE_GRAPH_PLUGIN_ID, type KnowledgeCollectionView } from "@orquester/api";
 
-import { useOptionalApi } from "../../../../context/orquester-context";
-import { cn } from "../../../../lib/cn";
+import { useOptionalApi } from "../../context/orquester-context";
+import { cn } from "../../lib/cn";
 import {
   checkKnowledgeCitation,
   useKnowledgeCitation,
   type KnowledgeCitationAnswer,
   type KnowledgeCitationSummary
-} from "../../../../lib/knowledge/citations";
-import { useKnowledgeCollections } from "../../../../lib/knowledge/store";
-import { isGlobalPluginEnabled } from "../../../../lib/plugins-state";
-import { useAppStore } from "../../../../store/app";
-import { CollectionChip } from "../../../knowledge/parts";
-import { entryByline, entryDate } from "../../../knowledge/knowledge.logic";
+} from "../../lib/knowledge/citations";
+import { useKnowledgeCollections } from "../../lib/knowledge/store";
+import { isGlobalPluginEnabled } from "../../lib/plugins-state";
+import { usePortalContainer } from "../../lib/portal-container";
+import { useAppStore } from "../../store/app";
+import { CollectionChip } from "./parts";
+import { entryByline, entryDate } from "./knowledge.logic";
 
 /**
  * A knowledge citation in an agent's answer (Knowledge Graph spec,
@@ -30,6 +31,10 @@ import { entryByline, entryDate } from "../../../knowledge/knowledge.logic";
  * collections and opening lines, from that same answer (retrieval spec,
  * "Entry panel and citations"); Escape or leaving closes it. While the plugin
  * is off it is the link's plain text.
+ *
+ * The app's chat host provides it (`ChatHost.KnowledgeCitation`), so the chat's
+ * markdown renders it without importing the app; with no such host the
+ * markdown renders the link's plain text, as here with the plugin off.
  */
 
 const OPEN_DELAY_MS = 350;
@@ -143,6 +148,7 @@ export function KnowledgeCitation({ entryId, children }: { entryId: string; chil
   const api = contextApi ?? storeApi;
   const { answer, pending } = useKnowledgeCitation(entryId);
   const collections = useKnowledgeCollections()?.collections ?? null;
+  const portalContainer = usePortalContainer();
   const anchorRef = React.useRef<HTMLButtonElement>(null);
   const [open, setOpen] = React.useState(false);
   const [position, setPosition] = React.useState<CardPosition | null>(null);
@@ -272,7 +278,7 @@ export function KnowledgeCitation({ entryId, children }: { entryId: string; chil
               <CardBody answer={answer} pending={pending} label={children} collections={collections} />
               {!deleted && <p className="mt-2 text-[11px] text-neutral-600">Click to open in Knowledge</p>}
             </div>,
-            document.body
+            portalContainer
           )
         : null}
     </>

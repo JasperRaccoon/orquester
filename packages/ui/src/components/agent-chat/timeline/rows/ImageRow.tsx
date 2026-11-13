@@ -2,11 +2,11 @@ import React from "react";
 import { GENERATE_IMAGE_TOOL_NAME } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
-import { toolApprovalsFor, toolApprovalsStore } from "../../../../lib/agent-tools/store";
 import { cn } from "../../../../lib/cn";
 import type { ChatImageItem } from "../../images/chat-image";
 import { ChatImageLightbox } from "../../images/ChatImageLightbox";
 import { ChatImageView } from "../../images/ChatImageView";
+import { useChatHost } from "../../chat-host";
 import { ShimmerText } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 
@@ -91,17 +91,12 @@ export function ImageRow({
  * square placeholder where the image will be. While an Orquester approval
  * card for `generate_image` is open in this chat (unified MCP §7; a card
  * names its tool, not its call), nothing is being made yet, so it says it
- * waits instead.
+ * waits instead — as far as the chat host knows of such cards.
  */
 export function ImagePendingRow(): React.ReactElement {
   const { sessionId } = useTimelineRowContext();
-  const awaitingApproval = React.useSyncExternalStore(toolApprovalsStore.subscribe, () =>
-    sessionId === undefined
-      ? false
-      : toolApprovalsFor(toolApprovalsStore.getState(), sessionId).some(
-          (approval) => approval.tool === GENERATE_IMAGE_TOOL_NAME
-        )
-  );
+  const useApprovalPending = useChatHost().useToolApprovalPending ?? useNoApprovalPending;
+  const awaitingApproval = useApprovalPending(sessionId, GENERATE_IMAGE_TOOL_NAME);
   return (
     <div className="px-1">
       <div
@@ -121,4 +116,9 @@ export function ImagePendingRow(): React.ReactElement {
       </div>
     </div>
   );
+}
+
+/** A host that knows of no approval cards. */
+function useNoApprovalPending(): boolean {
+  return false;
 }

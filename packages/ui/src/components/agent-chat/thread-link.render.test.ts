@@ -10,6 +10,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { AgentChatTimelineRow, WorkLogEntry } from "../../lib/agent-chat/contracts";
+import { ChatHostProvider, STANDALONE_CHAT_HOST } from "./chat-host";
 import { TimelineRowContext, type TimelineRowContextValue } from "./timeline/context";
 import { ThreadLink, WorkRow } from "./timeline/rows/ActivityRows";
 import { UserMessageRow } from "./timeline/rows/MessageRows";
@@ -46,8 +47,14 @@ test("a closed thread's link says so and is no button", () => {
 test("the tool row carries the link beside its label", () => {
   const row = { kind: "work", id: "w1", createdAt: entry.createdAt, groupedEntries: [entry], isExpandedToolGroup: false } as unknown as AgentChatTimelineRow;
   const context = { isExpanded: () => false, setExpanded: () => undefined, workspaceRoot: P, readOnly: false, backgroundShell: false } as unknown as TimelineRowContextValue;
-  const html = renderToStaticMarkup(createElement(TimelineRowContext.Provider, { value: context }, createElement(WorkRow, { row: row as never })));
-  // Server rendering reads the store's initial state, which holds no tabs: the link says closed.
+  // A host with chat tabs, none of them open: the link says closed.
+  const host = { ...STANDALONE_CHAT_HOST, chatTabs: { useTitle: () => undefined, open: () => undefined } };
+  const html = renderToStaticMarkup(
+    createElement(ChatHostProvider, {
+      host,
+      children: createElement(TimelineRowContext.Provider, { value: context }, createElement(WorkRow, { row: row as never }))
+    })
+  );
   assert.match(html, /data-thread-link="closed"/);
 });
 
