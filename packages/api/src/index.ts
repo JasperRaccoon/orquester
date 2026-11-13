@@ -128,6 +128,13 @@ export interface ServerInfoResponse {
   protocol?: number;
   /** `commit` shortened to 12 characters for display (connection diagnostics); null when unknown. Absent on older daemons. */
   build?: string | null;
+  /**
+   * The build of the web app this daemon serves on this transport: the short commit its web build
+   * wrote to the dist's `build-id` file, which equals the page's own build when the page is current.
+   * Null when the transport serves no web app (the unix socket) or the dist has no valid `build-id`.
+   * Absent on older daemons.
+   */
+  webBuild?: string | null;
   capabilities: {
     terminals: boolean;
     sessions: boolean;

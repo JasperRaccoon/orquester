@@ -115,14 +115,16 @@ function locate(input: ConnectionDiagnosisInput): ConnectionDiagnosisKind | null
 }
 
 /**
- * Whether the daemon that served this web page reports a build other than the page's own. Both are
- * the same checkout's commit (the page's short, the daemon's 12 characters), so one prefixes the
- * other when they match. Only a page the daemon itself served counts: the desktop app ships its own
- * UI and a web page on another server's connection was not loaded from it. An unknown side counts
- * as the same.
+ * Whether the daemon that served this web page now serves another web build than the page's own, so
+ * a reload would load a different app. It compares the web build the daemon serves (its dist's
+ * `build-id`), not the daemon's own commit: a checkout committed or pulled without rebuilding its web
+ * serves the page's build still, and a reload would bring the same page back. Both are short commits,
+ * so one prefixing the other counts as a match. Only a page the daemon itself served counts: the
+ * desktop app ships its own UI and a web page on another server's connection was not loaded from it.
+ * An unknown side (an older daemon, a dist without `build-id`) counts as the same.
  */
 function servedAnotherBuild(input: ConnectionDiagnosisInput): boolean {
-  const server = input.log.serverBuild;
+  const server = input.log.serverWebBuild;
   const client = input.clientBuild;
   if (input.runtime !== "web" || !input.sameOrigin || !server || !client || client === "unknown") return false;
   return !server.startsWith(client) && !client.startsWith(server);
@@ -318,6 +320,7 @@ export function presentConnectionDiagnosis(input: ConnectionDiagnosisInput): Con
   add("Server", redactUrl(input.endpoint));
   add("App build", input.clientBuild);
   add("Server build", log.serverBuild);
+  add("Served web build", log.serverWebBuild);
   add(
     "Protocol",
     `app ${input.clientProtocol}, server ${log.serverProtocol ?? "unknown"}`
@@ -386,7 +389,7 @@ export function connectionDiagnosticsText(report: DiagnosticsReportInput): strin
     `User agent: ${report.client.userAgent || "unknown"}`,
     `Network: ${input.online ? "online" : "offline"}`,
     `Status: ${input.status}${input.attempt > 0 ? ` (reconnect attempt ${input.attempt})` : ""}`,
-    `Server reports: protocol ${log.serverProtocol ?? "unknown"}, build ${log.serverBuild ?? "unknown"}`,
+    `Server reports: protocol ${log.serverProtocol ?? "unknown"}, build ${log.serverBuild ?? "unknown"}, web build ${log.serverWebBuild ?? "unknown"}`,
     `Last connected: ${log.connectedAt !== null ? iso(log.connectedAt) : "never"}`,
     `Restart announced: ${log.stoppingAt !== null ? iso(log.stoppingAt) : "no"}`,
     ""
