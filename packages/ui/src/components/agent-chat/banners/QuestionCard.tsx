@@ -5,11 +5,12 @@ import type { AttachmentRef, PendingUserInput, UserInputQuestion } from "@orques
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { useElementWidth } from "../../../hooks/use-element-width";
+import { isChatTabListenerActive } from "../../../lib/agent-chat-active-tab";
 import { cn } from "../../../lib/cn";
-import { anotherLayerOwnsTheKeyboard } from "../../attention/GlobalShortcutListener";
 import { insideKeyboardOwner } from "../../../lib/keyboard-surfaces";
+import { isAnyLayerOpen } from "../../../lib/open-layers";
+import { useChatHost } from "../chat-host";
 import { BannerCard, ChatIconButton, DisclosureChevron, DisclosurePanel, Kbd } from "../primitives";
-import { isChatTabListenerActive } from "../composer/tab-visibility";
 import { ChatInlineMarkdown, ChatMarkdown } from "../timeline/markdown/ChatMarkdown";
 import {
   allowsAnswerAttachments,
@@ -44,8 +45,11 @@ export interface QuestionAttachment {
 export interface QuestionCardProps {
   request: PendingUserInput;
   isResponding: boolean;
-  /** Per-question attachment drafts, keyed by {@link questionAttachmentKey}. */
-  attachments: Record<string, QuestionAttachment[]>;
+  /**
+   * Per-question attachment drafts, keyed by {@link questionAttachmentKey}.
+   * Absent: none (a host without attachments also passes no `onAttachFiles`).
+   */
+  attachments?: Record<string, QuestionAttachment[]>;
   onAttachFiles?: (questionId: string, files: File[]) => void;
   onRemoveAttachment?: (questionId: string, key: string) => void;
   onSubmit: (input: {
@@ -54,17 +58,21 @@ export interface QuestionCardProps {
   }) => void;
   /** Offered only when the request carries `dismissible` (§4.2, §6.2). */
   onDismiss: (() => void) | null;
-  /** Text an option click displaced, carried back rather than discarded. */
-  onCarryTextToDraft: (text: string) => void;
+  /**
+   * Text an option click displaced, carried back rather than discarded.
+   * Absent (a host with no draft to carry it to): the text is dropped.
+   */
+  onCarryTextToDraft?: (text: string) => void;
   /** The compact layout used while the mobile composer is collapsed (§7.8). */
   compact?: boolean;
   /** `false` while this tab is open but not visible — gates the digit keys. */
   active?: boolean;
   /**
    * Opens a workspace-relative link of the question's markdown in an editor
-   * tab, as the timeline's messages do. Without it such a link navigates.
+   * tab, as the timeline's messages do. Without it such a link navigates;
+   * `null`: nothing opens files here, so such a link is its plain text.
    */
-  onOpenFile?: ((path: string) => void) | undefined;
+  onOpenFile?: ((path: string) => void) | null | undefined;
   /**
    * The chat whose composer answers this card: a message sent there while the
    * card is up is the active question's typed answer (`applyComposerAnswer`,
@@ -72,6 +80,8 @@ export interface QuestionCardProps {
    */
   composerSessionId?: string | undefined;
 }
+
+const NO_ATTACHMENTS: Record<string, QuestionAttachment[]> = {};
 
 /** 200 ms: long enough to see the tick land, short enough not to feel slow. */
 const AUTO_ADVANCE_MS = 200;
@@ -136,7 +146,7 @@ function focusSiblingOption(event: React.KeyboardEvent<HTMLElement>): void {
 export function QuestionCard({
   request,
   isResponding,
-  attachments,
+  attachments = NO_ATTACHMENTS,
   onAttachFiles,
   onRemoveAttachment,
   onSubmit,
@@ -238,7 +248,7 @@ export function QuestionCard({
       const displaced = carryDisplacedCustomAnswerIntoPrompt("", existing?.customAnswer, {
         isSecret: isSecretQuestion(question)
       });
-      if (displaced.length > 0) onCarryTextToDraft(displaced);
+      if (displaced.length > 0) onCarryTextToDraft?.(displaced);
 
       const option = question.options.find((entry) => questionOptionValue(entry) === optionValue);
       // A digit picks without focusing: the preview follows the pick anyway.
@@ -269,6 +279,10 @@ export function QuestionCard({
     [advance, draftAnswers, onCarryTextToDraft]
   );
 
+  // A layer outside the chat (the app's settings, palette, dialogs) owns the
+  // keys while it is up; a host that names none leaves it to the open layers.
+  const keyboardLayerOpen = useChatHost().keyboardLayerOpen ?? isAnyLayerOpen;
+
   // Digits 1–9 pick an option. Whether one does is `questionShortcutOption`'s
   // call, pure and tested: never from a hidden tab (Q2-2 — one `1` answered
   // the question in EVERY open chat tab), under an open layer, while typing or
@@ -291,7 +305,7 @@ export function QuestionCard({
         key: event.key,
         modified: event.metaKey || event.ctrlKey || event.altKey,
         tabActive: isChatTabListenerActive(active, cardRef.current),
-        layerOpen: anotherLayerOwnsTheKeyboard(),
+        layerOpen: keyboardLayerOpen(),
         typing:
           target instanceof HTMLInputElement ||
           target instanceof HTMLTextAreaElement ||
@@ -306,7 +320,7 @@ export function QuestionCard({
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [active, activeQuestion, isCollapsed, isResponding, selectOption]);
+  }, [active, activeQuestion, isCollapsed, isResponding, keyboardLayerOpen, selectOption]);
 
   React.useEffect(() => {
     if (!optimisticSelection || !activeQuestion) return;

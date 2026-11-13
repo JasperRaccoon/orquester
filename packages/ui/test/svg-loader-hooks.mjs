@@ -1,7 +1,8 @@
 const SVG = /\.svg(\?react|\?url)?$/;
 // Vite bundles a stylesheet a module imports (KaTeX's, with the lazily loaded
-// math engine); in plain Node it is an empty module.
-const CSS = /\.css$/;
+// math engine); in plain Node it is an empty module. `?inline` asks for the
+// stylesheet's text (the embed's shadow-root CSS), so it is an empty string.
+const CSS = /\.css(\?inline)?$/;
 export async function resolve(specifier, context, next) {
   if (SVG.test(specifier)) {
     return { url: `orq-svg:${specifier}`, shortCircuit: true };
@@ -13,7 +14,8 @@ export async function resolve(specifier, context, next) {
 }
 export async function load(url, context, next) {
   if (url.startsWith("orq-css:")) {
-    return { format: "module", shortCircuit: true, source: "export default {};\n" };
+    const inline = url.endsWith("?inline");
+    return { format: "module", shortCircuit: true, source: inline ? 'export default "";\n' : "export default {};\n" };
   }
   if (url.startsWith("orq-svg:")) {
     return {

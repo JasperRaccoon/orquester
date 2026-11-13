@@ -11,7 +11,7 @@ import {
   splitLeadingQuotes,
   type ComposerQuote
 } from "./composer-quotes";
-import { MAX_COMPOSER_QUOTE_CHARS, MAX_COMPOSER_QUOTES } from "../../../lib/agent-chat/composer.logic";
+import { MAX_COMPOSER_QUOTE_CHARS, MAX_COMPOSER_QUOTES } from "./composer.logic";
 
 const q = (id: string, text: string): ComposerQuote => ({ id, text });
 

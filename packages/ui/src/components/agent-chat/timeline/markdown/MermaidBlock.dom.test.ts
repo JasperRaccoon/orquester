@@ -184,6 +184,31 @@ describe("MermaidBlock in the DOM", () => {
     assert.ok(svg.querySelector("annotation") === null, "the element is absent");
   });
 
+  it("measures $$ labels inside its shadow root, leaving the host page's body alone", async () => {
+    // An embedded chat renders in a shadow root of a page it does not own.
+    await act(async () => root.unmount());
+    const shadowHost = dom.window.document.createElement("div");
+    dom.window.document.body.replaceChildren(shadowHost);
+    const shadow = shadowHost.attachShadow({ mode: "open" });
+    container = dom.window.document.createElement("div");
+    shadow.append(container);
+    root = createRoot(container);
+    const prototype = dom.window.Element.prototype;
+    const realRect = prototype.getBoundingClientRect;
+    prototype.getBoundingClientRect = function (this: Element) {
+      return this.localName === "math" ? ({ width: 24, height: 18 } as DOMRect) : realRect.call(this);
+    };
+    try {
+      // A label no earlier test typeset, so it is measured here.
+      await show({ code: 'flowchart LR\n  A["$$y_3$$"] --> B' });
+    } finally {
+      prototype.getBoundingClientRect = realRect;
+    }
+    assert.ok(diagram()?.querySelector("foreignObject math msub"), "the label is typeset");
+    const { body } = dom.window.document;
+    assert.ok(body.childElementCount === 1 && body.firstElementChild === shadowHost, "nothing else in the page's body");
+  });
+
   it("expands into the modal as a blob image, and revokes it on close", async () => {
     const revoked: string[] = [];
     const realRevoke = URL.revokeObjectURL;

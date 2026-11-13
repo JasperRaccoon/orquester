@@ -2,11 +2,12 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { useOpenLayer } from "../../../hooks/use-open-layer";
 import { cn } from "../../../lib/cn";
-import { dismissWhenChatTabLeaves, ownChatSessionOf } from "../../../lib/agent-chat-active-tab";
-import { isChatTabListenerActive } from "./tab-visibility";
+import { dismissWhenChatTabLeaves, isChatTabListenerActive, ownChatSessionOf } from "../../../lib/agent-chat-active-tab";
+import { usePortalContainer } from "../../../lib/portal-container";
 
 /**
- * The composer's own anchored popover.
+ * The composer's own anchored popover — also the timeline's and the banners',
+ * so it lives with the chat's primitives rather than in `composer/`.
  *
  * It exists rather than reusing `components/ui/Dropdown` for one structural
  * reason: §7.4's `data-composer-shortcut` convention needs the attribute on
@@ -77,6 +78,7 @@ export function ComposerPopover({
   const [position, setPosition] = React.useState<PanelPosition | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
+  const portalContainer = usePortalContainer();
   useOpenLayer(open);
 
   const setOpenState = React.useCallback(
@@ -136,7 +138,8 @@ export function ComposerPopover({
   // Leaving its thread's tab closes it.
   //
   // The Escape gate below keeps a hidden tab's popover from stealing the key,
-  // but it cannot un-strand the panel: this portals to `document.body`, so a
+  // but it cannot un-strand the panel: this portals out of the tab (to
+  // `document.body` in the app), so a
   // menu left open in one thread floats over the next one, outside the CSS
   // class that hides its tab. Closing when the visible chat tab moves AWAY
   // from its own thread settles that — and only then: in the grid view the
@@ -155,9 +158,15 @@ export function ComposerPopover({
 
   React.useEffect(() => {
     if (!open) return;
+    // The event's path, not its target: from the document, a press inside a
+    // shadow root (the embeddable chat) targets the shadow host, so a
+    // `contains(target)` check read every press on the panel or the trigger
+    // as outside.
     const onPointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (!triggerRef.current?.contains(target) && !panelRef.current?.contains(target)) {
+      const path = event.composedPath();
+      const trigger = triggerRef.current;
+      const panel = panelRef.current;
+      if (!(trigger !== null && path.includes(trigger)) && !(panel !== null && path.includes(panel))) {
         setOpenState(false);
       }
     };
@@ -222,7 +231,7 @@ export function ComposerPopover({
             >
               {children(close)}
             </div>,
-            document.body
+            portalContainer
           )
         : null}
     </>

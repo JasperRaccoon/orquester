@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { AppChatHostProvider } from "./components/agent-chat/chat-host-app";
 import { AppWrapper, AppShell } from "./components/layout";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { DesktopHostBridge } from "./components/attention/DesktopHostBridge";
@@ -138,10 +139,12 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
         windowControls={windowControls}
         desktopHost={desktopHost}
       >
-        {desktopHost && <DesktopHostBridge host={desktopHost} />}
-        <AppWrapper>
-          <AppShell />
-        </AppWrapper>
+        <AppChatHostProvider>
+          {desktopHost && <DesktopHostBridge host={desktopHost} />}
+          <AppWrapper>
+            <AppShell />
+          </AppWrapper>
+        </AppChatHostProvider>
       </OrquesterProvider>
     </ErrorBoundary>
   );

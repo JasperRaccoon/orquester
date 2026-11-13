@@ -2,28 +2,20 @@
  * The pieces every surface showing a parent's delegated chats is built from — the timeline's
  * subagent strip (`timeline/rows/DelegateGroupRow.tsx`) and the roster's delegated rows
  * (`roster/DelegateRosterRow.tsx`) — so the two speak one visual language with the roster's own
- * agent rows: the same status dot and tones, the same agent icons the tab strip draws.
+ * agent rows: the same status dot and tones, the same agent icons the tab strip draws. What they
+ * read live from the app's tabs is in `delegate-tabs.ts`.
  */
 
 import React from "react";
-import { useShallow } from "zustand/react/shallow";
-import type { SessionSummary } from "@orquester/api";
 
-import { shortAccountLabel } from "../../../lib/account-label";
 import { cn } from "../../../lib/cn";
 import {
   DELEGATE_STATUS_LABEL,
-  delegateChildView,
   isDelegateLive,
-  type DelegateChildRef,
-  type DelegateChildStatus,
-  type DelegateChildView
+  type DelegateChildStatus
 } from "../../../lib/agent-chat/delegates.logic";
 import { getRegistryIcon } from "../../../icons";
-import { jumpToProject } from "../../../lib/session-nav";
-import { useAppStore } from "../../../store/app";
 import type { ChatTone } from "../primitives";
-import { formatSubagentModelLabel } from "../roster/format";
 
 export interface DelegateStatusVisual {
   tone: ChatTone;
@@ -56,53 +48,6 @@ export function delegateStatusVisual(status: DelegateChildStatus): DelegateStatu
     case "closed":
       return { tone: "muted", label, pulse: false, ping: false };
   }
-}
-
-/** The children's tabs, live: re-renders only when one of THESE summaries changes. */
-export function useDelegateChildViews(refs: readonly DelegateChildRef[]): DelegateChildView[] {
-  const sessions = useAppStore(
-    useShallow((state) =>
-      refs.map((ref) =>
-        ref.threadId === null
-          ? undefined
-          : state.sessions.find((session) => session.id === ref.threadId && session.kind === "agent-chat")
-      )
-    )
-  );
-  return React.useMemo(() => refs.map((ref, index) => delegateChildView(ref, sessions[index])), [refs, sessions]);
-}
-
-/**
- * A child's second line: its agent's name, its model and — where the tab strip shows one — its
- * managed account. "" for a child with none of them known (its tab is gone).
- */
-export function useDelegateMetaLine(view: Pick<DelegateChildView, "refId" | "model" | "accountId">): string {
-  const agentName = useAppStore((state) =>
-    view.refId === null ? undefined : (state.registry.agents.find((agent) => agent.id === view.refId)?.name ?? view.refId)
-  );
-  const accountLabel = useAppStore((state) =>
-    view.accountId === null ? "" : shortAccountLabel(state.agentAccounts?.accounts.find((account) => account.id === view.accountId)?.label)
-  );
-  return [agentName, formatSubagentModelLabel(view.model, null), accountLabel].filter((part): part is string => Boolean(part)).join(" · ");
-}
-
-/**
- * Focus a delegated child's tab: in this project, its tab; in another project (a task delegated
- * across projects), that project with its tab. False when the tab is gone.
- */
-export function openDelegateTab(sessionId: string): boolean {
-  const state = useAppStore.getState();
-  const session: SessionSummary | undefined = state.sessions.find((candidate) => candidate.id === sessionId);
-  if (!session) return false;
-  if (state.currentProject?.path !== session.projectPath) {
-    const project = state.projects.find((candidate) => candidate.path === session.projectPath);
-    if (project) {
-      jumpToProject({ project, sessionId });
-      return true;
-    }
-  }
-  state.activateTab(sessionId);
-  return true;
 }
 
 /** The agent's own icon in a round chip, as the strip overlaps them (`ring` cuts each from the next). */

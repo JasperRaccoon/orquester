@@ -8,7 +8,8 @@ import { cn } from "../../../lib/cn";
 import { copyText } from "../../../lib/clipboard";
 import { openLayer } from "../../../lib/open-layers";
 import { MAX_COMPOSER_QUOTE_CHARS } from "../../../lib/agent-chat/composer.logic";
-import { composerTakesQuotes, quoteIntoComposer } from "../composer/composer-bridge";
+import { usePortalContainer } from "../../../lib/portal-container";
+import type { ChatHost } from "../chat-host";
 import { COPY_FEEDBACK_MS } from "../primitives";
 import {
   isRectVisible,
@@ -25,6 +26,8 @@ export interface QuoteSelectionToolbarProps {
   sessionId: string;
   /** The bottom of the viewport the composer overlay covers; the toolbar never sits under it. */
   bottomInset: number;
+  /** The host's composer, which a quote goes into. */
+  composer: NonNullable<ChatHost["quoteToComposer"]>;
 }
 
 type PointerKind = "mouse" | "touch" | "keyboard";
@@ -76,8 +79,10 @@ function isEditable(target: EventTarget | null): boolean {
 export function QuoteSelectionToolbar({
   viewport,
   sessionId,
-  bottomInset
+  bottomInset,
+  composer
 }: QuoteSelectionToolbarProps): React.ReactElement | null {
+  const portalContainer = usePortalContainer();
   const [state, setState] = React.useState<ToolbarState | null>(null);
   const [copied, setCopied] = React.useState(false);
   const toolbarRef = React.useRef<HTMLDivElement>(null);
@@ -128,7 +133,7 @@ export function QuoteSelectionToolbar({
     const evaluate = (): void => {
       if (dismissed || mouseDown) return;
       const resolved = resolveQuoteSelection(view.getSelection(), viewport);
-      if (resolved === null || !composerTakesQuotes(sessionId)) {
+      if (resolved === null || !composer.takes(sessionId)) {
         hide();
         return;
       }
@@ -284,7 +289,7 @@ export function QuoteSelectionToolbar({
       view.removeEventListener("blur", onBlur);
       setState(null);
     };
-  }, [viewport, sessionId, endPress]);
+  }, [viewport, sessionId, composer, endPress]);
 
   // An open layer while it shows: the chat's Escape (interrupt, rewind) stands down for it.
   React.useEffect(() => (shown ? openLayer() : undefined), [shown]);
@@ -333,7 +338,7 @@ export function QuoteSelectionToolbar({
     window.getSelection()?.removeAllRanges();
     // A refusal (the draft holds all the quotes it may) is said on the
     // composer's status line, where the quotes are.
-    quoteIntoComposer(sessionId, state.markdown);
+    composer.quote(sessionId, state.markdown);
   };
   const copy = (): void => {
     endPress();
@@ -402,6 +407,6 @@ export function QuoteSelectionToolbar({
         {copied ? "Copied" : "Copy"}
       </button>
     </div>,
-    document.body
+    portalContainer
   );
 }

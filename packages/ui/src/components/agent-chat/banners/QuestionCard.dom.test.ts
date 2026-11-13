@@ -22,6 +22,7 @@ let createRoot: typeof import("react-dom/client").createRoot;
 let QuestionCard: typeof import("./QuestionCard").QuestionCard;
 let ChatBannerDock: typeof import("./ChatBannerDock").ChatBannerDock;
 let OrquesterProvider: typeof import("../../../context/orquester-context").OrquesterProvider;
+let AppChatHostProvider: typeof import("../chat-host-app").AppChatHostProvider;
 let visualSnippetDocument: typeof import("../visual/VisualSnippet").visualSnippetDocument;
 
 let dom: JSDOM;
@@ -65,6 +66,7 @@ before(async () => {
   ({ QuestionCard } = await import("./QuestionCard"));
   ({ ChatBannerDock } = await import("./ChatBannerDock"));
   ({ OrquesterProvider } = await import("../../../context/orquester-context"));
+  ({ AppChatHostProvider } = await import("../chat-host-app"));
   ({ visualSnippetDocument } = await import("../visual/VisualSnippet"));
 });
 
@@ -439,29 +441,31 @@ describe("ChatBannerDock — the question's markdown resolves like the timeline'
     act(() => {
       root.render(
         createElement(OrquesterProvider, {
-          // Only the file read is reached: the image goes through `useApi().readFileBytes`.
+          // Only the file read is reached: the image goes through the app's chat host, `api.readFileBytes`.
           runtime: {} as never,
           useTitlebar: false,
           api: api as never,
-          children: createElement(ChatBannerDock, {
-            sessionId: "s1",
-            approvals: [],
-            userInputs: [request(question({ question: "See ![the shot](shots/a.png) and [the notes](docs/notes.md)." }))],
-            respondingRequestIds: [],
-            backgroundLiveness: null,
-            liveAgentCount: 0,
-            stopping: false,
-            actionableProposedPlan: false,
-            onApprove: noop,
-            onAnswer: noop,
-            onDismiss: noop,
-            onStopBackgroundWork: noop,
-            onCarryTextToDraft: noop,
-            toolApprovals: [],
-            projectPath: "/work/proj",
-            onOpenFile: (path: string) => {
-              opened.push(path);
-            }
+          children: createElement(AppChatHostProvider, {
+            children: createElement(ChatBannerDock, {
+              sessionId: "s1",
+              approvals: [],
+              userInputs: [request(question({ question: "See ![the shot](shots/a.png) and [the notes](docs/notes.md)." }))],
+              respondingRequestIds: [],
+              backgroundLiveness: null,
+              liveAgentCount: 0,
+              stopping: false,
+              actionableProposedPlan: false,
+              onApprove: noop,
+              onAnswer: noop,
+              onDismiss: noop,
+              onStopBackgroundWork: noop,
+              onCarryTextToDraft: noop,
+              toolApprovals: [],
+              projectPath: "/work/proj",
+              onOpenFile: (path: string) => {
+                opened.push(path);
+              }
+            })
           })
         })
       );

@@ -4,7 +4,7 @@
 import React from "react";
 import { Code, Maximize2, Workflow } from "lucide-react";
 
-import { Modal, ModalCloseButton } from "../../../ui";
+import { Modal, ModalCloseButton } from "../../../ui/modal";
 import { ChatIconButton } from "../../primitives";
 import { CodeBlock } from "./CodeBlock";
 import {
@@ -13,7 +13,8 @@ import {
   loadedPele,
   loadMathResolver,
   loadPele,
-  type MathResolver,
+  mathProbeParentOf,
+  type ChatMathResolver,
   type PeleEngine
 } from "./mermaid-engine";
 import { createDiagramBlobUrl, createDiagramSanitizers, type DiagramSanitizers } from "./mermaid-svg";
@@ -89,7 +90,7 @@ function ViewToggle({ showingCode, onToggle }: { showingCode: boolean; onToggle:
 
 type Readiness =
   | { status: "loading" }
-  | { status: "ready"; pele: PeleEngine; math: MathResolver | null }
+  | { status: "ready"; pele: PeleEngine; math: ChatMathResolver | null }
   | { status: "unsupported" }
   | { status: "failed" };
 
@@ -157,7 +158,7 @@ function DiagramBody({
   hostRef
 }: {
   pele: PeleEngine;
-  math: MathResolver | null;
+  math: ChatMathResolver | null;
   source: string;
   onError: (message: string) => void;
   onExpand: () => void;
@@ -175,7 +176,9 @@ function DiagramBody({
       // Keep the author's direction: a wide diagram scales down to fit instead of turning vertical.
       autoDirection: false,
       sanitize,
-      ...(math ? { math } : {}),
+      // Labels are measured beside the diagram's own tree: inside an embed's
+      // shadow root rather than in its host page's body.
+      ...(math ? { math: (tex: string, size: number) => math(tex, size, mathProbeParentOf(host)) } : {}),
       onError: (error) => onError(error instanceof Error ? error.message : "The diagram could not be rendered.")
     });
     return () => mounted.destroy();

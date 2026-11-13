@@ -7,7 +7,9 @@
  *   the raw request line alone (`/%61pi/...` is routed to `/api/...`);
  * - a route parameter as long as the agent profile's item ids (a command
  *   `command:<64>/<64>`, a plugin `plugin:<name>@<marketplace>`, percent-encoded)
- *   still matches its route.
+ *   still matches its route;
+ * - the embeddable chat's public `/embed/` files load from any origin without a
+ *   bearer, cached by name, and a stale one is a JSON 404 rather than the SPA.
  */
 
 import assert from "node:assert/strict";
@@ -20,7 +22,7 @@ import { createVisualUrlSigner } from "./agent-chat/visual-urls.ts";
 import { SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 import { createServer } from "./index.ts";
 import { testAuthSessions } from "./auth/testing.ts";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { knowledgeRoutes } from "@orquester/api";
@@ -34,7 +36,7 @@ const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
 const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 
-function remoteApp(services: Record<string, unknown>, mode: "local" | "remote" = "remote") {
+function remoteApp(services: Record<string, unknown>, mode: "local" | "remote" = "remote", serveWeb?: string) {
   const config = createDefaultDaemonConfig({ env: {} });
   config.transports.http.username = USERNAME;
   config.transports.http.passwordHash = PASSWORD_HASH;
@@ -46,7 +48,7 @@ function remoteApp(services: Record<string, unknown>, mode: "local" | "remote" =
     createDefaultClientConfig(`${root}/daemon.sock`),
     createWriteStream("/dev/null"),
     { authSessions: AUTH_SESSIONS, ...services } as unknown as CreateServerArgs[4],
-    { authRequired: mode === "remote", mode }
+    { authRequired: mode === "remote", mode, serveWeb }
   );
 }
 
@@ -312,5 +314,78 @@ test("the Knowledge Graph routes are bearer-gated on the remote transport, worke
   for (const url of [knowledgeRoutes.workerNext, knowledgeRoutes.workerSubmit]) {
     const res = await app.inject({ method: "POST", url, payload: {}, headers: { authorization: BEARER } });
     assert.equal(res.statusCode, 404, `${url} must not exist on the remote transport (answered ${res.statusCode})`);
+  }
+});
+
+async function webDirWithEmbed(t: { after(fn: () => Promise<void>): void }): Promise<string> {
+  const webDir = await mkdtemp(join(tmpdir(), "orq-web-"));
+  t.after(() => rm(webDir, { recursive: true, force: true }));
+  await mkdir(join(webDir, "embed", "chunks"), { recursive: true });
+  await mkdir(join(webDir, "assets"));
+  await writeFile(join(webDir, "index.html"), "<!doctype html><title>spa</title>");
+  await writeFile(join(webDir, "assets", "app.1a2b3c4d.js"), "export {};");
+  await writeFile(join(webDir, "embed", "manifest.json"), JSON.stringify({ contract: 1, entry: "agent-chat.3f9a2c1d.js" }));
+  await writeFile(join(webDir, "embed", "agent-chat.3f9a2c1d.js"), "export const contract = 1;");
+  await writeFile(join(webDir, "embed", "chunks", "katex.5e6f7a8b.js"), "export {};");
+  return webDir;
+}
+
+test("embed files load cross-origin without a bearer: hashed ones immutable, the manifest revalidated", async (t) => {
+  const app = remoteApp({}, "remote", await webDirWithEmbed(t));
+  try {
+    for (const method of ["GET", "HEAD"] as const) {
+      for (const url of ["/embed/agent-chat.3f9a2c1d.js", "/embed/chunks/katex.5e6f7a8b.js"]) {
+        const res = await app.inject({ method, url });
+        assert.equal(res.statusCode, 200, `${method} ${url}`);
+        assert.equal(res.headers["access-control-allow-origin"], "*");
+        assert.equal(res.headers["cross-origin-resource-policy"], "cross-origin");
+        assert.equal(res.headers["cache-control"], "public, max-age=31536000, immutable");
+      }
+    }
+    const manifest = await app.inject({ method: "GET", url: "/embed/manifest.json" });
+    assert.equal(manifest.statusCode, 200);
+    assert.equal(manifest.json().entry, "agent-chat.3f9a2c1d.js");
+    assert.equal(manifest.headers["access-control-allow-origin"], "*");
+    assert.equal(manifest.headers["cache-control"], "no-cache");
+
+    const preflight = await app.inject({
+      method: "OPTIONS",
+      url: "/embed/agent-chat.3f9a2c1d.js",
+      headers: { origin: "https://viewer.example", "access-control-request-method": "GET" }
+    });
+    assert.equal(preflight.statusCode, 204);
+    assert.equal(preflight.headers["access-control-allow-origin"], "*");
+    assert.match(String(preflight.headers["access-control-allow-methods"]), /GET/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("a missing embed file is a cross-origin JSON 404, not the SPA; other web paths keep their behaviour", async (t) => {
+  const app = remoteApp({}, "remote", await webDirWithEmbed(t));
+  try {
+    for (const method of ["GET", "HEAD"] as const) {
+      const miss = await app.inject({ method, url: "/embed/agent-chat.deadbeef.js" });
+      assert.equal(miss.statusCode, 404, method);
+      assert.match(String(miss.headers["content-type"]), /application\/json/);
+      assert.equal(miss.headers["access-control-allow-origin"], "*");
+      assert.equal(miss.headers["cross-origin-resource-policy"], "cross-origin");
+      assert.doesNotMatch(String(miss.headers["cache-control"] ?? ""), /immutable/);
+    }
+    assert.equal((await app.inject({ method: "GET", url: "/embed/agent-chat.deadbeef.js" })).json().code, "NOT_FOUND");
+
+    const asset = await app.inject({ method: "GET", url: "/assets/app.1a2b3c4d.js" });
+    assert.equal(asset.statusCode, 200);
+    assert.equal(asset.headers["access-control-allow-origin"], undefined);
+    assert.equal(asset.headers["cross-origin-resource-policy"], undefined);
+    assert.doesNotMatch(String(asset.headers["cache-control"]), /immutable/);
+    for (const url of ["/workspace/project", "/embedded"]) {
+      const spa = await app.inject({ method: "GET", url });
+      assert.equal(spa.statusCode, 200, url);
+      assert.match(spa.body, /<title>spa<\/title>/);
+      assert.equal(spa.headers["access-control-allow-origin"], undefined);
+    }
+  } finally {
+    await app.close();
   }
 });

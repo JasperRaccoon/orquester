@@ -43,7 +43,7 @@ import {
 import { composerTextForDelivery } from "../../../lib/composer-inbox";
 import { textNamesPath } from "./composer-files";
 import { removeImagePlaceholder } from "./composer-images";
-import { mergeQuotes, quotesEqual, quotesFromText } from "./composer-quotes";
+import { mergeQuotes, quotesEqual, quotesFromText } from "../../../lib/agent-chat/composer-quotes";
 import {
   decideStagedAttachmentForRef,
   draftAfterSend,

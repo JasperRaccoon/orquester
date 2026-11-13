@@ -1,10 +1,10 @@
 import React from "react";
 
-import { useApi } from "../../../context/orquester-context";
-import { ApiError } from "../../../lib/api-client";
-import { cn } from "../../../lib/cn";
-import { DiffFilesView } from "../../git/DiffFilesView";
-import { Modal, ModalCloseButton } from "../../ui";
+import { useApi } from "../../context/orquester-context";
+import { ApiError } from "../../lib/api-client";
+import { cn } from "../../lib/cn";
+import { DiffFilesView } from "../git/DiffFilesView";
+import { Modal, ModalCloseButton } from "../ui";
 
 /**
  * One turn's diff — `GET …/turns/:n/diff` (§6.3) — read on demand and shown

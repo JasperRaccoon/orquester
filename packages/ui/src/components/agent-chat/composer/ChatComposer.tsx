@@ -63,7 +63,7 @@ import {
   composeQuotedPrompt,
   mergeQuotes,
   type ComposerQuote
-} from "./composer-quotes";
+} from "../../../lib/agent-chat/composer-quotes";
 import { restoreFailedSendDraft } from "./composer-failed-send";
 import { beginComposerSend, isComposerSending } from "./composer-sends";
 import { useComposerSending } from "./use-composer-sending";
@@ -84,11 +84,8 @@ import {
 } from "./composer-model";
 import { isComposerCollapsedMobile, resolveComposerTimelineInset } from "./composer-inset";
 import { anotherLayerOwnsTheKeyboard } from "../../attention/GlobalShortcutListener";
-import {
-  composerEscapeAction,
-  composerOwnsEscape,
-  isChatTabListenerActive
-} from "./tab-visibility";
+import { isChatTabListenerActive } from "../../../lib/agent-chat-active-tab";
+import { composerEscapeAction, composerOwnsEscape } from "./tab-visibility";
 import {
   findComposerShortcutTarget,
   resolveChatShortcut,

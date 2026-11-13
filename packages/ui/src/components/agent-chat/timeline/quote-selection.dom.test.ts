@@ -18,7 +18,7 @@ let createRoot: typeof import("react-dom/client").createRoot;
 let resolveQuoteSelection: typeof import("./quote-selection").resolveQuoteSelection;
 let selectionMarkdown: typeof import("./quote-selection").selectionMarkdown;
 let QuoteSelectionToolbar: typeof import("./QuoteSelectionToolbar").QuoteSelectionToolbar;
-let registerComposerHandle: typeof import("../composer/composer-bridge").registerComposerHandle;
+let bridge: typeof import("../composer/composer-bridge");
 let isAnyLayerOpen: typeof import("../../../lib/open-layers").isAnyLayerOpen;
 
 let dom: JSDOM;
@@ -53,7 +53,7 @@ before(async () => {
   ({ createRoot } = await import("react-dom/client"));
   ({ resolveQuoteSelection, selectionMarkdown } = await import("./quote-selection"));
   ({ QuoteSelectionToolbar } = await import("./QuoteSelectionToolbar"));
-  ({ registerComposerHandle } = await import("../composer/composer-bridge"));
+  bridge = await import("../composer/composer-bridge");
   ({ isAnyLayerOpen } = await import("../../../lib/open-layers"));
 });
 
@@ -261,7 +261,7 @@ describe("the selection toolbar", () => {
   }
 
   const withComposer = (): void => {
-    unregister = registerComposerHandle("s1", {
+    unregister = bridge.registerComposerHandle("s1", {
       insertText: () => {},
       stageAttachment: () => true,
       returnMessage: () => [],
@@ -286,7 +286,9 @@ describe("the selection toolbar", () => {
     document.body.appendChild(mount);
     root = createRoot(mount);
     await act(async () => {
-      root.render(createElement(QuoteSelectionToolbar, { viewport, sessionId: "s1", bottomInset: 0 }));
+      // The composer as the app's chat host reaches it: through the composer bridge.
+      const composer = { takes: bridge.composerTakesQuotes, quote: bridge.quoteIntoComposer };
+      root.render(createElement(QuoteSelectionToolbar, { viewport, sessionId: "s1", bottomInset: 0, composer }));
     });
   });
 

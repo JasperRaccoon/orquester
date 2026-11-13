@@ -44,7 +44,9 @@ export function visualSnippetDocument(html: string, theme: HtmlRenderTheme): str
 }
 
 export function VisualSnippet(props: { html: string; title: string; className?: string }): React.ReactElement {
-  const theme = useVisualTheme();
+  // The placeholder, then the frame: the theme is read where the fragment shows.
+  const boxRef = React.useRef<HTMLElement | null>(null);
+  const theme = useVisualTheme(boxRef);
   const page = React.useMemo(() => visualSnippetDocument(props.html, theme), [props.html, theme]);
   // A new blob per document: a theme change re-renders the fragment, which
   // has no script to restyle itself.
@@ -58,9 +60,10 @@ export function VisualSnippet(props: { html: string; title: string; className?: 
 
   // Until the first blob exists the box holds the frame's place, so the pane
   // does not jump when it lands.
-  if (src === null) return <div aria-hidden className={cn("block", props.className)} />;
+  if (src === null) return <div ref={boxRef as React.RefObject<HTMLDivElement>} aria-hidden className={cn("block", props.className)} />;
   return (
     <iframe
+      ref={boxRef as React.RefObject<HTMLIFrameElement>}
       // Empty sandbox: static markup and CSS only, an opaque origin, no script.
       sandbox=""
       src={src}

@@ -5588,11 +5588,37 @@ export function createServer(
   // On a miss @fastify/static calls reply.callNotFound(), routing to the SPA
   // fallback below; more-specific /api,/health,/events,/ws routes are never
   // shadowed by /*.
+  //
+  // `/embed/` holds the embeddable chat's build (spec 2026-11-13 §5.2): public, data-free files that
+  // foreign origins load as cross-origin module scripts and fonts. Every response under it — hit,
+  // miss or preflight — is open to any origin, and a miss is a JSON 404, never index.html.
   if (options.serveWeb) {
-    void app.register(fastifyStatic, { root: options.serveWeb, wildcard: true });
+    const embedDir = join(options.serveWeb, "embed") + sep;
+    app.addHook("onRequest", async (request, reply) => {
+      const path = safeDecodePath(request.url.split("?")[0] ?? "");
+      if (path === undefined || !isEmbedPath(path)) return;
+      reply.header("access-control-allow-origin", "*");
+      reply.header("cross-origin-resource-policy", "cross-origin");
+      if (request.method === "OPTIONS") {
+        reply.header("access-control-allow-methods", "GET, HEAD");
+        return reply.code(204).send();
+      }
+    });
+    void app.register(fastifyStatic, {
+      root: options.serveWeb,
+      wildcard: true,
+      // Called only for a file that exists (so a 404 never carries `immutable`), before `send`
+      // fills in its default `public, max-age=0`, which it skips when Cache-Control is already set.
+      setHeaders: (res, filePath) => {
+        if (!filePath.startsWith(embedDir)) return;
+        const name = filePath.slice(embedDir.length);
+        res.setHeader("cache-control", EMBED_UNHASHED_FILES.has(name) ? "no-cache" : "public, max-age=31536000, immutable");
+      }
+    });
     app.setNotFoundHandler((request, reply) => {
       const url = request.url;
       const isApi =
+        isEmbedPath(safeDecodePath(url.split("?")[0] ?? "") ?? "") ||
         url.startsWith("/api") ||
         url.startsWith("/health") ||
         url.startsWith("/events") ||
@@ -6095,6 +6121,14 @@ async function pruneArchivedProject(
  */
 async function writeJsonFile(file: string, value: unknown): Promise<void> {
   await writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`, 0o644, true, { durable: true });
+}
+
+/** The embeddable chat's files that keep their name across builds; every other file under `/embed/` is content-hashed. */
+const EMBED_UNHASHED_FILES = new Set(["manifest.json", "LICENSES.txt", "variables.json"]);
+
+/** Whether a request path is under the embeddable chat's reserved `/embed` prefix. */
+function isEmbedPath(path: string): boolean {
+  return path === "/embed" || path.startsWith("/embed/");
 }
 
 /** A request path percent-decoded as the router sees it; `undefined` when it is not valid percent-encoding. */

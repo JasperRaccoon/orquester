@@ -7,8 +7,8 @@ import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
 import { insideKeyboardSurface } from "../../../lib/keyboard-surfaces";
 import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
 import { isLoopOrGoalRow } from "../../../lib/agent-chat/roster.logic";
-import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
+import { useChatHost, type ChatHost } from "../chat-host";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import {
   readPlanWithoutStore,
@@ -132,6 +132,8 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     revealRequest = null,
     onRevealHandled
   } = props;
+  const host = useChatHost();
+  const { peekThread } = host;
   /**
    * "Load older turns" (design 2026-09-23 §C): only on the thread's own,
    * writable timeline — the drill-in and a read-only surface page nothing.
@@ -287,7 +289,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   );
 
   /** A plan proposal's whole markdown, for the plan card's Copy and Download. */
-  const readFullPlanMarkdown = React.useMemo(() => threadPlanReader(sessionId), [sessionId]);
+  const readFullPlanMarkdown = React.useMemo(() => threadPlanReader(peekThread, sessionId), [peekThread, sessionId]);
 
   const context = React.useMemo<TimelineRowContextValue>(
     () => ({
@@ -416,10 +418,10 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     const position = pendingScroll.current;
     pendingScroll.current = null;
     if (position === null) return;
-    // Read the store at call time rather than subscribing: a scroll must not
+    // Read the thread at call time rather than subscribing: a scroll must not
     // re-render the timeline, and the actions object is stable anyway.
-    peekThreadStore(sessionId)?.getState().actions.rememberScroll(position);
-  }, [sessionId]);
+    peekThread?.(sessionId)?.actions.rememberScroll(position);
+  }, [peekThread, sessionId]);
 
   const rememberScroll = React.useCallback(
     (position: TimelineScrollPosition) => {
@@ -622,15 +624,15 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       }
       // A row id that cannot be found (or quoted) falls back to the pixel offset.
       node.scrollTop = remembered.scrollOffset;
-      const store = peekThreadStore(sessionId);
+      const thread = peekThread?.(sessionId) ?? null;
       const turnId = restoreTurnOf(remembered, current, agentId, (turn) =>
-        promptIdOfTurn(store?.getState().slice.turns ?? [], turn)
+        promptIdOfTurn(thread?.turns ?? [], turn)
       );
       if (turnId !== null) {
-        void store?.getState().actions.revealTurn(turnId).catch(() => false);
+        void thread?.actions.revealTurn(turnId).catch(() => false);
       }
     },
-    [sessionId, agentId]
+    [peekThread, sessionId, agentId]
   );
 
   /**
@@ -932,9 +934,15 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       <ScrollToBottomButton visible={!follow} onClick={reArmFollow} bottom={bottomInset + 4} />
 
       {/* Quote or copy a selection in an agent's reply — only where there is
-          a composer to quote into: never the drill-in or a read-only view. */}
-      {effectiveReadOnly ? null : (
-        <QuoteSelectionToolbar viewport={scroller} sessionId={sessionId} bottomInset={bottomInset} />
+          a composer to quote into: never the drill-in, a read-only view or a
+          host without one. */}
+      {effectiveReadOnly || !host.quoteToComposer ? null : (
+        <QuoteSelectionToolbar
+          viewport={scroller}
+          sessionId={sessionId}
+          bottomInset={bottomInset}
+          composer={host.quoteToComposer}
+        />
       )}
     </div>
   );
@@ -947,17 +955,20 @@ const NOOP_STRING = (): void => {};
 const NO_ROSTER: NonNullable<ChatTimelineProps["roster"]> = [];
 
 /**
- * The row context's plan reader for one thread: the store's
- * `readFullPlanMarkdown`. It is looked up at call time, as `rememberScroll`
- * does, because a card holds no session id, and a drill-in reads through the
- * parent's slice, whose items the plan belongs to. With no store it answers
- * as the context's own fallback does: an intact plan as is, and only a cut
- * one refused.
+ * The row context's plan reader for one thread: the host thread's
+ * `readFullPlanMarkdown` (in the app, its thread store's). It is looked up at
+ * call time, as `rememberScroll` does, because a card holds no session id,
+ * and a drill-in reads through the parent's slice, whose items the plan
+ * belongs to. With no such thread it answers as the context's own fallback
+ * does: an intact plan as is, and only a cut one refused.
  */
-function threadPlanReader(sessionId: string): AgentChatActions["readFullPlanMarkdown"] {
+function threadPlanReader(
+  peekThread: ChatHost["peekThread"],
+  sessionId: string
+): AgentChatActions["readFullPlanMarkdown"] {
   return (plan) => {
-    const store = peekThreadStore(sessionId);
-    return store ? store.getState().actions.readFullPlanMarkdown(plan) : readPlanWithoutStore(plan);
+    const thread = peekThread?.(sessionId);
+    return thread ? thread.actions.readFullPlanMarkdown(plan) : readPlanWithoutStore(plan);
   };
 }
 

@@ -2,7 +2,8 @@
  * A `Modal`'s Escape in a DOM: it closes the modal only while the modal is the
  * newest open layer. A menu opened inside it, or a non-modal editor drawn over
  * it (the agent-config editor over Settings), owns that Escape — even when it
- * lets go of its layer while handling the same key.
+ * lets go of its layer while handling the same key. And where it mounts: the
+ * provided portal container (the embeddable chat's shadow root), else the body.
  */
 
 import assert from "node:assert/strict";
@@ -13,6 +14,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
 import { isAnyLayerOpen, openTrackedLayer } from "../../lib/open-layers";
+import { PortalContainerProvider } from "../../lib/portal-container";
 import { Modal } from "./modal";
 
 let dom: JSDOM;
@@ -98,5 +100,31 @@ describe("Modal's Escape", () => {
     pressEscape(item);
     item.remove();
     assert.equal(closes, 0);
+  });
+});
+
+describe("Modal's portal", () => {
+  it("mounts into the provided portal container rather than the body", () => {
+    // The modal hands focus back on a timer after it closes: run it here, not after the DOM is gone.
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const host = document.createElement("div");
+    const container = document.createElement("div");
+    document.body.append(host, container);
+    const root = createRoot(host);
+    act(() => {
+      root.render(
+        createElement(PortalContainerProvider, {
+          container,
+          children: createElement(Modal, { open: true, onClose: () => undefined, children: "in" })
+        })
+      );
+    });
+    const dialog = document.querySelector('[role="dialog"]');
+    assert.ok(dialog !== null && container.contains(dialog), "the dialog is in the container");
+    act(() => root.unmount());
+    mock.timers.runAll();
+    mock.timers.reset();
+    host.remove();
+    container.remove();
   });
 });

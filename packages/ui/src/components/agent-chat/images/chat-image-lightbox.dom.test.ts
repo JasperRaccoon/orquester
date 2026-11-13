@@ -1,6 +1,7 @@
 /**
- * The enlarged chat image in a DOM: ←/→ page through its row's images from wherever focus is in
- * it, a focused action that goes away while the next image loads included.
+ * The enlarged chat image in a DOM, with no app around it — its bytes come from the chat's host:
+ * ←/→ page through its row's images from wherever focus is in it, a focused action that goes away
+ * while the next image loads included.
  */
 
 import assert from "node:assert/strict";
@@ -9,12 +10,12 @@ import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
-import type { ApiClient } from "../../../lib/api-client";
+import type { ChatHost } from "../chat-host";
 import type { ChatImageItem } from "./chat-image";
 
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
-let OrquesterProvider: typeof import("../../../context/orquester-context").OrquesterProvider;
+let chatHost: typeof import("../chat-host");
 let ChatImageLightbox: typeof import("./ChatImageLightbox").ChatImageLightbox;
 
 let dom: JSDOM;
@@ -45,7 +46,7 @@ before(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
-  ({ OrquesterProvider } = await import("../../../context/orquester-context"));
+  chatHost = await import("../chat-host");
   ({ ChatImageLightbox } = await import("./ChatImageLightbox"));
 });
 
@@ -75,19 +76,18 @@ const item = (name: string): ChatImageItem => ({
 describe("ChatImageLightbox", () => {
   it("keeps paging with → after the focused action goes away while the next image loads", async () => {
     // The first image loads; the second never does, so its actions never show.
-    const api = {
+    const host: ChatHost = {
+      ...chatHost.STANDALONE_CHAT_HOST,
       readFileBytes: (path: string) => (path.endsWith("one.png") ? Promise.resolve(PNG) : new Promise<never>(() => {}))
-    } as unknown as ApiClient;
+    };
     const container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
     const steps: number[] = [];
     const items = [item("one"), item("two")];
     const view = (index: number) =>
-      createElement(OrquesterProvider, {
-        runtime: "web",
-        api,
-        useTitlebar: false,
+      createElement(chatHost.ChatHostProvider, {
+        host,
         children: createElement(ChatImageLightbox, {
           items,
           index,

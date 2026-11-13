@@ -4,7 +4,8 @@
  * height for this width until it reports its own, with a full-screen viewer.
  *
  * Ported from T3 Code (MIT): `apps/web/src/components/chat/HtmlRenderFrame.tsx`,
- * minting its URL through Orquester's API client.
+ * taking its URL from the chat's host (`ChatHost.visualPageUrl`; the app's
+ * mints it through Orquester's API client, {@link visualPageUrl}).
  */
 
 import React from "react";
@@ -16,9 +17,9 @@ import {
   type HtmlRenderReference
 } from "@orquester/api/agent-chat";
 
-import { useApi } from "../../../context/orquester-context";
 import type { ApiClient } from "../../../lib/api-client";
 import { VISUAL_FRAME_SHORTCUTS, VisualUrlCache, type VisualFrameUrl } from "../../../lib/agent-chat/visual-frame";
+import { useChatHost } from "../chat-host";
 import { ChatIconButton } from "../primitives";
 import { VisualDocument } from "./VisualDocument";
 import { VisualViewer } from "./VisualViewer";
@@ -52,7 +53,7 @@ export async function visualPageUrl(api: ApiClient, sessionId: string, attachmen
 export function VisualFrame(props: { sessionId: string; htmlRender: HtmlRenderReference }): React.ReactElement {
   const { sessionId, htmlRender } = props;
   const { attachmentId, title } = htmlRender;
-  const api = useApi();
+  const { visualPageUrl: pageUrl } = useChatHost();
 
   // The frame takes the page's measured height at its own width, read before
   // first paint so the reserved box is already the right size.
@@ -80,7 +81,7 @@ export function VisualFrame(props: { sessionId: string; htmlRender: HtmlRenderRe
   const [failed, setFailed] = React.useState(false);
   React.useEffect(() => {
     let cancelled = false;
-    visualPageUrl(api, sessionId, attachmentId).then(
+    pageUrl(sessionId, attachmentId).then(
       (url) => {
         if (!cancelled) setSrc(url.src);
       },
@@ -91,17 +92,17 @@ export function VisualFrame(props: { sessionId: string; htmlRender: HtmlRenderRe
     return () => {
       cancelled = true;
     };
-  }, [api, sessionId, attachmentId]);
+  }, [pageUrl, sessionId, attachmentId]);
 
   const [expandedSrc, setExpandedSrc] = React.useState<string | null>(null);
   const [expandFailed, setExpandFailed] = React.useState(false);
   const expand = React.useCallback(() => {
     setExpandFailed(false);
-    visualPageUrl(api, sessionId, attachmentId).then(
+    pageUrl(sessionId, attachmentId).then(
       (url) => setExpandedSrc(url.src),
       () => setExpandFailed(true)
     );
-  }, [api, sessionId, attachmentId]);
+  }, [pageUrl, sessionId, attachmentId]);
   const closeViewer = React.useCallback(() => setExpandedSrc(null), []);
 
   return (
@@ -114,6 +115,7 @@ export function VisualFrame(props: { sessionId: string; htmlRender: HtmlRenderRe
             shortcuts={VISUAL_FRAME_SHORTCUTS}
             className="block size-full"
             onContentHeight={setContentHeight}
+            themeAnchor={boxRef}
           />
           <div className="absolute end-1 top-1 flex items-center gap-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/visual:opacity-100 [@media(pointer:coarse)]:opacity-100">
             {expandFailed ? <span className="rounded bg-neutral-900/90 px-1.5 py-0.5 text-[11px] text-danger">Page unavailable</span> : null}
@@ -125,7 +127,7 @@ export function VisualFrame(props: { sessionId: string; htmlRender: HtmlRenderRe
               <Maximize2 size={13} aria-hidden />
             </ChatIconButton>
           </div>
-          {expandedSrc !== null ? <VisualViewer src={expandedSrc} title={title} onClose={closeViewer} /> : null}
+          {expandedSrc !== null ? <VisualViewer src={expandedSrc} title={title} onClose={closeViewer} themeAnchor={boxRef} /> : null}
         </>
       ) : failed ? (
         <p className="flex size-full items-center justify-center text-xs text-neutral-500">Unable to load {title}</p>
