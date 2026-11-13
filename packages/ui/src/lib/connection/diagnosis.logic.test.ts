@@ -130,6 +130,18 @@ describe("presentConnectionDiagnosis", () => {
     assert.equal(diagnose({ status: "connected", attempt: 0, log: log({ serverProtocol: null }) }), null, "an older daemon without a protocol");
   });
 
+  it("offers a reload when the server that served this page now runs another build", () => {
+    const served = (patch: Partial<ConnectionDiagnosisInput>) =>
+      diagnose({ status: "connected", attempt: 0, sameOrigin: true, clientBuild: "abc1234", ...patch });
+    const updated = served({ log: log({ serverBuild: "def567890abc" }) });
+    assert.equal(updated?.kind, "app-updated");
+    assert.equal(updated?.action, "reload");
+    assert.equal(served({ log: log({ serverBuild: "abc1234def56" }) }), null, "the same commit, longer");
+    assert.equal(served({ runtime: "desktop", log: log({ serverBuild: "def567890abc" }) }), null, "the desktop ships its own UI");
+    assert.equal(served({ sameOrigin: false, log: log({ serverBuild: "def567890abc" }) }), null, "another server's connection");
+    assert.equal(served({ clientBuild: "unknown", log: log({ serverBuild: "def567890abc" }) }), null);
+  });
+
   it("warns when HTTP works but the WebSocket keeps closing", () => {
     const ws = (failures: number) => ({ [WS]: { failures, lastOpenAt: null, lastCloseCode: 1006, lastFailureAt: NOW } });
     assert.equal(diagnose({ status: "connected", attempt: 0, log: log({ ws: ws(1) }) }), null);

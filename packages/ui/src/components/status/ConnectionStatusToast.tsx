@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useSyncExternalStore } from "react";
-import { AlertTriangle, ChevronDown, ChevronUp, Loader2, WifiOff, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, Loader2, RefreshCw, WifiOff, X } from "lucide-react";
 import { ORQUESTER_PROTOCOL_VERSION } from "@orquester/api";
 import { useAppStore } from "../../store/app";
 import { useOrquester } from "../../context/orquester-context";
@@ -75,7 +75,8 @@ export function useConnectionDiagnosisInput(): ConnectionDiagnosisInput | null {
  * Toast for connection trouble. While the client retries it shows a spinner,
  * the attempt and what the last failure was; when it gives up, what failed and
  * its fix (Retry, Sign in, Reload). Connected but degraded (WebSockets
- * blocked, a protocol mismatch) shows a dismissible warning. Details opens the
+ * blocked, a protocol mismatch) shows a dismissible warning, and so does a
+ * server that now runs another build than this page (it was updated). Details opens the
  * steps, live checks and Copy diagnostics. Hidden during normal startup and
  * while the auth prompt is showing.
  *
@@ -128,6 +129,8 @@ export const ConnectionStatusToast: React.FC = () => {
       <div className="flex max-w-full items-center gap-2.5 rounded-2xl border border-neutral-700 bg-neutral-900/95 py-1.5 pl-3 pr-2 text-sm shadow-xl shadow-black/40 backdrop-blur">
         {reconnecting ? (
           <Loader2 size={15} className="shrink-0 animate-spin text-neutral-300" />
+        ) : warning && diagnosis.kind === "app-updated" ? (
+          <RefreshCw size={15} className="shrink-0 text-info" />
         ) : warning ? (
           <AlertTriangle size={15} className="shrink-0 text-warn" />
         ) : (
