@@ -132,6 +132,24 @@ describe("StorageTreemap", () => {
     );
   });
 
+  it("measures the pointer inside the map's border", () => {
+    // A 1px border, as the Storage view gives the map: the map starts 1px in from the box's edge.
+    const box = map().parentElement!;
+    Object.defineProperty(box, "clientLeft", { value: 1, configurable: true });
+    Object.defineProperty(box, "clientTop", { value: 1, configurable: true });
+    const log = layoutTreemap(tree, WIDTH, HEIGHT, "dark").tiles.find((t: TreemapTile) => t.node.name === "log")!;
+    // Just inside log's right edge on the map, which is 1px further right on screen.
+    const clientX = log.x1 - 0.25 + 1;
+    const clientY = (log.y0 + log.y1) / 2 + 1;
+    act(() => {
+      map().dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, clientX, clientY }));
+    });
+    assert.deepEqual(
+      opened.map((n) => n.path),
+      ["/log"]
+    );
+  });
+
   it("does not open a file or a synthetic block", () => {
     act(() => {
       map().dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, ...centerOf("swap.img") }));
