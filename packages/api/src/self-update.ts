@@ -60,8 +60,18 @@ export interface SelfUpdateStartResponse {
   requestedAt: string;
 }
 
-/** Refusal codes of `POST /api/self-update` (409, `{ code, message }`). */
+/** Refusal codes of `POST /api/self-update` (409, {@link SelfUpdateRefusal}). */
 export type SelfUpdateErrorCode = "SELF_UPDATE_BUSY" | "SELF_UPDATE_UNAVAILABLE";
+
+export interface SelfUpdateRefusal {
+  code: SelfUpdateErrorCode;
+  message: string;
+  /**
+   * BUSY only: when the update in the way began (ISO, the server's clock) — the running run's
+   * `startedAt`, or the pending request's time — to follow it like a {@link SelfUpdateStartResponse}.
+   */
+  requestedAt?: string;
+}
 
 const RUN_STATES: readonly SelfUpdateRunState[] = ["running", "succeeded", "failed", "reverted"];
 const SHA = /^[0-9a-f]{40}$/;

@@ -234,8 +234,13 @@ const ServerVersionRow: React.FC = () => {
 interface FollowedUpdate {
   connectionId: string;
   request: FollowedRequest;
-  /** "timedOut": the server never came back or never finished within {@link UPDATE_GIVE_UP_MS}. */
-  phase: "updating" | "failed" | "reverted" | "stalled" | "timedOut";
+  /**
+   * "updating" and "stalled" (the host updater has not taken the request yet) keep polling; the
+   * others are final. "timedOut": nothing settled within {@link UPDATE_GIVE_UP_MS}.
+   */
+  phase: "updating" | "stalled" | "failed" | "reverted" | "timedOut";
+  /** Identifies one follow: a newer one (another request) ends the older one's poll. */
+  token: object;
 }
 
 const UPDATE_POLL_MS = 3_000;
@@ -266,15 +271,28 @@ const getFollowedUpdate = (): FollowedUpdate | null => followedUpdate;
 
 /**
  * Poll the server's update status until it runs another commit or this update's run succeeds (then
- * reload), the run fails, the request is never taken, or {@link UPDATE_GIVE_UP_MS} passes.
+ * reload), the run fails or reverts, or {@link UPDATE_GIVE_UP_MS} passes. A request the host updater
+ * has not taken shows as "stalled" while the poll goes on, so fixing the updater still finishes it.
+ * Following the update already followed is a no-op; another request replaces the follow.
  */
 const followUpdate = (connectionId: string, request: FollowedRequest): void => {
-  if (followedUpdate?.phase === "updating" && followedUpdate.connectionId === connectionId) return;
-  const followed: FollowedUpdate = { connectionId, request, phase: "updating" };
+  const current = followedUpdate;
+  if (
+    current &&
+    current.connectionId === connectionId &&
+    current.request.requestedAt === request.requestedAt &&
+    (current.phase === "updating" || current.phase === "stalled")
+  ) {
+    return;
+  }
+  const token = {};
   const giveUpAt = Date.now() + UPDATE_GIVE_UP_MS;
-  setFollowedUpdate(followed);
+  setFollowedUpdate({ connectionId, request, phase: "updating", token });
+  const settle = (phase: FollowedUpdate["phase"]): void => {
+    if (followedUpdate?.token === token && followedUpdate.phase !== phase) setFollowedUpdate({ ...followedUpdate, phase });
+  };
   const poll = async (): Promise<void> => {
-    if (followedUpdate !== followed) return;
+    if (followedUpdate?.token !== token) return;
     const { api, activeConnectionId } = useAppStore.getState();
     if (activeConnectionId !== connectionId) {
       setFollowedUpdate(null);
@@ -283,15 +301,16 @@ const followUpdate = (connectionId: string, request: FollowedRequest): void => {
     // The store rebuilds its client on every reconnect, so each poll takes the current one.
     const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(UPDATE_POLL_TIMEOUT_MS) : undefined;
     const status = api ? await api.selfUpdateStatus(signal).catch(() => null) : null;
-    if (followedUpdate !== followed || useAppStore.getState().activeConnectionId !== connectionId) return;
+    if (followedUpdate?.token !== token || useAppStore.getState().activeConnectionId !== connectionId) return;
     const phase = nextUpdatePhase(request, status);
     if (phase === "done") {
       void reloadApp();
-    } else if (phase === "failed" || phase === "reverted" || phase === "stalled") {
-      setFollowedUpdate({ ...followed, phase });
+    } else if (phase === "failed" || phase === "reverted") {
+      settle(phase);
     } else if (Date.now() >= giveUpAt) {
-      setFollowedUpdate({ ...followed, phase: "timedOut" });
+      settle("timedOut");
     } else {
+      settle(phase === "stalled" ? "stalled" : "updating");
       setTimeout(() => void poll(), UPDATE_POLL_MS);
     }
   };
@@ -349,16 +368,9 @@ const UpdatesRow: React.FC<{ connectionId: string }> = ({ connectionId }) => {
       followUpdate(connectionId, { from, requestedAt });
     } catch (err) {
       const code = err instanceof ApiError ? (err.body as { code?: unknown } | null | undefined)?.code : undefined;
-      if (code === "SELF_UPDATE_BUSY") {
-        // Already running or requested elsewhere: wait for it like our own — the run that is going,
-        // or (only a request so far) the next run to start after the last one on record.
-        const last = (await api.selfUpdateStatus().catch(() => null))?.run ?? null;
-        const lastStart = last ? Date.parse(last.startedAt) : NaN;
-        const requestedAt = !last || !Number.isFinite(lastStart)
-          ? new Date(0).toISOString()
-          : last.state === "running"
-            ? last.startedAt
-            : new Date(Math.floor(lastStart / 1000) * 1000 + 1000).toISOString();
+      const requestedAt = err instanceof ApiError ? (err.body as { requestedAt?: unknown } | null | undefined)?.requestedAt : undefined;
+      if (code === "SELF_UPDATE_BUSY" && typeof requestedAt === "string" && Number.isFinite(Date.parse(requestedAt))) {
+        // Already running or requested elsewhere: wait for that update like our own.
         followUpdate(connectionId, { from, requestedAt });
       } else {
         setStartError(errorText(err));
@@ -368,12 +380,16 @@ const UpdatesRow: React.FC<{ connectionId: string }> = ({ connectionId }) => {
     }
   };
 
+  // Still waiting on the followed update (a stalled request included: it may yet be taken).
   const updating = mine?.phase === "updating";
+  const stalled = mine?.phase === "stalled";
   if (missing || (!connected && !updating)) return null;
 
   let description: React.ReactNode;
   if (updating) {
     description = "Updating… The server restarts and this page reloads when it's done.";
+  } else if (stalled) {
+    description = "Waiting for the server's updater to take the request… This page reloads when the update is done.";
   } else if (!status) {
     description = loadError ? `Couldn't check for updates: ${loadError}` : "Checking for updates…";
   } else if (status.error && !status.checkedAt) {

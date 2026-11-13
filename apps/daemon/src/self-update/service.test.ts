@@ -190,13 +190,13 @@ test("requestUpdate: unavailable without a status file, busy while running or pe
 
   const s = await service(t, { requestPath, statusPath });
   await writeFile(statusPath, JSON.stringify({ state: "running", from: FROM, startedAt: "2026-11-13T10:00:00Z" }));
-  assert.equal(await s.requestUpdate(), "busy");
+  assert.deepEqual(await s.requestUpdate(), { busy: true, requestedAt: "2026-11-13T10:00:00Z" }, "follow the running run");
   await assert.rejects(access(requestPath));
 
   await writeFile(statusPath, JSON.stringify({ state: "failed", from: FROM, startedAt: "2026-11-13T10:00:00Z", finishedAt: "2026-11-13T10:05:00Z", exitCode: 1 }));
   assert.deepEqual(await s.requestUpdate(), { started: true, requestedAt: "2026-11-13T10:30:00.000Z" });
-  await access(requestPath);
-  assert.equal(await s.requestUpdate(), "busy");
+  await utimes(requestPath, new Date("2026-11-13T10:30:00Z"), new Date("2026-11-13T10:30:00Z"));
+  assert.deepEqual(await s.requestUpdate(), { busy: true, requestedAt: "2026-11-13T10:30:00.000Z" }, "follow the pending request");
   assert.equal((await s.status()).requestStalled, false);
 });
 
@@ -211,9 +211,9 @@ test("a request the host updater never took is reported, and a new request repla
 
   now += 60_000;
   assert.equal((await s.status()).requestStalled, false, "still within the updater's pickup time");
-  assert.equal(await s.requestUpdate(), "busy");
+  assert.deepEqual(await s.requestUpdate(), { busy: true, requestedAt: made.toISOString() });
 
-  now += 2 * 60_000;
+  now += 5 * 60_000;
   assert.equal((await s.status()).requestStalled, true);
   assert.deepEqual(await s.requestUpdate(), { started: true, requestedAt: new Date(now).toISOString() });
   await utimes(requestPath, new Date(now), new Date(now));

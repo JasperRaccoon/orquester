@@ -36,8 +36,14 @@ export interface SelfUpdateDeps {
   now?: () => number;
 }
 
-/** "started" carries the request time (ISO): the run that starts at or after it is this request's. */
-export type SelfUpdateRequestResult = { started: true; requestedAt: string } | "busy" | "unavailable";
+/**
+ * "started" carries the request time (ISO): the run that starts at or after it is this request's.
+ * "busy" carries when the update in the way began (its run's start, or its pending request's time).
+ */
+export type SelfUpdateRequestResult =
+  | { started: true; requestedAt: string }
+  | { busy: true; requestedAt: string }
+  | "unavailable";
 
 const DEFAULT_INTERVAL_MS = 3_600_000;
 const CHECK_TIMEOUT_MS = 15_000;
@@ -52,7 +58,7 @@ const STALE_RUN_MS = 3 * 60 * 60 * 1000;
  * The path unit takes a request within moments; one still there after this was never taken (the
  * unit is not active), so it is reported, and a new request replaces it.
  */
-const STALLED_REQUEST_MS = 2 * 60 * 1000;
+const STALLED_REQUEST_MS = 5 * 60 * 1000;
 const SHA = /^[0-9a-f]{40}$/;
 const NAME = "[A-Za-z0-9._-]+";
 const GITHUB_REMOTES = [
@@ -176,15 +182,18 @@ export class SelfUpdateService {
    */
   async requestUpdate(): Promise<SelfUpdateRequestResult> {
     if (this.deps.statusPath === null) return "unavailable";
-    if ((await this.readRun())?.state === "running") return "busy";
+    const run = await this.readRun();
+    if (run?.state === "running") return { busy: true, requestedAt: run.startedAt };
     if ((await this.requestAgeMs()) > STALLED_REQUEST_MS) await unlink(this.deps.requestPath).catch(() => undefined);
     await mkdir(dirname(this.deps.requestPath), { recursive: true });
     const requestedAt = new Date(this.now()).toISOString();
     try {
       await writeFile(this.deps.requestPath, "", { flag: "wx" });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return "busy";
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      // Pending: the run it starts is the next one, which begins after the request was made.
+      const age = await this.requestAgeMs();
+      return { busy: true, requestedAt: new Date(age < 0 ? this.now() : this.now() - age).toISOString() };
     }
     return { started: true, requestedAt };
   }

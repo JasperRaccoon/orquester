@@ -75,7 +75,7 @@ The wrapper records the run in `/var/lib/orquester-update/status.json` (root-own
 `running`, then `succeeded`, `reverted` (exit 3) or `failed`, with `from`, `startedAt`,
 `finishedAt` and `exitCode` (`from` is the stamped commit the daemon runs). A run is limited to 2 h
 (`TimeoutStartSec`); the daemon reports a `running` record older than 3 h as failed, and a request
-nothing took for 2 minutes (the path unit is not active) as stalled — a new click replaces it. The
+nothing took for 5 minutes (the path unit is not active) as stalled — a new click replaces it. The
 page reloads once the daemon is back on a new commit. Its output
 is in `journalctl -u orquester-update`. `install-unit.sh` installs and enables the units, so an
 existing VPS gets self-update after one more `./deploy.sh deploy`; `./deploy.sh verify` prints

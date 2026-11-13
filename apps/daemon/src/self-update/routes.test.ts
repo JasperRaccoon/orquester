@@ -60,9 +60,10 @@ test("POST starts one update; a second answers 409 busy", async (t) => {
 
   const second = await app.inject({ method: "POST", url: selfUpdateRoutes.status });
   assert.equal(second.statusCode, 409);
-  const body = second.json() as { code: string; message: string };
+  const body = second.json() as { code: string; message: string; requestedAt: string };
   assert.equal(body.code, "SELF_UPDATE_BUSY");
   assert.equal(typeof body.message, "string");
+  assert.ok(!Number.isNaN(Date.parse(body.requestedAt)), "when the pending update began, to follow it");
 });
 
 test("POST answers 409 unavailable when the install cannot update itself", async (t) => {
