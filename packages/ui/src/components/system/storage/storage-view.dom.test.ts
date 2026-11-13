@@ -387,6 +387,20 @@ describe("Host status → Storage", () => {
     assert.ok(text().includes("freed 1.0 GB"), text());
   });
 
+  it("rename refuses a name the daemon would refuse", async () => {
+    fake.trees.set("/|", rootTree());
+    await show();
+    await openStorage();
+    await rightClick("var");
+    await click(menuItem("Rename")!);
+    const input = doc().querySelector('input[aria-label="New name"]') as HTMLInputElement;
+    const submit = () => input.form!.querySelector('button[type="submit"]') as HTMLButtonElement;
+    await type(input, "logs");
+    assert.equal(submit().disabled, false);
+    await type(input, "a\\b");
+    assert.equal(submit().disabled, true);
+  });
+
   it("a folder that no longer exists falls back to the volume root", async () => {
     fake.trees.set("/|", rootTree());
     fake.trees.set("/|/var", treeOf("/", dir("/var", { children: [dir("/var/log")] }), [{ name: "/", path: "/" }]));

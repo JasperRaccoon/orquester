@@ -79,7 +79,7 @@ export const StorageDeleteDialog: React.FC<{
 function nameProblem(value: string): string | null {
   const name = value.trim();
   if (!name) return "Enter a name.";
-  if (name.includes("/")) return "A name can't contain “/”.";
+  if (/[\\/]/.test(name)) return "A name can't contain “/” or “\\”.";
   if (name.includes("\0")) return "A name can't contain a NUL character.";
   if (name === "." || name === "..") return "That name isn't allowed.";
   return null;
