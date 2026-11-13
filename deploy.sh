@@ -23,8 +23,10 @@ commands:
   deploy [target|all]        update + restart + verify each target (default: all);
                              a release that fails its health check is rolled back
   provision <target>         first-time setup of a fresh Ubuntu VPS
-  verify [target|all]        read-only: HEAD, version stamp, health, service, bundle hash, orq-agent, Go
-  rollback <target> <sha>    reset the target to <sha>, rebuild, restart, verify
+  verify [target|all]        read-only: HEAD, live/previous/kept releases, version stamp, health,
+                             service, bundle hash, orq-agent, Go
+  rollback <target> <sha>    switch the target to <sha> (a kept release without a rebuild,
+                             otherwise built beside the live one first), restart, verify
   logs <target> [-n N]       tail the daemon journal (default 50 lines)
   rotate-password <target>   generate + install a new HTTP password (shown once)
 
@@ -259,8 +261,22 @@ cmd_verify_target() {
   s="$(sudo_word)"
   info "=== verify $name ($T_USER@$T_HOST) ==="
   STEP="verify"
+  # /opt/orquester is a symlink to the live release (a linked worktree of
+  # /opt/orquester-releases/repo.git; git -C and the paths below go through it), or a plain
+  # checkout on a host no layout-aware update has converted yet.
   remote_run "set -e
 echo \"HEAD=\$(${s:+$s }git -C /opt/orquester rev-parse --short HEAD)\"
+if [ -L /opt/orquester ]; then live=\$(readlink -f /opt/orquester); echo \"release=\${live##*/}\"; else echo 'release=none (a plain checkout: the next deploy converts it)'; fi
+prev=\$(readlink -e /opt/orquester-previous 2>/dev/null || echo none); echo \"previous=\${prev##*/}\"
+kept=''
+for d in /opt/orquester-releases/*/; do
+  [ -d \"\$d\" ] || continue
+  n=\$(basename \"\$d\")
+  case \"\$n\" in repo.git|tooling) continue ;; esac
+  [ -f \"\$d.orq-release-complete\" ] || n=\"\$n(incomplete)\"
+  kept=\"\${kept:+\$kept }\$n\"
+done
+echo \"releases=\${kept:-none}\"
 echo \"stamp=\$(cat /opt/orquester/.orquester-version.json 2>/dev/null || echo 'none')\"
 curl -fsS http://127.0.0.1:47831/health; echo
 echo \"service=\$(systemctl is-active orquester)\"

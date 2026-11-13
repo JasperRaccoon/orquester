@@ -13,6 +13,8 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
   it. `./deploy.sh provision` and `./deploy.sh deploy`/`rollback` add it from the target's `domain`
   (`lib/ensure-public-url.sh`) when the file has no `ORQUESTER_PUBLIC_URL=` line; an existing value
   is never changed, and the file stays 0600. Restart the daemon after editing it by hand.
+  `ORQUESTER_WEB_FALLBACK_DIR=/opt/orquester-previous/apps/web/dist` is added the same way
+  (`lib/ensure-web-fallback.sh`; see "Releases" below).
 - `opencode.env.example` → optional per-launcher proxy env; copy to
   `/var/lib/orquester/daemon/env/opencode.env` (chmod 600) to affect only OpenCode sessions.
 - `Caddyfile` → `/etc/caddy/Caddyfile` (set your real domain or a sslip.io host).
@@ -44,25 +46,82 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
   and fill in one `[name]` section per VPS.
 - `lib/` → helpers for the repo-root `./deploy.sh` (deploy / provision / verify / rollback / logs /
   rotate-password): `common.sh` (targets.conf parser, ssh/scp helpers, output) plus the payloads
-  `remote-update.sh` and `remote-provision.sh`, which are `scp`'d to the VPS and run there.
+  `remote-update.sh` and `remote-provision.sh`, which are `scp`'d to the VPS and run there, and the
+  helpers they run from a release (`ensure-public-url.sh`, `ensure-web-fallback.sh`).
 
 `./deploy.sh provision <target>` installs the templates above onto a fresh VPS; the rest of this
 file documents what those templates are for.
 
+### Releases (staged updates)
+
+Each deployed commit is built in its own directory, beside the one that runs, so a build never
+touches the running daemon or the pages it serves:
+
+```
+/opt/orquester-releases/
+  repo.git/              shared git dir (bare clone + remote.origin.fetch for refs/remotes/origin/*);
+                         also holds the update lock orq-deploy.lock and orq-last-deployed-head
+  tooling/               remote-update.sh + self-update.sh of the last layout-aware release deployed
+  <sha12>/               one release: a linked worktree (git worktree add --detach) at that commit,
+                         fully built; .orq-release-complete (the full sha) is written last
+/opt/orquester           -> the live release           (symlink; the unit, daemon.env and git -C use it)
+/opt/orquester-previous  -> the release before it      (symlink; may be absent)
+```
+
+An update (`./deploy.sh deploy`, `rollback` or self-update) fetches into `repo.git`, creates
+`<sha12>/` and builds it there (install, SPA, orq-agent, native-module guard, warm-up of the
+daemon's tsx cache, version stamp, completion marker). A failed build leaves the live release as it
+was. Then it runs the new release's host setup (`ensure-public-url.sh`, `ensure-web-fallback.sh`,
+`install-unit.sh`), points `/opt/orquester-previous` at the live release, swaps `/opt/orquester`
+atomically and restarts: the only interruption is the restart's "Reconnecting…". A release that
+fails its health check is flipped back to the previous one and restarted, without a rebuild. A
+complete release still on disk (a re-deploy, or a rollback to a kept sha) is switched to without
+building. A running daemon keeps loading from the release it started in (systemd and node resolve
+the symlink at start).
+
+Pages opened before the switch keep lazily loading chunks of the old build: the daemon serves a
+hashed asset the live `ORQUESTER_WEB_DIR` lacks from `ORQUESTER_WEB_FALLBACK_DIR`
+(`/opt/orquester-previous/apps/web/dist`); `index.html` and unhashed files always come from the live
+build. `ensure-web-fallback.sh` adds the line to `daemon.env` when it has none; set it empty to turn
+the fallback off.
+
+After a healthy deploy, releases are pruned: the live one, the previous one and one more are kept,
+and so is every release a running process still uses (cwd, executable, command line or open files
+under it — e.g. an agent host that survived the restart). A deploy that keeps more than a few warns
+in its summary instead of deleting one in use.
+
+`./deploy.sh verify` prints `release=` (the live `<sha12>`), `previous=` and `releases=` (every
+release directory; `(incomplete)` marks one without its completion marker).
+
+Existing installs convert on their first update with a layout-aware `remote-update.sh` (it carries
+the line `# orq-release-layout: 1`): the checkout's git dir becomes `repo.git` (lock and state files
+included), the old directory is registered as the release of its commit without a rebuild, the new
+release is built beside it, and at the switch the old directory moves to
+`/opt/orquester-releases/<sha12>` with the symlink put in its place, immediately before the
+restart. Each step can be re-run after an interruption. `remote-provision.sh` creates the layout
+directly on a fresh host; re-run on a host that is still a plain checkout, it updates that checkout
+in place and leaves the conversion to the next deploy.
+
 ### Deploy health check and automatic revert
 
 `remote-update.sh` restarts the daemon and then waits up to 10 minutes (`HEALTH_WAIT`, 600 s) for
-`/health` and an active unit. If the new release never gets there, it resets the tree to the last
-successful deploy (`.git/orq-last-deployed-head`), rebuilds it, restarts it and checks it the same
-way. The deploy fails either way: exit 3 means the previous release is back and healthy (the summary
+`/health` and an active unit. If the new release never gets there, it switches back to the last
+successful deploy (`repo.git/orq-last-deployed-head`; a plain checkout not converted yet: resets the
+tree to it and rebuilds it), restarts it and checks it the same way. The deploy fails either way: exit 3 means the previous release is back and healthy (the summary
 says `AUTO-REVERTED`), exit 4 means it did not come back either and the daemon needs attention now
 (`./deploy.sh logs <target>`). A build or native-module failure before the restart never restarts
 the daemon. `./deploy.sh rollback <target> <sha>` runs the same cycle with that sha. One update runs
-per checkout at a time (`flock` on `.git/orq-deploy.lock`, shared with self-update below): a second
-one exits 5 without touching anything. Both `./deploy.sh` and self-update run the *running* release's
-`remote-update.sh`; once the tree is reset, a release whose own copy differs takes over the rest of
-the cycle (a copy in `$TMPDIR`, with the same lock), so steps a release adds run on the update that
-delivers it.
+per host at a time (`flock` on `repo.git/orq-deploy.lock`, shared by every release and with
+self-update below): a second one exits 5 without touching anything. Both `./deploy.sh` and
+self-update run the *running* release's `remote-update.sh`; once the new release's worktree exists,
+a layout-aware copy there that differs takes over the rest of the cycle (a copy in `$TMPDIR`, with
+the same lock), so steps a release adds run on the update that delivers it. A release from before
+the layout never takes over, and its units are not installed: a rollback to it is carried out by the
+current script and keeps the current units. Every successful update to a layout-aware release (and
+provision) installs that release's `remote-update.sh` and `self-update.sh` into
+`/opt/orquester-releases/tooling/` (copied beside and renamed into place); `orquester-update.service`
+runs those, so self-update keeps layout-aware tooling after a rollback to an older release. Without
+them (a host not converted yet) it takes the live release's `deploy/lib/` copies.
 `deploy/lib/remote-update.test.mjs` (in `pnpm test`) drives the script against a throwaway checkout
 with stubbed `systemctl`, `curl` and `pnpm`.
 
@@ -72,9 +131,10 @@ Settings → General → About offers **Update** when the daemon's commit is beh
 and its unit sets `ORQUESTER_SELF_UPDATE_STATUS`. The button makes the daemon create
 `/var/lib/orquester/daemon/update-request` (content ignored); `orquester-update.path` sees it and
 starts the root oneshot `orquester-update.service`, which removes the request, copies
-`lib/self-update.sh` and `lib/remote-update.sh` to `/run/orquester-update/` and runs the same cycle
-as `./deploy.sh deploy` on `main` (fetch, reset, install, build, restart, health check, automatic
-revert; no browser smoke test). It runs outside the daemon's unit, so the restart doesn't stop it.
+`self-update.sh` and `remote-update.sh` (from `/opt/orquester-releases/tooling/`, else the live
+release's `lib/`) to `/run/orquester-update/` and runs the same cycle
+as `./deploy.sh deploy` on `main` (fetch, build the new release beside the live one, switch,
+restart, health check, automatic revert; no browser smoke test). It runs outside the daemon's unit, so the restart doesn't stop it.
 The wrapper records the run in `/var/lib/orquester-update/status.json` (root-owned, world-readable):
 `running`, then `succeeded`, `reverted` (exit 3) or `failed`, with `from`, `startedAt`,
 `finishedAt` and `exitCode` (`from` is the stamped commit the daemon runs). A run is limited to 2 h
@@ -90,8 +150,8 @@ switched agent hosts during an update. After a switch, first end the `orqsvc-age
 sessions, or wait until `<appdir>/daemon/agent-hosts.json` lists only a generation 0 primary. An
 older daemon knows only generation 0, so it would lose track of the chats the other hosts run.
 
-Each deploy writes `/opt/orquester/.orquester-version.json` (`commit`, `version`, `deployedAt`;
-gitignored) before the restart. The daemon reads its version and commit once at boot, from git or
+Each deploy writes `.orquester-version.json` (`commit`, `version`, `deployedAt`; gitignored) into
+the release it builds (read as `/opt/orquester/.orquester-version.json`) before the restart. The daemon reads its version and commit once at boot, from git or
 from this stamp when `.git` is missing, and reports them in the authenticated `GET /api/info`
 (Settings → General → About shows them); the deploy output prints `version=… commit=…`.
 

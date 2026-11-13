@@ -6,6 +6,9 @@ Wants=network-online.target
 [Service]
 User=orquester
 Group=orquester
+# /opt/orquester is a symlink to the live release (/opt/orquester-releases/<sha12>, see
+# deploy/README.md). systemd's chdir and node's entry-point resolution follow it when the daemon
+# starts, so a running daemon keeps loading from its own release after a deploy moves the link.
 WorkingDirectory=/opt/orquester
 EnvironmentFile=/etc/orquester/daemon.env
 # tsx writes its transpile cache to TMPDIR; ProtectSystem=strict makes /tmp
