@@ -696,7 +696,7 @@ export class AgentAccountsService {
     }
     const serialized = JSON.stringify(next);
     if (JSON.stringify(existing) === serialized) return; // idempotent: no write churn
-    await writeFile(homeFile, serialized, { mode: 0o600 });
+    await writeFileAtomic(homeFile, serialized, 0o600);
   }
 
   private async ensureSymlink(target: string, linkPath: string): Promise<void> {
@@ -998,8 +998,7 @@ export class AgentAccountsService {
   }
 
   private async persist(): Promise<void> {
-    await mkdir(dirname(this.opts.indexFile), { recursive: true });
-    await writeFile(this.opts.indexFile, JSON.stringify(this.index, null, 2), { mode: 0o600 });
+    await writeFileAtomic(this.opts.indexFile, JSON.stringify(this.index, null, 2), 0o600, false, { durable: true });
   }
 
   private emitChanged(): void {
