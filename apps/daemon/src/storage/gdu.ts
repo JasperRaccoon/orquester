@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { accessSync, constants, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { availableParallelism } from "node:os";
@@ -124,6 +124,28 @@ export interface GduExportRun {
   pidFile?: string;
 }
 
+let setprivProbe: { path: string | null } | null = null;
+
+/**
+ * setpriv when it supports `--pdeathsig` (util-linux ≥ 2.33; older ones would make every scan fail
+ * to start), else null. Probed once per daemon: `setpriv --help` lists the option.
+ */
+function setprivWithPdeathsig(): string | null {
+  if (setprivProbe) return setprivProbe.path;
+  const path = resolveTool("setpriv", SYSTEM_PATH);
+  let supported = false;
+  if (path) {
+    try {
+      const help = execFileSync(path, ["--help"], { timeout: VERSION_TIMEOUT_MS, encoding: "utf8", env: { PATH: SYSTEM_PATH, LC_ALL: "C" } });
+      supported = help.includes("--pdeathsig");
+    } catch {
+      supported = false;
+    }
+  }
+  setprivProbe = { path: supported ? path : null };
+  return setprivProbe.path;
+}
+
 /** The command line for a run (exported for the scan service's log line). */
 export function gduExportCommand(run: GduExportRun): { command: string; args: string[] } {
   const ignore = [...new Set([...KERNEL_TREES, ...run.ignore])];
@@ -144,7 +166,7 @@ export function gduExportCommand(run: GduExportRun): { command: string; args: st
     run.outFile,
     run.root
   ];
-  const setpriv = resolveTool("setpriv", SYSTEM_PATH);
+  const setpriv = setprivWithPdeathsig();
   const nice = resolveTool("nice", SYSTEM_PATH);
   const ionice = resolveTool("ionice", SYSTEM_PATH);
   const prefix = [
