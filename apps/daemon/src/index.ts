@@ -124,7 +124,7 @@ import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks, writeFileAtomic } from "./agent-hooks";
 import { DailyLogStream } from "./daily-log.ts";
-import { daemonBuildInfo, type BuildInfo } from "./build-info.ts";
+import { daemonBuildInfo, daemonRepoRoot, type BuildInfo } from "./build-info.ts";
 import { listAgentConversations } from "./agent-conversations.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import { createSessionStream } from "./session-stream";
@@ -147,7 +147,7 @@ import { realClock } from "./workflows/factory.ts";
 // umcp:t5 begin
 import { registerReplySubscriptionRoutes } from "./agent-chat/lineage-routes.ts";
 import { ReplyRouter } from "./agent-chat/replies.ts";
-import { agentChatReplyOutboxFile } from "@orquester/config";
+import { agentChatReplyOutboxFile, selfUpdateRequestPath } from "@orquester/config";
 // umcp:t5 end
 import { registerSecretRequestRoutes, SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 // umcp:t3 begin
@@ -178,6 +178,8 @@ import { registerGitHubLinkRoutes } from "./github-links/routes.ts";
 import { SecretVaultStore } from "./secret-files/vault-store.ts";
 import { SecretFilesService } from "./secret-files/service.ts";
 import { registerSecretFilesRoutes } from "./secret-files/routes.ts";
+import { SelfUpdateService } from "./self-update/service.ts";
+import { registerSelfUpdateRoutes } from "./self-update/routes.ts";
 import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
@@ -555,6 +557,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await prepareDirs(resolved);
 
   const buildInfo = daemonBuildInfo();
+  // Self-update (spec 2026-11-13): the running commit against its origin's branch on GitHub, at
+  // start and hourly. The host updater's status file is set only by a unit with the update units.
+  const selfUpdate = new SelfUpdateService({
+    repoRoot: daemonRepoRoot(),
+    commit: buildInfo.commit,
+    requestPath: selfUpdateRequestPath(paths.baseDir),
+    statusPath: process.env.ORQUESTER_SELF_UPDATE_STATUS?.trim() || null,
+    logger: console
+  });
   // Rolled over at local midnight and at its size cap; old days pruned (daily-log.ts).
   const logStream = new DailyLogStream({ logsDir: () => resolved.logsDir });
   const clientConfig = createDefaultClientConfig(paths.socketPath);
@@ -1612,6 +1623,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, usagePricing, usageHistory, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
     secretFiles,
+    selfUpdate,
     knowledge,
     desktops, desktopAudio,
     agentProfile,
@@ -1910,12 +1922,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentProfile.start();
   // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.
   await secretFiles.start().catch((error) => console.error("Secret files start failed", error instanceof Error ? error.name : error));
+  // Self-update: the first check runs in the background; then hourly.
+  selfUpdate.start();
 
   const stop = async () => {
     // First, while the event streams still flow: clients show "restarting"
     // instead of a bare network error for the gap that follows.
     publishDaemonStopping("shutdown");
     usage.stop();
+    selfUpdate.stop();
     clearTimeout(liveRecompute);
     await usageState.flush();
     await usageHistory.flush();
@@ -2071,6 +2086,8 @@ interface Services {
   plugins: PluginsService;
   /** The "Secret files" plugin's vaults and sync engine: ONE instance both transports share. Optional: route tests build a partial `services`. */
   secretFiles?: SecretFilesService;
+  /** Self-update: the update check and the host updater's trigger. Optional: route tests build a partial `services`. */
+  selfUpdate?: SelfUpdateService;
   /** The Knowledge Graph plugin: ONE instance both transports share. Optional: route tests build a partial `services`. */
   knowledge?: KnowledgeService;
   // boxes: the Ephemeral AI VMs box service (spec 2026-10-19). Optional: route tests build a partial `services`.
@@ -5060,6 +5077,10 @@ export function createServer(
   }
   if (services.secretFiles) {
     registerSecretFilesRoutes(app, { service: services.secretFiles, logger: console });
+  }
+  // Self-update. Both transports; the bearer hook gates HTTP like every /api route.
+  if (services.selfUpdate) {
+    registerSelfUpdateRoutes(app, { service: services.selfUpdate });
   }
 
   // Built-in plugins (plugins spec §5.3). Both transports, like the protect-archived toggle:
