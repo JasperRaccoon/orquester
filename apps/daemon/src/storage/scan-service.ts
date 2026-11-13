@@ -95,7 +95,8 @@ export async function runGduScan(run: ScannerRun): Promise<ParsedScan> {
       cwd: run.workDir,
       signal: run.signal
     });
-    return await parseGduExport(createReadStream(outFile, { highWaterMark: 1024 * 1024 }), {
+    // Small chunks: parsing runs on the daemon's event loop, a few milliseconds per chunk.
+    return await parseGduExport(createReadStream(outFile, { highWaterMark: 256 * 1024 }), {
       minKeepBytes: run.minKeepBytes,
       signal: run.signal
     });
@@ -268,10 +269,12 @@ export class StorageScanService implements StorageTreeMutations {
       replay: []
     };
     this.running = running;
-    running.done = this.runQueue(running, queue, scanner).finally(() => {
-      if (this.running === running) this.running = null;
-      this.publish();
-    });
+    running.done = this.runQueue(running, queue, scanner)
+      .catch((error: unknown) => this.options.logger?.warn(`[storage] scan run failed: ${message(error)}`))
+      .finally(() => {
+        if (this.running === running) this.running = null;
+        this.publish();
+      });
   }
 
   private async runQueue(running: RunningScan, queue: VolumeInfo[], scanner: GduScanner): Promise<void> {
@@ -399,11 +402,20 @@ export class StorageScanService implements StorageTreeMutations {
     return this.mutate((scan) => renameInScan(scan, from, to));
   }
 
+  /**
+   * Never rejects: the action already happened on disk, so a saved scan that
+   * cannot be rewritten (a full disk) is logged, and the in-memory tree, which
+   * every response is answered from, is still correct.
+   */
   private async mutate(apply: (scan: SavedScan) => boolean): Promise<void> {
     this.running?.replay.push(apply);
     const changed = await this.write(async () => {
       const touched = [...this.scans.values()].filter((scan) => apply(scan));
-      for (const scan of touched) await writeSavedScan(this.dir, scan);
+      for (const scan of touched) {
+        await writeSavedScan(this.dir, scan).catch((error: unknown) =>
+          this.options.logger?.warn(`[storage] could not save the edited scan of ${scan.volume}: ${message(error)}`)
+        );
+      }
       return touched.length > 0;
     });
     if (changed) this.publish();
