@@ -197,6 +197,8 @@ import { KNOWLEDGE_CHANNEL, KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { applyKnowledgeEvent, loadKnowledge, resetKnowledge } from "../lib/knowledge/store";
 // The Device simulators plugin's module store (hosts, leases, settings; loaded while the plugin is on).
 import { DEVICES_CHANNEL, DEVICES_PLUGIN_ID } from "@orquester/api";
+import { STORAGE_EVENTS_CHANNEL } from "@orquester/api";
+import { applyStorageEvent } from "../components/system/storage/storage-status";
 import { applyDevicesEvent, loadDevices, resetDevices, setDevicesPluginOn } from "../lib/devices/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
@@ -4083,6 +4085,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       // The daemon's pushes, for the desktop shell's system notifications
       // (`lib/desktop-host.ts`); parsed there, and nothing here keeps them.
       observePushEvent(event);
+      return;
+    }
+    if (event.channel === STORAGE_EVENTS_CHANNEL) {
+      // Settings › Host status › Storage hears scan progress and finished scans
+      // only while it is on screen; nothing is kept here (a malformed payload is ignored).
+      applyStorageEvent(event);
       return;
     }
     if (event.channel === AGENT_TOOLS_CHANNEL) {

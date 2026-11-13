@@ -8,6 +8,7 @@ import { HostResourceCards } from "./HostResourceCards";
 import { OrquesterCore } from "./OrquesterCore";
 import { PortsTable } from "./PortsTable";
 import { SystemUnsupported } from "./SystemResources";
+import { StorageView } from "./storage/StorageView";
 import { TaskManager } from "./TaskManager";
 import { formatDuration } from "./system-format";
 import {
@@ -119,7 +120,7 @@ const CardsSkeleton: React.FC<{ label: string }> = ({ label }) => (
   </div>
 );
 
-type HostTab = "processes" | "ports";
+type HostTab = "processes" | "ports" | "storage";
 
 const TabButton: React.FC<{
   id: HostTab;
@@ -246,6 +247,9 @@ export const HostStatusView: React.FC<{ status: HostStatus }> = ({ status }) => 
           <TabButton id="ports" active={tab === "ports"} count={ports.data?.ports.length} onSelect={setTab}>
             Listening ports
           </TabButton>
+          <TabButton id="storage" active={tab === "storage"} onSelect={setTab}>
+            Storage
+          </TabButton>
         </div>
 
         <div role="tabpanel" id={`host-panel-${tab}`} aria-labelledby={`host-tab-${tab}`} className="space-y-2">
@@ -270,6 +274,16 @@ export const HostStatusView: React.FC<{ status: HostStatus }> = ({ status }) => 
               ) : (
                 <Pending what="the process list" />
               )}
+            </>
+          ) : tab === "storage" ? (
+            <>
+              <p className="text-xs text-neutral-500">
+                What fills each disk, from its latest scan (nightly, or on demand). Click a folder to zoom in, right-click
+                for actions. Deleting outside the workspaces asks you to type the name; system and Orquester folders
+                can&apos;t be deleted or renamed here.
+              </p>
+              {/* Not part of the page's poll: it reads once on open, then follows `storage.changed` events. */}
+              <StorageView />
             </>
           ) : (
             <>
