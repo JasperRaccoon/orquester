@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,6 +119,20 @@ test("from is the commit the deploy stamped (the running daemon's), not a HEAD a
   assert.equal(result.code, 1, result.out + result.err);
   assert.equal(readJson(join(stubs, "during.json")).from, running);
   assert.equal(readJson(statusFile).from, running);
+});
+
+test("from is found through the release layout: a symlink to a linked worktree of a bare repository", () => {
+  const head = git(repo, "rev-parse", "HEAD");
+  const releases = join(root, "opt-orquester-releases");
+  git(root, "clone", "-q", "--bare", repo, join(releases, "repo.git"));
+  const release = join(releases, head.slice(0, 12));
+  git(join(releases, "repo.git"), "worktree", "add", "-q", "--detach", release, head);
+  const live = join(root, "opt-orquester-live");
+  symlinkSync(release, live);
+  const result = update({ REPO_DIR: live });
+  assert.equal(result.code, 0, result.out + result.err);
+  assert.equal(readJson(join(stubs, "during.json")).from, head);
+  assert.equal(readJson(statusFile).from, head);
 });
 
 test("a repository it cannot read records from as null and still runs the update", () => {
