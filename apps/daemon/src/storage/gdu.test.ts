@@ -60,7 +60,9 @@ test("gdu scans a directory end to end: totals match du, hard links count once, 
     volumeSpace: async (path) =>
       path === root ? { totalBytes: null, usedBytes: null, freeBytes: null, inodesUsed: null } : volumeSpace(path),
     publish: (_channel, _type, payload) => {
-      if ((payload as StorageStatusResponse).scan.state === "idle") finished(payload as StorageStatusResponse);
+      const status = payload as StorageStatusResponse;
+      // The first idle status is the one published once the (no) saved scans are loaded.
+      if (status.scan.state === "idle" && (status.volumes[0]?.lastScan || status.lastError)) finished(status);
     }
   });
   t.after(() => service.dispose());

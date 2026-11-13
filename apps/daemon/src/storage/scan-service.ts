@@ -128,24 +128,42 @@ export class StorageScanService implements StorageTreeMutations {
   private writes: Promise<unknown> = Promise.resolve();
   /** Keeps published events in order. */
   private publishes: Promise<unknown> = Promise.resolve();
+  /**
+   * Settles once {@link start} has loaded the saved scans (or failed to). The
+   * transports serve before that, so every request waits on it: a scan started
+   * earlier would have its export removed as stale, and a status would say
+   * "never scanned".
+   */
+  private readonly ready: Promise<void>;
+  private markReady!: () => void;
 
   constructor(private readonly options: StorageScanServiceOptions) {
     this.dir = storageScansDir(options.baseDir);
     this.supported = options.supported ?? process.platform === "linux";
     this.probe = new GduProbe({ baseDir: options.baseDir, path: options.path });
+    this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
 
-  /** Load saved scans (dropping stale exports) and schedule the nightly run. */
+  /**
+   * Load saved scans (dropping stale exports), schedule the nightly run and
+   * publish the loaded status.
+   */
   async start(): Promise<void> {
-    if (!this.supported || this.disposed) return;
-    await mkdir(this.dir, { recursive: true });
-    this.scans = await loadSavedScans(this.dir);
-    this.schedule();
+    try {
+      if (!this.supported || this.disposed) return;
+      await mkdir(this.dir, { recursive: true });
+      this.scans = await loadSavedScans(this.dir);
+      this.schedule();
+    } finally {
+      this.markReady();
+    }
+    this.publish();
   }
 
   /** Stop the schedule and any running scan (its gdu process group is killed). */
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.markReady();
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.nextAt = null;
@@ -179,6 +197,7 @@ export class StorageScanService implements StorageTreeMutations {
         nextScheduledAt: null
       };
     }
+    await this.ready;
     const [scanner, volumes] = await Promise.all([this.locate(), this.volumes()]);
     return {
       supported: true,
@@ -205,6 +224,7 @@ export class StorageScanService implements StorageTreeMutations {
   /** Start a manual scan of `volume`; resolves once it is running, with the status. */
   async startScan(volume: string, trigger: StorageScanTrigger = "manual"): Promise<StorageStatusResponse> {
     if (!this.supported) throw storageErrors.unsupported();
+    await this.ready;
     if (this.running) throw storageErrors.running(this.running.state.volume);
     const scanner = await this.locate();
     if (!scanner || scanner.version === null) throw storageErrors.scannerMissing();
@@ -220,6 +240,7 @@ export class StorageScanService implements StorageTreeMutations {
   /** Cancel the running scan (and the rest of a nightly run); resolves once it stopped. */
   async cancelScan(): Promise<StorageStatusResponse> {
     if (!this.supported) throw storageErrors.unsupported();
+    await this.ready;
     const running = this.running;
     if (running) {
       running.state.queued = [];
@@ -231,6 +252,7 @@ export class StorageScanService implements StorageTreeMutations {
 
   async tree(volume: string, query: { path?: string; depth?: number; guard: StorageGuardPort }): Promise<StorageTreeResponse> {
     if (!this.supported) throw storageErrors.unsupported();
+    await this.ready;
     if (!(await this.volumes()).some((candidate) => candidate.id === volume)) throw storageErrors.unknownVolume(volume);
     const scan = this.scans.get(volume);
     if (!scan) throw storageErrors.noScan(volume);
@@ -316,6 +338,8 @@ export class StorageScanService implements StorageTreeMutations {
     });
     running.controller.signal.throwIfAborted();
     const finishedAt = Date.now();
+    // Deletes/renames applied by now are already reflected in the used space read next.
+    const reflected = running.replay.length;
     const usedBytesAtScan = (await this.space(volume.mountPoint)).usedBytes;
     const root = parsed.root;
     const scan: SavedScan = {
@@ -349,8 +373,6 @@ export class StorageScanService implements StorageTreeMutations {
     });
   }
 
-    // Deletes/renames applied by now are already reflected in the used space read next.
-    const reflected = running.replay.length;
   private write<T>(task: () => Promise<T>): Promise<T> {
     const result = this.writes.then(task);
     this.writes = result.catch(() => undefined);
@@ -417,6 +439,8 @@ export class StorageScanService implements StorageTreeMutations {
    * every response is answered from, is still correct.
    */
   private async mutate(apply: (scan: SavedScan) => boolean): Promise<void> {
+    // Applied before the load would be overwritten by it.
+    await this.ready;
     this.running?.replay.push(apply);
     const changed = await this.write(async () => {
       const touched = [...this.scans.values()].filter((scan) => apply(scan));
