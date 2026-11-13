@@ -19,7 +19,7 @@ import type { SessionProfileAgentId, SessionProfileSummary } from "@orquester/ap
 
 import { cn } from "../../../lib/cn";
 import { PROFILE_SWITCH_NOTE, profileChipEntries, profileChipLabel } from "../../../lib/session-profiles/logic";
-import { ComposerMenuRow, ComposerPopover } from "./ComposerPopover";
+import { ComposerMenuRow, ComposerPopover } from "../primitives/ComposerPopover";
 
 const CHIP =
   "ac-press inline-flex h-7 max-w-40 items-center gap-1 rounded-md px-2 text-xs " +

@@ -6,7 +6,7 @@ import type { ApprovalDecision, PendingApproval, ThreadItem } from "@orquester/a
 
 import { cn } from "../../../lib/cn";
 import { BannerCard } from "../primitives";
-import { ComposerMenuRow, ComposerPopover } from "../composer/ComposerPopover";
+import { ComposerMenuRow, ComposerPopover } from "../primitives/ComposerPopover";
 import {
   approvalDetailAriaLabel,
   approvalDetailIsProse,

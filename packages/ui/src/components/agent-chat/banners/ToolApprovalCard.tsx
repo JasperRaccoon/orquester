@@ -40,7 +40,7 @@ import {
 
 import { cn } from "../../../lib/cn";
 import { BottomSheet } from "../../ui/sheet";
-import { ComposerMenuRow, ComposerPopover } from "../composer/ComposerPopover";
+import { ComposerMenuRow, ComposerPopover } from "../primitives/ComposerPopover";
 import { BannerCard } from "../primitives";
 import {
   toolApprovalAnswerFailure,

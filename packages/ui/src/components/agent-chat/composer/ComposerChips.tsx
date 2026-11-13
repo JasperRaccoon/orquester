@@ -17,7 +17,7 @@ import { loginExpiryWarning } from "../../../lib/login-expiry";
 import type { ChatAccountOption } from "../../../lib/agent-chat/account-switch";
 import { ForgeLinkPill } from "../forge-links/ForgeLinkPill";
 import { Kbd } from "../primitives";
-import { ComposerMenuRow, ComposerPopover } from "./ComposerPopover";
+import { ComposerMenuRow, ComposerPopover } from "../primitives/ComposerPopover";
 import {
   applyModelSelection,
   applyOptionSelection,
