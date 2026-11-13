@@ -29,6 +29,7 @@ import {
   type TimelineRowContextValue
 } from "../../../../packages/ui/src/components/agent-chat/timeline/context";
 import { Modal, ModalCloseButton } from "../../../../packages/ui/src/components/ui/modal";
+import { BackCloseProvider } from "../../../../packages/ui/src/hooks/use-back-close";
 import { useMediaQuery } from "../../../../packages/ui/src/hooks/use-media-query";
 import type { AgentChatTimelineRow } from "../../../../packages/ui/src/lib/agent-chat/contracts";
 import {
@@ -116,60 +117,63 @@ export function EmbedChat({ thread, settings, host, portal, onCommand }: EmbedCh
 
   return (
     <ChatHostProvider host={host}>
-      <PortalContainerProvider container={portal}>
-        <div data-orq-embed-chat="" className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-neutral-950 text-neutral-200">
-          <ChatTimeline
-            sessionId={sessionId ?? ""}
-            rows={view.rows as AgentChatTimelineRow[]}
-            follow={view.slice.follow}
-            onFollowChange={onFollowChange}
-            disclosures={view.slice.disclosures}
-            onDisclosureChange={onDisclosureChange}
-            bottomInset={0}
-            canRevert={false}
-            onRevert={noop}
-            // Nothing opens here: no turn diff, file or agent drill-in, so
-            // those render as plain text. Full output only with both its loaders.
-            onOpenTurnDiff={null}
-            onOpenFile={null}
-            onLoadFullOutput={canLoadFullOutput ? onLoadFullOutput : null}
-            onOpenAgent={null}
-            onSendQueuedNow={noop}
-            onReturnQueuedToComposer={noop}
-            threadReady={sessionId !== null}
-            canBackgroundTasks={false}
-            errorBanner={null}
-            onDismissErrorBanner={noop}
-            // Not read-only: the timeline offers "load older" only on a
-            // writable surface. Every command affordance is withheld above.
-            readOnly={false}
-            retentionDropped={view.retentionDropped}
-            roster={view.slice.roster}
-            projectPath={config.workspaceRoot}
-            skills={NO_SKILLS}
-            historyHasOlder={historyHasOlder}
-            historyLoading={view.slice.history.loading}
-            historyError={view.slice.history.error}
-            onLoadOlderHistory={onLoadOlderHistory}
-          />
-          <EmbedPendingDock view={view} workspaceRoot={config.workspaceRoot} onCommand={onCommand} />
-        </div>
-        <Modal open={viewer !== null} onClose={closeViewer} className="max-h-[85vh] max-w-4xl">
-          <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex h-11 shrink-0 items-center justify-between border-b border-neutral-800 px-3">
-              <span className="truncate text-sm text-neutral-200">{viewer?.title}</span>
-              <ModalCloseButton onClose={closeViewer} />
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto">
-              {viewer?.error ? (
-                <p className="px-4 py-6 text-sm text-danger">{viewer.error}</p>
-              ) : (
-                <FullOutputPane loading={viewer?.loading ?? false} text={viewer?.text ?? ""} notes={viewer?.notes ?? NO_NOTES} />
-              )}
-            </div>
+      {/* The page's history is its own: no overlay here pushes entries for Back. */}
+      <BackCloseProvider enabled={false}>
+        <PortalContainerProvider container={portal}>
+          <div data-orq-embed-chat="" className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-neutral-950 text-neutral-200">
+            <ChatTimeline
+              sessionId={sessionId ?? ""}
+              rows={view.rows as AgentChatTimelineRow[]}
+              follow={view.slice.follow}
+              onFollowChange={onFollowChange}
+              disclosures={view.slice.disclosures}
+              onDisclosureChange={onDisclosureChange}
+              bottomInset={0}
+              canRevert={false}
+              onRevert={noop}
+              // Nothing opens here: no turn diff, file or agent drill-in, so
+              // those render as plain text. Full output only with both its loaders.
+              onOpenTurnDiff={null}
+              onOpenFile={null}
+              onLoadFullOutput={canLoadFullOutput ? onLoadFullOutput : null}
+              onOpenAgent={null}
+              onSendQueuedNow={noop}
+              onReturnQueuedToComposer={noop}
+              threadReady={sessionId !== null}
+              canBackgroundTasks={false}
+              errorBanner={null}
+              onDismissErrorBanner={noop}
+              // Not read-only: the timeline offers "load older" only on a
+              // writable surface. Every command affordance is withheld above.
+              readOnly={false}
+              retentionDropped={view.retentionDropped}
+              roster={view.slice.roster}
+              projectPath={config.workspaceRoot}
+              skills={NO_SKILLS}
+              historyHasOlder={historyHasOlder}
+              historyLoading={view.slice.history.loading}
+              historyError={view.slice.history.error}
+              onLoadOlderHistory={onLoadOlderHistory}
+            />
+            <EmbedPendingDock view={view} workspaceRoot={config.workspaceRoot} onCommand={onCommand} />
           </div>
-        </Modal>
-      </PortalContainerProvider>
+          <Modal open={viewer !== null} onClose={closeViewer} className="max-h-[85vh] max-w-4xl">
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="flex h-11 shrink-0 items-center justify-between border-b border-neutral-800 px-3">
+                <span className="truncate text-sm text-neutral-200">{viewer?.title}</span>
+                <ModalCloseButton onClose={closeViewer} />
+              </div>
+              <div className="min-h-0 flex-1 overflow-auto">
+                {viewer?.error ? (
+                  <p className="px-4 py-6 text-sm text-danger">{viewer.error}</p>
+                ) : (
+                  <FullOutputPane loading={viewer?.loading ?? false} text={viewer?.text ?? ""} notes={viewer?.notes ?? NO_NOTES} />
+                )}
+              </div>
+            </div>
+          </Modal>
+        </PortalContainerProvider>
+      </BackCloseProvider>
     </ChatHostProvider>
   );
 }

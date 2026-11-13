@@ -61,6 +61,9 @@ const globals = [
 ] as const;
 const saved = new Map<string, PropertyDescriptor | undefined>();
 
+/** A phone-sized viewport: no `min-width` query matches. Read when an element mounts. */
+let narrow = false;
+
 class InertObserver {
   observe(): void {}
   unobserve(): void {}
@@ -71,7 +74,8 @@ before(async () => {
   dom = new JSDOM("<!doctype html><body></body>", { url: "http://localhost/", pretendToBeVisual: true });
   const window = dom.window as unknown as Record<string, unknown>;
   window.matchMedia = (query: string) => ({
-    matches: true,
+    // Every query matches — a wide viewport — unless a test narrows it.
+    matches: !(narrow && query.includes("min-width")),
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -200,6 +204,7 @@ afterEach(async () => {
   await act(async () => {
     element.remove();
   });
+  narrow = false;
 });
 
 const shadow = (): ShadowRoot => element.shadowRoot!;
@@ -509,6 +514,44 @@ describe("orquester-agent-chat — loaders", () => {
       assert.equal(request.offset, 0);
       await settle(Promise.resolve());
       assert.ok(viewerText().includes("every line of it"));
+    });
+
+    it("opens and closes its viewer on a phone-sized page without touching the page's history", async () => {
+      narrow = true;
+      // A new element, so it mounts with the narrow viewport.
+      await act(async () => {
+        element.remove();
+      });
+      element = dom.window.document.createElement("orquester-agent-chat") as unknown as EmbedElement;
+      await act(async () => {
+        dom.window.document.body.replaceChildren(element);
+      });
+      const history = dom.window.history;
+      const pushState = mock.method(history, "pushState");
+      const go = mock.method(history, "go");
+      const listen = mock.method(dom.window, "addEventListener");
+      try {
+        act(() => {
+          element.loaders = {
+            item: () => Promise.resolve({ item: cutCommand({ truncated: false, data: { item: { aggregatedOutput: "all of it" } } }) }),
+            itemOutput: () => Promise.resolve(null)
+          };
+        });
+        pushCommand();
+        click(button("Load full output")!);
+        await settle(Promise.resolve());
+        assert.ok(viewerText().includes("all of it"), "the viewer is open");
+        click(shadow().querySelector('[role="dialog"] [aria-label="Close"]')!);
+        await settle(Promise.resolve());
+        assert.equal(shadow().querySelector('[role="dialog"]') === null, true, "the viewer closed");
+        assert.equal(pushState.mock.callCount(), 0, "no history entry pushed");
+        assert.equal(go.mock.callCount(), 0, "history never moved");
+        assert.equal(listen.mock.calls.filter((call) => call.arguments[0] === "popstate").length, 0, "no popstate listener");
+      } finally {
+        pushState.mock.restore();
+        go.mock.restore();
+        listen.mock.restore();
+      }
     });
 
     it("reads a cut compaction summary through the item loader", async () => {
