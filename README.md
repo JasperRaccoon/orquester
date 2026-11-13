@@ -206,6 +206,7 @@ What you get on the box:
 - **systemd-hardened daemon** (`ProtectSystem=strict`, unprivileged user, read-only code in `/opt`) with `KillMode=process` — restarts and redeploys leave the tmux server and all your agent sessions running.
 - **Caddy** as the only public face: automatic Let's Encrypt TLS, HSTS, strict CSP, WebSocket upgrades; the daemon itself stays on loopback and `ufw` allows only 22 + 443.
 - **Post-deploy browser smoke test** that loads the deployed SPA headlessly — with clean *and* legacy localStorage fixtures — and fails the deploy on any page error.
+- **One-click self-update**: the daemon checks hourly whether it is behind its repository's `main` on GitHub; the UI says so and updates the server from Settings → General (same cycle as `./deploy.sh deploy`, run by a root systemd unit), then reloads.
 - **Automatic revert**: a release that does not report healthy within 10 minutes after its restart is rolled back to the last successful deploy (rebuilt, restarted, health-checked), and the deploy still fails loudly. The running version and commit are in the deploy output and the authenticated `GET /api/info`.
 
 See [`deploy/`](deploy/) and `AGENTS.md` for the full reference.
