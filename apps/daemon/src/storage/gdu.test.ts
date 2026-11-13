@@ -10,9 +10,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { StorageNodeActions, StorageStatusResponse } from "@orquester/api";
-import { storageScansDir } from "@orquester/config";
+import { appBinDir, storageScansDir } from "@orquester/config";
 
-import { resolveGduBinary, runGduExport, ScanCancelledError } from "./gdu.ts";
+import { GduProbe, resolveGduBinary, runGduExport, ScanCancelledError } from "./gdu.ts";
 import { StorageScanService } from "./scan-service.ts";
 import type { StorageGuardPort } from "./types.ts";
 import { volumeSpace } from "./volumes.ts";
@@ -105,4 +105,20 @@ test("an aborted gdu run rejects as cancelled", async (t) => {
   const run = runGduExport({ bin, root, ignore: [], outFile, cwd: baseDir, signal: controller.signal });
   controller.abort();
   await assert.rejects(run, ScanCancelledError);
+});
+
+test("a gdu --version that failed is asked again instead of reading as not installed", async (t) => {
+  const baseDir = await mkdtemp(join(tmpdir(), "storage-gdu-appdir-"));
+  t.after(() => rm(baseDir, { recursive: true, force: true }));
+  // Fails the first time it is asked, answers after that (the binary itself is unchanged).
+  const asked = join(baseDir, "asked");
+  await mkdir(appBinDir(baseDir), { recursive: true });
+  await writeFile(
+    join(appBinDir(baseDir), "gdu"),
+    `#!/bin/sh\nif [ -e '${asked}' ]; then printf 'Version:\\t v5.39.0\\n'; exit 0; fi\n: > '${asked}'\nexit 1\n`,
+    { mode: 0o755 }
+  );
+  const probe = new GduProbe({ baseDir });
+  assert.equal((await probe.locate())?.version, null);
+  assert.equal((await probe.locate())?.version, "v5.39.0");
 });

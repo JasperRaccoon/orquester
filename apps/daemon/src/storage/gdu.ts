@@ -87,7 +87,14 @@ export class GduProbe {
       /* raced with a removal: --version fails and says so */
     }
     const key = `${path}\0${mtime}`;
-    if (this.cached?.key !== key) this.cached = { key, version: gduVersionOf(path) };
+    if (this.cached?.key !== key) {
+      const entry = { key, version: gduVersionOf(path) };
+      this.cached = entry;
+      // A --version that failed (a timeout, a spawn error) is asked again next time.
+      void entry.version.then((version) => {
+        if (version === null && this.cached === entry) this.cached = null;
+      });
+    }
     return { path, version: await this.cached.version };
   }
 }
