@@ -1,14 +1,13 @@
 import React from "react";
 import { Check, Copy, Download, FolderOpen, ImagePlus } from "lucide-react";
 
-import { useApi } from "../../../context/orquester-context";
 import { defaultSavedImagePath } from "../../../lib/agent-chat/chat-images.logic";
 import { cn } from "../../../lib/cn";
-import { useAppStore } from "../../../store/app";
+import { useChatHost } from "../chat-host";
 import { ChatIconButton, COPY_FEEDBACK_MS } from "../primitives";
 import { useTimelineRowContext } from "../timeline/context";
 import type { ChatImageItem } from "./chat-image";
-import { attachImageAsReference, copyImageToClipboard, readImageBlob } from "./image-actions";
+import { copyImageToClipboard, readImageBlob } from "./image-actions";
 import { SaveImageDialog } from "./SaveImageDialog";
 
 function failureMessage(cause: unknown, fallback: string): string {
@@ -21,7 +20,8 @@ function failureMessage(cause: unknown, fallback: string): string {
  * with a project); Reveal in files (only for an image that is a file of this
  * project); Use as reference (a chat image of the chat being viewed, where
  * the chat takes input). Each acts on the loaded image, so none is offered
- * before it has loaded.
+ * before it has loaded. All but Copy are the app's (`ChatHost`): a host that
+ * offers none of them shows Copy alone.
  */
 export function ChatImageActions(props: {
   item: ChatImageItem;
@@ -31,7 +31,7 @@ export function ChatImageActions(props: {
   onLeave?: () => void;
 }): React.ReactElement | null {
   const { item, url } = props;
-  const api = useApi();
+  const host = useChatHost();
   const { sessionId, workspaceRoot, readOnly } = useTimelineRowContext();
   const [copied, setCopied] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -62,12 +62,17 @@ export function ChatImageActions(props: {
   const mimeType = item.mimeType ?? (sniffed !== null && sniffed.url === url ? sniffed.mimeType : undefined);
 
   if (url === null) return null;
-  const notice = (title: string, message: string) => useAppStore.getState().setNotice({ title, message });
+  const notice = (title: string, message: string) => host.notify?.({ title, message });
+  const { saveImageToProject, revealInFiles, attachImageToComposer } = host;
   const attachment = item.source.kind === "attachment" ? item.source : null;
-  const canSave = attachment !== null && workspaceRoot !== undefined;
+  const canSave = saveImageToProject !== undefined && attachment !== null && workspaceRoot !== undefined;
   const canReveal =
-    item.path !== undefined && workspaceRoot !== undefined && item.path.startsWith(`${workspaceRoot}/`);
-  const canReference = attachment !== null && !readOnly && sessionId === attachment.sessionId;
+    revealInFiles !== undefined &&
+    item.path !== undefined &&
+    workspaceRoot !== undefined &&
+    item.path.startsWith(`${workspaceRoot}/`);
+  const canReference =
+    attachImageToComposer !== undefined && attachment !== null && !readOnly && sessionId === attachment.sessionId;
   const name = defaultSavedImagePath({
     ...(item.caption !== undefined ? { caption: item.caption } : {}),
     ...(item.title !== undefined ? { title: item.title } : {}),
@@ -104,7 +109,7 @@ export function ChatImageActions(props: {
           label="Reveal in files"
           onClick={(event) => {
             event.stopPropagation();
-            useAppStore.getState().revealInFileBrowser(item.path!);
+            revealInFiles(item.path!);
             props.onLeave?.();
           }}
         >
@@ -119,7 +124,7 @@ export function ChatImageActions(props: {
             event.stopPropagation();
             setAttaching(true);
             const fileName = name.slice(name.lastIndexOf("/") + 1);
-            attachImageAsReference({ api, sessionId: attachment.sessionId, url, name: fileName }).then(
+            attachImageToComposer({ sessionId: attachment.sessionId, url, name: fileName }).then(
               () => {
                 setAttaching(false);
                 props.onLeave?.();
@@ -134,8 +139,10 @@ export function ChatImageActions(props: {
           <ImagePlus size={14} aria-hidden />
         </ChatIconButton>
       ) : null}
-      {saving && workspaceRoot !== undefined ? (
+      {saving && canSave ? (
         <SaveImageDialog
+          save={saveImageToProject}
+          notify={host.notify}
           projectRoot={workspaceRoot}
           url={url}
           defaultPath={name}

@@ -45,6 +45,7 @@
 - Use the module map in `apps/daemon/src/agent-host/README.md` when working on the agent host.
 - Read the provider fixture README before changing a provider adapter or its replay tests.
 - Use `deploy/README.md` and `deploy.sh` for deployment work.
+- Keep `deploy/lib/remote-update.sh` working both over ssh from `deploy.sh` and as root from `orquester-update.service` (no ssh session, `SUDO` unset).
 
 ## Runtime boundaries
 
@@ -126,6 +127,6 @@
 - Don't hand-edit the Codex or Grok adapter `_generated` files; regenerate them from their source.
 - Don't skip typechecking or relevant tests because a change looks small.
 - Don't run `pnpm dev`, `pnpm dev:daemon`, `pnpm dev:web`, or the daemon CLI in this live checkout.
-- Don't bind the daemon's port or socket or run `systemctl restart orquester` without explicit instruction.
+- Don't bind the daemon's port or socket, run `systemctl restart orquester`, or trigger a self-update (`POST /api/self-update`, its request file, `orquester-update.service`) without explicit instruction.
 - Don't use sleep-based timing in tests or orchestration when a receipt, drain, or event can signal completion.
 - Don't weaken auth, filesystem containment, or secret redaction to make a local test pass.

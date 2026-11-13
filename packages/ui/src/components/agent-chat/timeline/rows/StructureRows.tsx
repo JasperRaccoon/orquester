@@ -77,10 +77,10 @@ export const CompactionRow = React.memo(function CompactionRow({
       {summary !== undefined && expanded ? (
         <div className="mb-1 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2">
           <ChatMarkdown text={summary} onOpenFile={ctx.onOpenFile} />
-          {row.summaryTruncated === true ? (
+          {row.summaryTruncated === true && ctx.onLoadFullOutput ? (
             <button
               type="button"
-              onClick={() => ctx.onLoadFullOutput(row.id)}
+              onClick={() => ctx.onLoadFullOutput?.(row.id)}
               className="mt-2 rounded text-[11px] text-neutral-500 transition-colors hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
             >
               Load the full summary

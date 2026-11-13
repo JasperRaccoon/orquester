@@ -1,0 +1,16 @@
+/*
+ * The embed's base sheet, adopted into every shadow root by styles.ts.
+ *
+ * It is the app's own `globals.css` (agent-chat.css, Tailwind, the colour
+ * schemes), built by vite.embed.config.ts with:
+ * - Tailwind's content limited to the chat components and this directory;
+ * - `workflows.css` left out (aliased to omitted.css);
+ * - a PostCSS step that moves `:root`/`html` to `:host` and `body` to the
+ *   `.orq-embed-root` wrapper, and wraps every `--n-*`, `--sem-*`, `--diff-*`
+ *   value as `var(--orq-…, <value>)` (vite/embed-css.ts).
+ */
+@import "../../../../packages/ui/src/styles/globals.css";
+
+:host {
+  display: block;
+}

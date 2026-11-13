@@ -183,6 +183,24 @@ test("a failed build never restarts the daemon", () => {
   assert.equal(lastDeployed(), good);
 });
 
+test("an update while another holds the checkout's lock touches nothing and exits 5", { skip: spawnSync("sh", ["-c", "command -v flock"]).status !== 0 && "no flock on this host" }, () => {
+  release("ok", "1.1.0");
+  const lock = join(repo, ".git", "orq-deploy.lock");
+  writeFileSync(lock, "");
+  // flock(1) holds the lock while it runs the deploy, which opens the file again and must not get it.
+  const held = spawnSync("flock", [lock, "bash", SCRIPT], {
+    encoding: "utf8",
+    env: { ...process.env, ...gitEnv, PATH: `${join(stubs, "bin")}:${process.env.PATH}`, STUB_DIR: stubs, REPO_DIR: repo, NODE_BIN: join(stubs, "bin", "node"), HEALTH_WAIT: "1", SUDO: "" }
+  });
+  assert.equal(held.status, 5, held.stderr);
+  assert.match(held.stderr, /another update is running/);
+  assert.equal(head(), good, "the tree was not reset");
+  assert.deepEqual(restarts(), []);
+
+  const result = deploy();
+  assert.equal(result.code, 0, result.err);
+});
+
 test("the manual rollback to a sha still works, and a later unhealthy deploy reverts to it", () => {
   const second = release("ok", "1.1.0");
   assert.equal(deploy().code, 0);

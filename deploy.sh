@@ -114,6 +114,9 @@ remote_update() {
     3)
       STEP="remote-update: unhealthy, AUTO-REVERTED to the previous release"
       warn "$name: the new release failed its health check and was ROLLED BACK — the previous release is running. The deploy FAILED." ;;
+    5)
+      STEP="remote-update: another update is running on the host"
+      warn "$name: another update (a deploy or the self-update unit) is running there — nothing was changed. Retry when it ends." ;;
     4)
       STEP="remote-update: unhealthy, and the AUTO-REVERT FAILED — daemon not healthy"
       warn "$name: the new release failed its health check and the previous release did not come back either — the daemon is NOT healthy. Act now: ./deploy.sh logs $name" ;;
@@ -261,6 +264,7 @@ echo \"HEAD=\$(${s:+$s }git -C /opt/orquester rev-parse --short HEAD)\"
 echo \"stamp=\$(cat /opt/orquester/.orquester-version.json 2>/dev/null || echo 'none')\"
 curl -fsS http://127.0.0.1:47831/health; echo
 echo \"service=\$(systemctl is-active orquester)\"
+echo \"update-path=\$(systemctl is-active orquester-update.path || true)\"
 echo \"bundle=\$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)\"
 echo \"box-agent=\$(node -p \"require('/opt/orquester/apps/box-agent/dist/manifest.json').version\" 2>/dev/null || echo 'not prebuilt')\"
 echo \"go=\$(/usr/local/go/bin/go version 2>/dev/null || echo missing)\""

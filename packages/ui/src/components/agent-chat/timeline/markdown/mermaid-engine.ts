@@ -81,33 +81,53 @@ export function isMermaidFence(language: string): boolean {
 /** Distinct (size, TeX) pairs kept typeset; pele asks again on every layout, resizes included. */
 const MATH_CACHE_MAX_ENTRIES = 500;
 
-let mathResolver: MathResolver | null = null;
-let mathLoading: Promise<MathResolver | null> | null = null;
+/**
+ * A pele `MathResolver` that also takes where to measure: `probeParent`, the
+ * node its off-screen probe is appended to — `document.body` when absent.
+ * Pele calls it with two arguments; a diagram binds the third
+ * ({@link mathProbeParentOf}).
+ */
+export type ChatMathResolver = (tex: string, size: number, probeParent?: ParentNode) => ReturnType<MathResolver>;
+
+let mathResolver: ChatMathResolver | null = null;
+let mathLoading: Promise<ChatMathResolver | null> | null = null;
+
+/**
+ * Where a diagram drawn into `node` measures its labels: the shadow root it
+ * renders in — an embedded chat must not write into its host page's body —
+ * else the document's body, as always.
+ */
+export function mathProbeParentOf(node: Node): ParentNode {
+  const root = node.getRootNode();
+  return root.nodeType === root.DOCUMENT_FRAGMENT_NODE ? (root as ParentNode) : (node.ownerDocument ?? document).body;
+}
 
 /**
  * A pele `MathResolver` over the chat's KaTeX: the label as MathML (no CSS or
- * fonts needed), measured in an off-screen probe. The `<annotation>` that
- * repeats the TeX is removed (the sanitiser would keep its text). A label
- * KaTeX cannot parse resolves to `null`, and pele shows its source.
- * Resolves to `null` when KaTeX fails to load.
+ * fonts needed), measured in an off-screen probe (one per probe parent). The
+ * `<annotation>` that repeats the TeX is removed (the sanitiser would keep its
+ * text). A label KaTeX cannot parse resolves to `null`, and pele shows its
+ * source. Resolves to `null` when KaTeX fails to load.
  */
-export function loadMathResolver(): Promise<MathResolver | null> {
+export function loadMathResolver(): Promise<ChatMathResolver | null> {
   if (mathResolver) return Promise.resolve(mathResolver);
   mathLoading ??= loadMathEngine().then(
     (katex) => {
       const typeset = new Map<string, ReturnType<MathResolver>>();
-      let probe: HTMLDivElement | null = null;
-      mathResolver = (tex, size) => {
+      const probes = new WeakMap<ParentNode, HTMLDivElement>();
+      mathResolver = (tex, size, probeParent = document.body) => {
         const key = `${size}:${tex}`;
         if (typeset.has(key)) return typeset.get(key);
         let markup: ReturnType<MathResolver> = null;
         try {
+          let probe = probes.get(probeParent);
           if (!probe || !probe.isConnected) {
             probe = document.createElement("div");
             probe.setAttribute("aria-hidden", "true");
             probe.style.cssText =
               "position:absolute;left:-9999px;top:0;visibility:hidden;display:inline-block;white-space:nowrap";
-            document.body.append(probe);
+            probeParent.append(probe);
+            probes.set(probeParent, probe);
           }
           probe.style.fontSize = `${size}px`;
           probe.innerHTML = katex.renderToString(tex, { ...KATEX_OPTIONS, displayMode: true, output: "mathml" });
@@ -135,7 +155,7 @@ export function loadMathResolver(): Promise<MathResolver | null> {
 }
 
 /** The resolver, or `null` before {@link loadMathResolver} has settled. */
-export function loadedMathResolver(): MathResolver | null {
+export function loadedMathResolver(): ChatMathResolver | null {
   return mathResolver;
 }
 

@@ -1,10 +1,14 @@
-import React, { useEffect, useState } from "react";
-import { Bell, Loader2, RefreshCw } from "lucide-react";
+import React, { useEffect, useState, useSyncExternalStore } from "react";
+import type { SelfUpdateStatusResponse } from "@orquester/api";
+import { Bell, Download, Loader2, RefreshCw } from "lucide-react";
 import { disablePush, enablePush, getSubscription, pushSupported } from "../../lib/push";
 import { Button, Switch } from "../ui";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { serverVersionLabel } from "../../lib/server-version";
+import { ApiError } from "../../lib/api-client";
+import { relativeTime } from "../../lib/relative-time";
+import { lastRunFailure, nextUpdatePhase, type FollowedRequest } from "../../lib/self-update.logic";
 import type { Runtime } from "../../types";
 import {
   Badge,
@@ -29,6 +33,21 @@ const isInstalledPwa = (): boolean => {
   return (navigator as Navigator & { standalone?: boolean }).standalone === true;
 };
 
+// Force the web client to pull the freshly deployed bundle. Pull-to-refresh is
+// disabled app-wide (it was reloading the SPA on terminal scroll), so an
+// installed PWA left open has no gesture to refresh itself. Nudge the service
+// worker to re-check for a new version, then reload — navigations are
+// network-first and assets are content-hashed, so this lands on the latest.
+const reloadApp = async (): Promise<void> => {
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    await reg?.update();
+  } catch {
+    /* SW unsupported/blocked — the reload below still refreshes the shell */
+  }
+  window.location.reload();
+};
+
 const runtimeLabel = (runtime: Runtime): string =>
   runtime === "desktop" ? "Desktop app" : isInstalledPwa() ? "Web app (installed)" : "Web browser";
 
@@ -40,22 +59,6 @@ export const GeneralSettings: React.FC = () => {
   const activeId = useAppStore((s) => s.activeConnectionId);
   const active = connections.find((c) => c.id === activeId);
   const [reloading, setReloading] = useState(false);
-
-  // Force the web client to pull the freshly deployed bundle. Pull-to-refresh is
-  // disabled app-wide (it was reloading the SPA on terminal scroll), so an
-  // installed PWA left open has no gesture to refresh itself. Nudge the service
-  // worker to re-check for a new version, then reload — navigations are
-  // network-first and assets are content-hashed, so this lands on the latest.
-  const reloadApp = async () => {
-    setReloading(true);
-    try {
-      const reg = await navigator.serviceWorker?.getRegistration();
-      await reg?.update();
-    } catch {
-      /* SW unsupported/blocked — the reload below still refreshes the shell */
-    }
-    window.location.reload();
-  };
 
   return (
     <SettingsPage title="General" description="How the app window behaves, what notifies you, and what you're connected to.">
@@ -127,12 +130,21 @@ export const GeneralSettings: React.FC = () => {
           }
         />
         {active && <ServerVersionRow key={active.id} />}
+        {active && <UpdatesRow key={active.id} connectionId={active.id} />}
         {runtime === "web" && (
           <SettingRow
             label="Reload app"
             description="Fetch the latest version if the app looks out of date after an update."
           >
-            <Button size="sm" variant="outline" disabled={reloading} onClick={() => void reloadApp()}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={reloading}
+              onClick={() => {
+                setReloading(true);
+                void reloadApp();
+              }}
+            >
               {reloading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Reload
             </Button>
           </SettingRow>
@@ -197,7 +209,7 @@ const NotificationsSection: React.FC = () => {
   );
 };
 
-/** The connected daemon's version and commit (`GET /api/info`); hidden when it reports neither. */
+/** The connected daemon's commit (`GET /api/info`), which is its version; hidden when it reports none. */
 const ServerVersionRow: React.FC = () => {
   const api = useApi();
   const [label, setLabel] = useState<string | null>(null);
@@ -212,6 +224,248 @@ const ServerVersionRow: React.FC = () => {
     return () => controller.abort();
   }, [api]);
   return label ? <InfoRow label="Server version" value={label} mono /> : null;
+};
+
+/**
+ * The update this client follows: started here, or found running when the Updates row loaded.
+ * Module state rather than the row's, so closing Settings mid-update keeps the poll going and the
+ * page still reloads onto the new release. The poll ends when the active connection changes.
+ */
+interface FollowedUpdate {
+  connectionId: string;
+  request: FollowedRequest;
+  /**
+   * "updating" and "stalled" (the host updater has not taken the request yet) keep polling; the
+   * others are final. "timedOut": nothing settled within {@link UPDATE_GIVE_UP_MS}.
+   */
+  phase: "updating" | "stalled" | "failed" | "reverted" | "timedOut";
+  /** Identifies one follow: a newer one (another request) ends the older one's poll. */
+  token: object;
+}
+
+const UPDATE_POLL_MS = 3_000;
+/** One poll's own limit: a request to a daemon that is mid-restart may hang rather than fail. */
+const UPDATE_POLL_TIMEOUT_MS = 10_000;
+/**
+ * Stop waiting after this: longer than the host updater's own 2 h limit would be pointless, and a
+ * real update (builds, health wait, even a revert) is far shorter — the server is down or stuck.
+ */
+const UPDATE_GIVE_UP_MS = 60 * 60 * 1000;
+
+let followedUpdate: FollowedUpdate | null = null;
+const followedUpdateListeners = new Set<() => void>();
+
+const setFollowedUpdate = (next: FollowedUpdate | null): void => {
+  followedUpdate = next;
+  for (const listener of [...followedUpdateListeners]) listener();
+};
+
+const subscribeFollowedUpdate = (listener: () => void): (() => void) => {
+  followedUpdateListeners.add(listener);
+  return () => {
+    followedUpdateListeners.delete(listener);
+  };
+};
+
+const getFollowedUpdate = (): FollowedUpdate | null => followedUpdate;
+
+/**
+ * Poll the server's update status until it runs another commit or this update's run succeeds (then
+ * reload), the run fails or reverts, or {@link UPDATE_GIVE_UP_MS} passes. A request the host updater
+ * has not taken shows as "stalled" while the poll goes on, so fixing the updater still finishes it.
+ * Following the update already followed is a no-op; another request replaces the follow.
+ */
+const followUpdate = (connectionId: string, request: FollowedRequest): void => {
+  const current = followedUpdate;
+  if (
+    current &&
+    current.connectionId === connectionId &&
+    current.request.requestedAt === request.requestedAt &&
+    (current.phase === "updating" || current.phase === "stalled")
+  ) {
+    return;
+  }
+  const token = {};
+  const giveUpAt = Date.now() + UPDATE_GIVE_UP_MS;
+  setFollowedUpdate({ connectionId, request, phase: "updating", token });
+  const settle = (phase: FollowedUpdate["phase"]): void => {
+    if (followedUpdate?.token === token && followedUpdate.phase !== phase) setFollowedUpdate({ ...followedUpdate, phase });
+  };
+  const poll = async (): Promise<void> => {
+    if (followedUpdate?.token !== token) return;
+    const { api, activeConnectionId } = useAppStore.getState();
+    if (activeConnectionId !== connectionId) {
+      setFollowedUpdate(null);
+      return;
+    }
+    // The store rebuilds its client on every reconnect, so each poll takes the current one.
+    const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(UPDATE_POLL_TIMEOUT_MS) : undefined;
+    const status = api ? await api.selfUpdateStatus(signal).catch(() => null) : null;
+    if (followedUpdate?.token !== token || useAppStore.getState().activeConnectionId !== connectionId) return;
+    const phase = nextUpdatePhase(request, status);
+    if (phase === "done") {
+      void reloadApp();
+    } else if (phase === "failed" || phase === "reverted") {
+      settle(phase);
+    } else if (Date.now() >= giveUpAt) {
+      settle("timedOut");
+    } else {
+      settle(phase === "stalled" ? "stalled" : "updating");
+      setTimeout(() => void poll(), UPDATE_POLL_MS);
+    }
+  };
+  setTimeout(() => void poll(), UPDATE_POLL_MS);
+};
+
+const errorText = (err: unknown): string =>
+  err instanceof ApiError ? (err.serverMessage ?? err.message) : err instanceof Error ? err.message : String(err);
+
+const commitsBehind = (status: SelfUpdateStatusResponse): string =>
+  `${status.behindBy} commit${status.behindBy === 1 ? "" : "s"} behind ${status.branch}`;
+
+/**
+ * Whether the server is behind its branch on GitHub (`GET /api/self-update`) and, on an install
+ * that can update itself, the Update button. Hidden for an older daemon without the route.
+ */
+const UpdatesRow: React.FC<{ connectionId: string }> = ({ connectionId }) => {
+  const api = useAppStore((s) => s.api);
+  const connected = useAppStore((s) => s.connectionStatus === "connected");
+  const followed = useSyncExternalStore(subscribeFollowedUpdate, getFollowedUpdate, getFollowedUpdate);
+  const mine = followed?.connectionId === connectionId ? followed : null;
+  const [status, setStatus] = useState<SelfUpdateStatusResponse | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!api || !connected) return;
+    const controller = new AbortController();
+    api
+      .selfUpdateStatus(controller.signal)
+      .then((next) => {
+        setStatus(next);
+        setLoadError(null);
+        // Someone started an update elsewhere: follow it here too, so this page reloads with it.
+        if (next.run?.state === "running" && next.current) {
+          followUpdate(connectionId, { from: next.current, requestedAt: next.run.startedAt });
+        }
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        if (err instanceof ApiError && err.status === 404) setMissing(true);
+        else setLoadError(errorText(err));
+      });
+    return () => controller.abort();
+  }, [api, connected, connectionId]);
+
+  const start = async (from: string) => {
+    if (!api) return;
+    setStarting(true);
+    setStartError(null);
+    try {
+      const { requestedAt } = await api.startSelfUpdate();
+      followUpdate(connectionId, { from, requestedAt });
+    } catch (err) {
+      const code = err instanceof ApiError ? (err.body as { code?: unknown } | null | undefined)?.code : undefined;
+      const requestedAt = err instanceof ApiError ? (err.body as { requestedAt?: unknown } | null | undefined)?.requestedAt : undefined;
+      if (code === "SELF_UPDATE_BUSY" && typeof requestedAt === "string" && Number.isFinite(Date.parse(requestedAt))) {
+        // Already running or requested elsewhere: wait for that update like our own.
+        followUpdate(connectionId, { from, requestedAt });
+      } else {
+        setStartError(errorText(err));
+      }
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  // Still waiting on the followed update (a stalled request included: it may yet be taken).
+  const updating = mine?.phase === "updating";
+  const stalled = mine?.phase === "stalled";
+  if (missing || (!connected && !updating)) return null;
+
+  let description: React.ReactNode;
+  if (updating) {
+    description = "Updating… The server restarts and this page reloads when it's done.";
+  } else if (stalled) {
+    description = "Waiting for the server's updater to take the request… This page reloads when the update is done.";
+  } else if (!status) {
+    description = loadError ? `Couldn't check for updates: ${loadError}` : "Checking for updates…";
+  } else if (status.error && !status.checkedAt) {
+    description = `Couldn't check for updates: ${status.error}`;
+  } else if (!status.checkedAt) {
+    description = "Not checked yet.";
+  } else if (status.behindBy > 0) {
+    description = status.canUpdate
+      ? `${commitsBehind(status)}.`
+      : `${commitsBehind(status)}. Update this server with ./deploy.sh deploy.`;
+  } else {
+    const checked = relativeTime(status.checkedAt);
+    description = checked ? `Up to date · checked ${checked}` : "Up to date";
+  }
+
+  const from = status?.current ?? null;
+  // This client's followed update, or else what the server reports: a request its updater never
+  // took, or the last run's failure while the server still runs the commit it started from.
+  const outcome: Exclude<FollowedUpdate["phase"], "updating"> | null =
+    mine && mine.phase !== "updating"
+      ? mine.phase
+      : !updating && status
+        ? status.requestStalled
+          ? "stalled"
+          : lastRunFailure(status)
+        : null;
+  const canStart = !updating && !!status?.canUpdate && status.behindBy > 0 && !!from;
+  const journal = (
+    <>
+      Details: <code>journalctl -u orquester-update</code> on the server.
+    </>
+  );
+
+  return (
+    <>
+      <SettingRow label="Updates" description={description}>
+        {updating ? (
+          <Badge tone="info" icon={<Loader2 size={11} className="animate-spin" />}>
+            Updating
+          </Badge>
+        ) : (
+          canStart &&
+          from && (
+            <Button size="sm" variant="outline" disabled={starting} onClick={() => void start(from)}>
+              {starting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Update
+            </Button>
+          )
+        )}
+      </SettingRow>
+      {(outcome || startError) && (
+        <div className="px-4 py-3">
+          {startError ? (
+            <Notice tone="danger" title="Couldn't start the update">
+              {startError}
+            </Notice>
+          ) : outcome === "reverted" ? (
+            <Notice tone="warn" title="The update failed and the previous version was restored">
+              {journal}
+            </Notice>
+          ) : outcome === "stalled" ? (
+            <Notice tone="warn" title="The server's updater didn't start the update">
+              Check <code>systemctl status orquester-update.path</code> on the server, then try again.
+            </Notice>
+          ) : outcome === "timedOut" ? (
+            <Notice tone="warn" title="The update hasn't finished after an hour">
+              The server may be down or the update stuck. {journal}
+            </Notice>
+          ) : (
+            <Notice tone="danger" title="The update failed">
+              {journal}
+            </Notice>
+          )}
+        </div>
+      )}
+    </>
+  );
 };
 
 /**

@@ -2,7 +2,7 @@ import React from "react";
 import { ChevronLeft } from "lucide-react";
 
 import { cn } from "../../../lib/cn";
-import { TurnDiffBody, turnDiffTitle, type TurnDiffRequest } from "../../agent-chat/timeline/TurnDiffModal";
+import { TurnDiffBody, turnDiffTitle, type TurnDiffRequest } from "../../agent-chat/TurnDiffModal";
 
 /**
  * A turn's diff INSIDE the panel — a phone's way to show it. The

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useBackClose } from "../../hooks/use-back-close";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
+import { usePortalContainer } from "../../lib/portal-container";
 
 export interface ContextMenuItem {
   label: string;
@@ -41,6 +42,7 @@ const EDGE_Y = 6;
 export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }) => {
   useOpenLayer(true);
   useBackClose(true, onClose);
+  const portalContainer = usePortalContainer();
   useEffect(() => {
     const close = () => onClose();
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -132,6 +134,6 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
         </button>
       ))}
     </div>,
-    document.body
+    portalContainer
   );
 };

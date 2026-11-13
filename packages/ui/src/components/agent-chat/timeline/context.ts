@@ -79,14 +79,17 @@ export interface TimelineRowContextValue {
   onFork: ((input: TimelineForkInput) => Promise<unknown> | void) | null;
   /** "Continue in another agent…" from a message: opens the picker; null where no fork is offered. */
   onContinueIn: ((input: TimelineForkInput) => void) | null;
-  onOpenTurnDiff: (turnCount: number) => void;
-  onOpenFile: (path: string) => void;
+  /** The changed-files card's full turn diff; null: no diff button. */
+  onOpenTurnDiff: ((turnCount: number) => void) | null;
+  /** Open a file in an editor tab; null: file paths render as plain text. */
+  onOpenFile: ((path: string) => void) | null;
   /**
    * A row's "Load full output": its item, or — for a command whose output
    * streamed — first its call's output as the host joins it
    * (`FullOutputSource`, `lib/agent-chat/full-output.ts`). Absent means the item.
+   * Null: no row offers a full read.
    */
-  onLoadFullOutput: (itemId: string, source?: FullOutputSource) => void;
+  onLoadFullOutput: ((itemId: string, source?: FullOutputSource) => void) | null;
   /**
    * The whole markdown of a plan proposal — the store's `readFullPlanMarkdown`,
    * the read Implement makes: as is when intact, read back when the wire cut it
@@ -95,7 +98,8 @@ export interface TimelineRowContextValue {
    * than ever answer it.
    */
   readFullPlanMarkdown: AgentChatActions["readFullPlanMarkdown"];
-  onOpenAgent: (agentId: string) => void;
+  /** Drill in to a spawned agent; null: a spawn row's agents are not clickable. */
+  onOpenAgent: ((agentId: string) => void) | null;
   onSendQueuedNow: (queuedId: string) => void;
   onReturnQueuedToComposer: (queuedId: string) => void;
   /**
@@ -155,12 +159,13 @@ const FALLBACK: TimelineRowContextValue = {
   onRevert: NOOP,
   onFork: null,
   onContinueIn: null,
-  onOpenTurnDiff: NOOP,
-  onOpenFile: NOOP,
-  onLoadFullOutput: NOOP,
+  // Outside a timeline nothing opens or reads: those controls are not offered.
+  onOpenTurnDiff: null,
+  onOpenFile: null,
+  onLoadFullOutput: null,
   // Outside a timeline there is no thread to read a cut plan back from.
   readFullPlanMarkdown: readPlanWithoutStore,
-  onOpenAgent: NOOP,
+  onOpenAgent: null,
   onSendQueuedNow: NOOP,
   onReturnQueuedToComposer: NOOP,
   canBackgroundTasks: false,

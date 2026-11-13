@@ -90,6 +90,9 @@ Every skill, MCP server, plugin, hook and instruction an agent loads costs conte
 ### 🔌 MCP server built in
 The daemon exposes a Streamable-HTTP **MCP endpoint** (`POST /mcp`, on the authenticated remote transport) so *other* agents can drive your agent chat sessions the way you do in the GUI: open, resume and configure Claude Code, Codex, OpenCode and Grok sessions, send messages with attachments and get the reply back, answer questions and approvals, read transcripts and diffs, wait for a session to need attention, and check usage and cost — plus shared todos and saved prompts, sandboxed file and git reads, automated workflows, desktop tabs, Agent Profiles, and each agent CLI's global config (MCP servers, skills, plugins, hooks, commands, instruction file). The same 41-tool catalog serves the agents chatting *inside* Orquester (their own `orquester` server), where every tool is Read, Act or Admin and Admin changes wait for your approval card; Orquester keeps this full-trust endpoint out of those chats. Setup and the tool reference: [`docs/orquester-mcp.md`](docs/orquester-mcp.md); the in-chat side: [`apps/daemon/src/session-tools/README.md`](apps/daemon/src/session-tools/README.md).
 
+### 🧩 Embeddable chat
+Every Orquester serves its agent-chat GUI as a web component other apps load at runtime (`<orquester-agent-chat>`, public under `/embed/`): the host's backend relays a chat's frames and the element renders them exactly as Orquester does, themable through `--orq-*` CSS variables, with no Orquester credentials in the browser. Contract: [`docs/embed-agent-chat.md`](docs/embed-agent-chat.md).
+
 ---
 
 ## 🧰 What can it launch?
@@ -203,6 +206,7 @@ What you get on the box:
 - **systemd-hardened daemon** (`ProtectSystem=strict`, unprivileged user, read-only code in `/opt`) with `KillMode=process` — restarts and redeploys leave the tmux server and all your agent sessions running.
 - **Caddy** as the only public face: automatic Let's Encrypt TLS, HSTS, strict CSP, WebSocket upgrades; the daemon itself stays on loopback and `ufw` allows only 22 + 443.
 - **Post-deploy browser smoke test** that loads the deployed SPA headlessly — with clean *and* legacy localStorage fixtures — and fails the deploy on any page error.
+- **One-click self-update**: the daemon checks hourly whether it is behind its repository's `main` on GitHub; the UI says so and updates the server from Settings → General (same cycle as `./deploy.sh deploy`, run by a root systemd unit), then reloads.
 - **Automatic revert**: a release that does not report healthy within 10 minutes after its restart is rolled back to the last successful deploy (rebuilt, restarted, health-checked), and the deploy still fails loudly. The running version and commit are in the deploy output and the authenticated `GET /api/info`.
 
 See [`deploy/`](deploy/) and `AGENTS.md` for the full reference.

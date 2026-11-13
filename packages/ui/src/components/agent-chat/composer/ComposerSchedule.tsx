@@ -3,7 +3,7 @@ import { Clock } from "lucide-react";
 
 import { cn } from "../../../lib/cn";
 import { nextClockTime, parseDelay, sendsAtText } from "../../../lib/agent-chat/scheduled-prompts.logic";
-import { ComposerPopover } from "./ComposerPopover";
+import { ComposerPopover } from "../primitives/ComposerPopover";
 
 export interface ComposerScheduleProps {
   /** Non-null: the draft cannot be scheduled now, and this says why. */

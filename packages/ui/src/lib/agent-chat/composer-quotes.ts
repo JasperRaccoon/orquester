@@ -22,9 +22,9 @@ import {
   MAX_COMPOSER_QUOTE_CHARS,
   MAX_COMPOSER_QUOTES,
   type ComposerQuote
-} from "../../../lib/agent-chat/composer.logic";
+} from "./composer.logic";
 
-export type { ComposerQuote } from "../../../lib/agent-chat/composer.logic";
+export type { ComposerQuote } from "./composer.logic";
 
 // ---------------------------------------------------------------------------
 // The passage itself

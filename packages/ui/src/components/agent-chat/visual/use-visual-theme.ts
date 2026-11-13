@@ -5,29 +5,30 @@
  * reading Orquester's scheme × mode instead of T3's palettes.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type RefObject } from "react";
 
 import type { HtmlRenderTheme } from "@orquester/api/agent-chat";
 
 import { htmlRenderThemeTokens } from "../../../lib/theme";
-import { useAppStore } from "../../../store/app";
+import { useChatHost } from "../chat-host";
 
 /**
- * The page tokens for the theme on screen. Read off the document root, so it
- * is exactly what `applyTheme` painted: in a passive effect, which runs after
- * the root's layout effect has stamped a new scheme or mode — a value read
- * while rendering would be the previous theme's.
+ * The page tokens for the theme on screen where the page shows: read off the
+ * themed element `anchor` sits in (`htmlRenderThemeTokens`; the document root
+ * when there is no anchor, or before it is mounted), so it is exactly what
+ * was painted there. Re-read in a passive effect, which runs after the app
+ * root's layout effect has stamped a new scheme or mode — a value read while
+ * rendering would be the previous theme's — and after the anchor mounted.
  */
-export function useVisualTheme(): HtmlRenderTheme {
-  const scheme = useAppStore((state) => state.colorScheme);
-  const mode = useAppStore((state) => state.resolvedMode);
-  const [theme, setTheme] = useState<HtmlRenderTheme>(() => htmlRenderThemeTokens(mode));
+export function useVisualTheme(anchor?: RefObject<Element | null>): HtmlRenderTheme {
+  const { scheme, mode } = useChatHost().useAppearance();
+  const [theme, setTheme] = useState<HtmlRenderTheme>(() => htmlRenderThemeTokens(mode, anchor?.current));
   useEffect(() => {
     setTheme((current) => {
-      const next = htmlRenderThemeTokens(mode);
+      const next = htmlRenderThemeTokens(mode, anchor?.current);
       return sameTheme(current, next) ? current : next;
     });
-  }, [scheme, mode]);
+  }, [anchor, scheme, mode]);
   return theme;
 }
 

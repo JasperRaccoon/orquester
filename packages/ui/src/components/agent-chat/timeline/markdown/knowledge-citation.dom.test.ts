@@ -22,6 +22,8 @@ let resetKnowledge: typeof import("../../../../lib/knowledge/store").resetKnowle
 let deleteKnowledgeEntry: typeof import("../../../../lib/knowledge/store").deleteKnowledgeEntry;
 let knowledgeStore: typeof import("../../../../lib/knowledge/store").knowledgeStore;
 let markdown: typeof import("./ChatMarkdown");
+let chatHost: typeof import("../../chat-host");
+let KnowledgeCitation: typeof import("../../../knowledge/KnowledgeCitation").KnowledgeCitation;
 let ApiError: typeof import("../../../../lib/api-client").ApiError;
 
 let dom: JSDOM;
@@ -65,6 +67,8 @@ before(async () => {
   ({ useAppStore } = await import("../../../../store/app"));
   ({ resetKnowledge, deleteKnowledgeEntry, knowledgeStore } = await import("../../../../lib/knowledge/store"));
   markdown = await import("./ChatMarkdown");
+  chatHost = await import("../../chat-host");
+  ({ KnowledgeCitation } = await import("../../../knowledge/KnowledgeCitation"));
   ({ ApiError } = await import("../../../../lib/api-client"));
 });
 
@@ -78,6 +82,10 @@ after(() => {
 });
 
 const LIVE = "ke_aaaaaaaaaaaa";
+
+/** A message as the app shows it: its chat host renders citations as the Knowledge chip. */
+const inApp = (element: ReturnType<typeof createElement>) =>
+  createElement(chatHost.ChatHostProvider, { host: { ...chatHost.STANDALONE_CHAT_HOST, KnowledgeCitation }, children: element });
 const GONE = "ke_bbbbbbbbbbbb";
 const PROJECT = { name: "app", path: "/w/ws/app", workspace: "ws" };
 
@@ -234,7 +242,7 @@ describe("knowledge citations in a message", () => {
 
   const show = async (on: boolean) => {
     useAppStore.setState({ api: api as never, plugins: [knowledgePlugin(on)], currentProject: PROJECT as never });
-    await act(async () => root.render(createElement(markdown.ChatMarkdown, { text: TEXT })));
+    await act(async () => root.render(inApp(createElement(markdown.ChatMarkdown, { text: TEXT }))));
     await settle();
   };
 
@@ -395,7 +403,7 @@ describe("a knowledge citation's hover card", () => {
     useAppStore.setState({ api: api as never, plugins: [knowledgePlugin(on)], currentProject: PROJECT as never });
     knowledgeStore.setState({ collections: collections([collection(), collection({ id: "kc_ads", name: "Ads", color: "chart-2" })]) });
     const text = `See [Alternatives pages · @hridoyreh](orquester-knowledge:entry/${LIVE}) and [Old note](orquester-knowledge:entry/${GONE}).`;
-    await act(async () => root.render(createElement(markdown.ChatMarkdown, { text })));
+    await act(async () => root.render(inApp(createElement(markdown.ChatMarkdown, { text }))));
     await settle();
   };
 

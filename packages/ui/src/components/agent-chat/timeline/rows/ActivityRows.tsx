@@ -8,8 +8,6 @@ import { cn } from "../../../../lib/cn";
 import { shortAccountLabel } from "../../../../lib/account-label";
 import { identityChangeSummary } from "../../../../lib/agent-chat/account-switch";
 import { profileChangeSummary } from "../../../../lib/session-profiles/logic";
-import { sessionProfilesStore } from "../../../../lib/session-profiles/store";
-import { useAppStore } from "../../../../store/app";
 import type { AgentChatTimelineRow, WorkLogEntry } from "../../../../lib/agent-chat/contracts";
 import { fullOutputSourceOf } from "../../../../lib/agent-chat/full-output";
 import {
@@ -53,8 +51,13 @@ import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
 import { WorkEntryIcon } from "./icons";
 import { ChatIconButton } from "../../primitives/ChatIconButton";
-import { DeviceScreenshotThumb, DeviceShowButton, useDeviceLinkName } from "./DeviceRowLink";
-import { DesktopScreenshotThumb, DesktopShowButton, useDesktopLinkTitle } from "./DesktopRowLink";
+import { useChatHost } from "../../chat-host";
+
+// What a host without the app's stores reads: nothing live, so a row names
+// things as their events recorded them.
+const useNoAccounts = (): undefined => undefined;
+const useNoProfiles = (): null => null;
+const useNoName = (): undefined => undefined;
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
 
@@ -266,14 +269,15 @@ function RerouteNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElemen
 /**
  * "From here on, another identity" (§3.4).
  *
- * The label is resolved against the LIVE account list rather than read off the
- * event: the host has no labels to write, and an account renamed later should
- * read under its current name. Reading the store in this leaf is deliberate —
- * rows are memoised on their row object, so a prop would defeat that memo for
- * every row on every account refresh.
+ * The label is resolved against the LIVE account list (the chat host's) rather
+ * than read off the event: the host has no labels to write, and an account
+ * renamed later should read under its current name. Reading it in this leaf is
+ * deliberate — rows are memoised on their row object, so a prop would defeat
+ * that memo for every row on every account refresh.
  */
 function IdentityNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElement {
-  const accounts = useAppStore((state) => state.agentAccounts?.accounts);
+  const useAccounts = useChatHost().useAgentAccounts ?? useNoAccounts;
+  const accounts = useAccounts();
   const label = identityChangeSummary({
     payload: entry.accountSwitch,
     accounts,
@@ -296,15 +300,14 @@ function IdentityNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactEleme
   );
 }
 
-const profilesSnapshot = () => sessionProfilesStore.getState().list.profiles;
-
 /**
  * "From here on, another Agent Profile" (agent profiles §5.3), named from the LIVE profile list
- * (the composer's chip loads it) like the identity row: the log keeps ids only, and a profile
- * renamed later reads under its current name.
+ * (the chat host's; in the app, the one the composer's chip loads) like the identity row: the log
+ * keeps ids only, and a profile renamed later reads under its current name.
  */
 function ProfileNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElement {
-  const profiles = React.useSyncExternalStore(sessionProfilesStore.subscribe, profilesSnapshot, profilesSnapshot);
+  const useProfiles = useChatHost().useSessionProfiles ?? useNoProfiles;
+  const profiles = useProfiles();
   const label = entry.profileSwitch ? profileChangeSummary(entry.profileSwitch, profiles) : entry.label;
   return (
     <div
@@ -330,10 +333,9 @@ function ProfileNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElemen
  */
 function StopCascadeNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElement {
   const cause = entry.stopCascade!;
-  const liveTitle = useAppStore(
-    (state) => state.sessions.find((session) => session.id === cause.parentSessionId && session.kind === "agent-chat")?.title
-  );
-  const activateTab = useAppStore((state) => state.activateTab);
+  const chatTabs = useChatHost().chatTabs;
+  const useTitle = chatTabs?.useTitle ?? useNoName;
+  const liveTitle = useTitle(cause.parentSessionId);
   const label = stopCascadedSummary(cause.action, liveTitle ?? cause.parentTitle);
   return (
     <div
@@ -349,10 +351,10 @@ function StopCascadeNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactEl
         <CircleStop size={12} aria-hidden />
       </span>
       <span className="min-w-0 flex-1 break-words">{label}</span>
-      {liveTitle !== undefined ? (
+      {chatTabs && liveTitle !== undefined ? (
         <button
           type="button"
-          onClick={() => activateTab(cause.parentSessionId)}
+          onClick={() => chatTabs.open(cause.parentSessionId)}
           title={`Open “${liveTitle}”`}
           className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 text-[11px] underline-offset-2 hover:underline focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
         >
@@ -367,16 +369,14 @@ function StopCascadeNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactEl
 /**
  * "Continued from “<source>” (Claude Opus 4.1)" (thread lineage §6): the first row of a chat
  * continued in another agent or account. The source's title links back to its tab — its live
- * title, else the one recorded at the fork, marked closed — and the second line says what the
- * handoff carried and when the agent reads it.
+ * title, else the one recorded at the fork, marked closed (a host with no tabs: that title, inert)
+ * — and the second line says what the handoff carried and when the agent reads it.
  */
 function ContinuationNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElement {
   const continuation = entry.continuation!;
-  const liveTitle = useAppStore(
-    (state) =>
-      state.sessions.find((session) => session.id === continuation.parentThreadId && session.kind === "agent-chat")?.title
-  );
-  const activateTab = useAppStore((state) => state.activateTab);
+  const chatTabs = useChatHost().chatTabs;
+  const useTitle = chatTabs?.useTitle ?? useNoName;
+  const liveTitle = useTitle(continuation.parentThreadId);
   const detail = entry.detail?.trim() ?? "";
   return (
     <div
@@ -393,11 +393,13 @@ function ContinuationNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactE
       </span>
       <span className="min-w-0 flex-1 break-words">
         Continued from{" "}
-        {liveTitle !== undefined ? (
+        {!chatTabs ? (
+          <span>“{continuation.sourceTitle}”</span>
+        ) : liveTitle !== undefined ? (
           <button
             type="button"
             data-thread-link={continuation.parentThreadId}
-            onClick={() => activateTab(continuation.parentThreadId)}
+            onClick={() => chatTabs.open(continuation.parentThreadId)}
             title={`Open “${liveTitle}”`}
             className="inline rounded font-medium underline-offset-2 hover:underline focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
           >
@@ -458,13 +460,16 @@ export function ThreadLink({
   );
 }
 
-/** {@link ThreadLink} on the store: the project's chat tab of that id, opened as a tab. */
-function ThreadLinkButton({ link }: { link: NonNullable<WorkLogEntry["threadLink"]> }): React.ReactElement {
-  const title = useAppStore(
-    (state) => state.sessions.find((session) => session.id === link.threadId && session.kind === "agent-chat")?.title
-  );
-  const activateTab = useAppStore((state) => state.activateTab);
-  return <ThreadLink link={link} title={title} onOpen={activateTab} />;
+/** {@link ThreadLink} on the chat host's tabs: the chat tab of that id, opened as a tab. */
+function ThreadLinkButton({
+  link,
+  chatTabs
+}: {
+  link: NonNullable<WorkLogEntry["threadLink"]>;
+  chatTabs: NonNullable<ReturnType<typeof useChatHost>["chatTabs"]>;
+}): React.ReactElement {
+  const title = chatTabs.useTitle(link.threadId);
+  return <ThreadLink link={link} title={title} onOpen={chatTabs.open} />;
 }
 
 const ToolEntryRow = React.memo(function ToolEntryRow({
@@ -477,13 +482,16 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
   displayLabel?: string | undefined;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
+  const { chatTabs, deviceRows, desktopRows } = useChatHost();
   const expanded = ctx.isExpanded(entry.id);
-  // Devices §10.3: a device tool's row names its device as the store knows it.
+  // Devices §10.3: a device tool's row names its device as the host's store knows it.
   const deviceLink = entry.sessionTool !== undefined ? entry.deviceLink : undefined;
-  const storeDeviceName = useDeviceLinkName(deviceLink);
-  // Desktops R2.6: a desktop tool's row names its desktop as the store knows it.
+  const useDeviceName = deviceRows?.useName ?? useNoName;
+  const storeDeviceName = useDeviceName(deviceLink);
+  // Desktops R2.6: a desktop tool's row names its desktop as the host's store knows it.
   const desktopLink = entry.sessionTool !== undefined ? entry.desktopLink : undefined;
-  const desktopTitle = useDesktopLinkTitle(desktopLink);
+  const useDesktopTitle = desktopRows?.useTitle ?? useNoName;
+  const desktopTitle = useDesktopTitle(desktopLink);
 
   const warning = workEntryIsWarning(entry);
   const failed = workEntryDisplayIndicatesToolFailure(entry);
@@ -586,9 +594,9 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
               {label}
             </span>
           </p>
-          {entry.threadLink ? <ThreadLinkButton link={entry.threadLink} /> : null}
-          {deviceLink ? <DeviceShowButton link={deviceLink} sessionId={ctx.sessionId} /> : null}
-          {desktopLink ? <DesktopShowButton link={desktopLink} /> : null}
+          {entry.threadLink && chatTabs ? <ThreadLinkButton link={entry.threadLink} chatTabs={chatTabs} /> : null}
+          {deviceLink && deviceRows ? <deviceRows.ShowButton link={deviceLink} sessionId={ctx.sessionId} /> : null}
+          {desktopLink && desktopRows ? <desktopRows.ShowButton link={desktopLink} /> : null}
           {failed && !destructive ? (
             <X size={12} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500/40" />
           ) : null}
@@ -599,8 +607,10 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
           </span>
         </div>
       </div>
-      {deviceLink?.screenshotId ? <DeviceScreenshotThumb link={deviceLink} name={deviceLink.name ?? storeDeviceName} /> : null}
-      {desktopLink?.screenshotId ? <DesktopScreenshotThumb link={desktopLink} title={desktopTitle} /> : null}
+      {deviceLink?.screenshotId && deviceRows ? (
+        <deviceRows.ScreenshotThumb link={deviceLink} name={deviceLink.name ?? storeDeviceName} />
+      ) : null}
+      {desktopLink?.screenshotId && desktopRows ? <desktopRows.ScreenshotThumb link={desktopLink} title={desktopTitle} /> : null}
       {expanded && entry.questionAnswer ? <QuestionAnswerHistory answer={entry.questionAnswer} /> : null}
       {expanded && canExpand && entry.questionAnswer === undefined ? (
         <div
@@ -620,26 +630,33 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
           ) : null}
           {diff === null && changedFiles.length > 0 ? (
             <div className={cn("flex flex-col gap-0.5", (command.length > 0 || detail.length > 0) && "mt-2")}>
-              {changedFiles.map((path) => (
-                <button
-                  key={path}
-                  type="button"
-                  onClick={() => ctx.onOpenFile(path)}
-                  className="flex w-full min-w-0 items-center rounded px-1 py-0.5 text-left font-mono text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800/60 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-                >
-                  <span className="min-w-0 truncate">{path}</span>
-                </button>
-              ))}
+              {changedFiles.map((path) => {
+                const { onOpenFile } = ctx;
+                return onOpenFile ? (
+                  <button
+                    key={path}
+                    type="button"
+                    onClick={() => onOpenFile(path)}
+                    className="flex w-full min-w-0 items-center rounded px-1 py-0.5 text-left font-mono text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800/60 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+                  >
+                    <span className="min-w-0 truncate">{path}</span>
+                  </button>
+                ) : (
+                  <span key={path} className="flex w-full min-w-0 items-center px-1 py-0.5 font-mono text-[11px] text-neutral-400">
+                    <span className="min-w-0 truncate">{path}</span>
+                  </span>
+                );
+              })}
             </div>
           ) : null}
           {/* A promise that the read really has more: where the slimmer
               stamped `truncated` (§5.6), the item; where a command's output
               streamed, the host's join of it, of which this row may hold only
               the latest (`fullOutputSourceOf`). */}
-          {fullOutput !== null ? (
+          {fullOutput !== null && ctx.onLoadFullOutput ? (
             <button
               type="button"
-              onClick={() => ctx.onLoadFullOutput(entry.id, fullOutput)}
+              onClick={() => ctx.onLoadFullOutput?.(entry.id, fullOutput)}
               className="mt-2 rounded text-[11px] text-neutral-500 transition-colors hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
             >
               Load full output
@@ -1032,27 +1049,18 @@ const AgentSpawnRow = React.memo(function AgentSpawnRow({
         <div className="ms-7 mt-0.5 flex flex-col">
           {coordinator !== null ? (
             // The run itself: its drill-in heads with the workflow's script.
-            <button
-              type="button"
-              onClick={() => ctx.onOpenAgent(coordinator.id)}
-              className="flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-xs transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-            >
+            <SpawnMemberLine agentId={coordinator.id} onOpen={ctx.onOpenAgent}>
               <span className="min-w-0 flex-1 truncate text-neutral-400">
                 Workflow · {coordinator.workflowName ?? coordinator.title}
               </span>
               <span className="shrink-0 text-neutral-500">{MEMBER_STATUS_LABEL[coordinator.status]}</span>
-            </button>
+            </SpawnMemberLine>
           ) : null}
           {agents.map((agent) => (
-            <button
-              key={agent.id}
-              type="button"
-              onClick={() => ctx.onOpenAgent(agent.id)}
-              className="flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-xs transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-            >
+            <SpawnMemberLine key={agent.id} agentId={agent.id} onOpen={ctx.onOpenAgent}>
               <span className="min-w-0 flex-1 truncate text-neutral-300">{agent.title}</span>
               <span className="shrink-0 text-neutral-500">{MEMBER_STATUS_LABEL[agent.status]}</span>
-            </button>
+            </SpawnMemberLine>
           ))}
           {ownText !== null ? (
             <>
@@ -1073,3 +1081,25 @@ const AgentSpawnRow = React.memo(function AgentSpawnRow({
     </div>
   );
 });
+
+/** One agent a spawn row lists: opens its drill-in, or — with no drill-in to open (the embed) — a plain line. */
+function SpawnMemberLine({
+  agentId,
+  onOpen,
+  children
+}: {
+  agentId: string;
+  onOpen: ((agentId: string) => void) | null;
+  children: React.ReactNode;
+}): React.ReactElement {
+  if (!onOpen) return <div className="flex min-w-0 items-center gap-2 px-1 py-0.5 text-xs">{children}</div>;
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(agentId)}
+      className="flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-xs transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+    >
+      {children}
+    </button>
+  );
+}

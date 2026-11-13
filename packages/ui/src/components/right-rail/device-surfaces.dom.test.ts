@@ -11,7 +11,7 @@ import { fixtureLease } from "../devices-fleet/fixtures.test-helpers";
 let createRoot: typeof import("react-dom/client").createRoot;
 let devicesStore: typeof import("../../lib/devices/store").devicesStore;
 let useAppStore: typeof import("../../store/app").useAppStore;
-let DeviceShowButton: typeof import("../agent-chat/timeline/rows/DeviceRowLink").DeviceShowButton;
+let DeviceShowButton: typeof import("../device/DeviceRowLink").DeviceShowButton;
 let MobileSectionOverlay: typeof import("./MobileSections").MobileSectionOverlay;
 let mobileSection: typeof import("./mobile-section").mobileSection;
 let setMobileSection: typeof import("./mobile-section").setMobileSection;
@@ -30,7 +30,7 @@ before(async () => {
   ({ createRoot } = await import("react-dom/client"));
   ({ devicesStore } = await import("../../lib/devices/store"));
   ({ useAppStore } = await import("../../store/app"));
-  ({ DeviceShowButton } = await import("../agent-chat/timeline/rows/DeviceRowLink"));
+  ({ DeviceShowButton } = await import("../device/DeviceRowLink"));
   ({ MobileSectionOverlay } = await import("./MobileSections"));
   ({ mobileSection, setMobileSection } = await import("./mobile-section"));
 });

@@ -24,7 +24,7 @@ export function QuestionOptionPreview({
   className
 }: {
   option: UserInputQuestionOption;
-  onOpenFile?: ((path: string) => void) | undefined;
+  onOpenFile?: ((path: string) => void) | null | undefined;
   className?: string;
 }): React.ReactElement {
   const preview = option.preview ?? "";

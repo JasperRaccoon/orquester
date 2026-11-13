@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useBackClose } from "../../hooks/use-back-close";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
+import { usePortalContainer } from "../../lib/portal-container";
 import { DropdownContext } from "./dropdown";
 
 export interface BottomSheetProps {
@@ -24,6 +25,7 @@ export interface BottomSheetProps {
 export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, label, children }) => {
   useOpenLayer(open);
   useBackClose(open, onClose);
+  const portalContainer = usePortalContainer();
   useEffect(() => {
     if (!open) {
       return;
@@ -41,7 +43,7 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, 
     // NB: the wrapper is `overflow-hidden` (it clips the extra vw `w-screen`
     // adds when a scrollbar is present), so anything that must escape the sheet
     // box — a dropdown panel, tooltip, confirm dialog — has to portal to
-    // document.body rather than render inline here.
+    // the portal container rather than render inline here.
     <div
       className="fixed inset-0 z-[110] flex flex-col justify-end overflow-hidden"
       onMouseDown={onClose}
@@ -74,6 +76,6 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, 
         </div>
       </div>
     </div>,
-    document.body
+    portalContainer
   );
 };

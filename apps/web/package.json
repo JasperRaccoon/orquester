@@ -5,12 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
-    "build": "vite build",
+    "build": "vite build && vite build -c vite.embed.config.ts",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test $(find test -name '*.test.mjs')"
+    "test": "TSX_DISABLE_CACHE=1 node --import tsx --import ../../packages/ui/test/svg-loader.mjs --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find test src vite -name '*.test.mjs' -o -name '*.test.ts')"
   },
   "dependencies": {
+    "@orquester/api": "workspace:*",
     "@orquester/ui": "workspace:*",
     "@vitejs/plugin-react": "^4.5.2",
     "autoprefixer": "^10.4.21",
@@ -21,8 +22,12 @@
     "vite": "^6.3.5"
   },
   "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.19.21",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "jsdom": "^26.1.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.8.3",
     "vite-plugin-svgr": "^5.2.0"
   }

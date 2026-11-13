@@ -18,7 +18,8 @@
 #   AUTO_REVERT 1 (default) rolls a release that fails its health check back; 0 leaves it
 # Exit codes: 0 deployed; 1 failed before or without a revert; 3 the new release
 # failed its health check and the previous one was restored (running, healthy);
-# 4 the previous one failed to come back too (the daemon is DOWN).
+# 4 the previous one failed to come back too (the daemon is DOWN); 5 another update
+# (./deploy.sh or the self-update unit) is running on this checkout — nothing was touched.
 set -euo pipefail
 trap 'echo "[remote-update] FAILED at line $LINENO" >&2' ERR
 
@@ -38,6 +39,26 @@ AUTO_REVERT="${AUTO_REVERT:-1}"
 STAMP_FILE=".orquester-version.json"
 
 cd "$REPO_DIR"
+# One update at a time per checkout: ./deploy.sh and the self-update unit (orquester-update.service)
+# both run this script. The lock lives in the root-owned .git (no one else can plant a file there);
+# it is opened read-only (0644 whatever the umask), which is enough for flock, so a non-root deploy
+# user (SUDO=sudo) can hold it too. Held until this script exits; commands that may leave a process
+# behind (git's detached auto-gc) get fd 9 closed. A host without flock (not Linux), or a .git the
+# deploy user cannot read, runs unlocked with a warning rather than not at all.
+lock_held=0
+if command -v flock >/dev/null 2>&1; then
+  lock_file="$REPO_DIR/.git/orq-deploy.lock"
+  [ -e "$lock_file" ] || $SUDO install -m 0644 /dev/null "$lock_file" 2>/dev/null || true
+  [ -r "$lock_file" ] || $SUDO chmod 0644 "$lock_file" 2>/dev/null || true
+  if { exec 9<"$lock_file"; } 2>/dev/null; then
+    if ! flock -n 9; then
+      echo "[remote-update] another update is running on $REPO_DIR (./deploy.sh or the self-update unit) — try again when it ends." >&2
+      exit 5
+    fi
+    lock_held=1
+  fi
+fi
+[ "$lock_held" -eq 1 ] || echo "[remote-update] WARNING: running without the update lock (no flock, or $REPO_DIR/.git/orq-deploy.lock unreadable)." >&2
 old_head="$($SUDO git rev-parse HEAD)"
 # Base the Caddyfile-drift check on the last SUCCESSFUL deploy, not the current
 # checkout: a deploy that dies after `git reset` leaves the tree at the new HEAD,
@@ -50,7 +71,7 @@ if last_ok="$($SUDO cat "$state_file" 2>/dev/null)" \
   drift_base="$last_ok"
 fi
 previous="$drift_base"
-$SUDO git fetch origin -q
+$SUDO git fetch origin -q 9<&-
 $SUDO git rev-parse --verify --quiet "$RESET_REF^{commit}" >/dev/null \
   || { echo "[remote-update] ref not found: $RESET_REF" >&2; exit 1; }
 $SUDO git reset --hard -q "$RESET_REF"

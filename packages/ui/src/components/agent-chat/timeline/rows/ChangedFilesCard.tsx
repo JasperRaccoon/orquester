@@ -115,20 +115,38 @@ export const ChangedFilesCard = React.memo(function ChangedFilesCard({
         </div>
       );
     }
-    return (
-      <button
-        key={`file:${node.path}`}
-        type="button"
-        style={{ paddingLeft: `${paddingLeft}px` }}
-        onClick={() => ctx.onOpenFile(node.path)}
-        className="group flex w-full items-center gap-2 rounded-md py-1.5 pr-2 text-left transition-colors hover:bg-neutral-800/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-      >
+    const fileLine = (
+      <>
         {hasDirectories || depth > 0 ? <span aria-hidden className="h-3.5 w-3.5 shrink-0" /> : null}
         <FileIcon size={14} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
         <span className="truncate font-mono text-xs text-neutral-300 group-hover:text-neutral-100">
           {node.name}
         </span>
         {node.stat ? <DiffStatLabel stat={node.stat} /> : null}
+      </>
+    );
+    const { onOpenFile } = ctx;
+    // Nothing to open a file with (the embed): the line is a plain one.
+    if (!onOpenFile) {
+      return (
+        <div
+          key={`file:${node.path}`}
+          style={{ paddingLeft: `${paddingLeft}px` }}
+          className="flex w-full items-center gap-2 py-1.5 pr-2"
+        >
+          {fileLine}
+        </div>
+      );
+    }
+    return (
+      <button
+        key={`file:${node.path}`}
+        type="button"
+        style={{ paddingLeft: `${paddingLeft}px` }}
+        onClick={() => onOpenFile(node.path)}
+        className="group flex w-full items-center gap-2 rounded-md py-1.5 pr-2 text-left transition-colors hover:bg-neutral-800/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+      >
+        {fileLine}
       </button>
     );
   };
@@ -162,13 +180,15 @@ export const ChangedFilesCard = React.memo(function ChangedFilesCard({
               )}
             </ChatIconButton>
           ) : null}
-          <ChatIconButton
-            size="xs"
-            label="Open the full diff for this turn"
-            onClick={() => ctx.onOpenTurnDiff(turnCount)}
-          >
-            <FileDiff size={12} strokeWidth={1.8} aria-hidden />
-          </ChatIconButton>
+          {ctx.onOpenTurnDiff ? (
+            <ChatIconButton
+              size="xs"
+              label="Open the full diff for this turn"
+              onClick={() => ctx.onOpenTurnDiff?.(turnCount)}
+            >
+              <FileDiff size={12} strokeWidth={1.8} aria-hidden />
+            </ChatIconButton>
+          ) : null}
         </div>
       </div>
       <div className="p-2">{tree.map((node) => renderNode(node, 0))}</div>
