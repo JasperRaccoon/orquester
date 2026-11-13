@@ -91,7 +91,7 @@ export interface ChatHost {
    * The live state of delegated child chats (the subagent strip): each
    * child's view from its tab, its agent · model · account line, and opening
    * it (false once its tab is gone). Absent: each child as its call recorded
-   * it, with no meta line and no Open.
+   * it — no status (never "closed"), clock, meta line or Open.
    */
   delegates?: {
     useChildViews(refs: readonly DelegateChildRef[]): DelegateChildView[];
