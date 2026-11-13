@@ -7,7 +7,9 @@
  * The row holds ids only (`delegate-group`, rows.logic); everything live comes from the children's
  * tab summaries, through the chat host (`ChatHost.delegates`; in the app, its store, kept fresh by
  * the `sessions` bus). A child whose tab was closed keeps its line, shown closed, with Open
- * disabled. A host with no tabs shows each child as its call recorded it, with no Open.
+ * disabled. A host with no tabs (the embed) knows nothing of the children's tabs: each child
+ * shows as its call recorded it — its title — with no status, clock or Open, and never as
+ * closed.
  *
  * *T3: `MessagesTimeline.tsx` `V2SubagentGroup` and `V2LifecycleRow`.*
  */
@@ -51,15 +53,18 @@ export const DelegateGroupRow = React.memo(function DelegateGroupRow({
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
   const expanded = ctx.isExpanded(row.groupId);
-  const useChildViews = useChatHost().delegates?.useChildViews ?? useRecordedChildViews;
+  const delegates = useChatHost().delegates;
+  // No host tabs: how a child fares is unknown here, so nothing claims it.
+  const recorded = delegates === undefined;
+  const useChildViews = delegates?.useChildViews ?? useRecordedChildViews;
   const views = useChildViews(row.children);
   const statuses = views.map((view) => view.status);
-  const summary = summarizeDelegateStatuses(statuses);
+  const summary = recorded ? null : summarizeDelegateStatuses(statuses);
   const timing = delegateGroupTiming(views);
   const label = delegateGroupLabel(views.length);
   const panelId = `${row.groupId}:children`;
   // A settled group with no end any child reports claims no duration.
-  const showTimer = timing.startedAt !== null && (timing.live || timing.endedAt !== null);
+  const showTimer = !recorded && timing.startedAt !== null && (timing.live || timing.endedAt !== null);
 
   return (
     <section
@@ -71,7 +76,7 @@ export const DelegateGroupRow = React.memo(function DelegateGroupRow({
         type="button"
         aria-expanded={expanded}
         aria-controls={panelId}
-        aria-label={`${label}: ${summary}`}
+        aria-label={summary === null ? label : `${label}: ${summary}`}
         onClick={() => ctx.setExpanded(row.groupId, !expanded)}
         className={cn(
           "flex w-full min-w-0 items-center gap-3 px-2.5 py-2 text-left transition-colors",
@@ -81,7 +86,9 @@ export const DelegateGroupRow = React.memo(function DelegateGroupRow({
         <DelegateAvatars refIds={views.map((view) => view.refId)} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-xs font-semibold text-neutral-200">{label}</span>
-          <span className={cn("block truncate text-[11px]", delegateSummaryTone(statuses))}>{summary}</span>
+          {summary !== null ? (
+            <span className={cn("block truncate text-[11px]", delegateSummaryTone(statuses))}>{summary}</span>
+          ) : null}
         </span>
         {showTimer ? (
           <span className="shrink-0 font-mono text-[11px] text-neutral-500">
@@ -93,7 +100,7 @@ export const DelegateGroupRow = React.memo(function DelegateGroupRow({
       {expanded ? (
         <ul id={panelId} className="flex flex-col gap-0.5 border-t border-neutral-800/80 p-1">
           {views.map((view) => (
-            <DelegateChildLine key={view.ref.callId} view={view} />
+            <DelegateChildLine key={view.ref.callId} view={view} recorded={recorded} />
           ))}
         </ul>
       ) : null}
@@ -101,8 +108,11 @@ export const DelegateGroupRow = React.memo(function DelegateGroupRow({
   );
 });
 
-/** One child: status dot, agent, title and status word, agent · model · account, preview, Open. */
-function DelegateChildLine({ view }: { view: DelegateChildView }): React.ReactElement {
+/**
+ * One child: status dot, agent, title and status word, agent · model · account, preview, Open.
+ * `recorded` (no host tabs): the title alone, as the call recorded it.
+ */
+function DelegateChildLine({ view, recorded }: { view: DelegateChildView; recorded: boolean }): React.ReactElement {
   const visual = delegateStatusVisual(view.status);
   const delegates = useChatHost().delegates;
   const useMetaLine = delegates?.useMetaLine ?? useNoMetaLine;
@@ -112,35 +122,39 @@ function DelegateChildLine({ view }: { view: DelegateChildView }): React.ReactEl
   return (
     <li
       data-delegate-child={threadId ?? view.ref.callId}
-      data-status={view.status}
-      className={cn("flex min-w-0 items-start gap-2 rounded-md px-1.5 py-1.5", view.status === "closed" && "opacity-70")}
+      data-status={recorded ? undefined : view.status}
+      className={cn("flex min-w-0 items-start gap-2 rounded-md px-1.5 py-1.5", !recorded && view.status === "closed" && "opacity-70")}
     >
-      <span className="flex h-5 shrink-0 items-center">
-        <StatusDot tone={visual.tone} size="xs" pulse={visual.pulse} ping={visual.ping} label={visual.label} />
-      </span>
+      {recorded ? null : (
+        <span className="flex h-5 shrink-0 items-center">
+          <StatusDot tone={visual.tone} size="xs" pulse={visual.pulse} ping={visual.ping} label={visual.label} />
+        </span>
+      )}
       <DelegateAvatar refId={view.refId} className="h-5 w-5 ring-0" />
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-baseline gap-1.5">
           <span className="min-w-0 truncate text-sm text-neutral-200" title={view.title}>
             {view.title}
           </span>
-          <span
-            className={cn(
-              "shrink-0 text-[11px]",
-              view.status === "needs-input"
-                ? "text-warn-300"
-                : view.status === "failed"
-                  ? "text-danger-300"
-                  : "text-neutral-500"
-            )}
-          >
-            {visual.label}
-          </span>
+          {recorded ? null : (
+            <span
+              className={cn(
+                "shrink-0 text-[11px]",
+                view.status === "needs-input"
+                  ? "text-warn-300"
+                  : view.status === "failed"
+                    ? "text-danger-300"
+                    : "text-neutral-500"
+              )}
+            >
+              {visual.label}
+            </span>
+          )}
         </span>
         {meta ? <span className="block truncate font-mono text-[11px] text-neutral-500">{meta}</span> : null}
         {view.preview ? (
           <span className="mt-0.5 line-clamp-2 block break-words text-xs leading-relaxed text-neutral-400">{view.preview}</span>
-        ) : view.status === "closed" ? (
+        ) : !recorded && view.status === "closed" ? (
           <span className="mt-0.5 block text-xs text-neutral-500">Its tab was closed.</span>
         ) : null}
       </span>

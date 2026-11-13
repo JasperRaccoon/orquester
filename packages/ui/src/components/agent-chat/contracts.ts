@@ -100,18 +100,30 @@ export interface ChatTimelineProps {
    * makes every rewind read as removing one turn — the floor.
    */
   startedTurnCount?: number | undefined;
-  /** Open a turn's unified diff (`GET …/turns/:n/diff`). */
-  onOpenTurnDiff: (turnCount: number) => void;
-  /** Click-through from a file-change row to an editor tab. */
-  onOpenFile: (path: string) => void;
+  /**
+   * Open a turn's unified diff (`GET …/turns/:n/diff`). `null` where nothing
+   * can show one (the embed): the changed-files card offers no diff button.
+   */
+  onOpenTurnDiff: ((turnCount: number) => void) | null;
+  /**
+   * Click-through from a file-change row, a diff heading or a workspace link
+   * to an editor tab. `null` where nothing can open a file (the embed): those
+   * paths render as plain text.
+   */
+  onOpenFile: ((path: string) => void) | null;
   /**
    * Fetch one item's full, unslimmed payload (§5.6 "load full output") — or,
    * for a command whose output streamed (`source: "streamed"`), first its
-   * call's whole output as the host joins it (§6.3).
+   * call's whole output as the host joins it (§6.3). `null` where nothing can
+   * read it (an embed with no `itemOutput` loader): no "load full output",
+   * "load the full summary" or "show full prompt" read is offered.
    */
-  onLoadFullOutput: (itemId: string, source?: FullOutputSource) => void;
-  /** Drill in to a subagent's own timeline (§7.6). */
-  onOpenAgent: (agentId: string) => void;
+  onLoadFullOutput: ((itemId: string, source?: FullOutputSource) => void) | null;
+  /**
+   * Drill in to a subagent's own timeline (§7.6). `null` where there is no
+   * drill-in (the embed): a spawn row lists its agents, not clickable.
+   */
+  onOpenAgent: ((agentId: string) => void) | null;
   onSendQueuedNow: (queuedId: string) => void;
   onReturnQueuedToComposer: (queuedId: string) => void;
   /**

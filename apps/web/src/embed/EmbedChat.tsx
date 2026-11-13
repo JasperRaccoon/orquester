@@ -6,8 +6,10 @@
  *
  * Mounted by the element (`element.tsx`) in its shadow root with its own
  * {@link ChatHost} and portal container. Every app-only affordance the
- * timeline takes as a prop is left out or inert: no rewind, fork, "continue
- * in…", turn diff, file opening, agent drill-in, queue or background tool.
+ * timeline takes as a prop is left out — never a control that does nothing:
+ * no rewind, fork, "continue in…", turn diff, file opening (paths are plain
+ * text), agent drill-in, queue or background tool, and no "load full output"
+ * until the host sets an `itemOutput` loader.
  */
 
 import React from "react";
@@ -124,10 +126,12 @@ export function EmbedChat({ thread, settings, host, portal, onCommand }: EmbedCh
             bottomInset={0}
             canRevert={false}
             onRevert={noop}
-            onOpenTurnDiff={noop}
-            onOpenFile={noop}
-            onLoadFullOutput={config.loaders.itemOutput === undefined ? noop : onLoadFullOutput}
-            onOpenAgent={noop}
+            // Nothing opens here: no turn diff, file or agent drill-in, so
+            // those render as plain text. Full output only with its loader.
+            onOpenTurnDiff={null}
+            onOpenFile={null}
+            onLoadFullOutput={config.loaders.itemOutput === undefined ? null : onLoadFullOutput}
+            onOpenAgent={null}
             onSendQueuedNow={noop}
             onReturnQueuedToComposer={noop}
             threadReady={sessionId !== null}
@@ -250,7 +254,7 @@ function EmbedPendingDock({
               onDismiss={
                 userInput.dismissible ? () => onCommand({ command: "dismiss", requestId: userInput.requestId }) : null
               }
-              onCarryTextToDraft={noop}
+              onOpenFile={null}
               active={false}
             />
           </TimelineRowContext.Provider>

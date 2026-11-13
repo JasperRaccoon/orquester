@@ -3,6 +3,7 @@
  * folded from its events and projected the way the app projects it (fold →
  * entries → rows) renders in `ChatTimeline` with no provider of any kind — no
  * `OrquesterProvider`, no chat host, no thread store — and shows its messages.
+ * Given the app's callbacks, its rows offer what they open and read.
  */
 
 import assert from "node:assert/strict";
@@ -13,7 +14,7 @@ import { JSDOM } from "jsdom";
 
 import { foldThread, type DomainEvent } from "@orquester/api/agent-chat";
 
-import { ev, resetBuilders } from "../../../lib/agent-chat/test-helpers";
+import { activity, ev, message, resetBuilders } from "../../../lib/agent-chat/test-helpers";
 
 let act: typeof import("react").act;
 let createRoot: typeof import("react-dom/client").createRoot;
@@ -162,4 +163,81 @@ it("renders a folded thread's messages with no app, host or store around it", as
   // No host to open knowledge entries: the citation is its link's plain text.
   assert.equal(mount.querySelector("[data-knowledge-citation]"), null);
   assert.ok(mount.querySelector('[data-knowledge-citation-text="ke_aaaaaaaaaaaa"]'));
+});
+
+it("with the app's callbacks, opens files and the turn diff and reads full output", async () => {
+  resetBuilders();
+  const at = (second: number): string => `2026-11-13T10:00:0${second}.000Z`;
+  const items = [
+    message("user", "Fix the port", { id: "u1", turnId: "t1", createdAt: at(0) }),
+    activity(
+      "tool.completed",
+      { itemType: "command_execution", toolUseId: "call-ls", command: "ls -la /etc", status: "completed", truncated: true, data: { output: "a" } },
+      { id: "cmd-1", turnId: "t1", createdAt: at(1), status: "completed" }
+    ),
+    message("assistant", "Edited [the server](src/server.ts).", { id: "a1", turnId: "t1", createdAt: at(2) })
+  ];
+  const { entries } = deriveTimelineEntriesFromItems(items);
+  const { rows } = deriveTimelineRowsWithState({
+    timelineEntries: entries,
+    turns: [
+      { turnId: "t1", state: "completed", turnCount: 1, requestedAt: at(0), startedAt: at(0), completedAt: at(5), assistantMessageId: "a1", userMessageId: "u1" }
+    ],
+    checkpoints: [
+      {
+        turnId: "t1",
+        checkpointTurnCount: 1,
+        checkpointRef: "refs/orquester/checkpoints/x/turn/1",
+        status: "ready",
+        files: [{ path: "src/server.ts", additions: 3, deletions: 1 }],
+        assistantMessageId: "a1",
+        completedAt: at(5)
+      }
+    ],
+    expandedTurnIds: new Set(["t1"]),
+    isWorking: false,
+    activeTurnStartedAt: null,
+    supportsConversationRollback: false
+  });
+  const calls: string[] = [];
+  const noop = (): void => {};
+  const mount = document.createElement("div");
+  document.body.appendChild(mount);
+  root = createRoot(mount);
+  await act(async () => {
+    root!.render(
+      createElement(ChatTimeline, {
+        sessionId: "s1",
+        rows,
+        follow: true,
+        onFollowChange: noop,
+        disclosures: { expandedTurnIds: ["t1"], expandedGroupIds: ["cmd-1"], expandedAgentIds: [], expandedReasoningIds: [], toolOutputOffsets: {} },
+        onDisclosureChange: noop,
+        bottomInset: 0,
+        canRevert: false,
+        onRevert: noop,
+        onOpenTurnDiff: (turnCount) => void calls.push(`diff:${turnCount}`),
+        onOpenFile: (path) => void calls.push(`file:${path}`),
+        onLoadFullOutput: (itemId) => void calls.push(`output:${itemId}`),
+        onOpenAgent: noop,
+        onSendQueuedNow: noop,
+        onReturnQueuedToComposer: noop,
+        errorBanner: null,
+        onDismissErrorBanner: noop,
+        threadReady: true
+      })
+    );
+  });
+
+  const buttons = (): HTMLButtonElement[] => Array.from(mount.querySelectorAll("button"));
+  const press = async (find: (button: HTMLButtonElement) => boolean, what: string): Promise<void> => {
+    const button = buttons().find(find);
+    assert.ok(button, what);
+    await act(async () => button.click());
+  };
+  await press((button) => button.getAttribute("aria-label") === "Open the full diff for this turn", "the turn diff");
+  await press((button) => button.textContent === "the server", "the workspace link");
+  await press((button) => button.textContent?.includes("server.ts") === true, "the changed file");
+  await press((button) => button.textContent === "Load full output", "the full output");
+  assert.deepEqual(calls, ["diff:1", "file:src/server.ts", "file:src/server.ts", "output:cmd-1"]);
 });

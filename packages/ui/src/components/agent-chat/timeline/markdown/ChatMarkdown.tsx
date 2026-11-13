@@ -58,8 +58,12 @@ export interface ChatMarkdownProps {
   text: string;
   /** Arms the incremental parser and the per-block streaming fade. */
   streaming?: boolean;
-  /** Opens a workspace-relative link in an editor tab instead of navigating. */
-  onOpenFile?: ((path: string) => void) | undefined;
+  /**
+   * Opens a workspace-relative link in an editor tab instead of navigating.
+   * `null`: nothing can open one here (the embed), so such a link is its
+   * plain text; absent: it navigates, as any link.
+   */
+  onOpenFile?: ((path: string) => void) | null | undefined;
   /**
    * Remote (`http(s):`) images: `"load"` (the default) shows them at once; `"click"` holds each back
    * behind a "Load image" button, so text saved from elsewhere cannot fire a tracking pixel on open.
@@ -75,7 +79,7 @@ export interface ChatMarkdownProps {
 interface MarkdownConfig {
   mode: "light" | "dark";
   streaming: boolean;
-  onOpenFile: ((path: string) => void) | undefined;
+  onOpenFile: ((path: string) => void) | null | undefined;
   remoteImages: "load" | "click";
 }
 
@@ -203,7 +207,7 @@ function MarkdownAnchor({
   children
 }: {
   target: string;
-  onOpenFile: ((path: string) => void) | undefined;
+  onOpenFile: ((path: string) => void) | null | undefined;
   children?: React.ReactNode;
 }): React.ReactElement {
   const forge = React.useMemo(() => parseForgeLink(target), [target]);
@@ -216,7 +220,9 @@ function MarkdownAnchor({
   }
   // Info-coloured, no underline at rest; hover draws a dotted one.
   const linkClass = "text-info-300 underline-offset-2 hover:underline hover:decoration-dotted";
-  if (onOpenFile && looksLikeWorkspacePath(target)) {
+  if (onOpenFile !== undefined && looksLikeWorkspacePath(target)) {
+    // With no opener, a workspace path is not a link: there is nowhere to go.
+    if (onOpenFile === null) return <span data-workspace-link-text={target}>{children}</span>;
     return (
       <button type="button" onClick={() => onOpenFile(target)} className={cn("cursor-pointer", linkClass)}>
         {children}

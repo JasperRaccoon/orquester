@@ -630,26 +630,33 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
           ) : null}
           {diff === null && changedFiles.length > 0 ? (
             <div className={cn("flex flex-col gap-0.5", (command.length > 0 || detail.length > 0) && "mt-2")}>
-              {changedFiles.map((path) => (
-                <button
-                  key={path}
-                  type="button"
-                  onClick={() => ctx.onOpenFile(path)}
-                  className="flex w-full min-w-0 items-center rounded px-1 py-0.5 text-left font-mono text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800/60 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-                >
-                  <span className="min-w-0 truncate">{path}</span>
-                </button>
-              ))}
+              {changedFiles.map((path) => {
+                const { onOpenFile } = ctx;
+                return onOpenFile ? (
+                  <button
+                    key={path}
+                    type="button"
+                    onClick={() => onOpenFile(path)}
+                    className="flex w-full min-w-0 items-center rounded px-1 py-0.5 text-left font-mono text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800/60 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+                  >
+                    <span className="min-w-0 truncate">{path}</span>
+                  </button>
+                ) : (
+                  <span key={path} className="flex w-full min-w-0 items-center px-1 py-0.5 font-mono text-[11px] text-neutral-400">
+                    <span className="min-w-0 truncate">{path}</span>
+                  </span>
+                );
+              })}
             </div>
           ) : null}
           {/* A promise that the read really has more: where the slimmer
               stamped `truncated` (§5.6), the item; where a command's output
               streamed, the host's join of it, of which this row may hold only
               the latest (`fullOutputSourceOf`). */}
-          {fullOutput !== null ? (
+          {fullOutput !== null && ctx.onLoadFullOutput ? (
             <button
               type="button"
-              onClick={() => ctx.onLoadFullOutput(entry.id, fullOutput)}
+              onClick={() => ctx.onLoadFullOutput?.(entry.id, fullOutput)}
               className="mt-2 rounded text-[11px] text-neutral-500 transition-colors hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
             >
               Load full output
@@ -1042,27 +1049,18 @@ const AgentSpawnRow = React.memo(function AgentSpawnRow({
         <div className="ms-7 mt-0.5 flex flex-col">
           {coordinator !== null ? (
             // The run itself: its drill-in heads with the workflow's script.
-            <button
-              type="button"
-              onClick={() => ctx.onOpenAgent(coordinator.id)}
-              className="flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-xs transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-            >
+            <SpawnMemberLine agentId={coordinator.id} onOpen={ctx.onOpenAgent}>
               <span className="min-w-0 flex-1 truncate text-neutral-400">
                 Workflow · {coordinator.workflowName ?? coordinator.title}
               </span>
               <span className="shrink-0 text-neutral-500">{MEMBER_STATUS_LABEL[coordinator.status]}</span>
-            </button>
+            </SpawnMemberLine>
           ) : null}
           {agents.map((agent) => (
-            <button
-              key={agent.id}
-              type="button"
-              onClick={() => ctx.onOpenAgent(agent.id)}
-              className="flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-xs transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-            >
+            <SpawnMemberLine key={agent.id} agentId={agent.id} onOpen={ctx.onOpenAgent}>
               <span className="min-w-0 flex-1 truncate text-neutral-300">{agent.title}</span>
               <span className="shrink-0 text-neutral-500">{MEMBER_STATUS_LABEL[agent.status]}</span>
-            </button>
+            </SpawnMemberLine>
           ))}
           {ownText !== null ? (
             <>
@@ -1083,3 +1081,25 @@ const AgentSpawnRow = React.memo(function AgentSpawnRow({
     </div>
   );
 });
+
+/** One agent a spawn row lists: opens its drill-in, or — with no drill-in to open (the embed) — a plain line. */
+function SpawnMemberLine({
+  agentId,
+  onOpen,
+  children
+}: {
+  agentId: string;
+  onOpen: ((agentId: string) => void) | null;
+  children: React.ReactNode;
+}): React.ReactElement {
+  if (!onOpen) return <div className="flex min-w-0 items-center gap-2 px-1 py-0.5 text-xs">{children}</div>;
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(agentId)}
+      className="flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-xs transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+    >
+      {children}
+    </button>
+  );
+}
