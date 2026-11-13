@@ -124,7 +124,12 @@ import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks, writeFileAtomic } from "./agent-hooks";
 import { DailyLogStream } from "./daily-log.ts";
-import { daemonBuildInfo, type BuildInfo } from "./build-info.ts";
+import { daemonBuildInfo, findRepoRoot, type BuildInfo } from "./build-info.ts";
+import { StorageScanService } from "./storage/scan-service.ts";
+import { registerStorageRoutes } from "./storage/routes.ts";
+import { createStorageGuard, readMountPoints, type StorageGuard } from "./storage/guard.ts";
+import { registerStorageActionRoutes } from "./storage/action-routes.ts";
+import { resolveGduBinary } from "./storage/gdu.ts";
 import { listAgentConversations } from "./agent-conversations.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import { createSessionStream } from "./session-stream";
@@ -344,10 +349,11 @@ import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, realpathSync } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { fsPathFromQuery } from "./fs-path-query.js";
 import { randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
@@ -1606,6 +1612,34 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // GPT Image: generate_image on a connected Codex account's ChatGPT plan, while the plugin is on.
   // Its logins are read and renewed through the accounts service only (`gpt-image/accounts.ts`).
   const gptImage = new GptImageService({ plugins, accounts: agentAccounts, fsRoot: () => resolved.fsRoot, logger: console });
+  // Host storage (Settings → Host status → Storage): one scan service for both transports (one gdu
+  // scan at a time, the nightly schedule) and the action guard its tree query and the
+  // delete/rename/download routes share. The guard canonicalises its paths once, here.
+  const storageScans = new StorageScanService({
+    baseDir: paths.baseDir,
+    publish: (channel, type, payload) => broadcaster.publish(channel, type, payload),
+    logger: console
+  });
+  const gduAtBoot = (() => {
+    const bin = resolveGduBinary({ baseDir: paths.baseDir });
+    try {
+      return bin ? dirname(realpathSync(bin)) : null;
+    } catch {
+      return null;
+    }
+  })();
+  const storageGuard = createStorageGuard({
+    rootDir: "/",
+    mountPoints: () => readMountPoints(),
+    appdir: paths.baseDir,
+    homeDir: resolved.vars.userhome,
+    workspacesDir: resolved.workspacesDir,
+    fsRoot: resolved.fsRoot,
+    daemonCheckoutDir:
+      findRepoRoot(dirname(fileURLToPath(import.meta.url))) ?? fileURLToPath(new URL("../../..", import.meta.url)),
+    toolDirs: ["/opt/orquester-tools", ...(gduAtBoot ? [gduAtBoot] : [])],
+    secretPaths: ["/etc/orquester"]
+  });
   const services: Services = {
     buildInfo,
     authSessions,
@@ -1631,7 +1665,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxRegistry: boxes.registry,
     boxWiring: boxes,
     devices,
-    gptImage
+    gptImage,
+    storage: { scans: storageScans, guard: storageGuard }
   };
   // umcp:t3 begin
   // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
@@ -1911,6 +1946,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentProfile.start();
   // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.
   await secretFiles.start().catch((error) => console.error("Secret files start failed", error instanceof Error ? error.name : error));
+  // Host storage: loads the saved scans and arms the nightly scan.
+  await storageScans.start().catch((error) => console.error("Storage scans start failed", error instanceof Error ? error.message : error));
 
   const stop = async () => {
     // First, while the event streams still flow: clients show "restarting"
@@ -1934,6 +1971,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     await devices.stop().catch((error) => console.error("Device service stop failed", error instanceof Error ? error.message : error));
     // GPT Image: stops following the plugin and the accounts.
     gptImage.stop();
+    // Host storage: the nightly timer stops and a running gdu scan's process group is killed.
+    await storageScans.dispose().catch((error) => console.error("Storage scans stop failed", error instanceof Error ? error.message : error));
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
@@ -2172,6 +2211,8 @@ interface Services {
   devices?: DaemonDevices;
   /** GPT Image: the plugin's service (settings routes). Optional: route tests build a partial `services`. */
   gptImage?: GptImageService;
+  /** Host storage: the scan service and the action guard (Storage routes). Optional: route tests build a partial `services`. */
+  storage?: { scans: StorageScanService; guard: StorageGuard };
 }
 
 export function createServer(
@@ -4229,6 +4270,20 @@ export function createServer(
   );
 
   app.get("/api/system/ports", async (): Promise<SystemPortsResponse> => systemStatus.ports());
+
+  // Host storage (Settings → Host status → Storage): the gdu scans and the tree query, then the
+  // guarded delete/rename/download. Not confined to fsRoot — the storage guard decides
+  // (storage/guard.ts); both transports, like killing a process here.
+  if (services.storage) {
+    registerStorageRoutes(app, { service: services.storage.scans, guard: services.storage.guard });
+    registerStorageActionRoutes(app, {
+      guard: services.storage.guard,
+      tree: services.storage.scans,
+      closeTreeUsers,
+      notifyWorkspacesChanged,
+      supported: process.platform === "linux"
+    });
+  }
 
   // Past conversations of every installed agent for one project, merged and
   // newest-first, read out of each CLI's own history dir. Fail-soft on purpose:
