@@ -127,6 +127,7 @@ import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsR
 import { accountLendRoutes, boxRoutes, type AccountLendsResponse } from "@orquester/api";
 // Devices: the Device simulators plugin's routes and payloads (answers validated by `lib/devices/validate.ts`).
 import { deviceRoutes } from "@orquester/api";
+import { selfUpdateRoutes, type SelfUpdateStartResponse, type SelfUpdateStatusResponse } from "@orquester/api";
 import type {
   DeviceActionsResponse,
   DeviceCacheWarmResponse,
@@ -508,6 +509,16 @@ export class ApiClient {
 
   info(signal?: AbortSignal): Promise<ServerInfoResponse> {
     return this.send("GET", "/api/info", { signal });
+  }
+
+  /** Whether the server is behind its branch on GitHub, whether it can update itself, and its updater's last run. */
+  selfUpdateStatus(signal?: AbortSignal): Promise<SelfUpdateStatusResponse> {
+    return this.send("GET", selfUpdateRoutes.status, { signal });
+  }
+
+  /** Ask the host updater to update and restart the server; a 409 `SELF_UPDATE_BUSY` / `SELF_UPDATE_UNAVAILABLE` throws. */
+  startSelfUpdate(): Promise<SelfUpdateStartResponse> {
+    return this.send("POST", selfUpdateRoutes.status);
   }
 
   /** Public auth metadata: whether a sign-in is required (and a username with it). */

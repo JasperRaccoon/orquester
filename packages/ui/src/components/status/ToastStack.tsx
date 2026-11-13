@@ -4,6 +4,7 @@ import { AgentAuthErrorToast } from "./AgentAuthErrorToast";
 import { ConnectionStatusToast } from "./ConnectionStatusToast";
 import { NoticeToast } from "./NoticeToast";
 import { ResumeErrorToast } from "./ResumeErrorToast";
+import { UpdateAvailableToast } from "./UpdateAvailableToast";
 import { WorkflowRunToast } from "../workflows/runs/WorkflowRunToast";
 
 /**
@@ -16,7 +17,7 @@ import { WorkflowRunToast } from "../workflows/runs/WorkflowRunToast";
  * Order is by urgency: transport trouble first (it explains why the others may
  * be failing), then a refused resume, then the agent-auth failure (every turn
  * on that thread will fail until it is fixed), then a finished workflow run,
- * then plain notices.
+ * then plain notices, then an out-of-date server.
  *
  * The column also bounds the cards on a phone: each is capped to the column's
  * width and long unbroken text (a prompt-derived tab title with a URL in it)
@@ -31,6 +32,7 @@ export const ToastStack: React.FC = () =>
       <AgentAuthErrorToast />
       <WorkflowRunToast />
       <NoticeToast />
+      <UpdateAvailableToast />
     </div>,
     document.body
   );
