@@ -4,6 +4,10 @@ Description=Orquester self-update (the deploy update cycle, on the daemon's requ
 # (POST /api/self-update); there is no [Install] section. A separate unit, so it runs outside
 # orquester.service's cgroup: the `systemctl restart orquester` it performs does not stop it.
 
+# A request left from before a reboot starts the update at boot: it fetches, so wait for the network.
+After=network-online.target
+Wants=network-online.target
+
 [Service]
 # Root, unsandboxed: the update rewrites root-owned /opt/orquester, installs into /usr/local and
 # /etc (Go, voxl, the units) and restarts orquester. The daemon user only creates the request file,
@@ -37,5 +41,7 @@ ExecStart=/bin/bash /run/orquester-update/self-update.sh
 # from the checkout's HEAD so the daemon stops waiting. Once the wrapper ran, it recorded the outcome
 # itself. ($$ and %% are systemd's escapes for $ and %; the JSON formats are the last two words.)
 ExecStopPost=/bin/bash -c 'test -e /run/orquester-update/self-update.sh && exit 0; t=$$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ); f=$$(git -C /opt/orquester rev-parse HEAD 2>/dev/null) || f=; if [ $${#f} -eq 40 ]; then printf "$$1" "$$f" "$$t" "$$t"; else printf "$$2" "$$t" "$$t"; fi > "$$STATUS_FILE.tmp" && chmod 0644 "$$STATUS_FILE.tmp" && mv -f "$$STATUS_FILE.tmp" "$$STATUS_FILE"' self-update-fallback '{"state":"failed","from":"%%s","startedAt":"%%s","finishedAt":"%%s","exitCode":1}' '{"state":"failed","from":null,"startedAt":"%%s","finishedAt":"%%s","exitCode":1}'
-# A build can take many minutes, and the health check waits up to 10 more.
-TimeoutStartSec=infinity
+# A build can take many minutes, the health check waits up to 10 more, and a revert repeats both.
+# Finite, so a hung fetch or install is killed (the wrapper's TERM trap records it as failed) — and
+# below the daemon's 3 h STALE_RUN_MS, so the daemon never accepts a new request while this still runs.
+TimeoutStartSec=2h

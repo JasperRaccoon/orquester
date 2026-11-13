@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SelfUpdateRun, SelfUpdateStatusResponse } from "@orquester/api";
-import { nextUpdatePhase, readDismissedUpdate, updateToastKey, writeDismissedUpdate } from "./self-update.logic.ts";
+import { lastRunFailure, nextUpdatePhase, readDismissedUpdate, updateToastKey, writeDismissedUpdate } from "./self-update.logic.ts";
 
 const FROM = "1111111111111111111111111111111111111111";
 const NEW = "2222222222222222222222222222222222222222";
@@ -17,42 +17,54 @@ const status = (patch: Partial<SelfUpdateStatusResponse> = {}): SelfUpdateStatus
   error: null,
   canUpdate: true,
   run: null,
+  requestStalled: false,
   ...patch
 });
 
-const run = (state: SelfUpdateRun["state"], from: string | null): SelfUpdateRun => ({
+const run = (state: SelfUpdateRun["state"], from: string | null, startedAt = "2026-11-13T10:00:00.000Z"): SelfUpdateRun => ({
   state,
   from,
-  startedAt: "2026-11-13T10:00:00.000Z"
+  startedAt
 });
 
-test("nextUpdatePhase keeps waiting while the daemon is down or still runs the old commit", () => {
-  assert.equal(nextUpdatePhase(FROM, null), "updating", "a failed poll is the restart, not an error");
-  assert.equal(nextUpdatePhase(FROM, status()), "updating", "the updater has not written its run yet");
-  assert.equal(nextUpdatePhase(FROM, status({ run: run("running", FROM) })), "updating");
-  assert.equal(nextUpdatePhase(FROM, status({ current: null })), "updating", "an unknown commit is not a new one");
+const REQUEST = { from: FROM, requestedAt: "2026-11-13T10:00:00.400Z" };
+
+test("nextUpdatePhase keeps waiting while the daemon is down or this update has not finished", () => {
+  assert.equal(nextUpdatePhase(REQUEST, null), "updating", "a failed poll is the restart, not an error");
+  assert.equal(nextUpdatePhase(REQUEST, status()), "updating", "the updater has not written its run yet");
+  assert.equal(nextUpdatePhase(REQUEST, status({ run: run("running", FROM) })), "updating");
+  assert.equal(nextUpdatePhase(REQUEST, status({ current: null })), "updating", "an unknown commit is not a new one");
 });
 
-test("nextUpdatePhase is done once the server runs another commit", () => {
-  assert.equal(nextUpdatePhase(FROM, status({ current: NEW, behindBy: 0 })), "done");
-  assert.equal(nextUpdatePhase(FROM, status({ current: NEW, run: run("succeeded", FROM) })), "done");
-  assert.equal(nextUpdatePhase(FROM, status({ run: run("succeeded", FROM) })), "done", "succeeded without a new commit");
-  const previous = run("succeeded", FROM);
-  assert.equal(nextUpdatePhase(FROM, status({ run: previous }), previous), "updating", "the run before this request");
+test("nextUpdatePhase is done once the server runs another commit or this update succeeded", () => {
+  assert.equal(nextUpdatePhase(REQUEST, status({ current: NEW, behindBy: 0 })), "done");
+  assert.equal(nextUpdatePhase(REQUEST, status({ run: run("succeeded", FROM) })), "done", "succeeded without a new commit");
 });
 
-test("nextUpdatePhase reports this run's failure or revert, not an older run's", () => {
-  assert.equal(nextUpdatePhase(FROM, status({ run: run("failed", FROM) })), "failed");
-  assert.equal(nextUpdatePhase(FROM, status({ run: run("reverted", FROM) })), "reverted");
-  assert.equal(nextUpdatePhase(FROM, status({ run: run("failed", OLDER) })), "updating", "a stale run from an older commit");
-  assert.equal(nextUpdatePhase(FROM, status({ run: run("failed", null) })), "updating");
+test("nextUpdatePhase reports this update's failure or revert, whatever commit the updater saw", () => {
+  assert.equal(nextUpdatePhase(REQUEST, status({ run: run("failed", FROM) })), "failed", "stamped to the second");
+  assert.equal(nextUpdatePhase(REQUEST, status({ run: run("reverted", FROM) })), "reverted");
+  // A build that failed earlier left the checkout ahead of the daemon: the run's from is that commit.
+  assert.equal(nextUpdatePhase(REQUEST, status({ run: run("failed", OLDER, "2026-11-13T10:00:05.000Z") })), "failed");
 });
 
-test("nextUpdatePhase ignores the failed run a retry from the same commit started after", () => {
-  const previous = run("failed", FROM);
-  assert.equal(nextUpdatePhase(FROM, status({ run: previous }), previous), "updating");
-  const retry = { ...run("failed", FROM), startedAt: "2026-11-13T11:00:00.000Z" };
-  assert.equal(nextUpdatePhase(FROM, status({ run: retry }), previous), "failed");
+test("nextUpdatePhase ignores the run before the request", () => {
+  for (const state of ["failed", "reverted", "succeeded"] as const) {
+    assert.equal(nextUpdatePhase(REQUEST, status({ run: run(state, FROM, "2026-11-13T09:59:59.000Z") })), "updating", state);
+  }
+});
+
+test("nextUpdatePhase reports a request the host updater never took", () => {
+  assert.equal(nextUpdatePhase(REQUEST, status({ requestStalled: true })), "stalled");
+  assert.equal(nextUpdatePhase(REQUEST, status({ requestStalled: true, run: run("failed", FROM) })), "failed", "an outcome wins");
+});
+
+test("lastRunFailure shows the last run's failure only while the server still runs its commit", () => {
+  assert.equal(lastRunFailure(status({ run: run("failed", FROM) })), "failed");
+  assert.equal(lastRunFailure(status({ run: run("reverted", FROM) })), "reverted");
+  assert.equal(lastRunFailure(status({ run: run("failed", OLDER) })), null, "deployed since");
+  assert.equal(lastRunFailure(status({ run: run("succeeded", FROM) })), null);
+  assert.equal(lastRunFailure(status()), null);
 });
 
 test("updateToastKey offers the branch head only to an install behind it that can update itself", () => {

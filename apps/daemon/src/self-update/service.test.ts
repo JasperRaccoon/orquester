@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -104,7 +104,7 @@ test("a failed check keeps the last result and records the error", async (t) => 
   await s.check();
   const { checkedAt } = await s.status();
 
-  for (const expected of [/reached/, /403/, /unexpected/]) {
+  for (const expected of [/reached/, /rate limit/, /unexpected/]) {
     await s.check();
     const status = await s.status();
     assert.equal(status.behindBy, 3);
@@ -194,9 +194,30 @@ test("requestUpdate: unavailable without a status file, busy while running or pe
   await assert.rejects(access(requestPath));
 
   await writeFile(statusPath, JSON.stringify({ state: "failed", from: FROM, startedAt: "2026-11-13T10:00:00Z", finishedAt: "2026-11-13T10:05:00Z", exitCode: 1 }));
-  assert.equal(await s.requestUpdate(), "started");
+  assert.deepEqual(await s.requestUpdate(), { started: true, requestedAt: "2026-11-13T10:30:00.000Z" });
   await access(requestPath);
   assert.equal(await s.requestUpdate(), "busy");
+  assert.equal((await s.status()).requestStalled, false);
+});
+
+test("a request the host updater never took is reported, and a new request replaces it", async (t) => {
+  const dir = await tempDir(t);
+  const requestPath = join(dir, "daemon", "update-request");
+  let now = Date.parse("2026-11-13T10:30:00Z");
+  const s = await service(t, { requestPath, statusPath: join(dir, "status.json"), now: () => now });
+  assert.equal(typeof (await s.requestUpdate()), "object");
+  const made = new Date(now);
+  await utimes(requestPath, made, made);
+
+  now += 60_000;
+  assert.equal((await s.status()).requestStalled, false, "still within the updater's pickup time");
+  assert.equal(await s.requestUpdate(), "busy");
+
+  now += 2 * 60_000;
+  assert.equal((await s.status()).requestStalled, true);
+  assert.deepEqual(await s.requestUpdate(), { started: true, requestedAt: new Date(now).toISOString() });
+  await utimes(requestPath, new Date(now), new Date(now));
+  assert.equal((await s.status()).requestStalled, false, "the new request is fresh");
 });
 
 test("status().run is the status file's run, null when missing or garbage", async (t) => {
@@ -217,7 +238,7 @@ test("status().run is the status file's run, null when missing or garbage", asyn
   // Cut off without an outcome (a reboot mid-run): failed, and no longer blocking a new request.
   await writeFile(statusPath, JSON.stringify({ state: "running", from: FROM, startedAt: "2026-11-13T07:00:00Z" }));
   assert.equal((await s.status()).run?.state, "failed");
-  assert.equal(await s.requestUpdate(), "started");
+  assert.equal(typeof (await s.requestUpdate()), "object", "started");
 
   const without = await service(t, { statusPath: null });
   assert.equal((await without.status()).canUpdate, false);

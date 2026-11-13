@@ -112,6 +112,15 @@ for (const [exit, state] of [
   });
 }
 
+test("from is the commit the deploy stamped (the running daemon's), not a HEAD a failed build moved", () => {
+  const running = "d".repeat(40);
+  writeFileSync(join(repo, ".orquester-version.json"), `{"commit":"${running}","version":"0.0.0","deployedAt":"2026-11-13T10:00:00Z"}\n`);
+  const result = update({ STUB_EXIT: "1" });
+  assert.equal(result.code, 1, result.out + result.err);
+  assert.equal(readJson(join(stubs, "during.json")).from, running);
+  assert.equal(readJson(statusFile).from, running);
+});
+
 test("a repository it cannot read records from as null and still runs the update", () => {
   const result = update({ REPO_DIR: join(root, "not-a-repo") });
   assert.equal(result.code, 0, result.out + result.err);

@@ -44,10 +44,20 @@ export interface SelfUpdateStatusResponse {
   canUpdate: boolean;
   /** The host updater's last run; null when it never ran or the install cannot update itself. */
   run: SelfUpdateRun | null;
+  /**
+   * An update request has waited minutes without the host updater taking it (its path unit is not
+   * active): nothing will run until that is fixed. A new POST replaces the stuck request.
+   */
+  requestStalled: boolean;
 }
 
 export interface SelfUpdateStartResponse {
   started: true;
+  /**
+   * When the daemon made the request (ISO, the server's clock — the updater's `startedAt` uses the
+   * same clock): the run with `startedAt` at or after it (to the second) is this request's.
+   */
+  requestedAt: string;
 }
 
 /** Refusal codes of `POST /api/self-update` (409, `{ code, message }`). */

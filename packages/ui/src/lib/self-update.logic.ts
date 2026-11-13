@@ -4,30 +4,55 @@ import type { SelfUpdateRun, SelfUpdateStatusResponse } from "@orquester/api";
  * The client's side of a self-update (spec 2026-11-13-self-update-design.md): what to show while
  * the host updater runs, and which out-of-date toast the user has already dismissed.
  */
-export type UpdatePhase = "idle" | "updating" | "done" | "failed" | "reverted";
+export type UpdatePhase = "idle" | "updating" | "done" | "failed" | "reverted" | "stalled";
+
+/** An update this client follows: the commit the server ran and when the update was requested. */
+export interface FollowedRequest {
+  /** The commit the server ran when the update was requested (`status.current`). */
+  from: string;
+  /**
+   * The request's time on the server's clock (the POST's `requestedAt`; for a run found already
+   * going, its `startedAt`): the updater's run that started at or after it is this update's.
+   */
+  requestedAt: string;
+}
 
 const SHA = /^[0-9a-f]{40}$/;
 
+/** Whether `run` started at or after `requestedAt`; the updater stamps whole seconds, so compare to the second. */
+function startedSince(run: SelfUpdateRun, requestedAt: string): boolean {
+  const started = Date.parse(run.startedAt);
+  const requested = Date.parse(requestedAt);
+  return Number.isFinite(started) && Number.isFinite(requested) && started >= Math.floor(requested / 1000) * 1000;
+}
+
 /**
- * After an update started from `fromCommit`: what the latest poll means. `status` is null when the
- * request failed — the daemon is down for minutes while the update restarts it, so that is still
- * "updating". The server running another commit, or this update's run succeeding, is "done". A
- * finished run counts only when it is this update's: right after the request the status file may still hold an older run
- * until the updater writes "running" — one from another commit, or `staleRun`, the run the server
- * reported before the request (a retry after a failure starts from the same commit).
+ * What the latest poll means for a followed update. `status` is null when the request failed — the
+ * daemon is down for minutes while the update restarts it, so that is still "updating". The server
+ * running another commit, or this update's run succeeding, is "done"; this update's run failing or
+ * reverting is that. A run counts as this update's by its start time, not its commit: the status
+ * file holds the previous run until the updater writes "running", and the checkout's commit can
+ * differ from the one the daemon runs. A request the host updater never took is "stalled".
  */
-export function nextUpdatePhase(
-  fromCommit: string,
-  status: SelfUpdateStatusResponse | null,
-  staleRun: SelfUpdateRun | null = null
-): UpdatePhase {
+export function nextUpdatePhase(update: FollowedRequest, status: SelfUpdateStatusResponse | null): UpdatePhase {
   if (!status) return "updating";
-  if (typeof status.current === "string" && SHA.test(status.current) && status.current !== fromCommit) return "done";
+  if (typeof status.current === "string" && SHA.test(status.current) && status.current !== update.from) return "done";
   const run = status.run;
-  if (!run || run.from !== fromCommit || (staleRun && run.startedAt === staleRun.startedAt)) return "updating";
-  // Succeeded without a new commit (the branch head was already running): nothing left to wait for.
-  if (run.state === "succeeded") return "done";
-  return run.state === "failed" || run.state === "reverted" ? run.state : "updating";
+  if (run && run.state !== "running" && startedSince(run, update.requestedAt)) {
+    return run.state === "succeeded" ? "done" : run.state;
+  }
+  if (status.requestStalled) return "stalled";
+  return "updating";
+}
+
+/**
+ * The outcome to show when no update is followed: the last run's failure or revert, when it started
+ * from the commit the server still runs (a later deploy to another commit makes it history).
+ */
+export function lastRunFailure(status: SelfUpdateStatusResponse): "failed" | "reverted" | null {
+  const run = status.run;
+  if (!run || !status.current || run.from !== status.current) return null;
+  return run.state === "failed" || run.state === "reverted" ? run.state : null;
 }
 
 /**

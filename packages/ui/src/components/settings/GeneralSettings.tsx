@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useSyncExternalStore } from "react";
-import type { SelfUpdateRun, SelfUpdateStatusResponse } from "@orquester/api";
+import type { SelfUpdateStatusResponse } from "@orquester/api";
 import { Bell, Download, Loader2, RefreshCw } from "lucide-react";
 import { disablePush, enablePush, getSubscription, pushSupported } from "../../lib/push";
 import { Button, Switch } from "../ui";
@@ -8,7 +8,7 @@ import { useAppStore } from "../../store/app";
 import { serverVersionLabel } from "../../lib/server-version";
 import { ApiError } from "../../lib/api-client";
 import { relativeTime } from "../../lib/relative-time";
-import { nextUpdatePhase } from "../../lib/self-update.logic";
+import { lastRunFailure, nextUpdatePhase, type FollowedRequest } from "../../lib/self-update.logic";
 import type { Runtime } from "../../types";
 import {
   Badge,
@@ -233,15 +233,19 @@ const ServerVersionRow: React.FC = () => {
  */
 interface FollowedUpdate {
   connectionId: string;
-  from: string;
-  phase: "updating" | "failed" | "reverted";
-  /** The updater's run as last seen: before the request while updating, the one that ended it after. */
-  run: SelfUpdateRun | null;
+  request: FollowedRequest;
+  /** "timedOut": the server never came back or never finished within {@link UPDATE_GIVE_UP_MS}. */
+  phase: "updating" | "failed" | "reverted" | "stalled" | "timedOut";
 }
 
 const UPDATE_POLL_MS = 3_000;
 /** One poll's own limit: a request to a daemon that is mid-restart may hang rather than fail. */
 const UPDATE_POLL_TIMEOUT_MS = 10_000;
+/**
+ * Stop waiting after this: longer than the host updater's own 2 h limit would be pointless, and a
+ * real update (builds, health wait, even a revert) is far shorter — the server is down or stuck.
+ */
+const UPDATE_GIVE_UP_MS = 60 * 60 * 1000;
 
 let followedUpdate: FollowedUpdate | null = null;
 const followedUpdateListeners = new Set<() => void>();
@@ -261,12 +265,13 @@ const subscribeFollowedUpdate = (listener: () => void): (() => void) => {
 const getFollowedUpdate = (): FollowedUpdate | null => followedUpdate;
 
 /**
- * Poll the server's update status until it runs another commit (then reload) or the run fails.
- * `staleRun` is the run the server reported before the request, which is not this update's.
+ * Poll the server's update status until it runs another commit or this update's run succeeds (then
+ * reload), the run fails, the request is never taken, or {@link UPDATE_GIVE_UP_MS} passes.
  */
-const followUpdate = (connectionId: string, from: string, staleRun: SelfUpdateRun | null): void => {
+const followUpdate = (connectionId: string, request: FollowedRequest): void => {
   if (followedUpdate?.phase === "updating" && followedUpdate.connectionId === connectionId) return;
-  const followed: FollowedUpdate = { connectionId, from, phase: "updating", run: staleRun };
+  const followed: FollowedUpdate = { connectionId, request, phase: "updating" };
+  const giveUpAt = Date.now() + UPDATE_GIVE_UP_MS;
   setFollowedUpdate(followed);
   const poll = async (): Promise<void> => {
     if (followedUpdate !== followed) return;
@@ -279,11 +284,13 @@ const followUpdate = (connectionId: string, from: string, staleRun: SelfUpdateRu
     const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(UPDATE_POLL_TIMEOUT_MS) : undefined;
     const status = api ? await api.selfUpdateStatus(signal).catch(() => null) : null;
     if (followedUpdate !== followed || useAppStore.getState().activeConnectionId !== connectionId) return;
-    const phase = nextUpdatePhase(from, status, staleRun);
+    const phase = nextUpdatePhase(request, status);
     if (phase === "done") {
       void reloadApp();
-    } else if (phase === "failed" || phase === "reverted") {
-      setFollowedUpdate({ ...followed, phase, run: status?.run ?? null });
+    } else if (phase === "failed" || phase === "reverted" || phase === "stalled") {
+      setFollowedUpdate({ ...followed, phase });
+    } else if (Date.now() >= giveUpAt) {
+      setFollowedUpdate({ ...followed, phase: "timedOut" });
     } else {
       setTimeout(() => void poll(), UPDATE_POLL_MS);
     }
@@ -321,8 +328,9 @@ const UpdatesRow: React.FC<{ connectionId: string }> = ({ connectionId }) => {
         setStatus(next);
         setLoadError(null);
         // Someone started an update elsewhere: follow it here too, so this page reloads with it.
-        const from = next.run?.state === "running" ? (next.run.from ?? next.current) : null;
-        if (from) followUpdate(connectionId, from, null);
+        if (next.run?.state === "running" && next.current) {
+          followUpdate(connectionId, { from: next.current, requestedAt: next.run.startedAt });
+        }
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
@@ -334,18 +342,27 @@ const UpdatesRow: React.FC<{ connectionId: string }> = ({ connectionId }) => {
 
   const start = async (from: string) => {
     if (!api) return;
-    // The latest run this client knows of; the poll must not mistake it for the new one.
-    const staleRun = mine?.run ?? status?.run ?? null;
     setStarting(true);
     setStartError(null);
     try {
-      await api.startSelfUpdate();
-      followUpdate(connectionId, from, staleRun);
+      const { requestedAt } = await api.startSelfUpdate();
+      followUpdate(connectionId, { from, requestedAt });
     } catch (err) {
       const code = err instanceof ApiError ? (err.body as { code?: unknown } | null | undefined)?.code : undefined;
-      // Busy: an update is already running or requested — wait for it like our own.
-      if (code === "SELF_UPDATE_BUSY") followUpdate(connectionId, from, staleRun);
-      else setStartError(errorText(err));
+      if (code === "SELF_UPDATE_BUSY") {
+        // Already running or requested elsewhere: wait for it like our own — the run that is going,
+        // or (only a request so far) the next run to start after the last one on record.
+        const last = (await api.selfUpdateStatus().catch(() => null))?.run ?? null;
+        const lastStart = last ? Date.parse(last.startedAt) : NaN;
+        const requestedAt = !last || !Number.isFinite(lastStart)
+          ? new Date(0).toISOString()
+          : last.state === "running"
+            ? last.startedAt
+            : new Date(Math.floor(lastStart / 1000) * 1000 + 1000).toISOString();
+        followUpdate(connectionId, { from, requestedAt });
+      } else {
+        setStartError(errorText(err));
+      }
     } finally {
       setStarting(false);
     }
@@ -373,10 +390,22 @@ const UpdatesRow: React.FC<{ connectionId: string }> = ({ connectionId }) => {
   }
 
   const from = status?.current ?? null;
-  // This client's run, or the last run from the commit the server still runs (it failed elsewhere).
-  const lastPhase = mine && mine.phase !== "updating" ? mine.phase : from && !updating ? nextUpdatePhase(from, status) : null;
-  const failed = lastPhase === "failed" || lastPhase === "reverted" ? lastPhase : null;
+  // This client's followed update, or else what the server reports: a request its updater never
+  // took, or the last run's failure while the server still runs the commit it started from.
+  const outcome: Exclude<FollowedUpdate["phase"], "updating"> | null =
+    mine && mine.phase !== "updating"
+      ? mine.phase
+      : !updating && status
+        ? status.requestStalled
+          ? "stalled"
+          : lastRunFailure(status)
+        : null;
   const canStart = !updating && !!status?.canUpdate && status.behindBy > 0 && !!from;
+  const journal = (
+    <>
+      Details: <code>journalctl -u orquester-update</code> on the server.
+    </>
+  );
 
   return (
     <>
@@ -394,19 +423,27 @@ const UpdatesRow: React.FC<{ connectionId: string }> = ({ connectionId }) => {
           )
         )}
       </SettingRow>
-      {(failed || startError) && (
+      {(outcome || startError) && (
         <div className="px-4 py-3">
           {startError ? (
             <Notice tone="danger" title="Couldn't start the update">
               {startError}
             </Notice>
-          ) : failed === "reverted" ? (
+          ) : outcome === "reverted" ? (
             <Notice tone="warn" title="The update failed and the previous version was restored">
-              Details: <code>journalctl -u orquester-update</code> on the server.
+              {journal}
+            </Notice>
+          ) : outcome === "stalled" ? (
+            <Notice tone="warn" title="The server's updater didn't start the update">
+              Check <code>systemctl status orquester-update.path</code> on the server, then try again.
+            </Notice>
+          ) : outcome === "timedOut" ? (
+            <Notice tone="warn" title="The update hasn't finished after an hour">
+              The server may be down or the update stuck. {journal}
             </Notice>
           ) : (
             <Notice tone="danger" title="The update failed">
-              Details: <code>journalctl -u orquester-update</code> on the server.
+              {journal}
             </Notice>
           )}
         </div>

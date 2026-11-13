@@ -28,7 +28,12 @@ main() {
   # A symlink planted at the request path is only unlinked (rm never follows it).
   rm -f -- "$REQUEST_FILE"
 
-  from="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || true)"
+  # The commit the daemon runs: the deploy's version stamp, which remote-update.sh writes only on
+  # its way to a restart. The checkout's HEAD can be ahead of the daemon (a build that failed after
+  # the reset leaves HEAD on the new commit and the old daemon running); it is the fallback for an
+  # install no deploy has stamped yet.
+  from="$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' "$repo_dir/.orquester-version.json" 2>/dev/null | head -n1 || true)"
+  [[ "$from" =~ ^[0-9a-f]{40}$ ]] || from="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || true)"
   [[ "$from" =~ ^[0-9a-f]{40}$ ]] && from="\"$from\"" || from=null
   started_at="$(now)"
 

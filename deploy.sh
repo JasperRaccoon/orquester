@@ -114,6 +114,9 @@ remote_update() {
     3)
       STEP="remote-update: unhealthy, AUTO-REVERTED to the previous release"
       warn "$name: the new release failed its health check and was ROLLED BACK — the previous release is running. The deploy FAILED." ;;
+    5)
+      STEP="remote-update: another update is running on the host"
+      warn "$name: another update (a deploy or the self-update unit) is running there — nothing was changed. Retry when it ends." ;;
     4)
       STEP="remote-update: unhealthy, and the AUTO-REVERT FAILED — daemon not healthy"
       warn "$name: the new release failed its health check and the previous release did not come back either — the daemon is NOT healthy. Act now: ./deploy.sh logs $name" ;;

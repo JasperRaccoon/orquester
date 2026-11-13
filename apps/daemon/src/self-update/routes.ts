@@ -24,7 +24,7 @@ export function registerSelfUpdateRoutes(app: FastifyInstance, deps: SelfUpdateR
 
   app.post(selfUpdateRoutes.status, async (_request, reply) => {
     const result = await service.requestUpdate();
-    if (result === "started") return reply.code(202).send({ started: true } satisfies SelfUpdateStartResponse);
+    if (typeof result === "object") return reply.code(202).send(result satisfies SelfUpdateStartResponse);
     return reply.code(409).send(REFUSALS[result]);
   });
 }

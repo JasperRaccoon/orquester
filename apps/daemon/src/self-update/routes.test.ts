@@ -44,7 +44,8 @@ test("GET answers the update status", async (t) => {
     checkedAt: null,
     error: null,
     canUpdate: true,
-    run: null
+    run: null,
+    requestStalled: false
   });
 });
 
@@ -52,7 +53,9 @@ test("POST starts one update; a second answers 409 busy", async (t) => {
   const { app, requestPath } = await harness(t, { canUpdate: true });
   const first = await app.inject({ method: "POST", url: selfUpdateRoutes.status });
   assert.equal(first.statusCode, 202, first.body);
-  assert.deepEqual(first.json(), { started: true });
+  const started = first.json() as { started: boolean; requestedAt: string };
+  assert.equal(started.started, true);
+  assert.ok(!Number.isNaN(Date.parse(started.requestedAt)), "requestedAt is an ISO time");
   await access(requestPath);
 
   const second = await app.inject({ method: "POST", url: selfUpdateRoutes.status });

@@ -8,7 +8,7 @@
 // daemon only reads.
 
 import { readFileSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parseSelfUpdateRun, type SelfUpdateRun, type SelfUpdateStatusResponse } from "@orquester/api";
 import { gitCommonDirOf, gitDirOf } from "../build-info.ts";
@@ -36,7 +36,8 @@ export interface SelfUpdateDeps {
   now?: () => number;
 }
 
-export type SelfUpdateRequestResult = "started" | "busy" | "unavailable";
+/** "started" carries the request time (ISO): the run that starts at or after it is this request's. */
+export type SelfUpdateRequestResult = { started: true; requestedAt: string } | "busy" | "unavailable";
 
 const DEFAULT_INTERVAL_MS = 3_600_000;
 const CHECK_TIMEOUT_MS = 15_000;
@@ -47,6 +48,11 @@ const CHECK_TIMEOUT_MS = 15_000;
  * own rebuild and health wait — ends well within it.
  */
 const STALE_RUN_MS = 3 * 60 * 60 * 1000;
+/**
+ * The path unit takes a request within moments; one still there after this was never taken (the
+ * unit is not active), so it is reported, and a new request replaces it.
+ */
+const STALLED_REQUEST_MS = 2 * 60 * 1000;
 const SHA = /^[0-9a-f]{40}$/;
 const NAME = "[A-Za-z0-9._-]+";
 const GITHUB_REMOTES = [
@@ -159,22 +165,41 @@ export class SelfUpdateService {
       checkedAt: this.checkedAt,
       error: this.error,
       canUpdate: this.deps.statusPath !== null,
-      run: await this.readRun()
+      run: await this.readRun(),
+      requestStalled: this.deps.statusPath !== null && (await this.requestAgeMs()) > STALLED_REQUEST_MS
     };
   }
 
-  /** Asks the host updater to run: "busy" while a run is going or a request is pending. */
+  /**
+   * Asks the host updater to run: "busy" while a run is going or a request is pending. A request the
+   * updater never took (stalled) is replaced, so a retry works once its path unit is running again.
+   */
   async requestUpdate(): Promise<SelfUpdateRequestResult> {
     if (this.deps.statusPath === null) return "unavailable";
     if ((await this.readRun())?.state === "running") return "busy";
+    if ((await this.requestAgeMs()) > STALLED_REQUEST_MS) await unlink(this.deps.requestPath).catch(() => undefined);
     await mkdir(dirname(this.deps.requestPath), { recursive: true });
+    const requestedAt = new Date(this.now()).toISOString();
     try {
       await writeFile(this.deps.requestPath, "", { flag: "wx" });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") return "busy";
       throw error;
     }
-    return "started";
+    return { started: true, requestedAt };
+  }
+
+  private now(): number {
+    return (this.deps.now ?? Date.now)();
+  }
+
+  /** How long the pending request has waited (ms); -1 when there is none. */
+  private async requestAgeMs(): Promise<number> {
+    try {
+      return this.now() - (await stat(this.deps.requestPath)).mtimeMs;
+    } catch {
+      return -1;
+    }
   }
 
   private cannotCheck(): string | null {
@@ -208,7 +233,12 @@ export class SelfUpdateService {
         failure = "GitHub answered an unexpected response";
       } else {
         await response.body?.cancel().catch(() => undefined);
-        failure = `GitHub answered ${response.status}`;
+        failure =
+          response.status === 404
+            ? "GitHub doesn't know this repository or commit (a private repository, or a commit that was never pushed)"
+            : response.status === 403 || response.status === 429
+              ? `GitHub refused the check (${response.status}, likely its rate limit); it is retried hourly`
+              : `GitHub answered ${response.status}`;
       }
     } catch (error) {
       if (this.aborts.signal.aborted) return;
@@ -222,8 +252,7 @@ export class SelfUpdateService {
     if (this.deps.statusPath === null) return null;
     try {
       const run = parseSelfUpdateRun(JSON.parse(await readFile(this.deps.statusPath, "utf8")));
-      const now = (this.deps.now ?? Date.now)();
-      if (run?.state === "running" && now - Date.parse(run.startedAt) > STALE_RUN_MS) return { ...run, state: "failed" };
+      if (run?.state === "running" && this.now() - Date.parse(run.startedAt) > STALE_RUN_MS) return { ...run, state: "failed" };
       return run;
     } catch {
       return null;
