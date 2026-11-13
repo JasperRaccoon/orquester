@@ -124,7 +124,7 @@ import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks, writeFileAtomic } from "./agent-hooks";
 import { DailyLogStream } from "./daily-log.ts";
-import { daemonBuildInfo, daemonRepoRoot, type BuildInfo } from "./build-info.ts";
+import { daemonBuildInfo, daemonRepoRoot, readWebBuild, type BuildInfo } from "./build-info.ts";
 import { StorageScanService } from "./storage/scan-service.ts";
 import { registerStorageRoutes } from "./storage/routes.ts";
 import { createStorageGuard, readMountPoints, type StorageGuard } from "./storage/guard.ts";
@@ -2483,6 +2483,7 @@ export function createServer(
     workspacesDir: resolved.workspacesDir,
     protocol: ORQUESTER_PROTOCOL_VERSION,
     build: services.buildInfo.commit?.slice(0, 12) ?? null,
+    webBuild: options.serveWeb ? await readWebBuild(options.serveWeb) : null,
     capabilities: {
       terminals: true,
       sessions: true,

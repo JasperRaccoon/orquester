@@ -2,7 +2,7 @@ import react from "@vitejs/plugin-react";
 import svgr from "vite-plugin-svgr";
 import { defineConfig, type Rollup } from "vite";
 import { excalidrawAssets } from "../../packages/ui/vite/excalidraw-assets";
-import { orquesterBuildDefine } from "../../packages/ui/vite/build-id";
+import { orquesterBuildDefine, orquesterBuildId, orquesterBuildIdFile } from "../../packages/ui/vite/build-id";
 
 /**
  * Vendor chunks: the third-party code the first paint needs, out of the entry
@@ -73,6 +73,9 @@ function vendorChunks(): Rollup.GetManualChunk {
   };
 }
 
+/** This build's id: the page's `__ORQUESTER_BUILD__` and the dist's `build-id`, one value. */
+const BUILD = orquesterBuildId();
+
 export default defineConfig({
   // noVNC 1.7 (desktop tabs) keeps a top-level `await` in core/util/browser.js,
   // which needs an es2022 target in both the build and the dev pre-bundle.
@@ -86,9 +89,11 @@ export default defineConfig({
   },
   optimizeDeps: { esbuildOptions: { target: "es2022" } },
   // The app build named in the connection diagnostics.
-  define: orquesterBuildDefine(),
+  define: orquesterBuildDefine(BUILD),
   plugins: [
     react(),
+    // The same build id as a file, which the daemon reports as the web build it serves.
+    orquesterBuildIdFile(BUILD),
     // The whiteboard plugin's fonts, served from the app (see the plugin).
     excalidrawAssets(),
     svgr({

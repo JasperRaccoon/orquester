@@ -59,12 +59,14 @@ describe("connection log", () => {
   it("records what the daemon says about itself", () => {
     noteServerHealth({ protocol: 2 });
     assert.equal(getConnectionLog().serverProtocol, 2);
-    noteServerInfo({ protocol: 1, build: "abc1234" });
+    noteServerInfo({ protocol: 1, build: "abc1234def56", webBuild: "0a1b2c3" });
     assert.equal(getConnectionLog().serverProtocol, 1);
-    assert.equal(getConnectionLog().serverBuild, "abc1234");
+    assert.equal(getConnectionLog().serverBuild, "abc1234def56");
+    assert.equal(getConnectionLog().serverWebBuild, "0a1b2c3");
     noteServerInfo({});
     assert.equal(getConnectionLog().serverProtocol, 1, "an older daemon's info keeps what /health said");
     assert.equal(getConnectionLog().serverBuild, null);
+    assert.equal(getConnectionLog().serverWebBuild, null);
   });
 
   it("notifies subscribers with a new snapshot", () => {
