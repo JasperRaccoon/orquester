@@ -2,19 +2,19 @@
 // delete, rename or download. Separate from the /api/fs `fsRoot` sandbox — storage
 // actions reach the whole host — so it refuses, with a reason the UI shows:
 //
+// - every action: the kernel pseudo-filesystems (/proc, /sys, /dev, /run) and
+//   everything in them — not stored data, and /proc/self/environ is the daemon's env;
 // - delete/rename: the root, every direct child of it, every mount point, the
 //   daemon's and client's state (`<appdir>/daemon`, `<appdir>/app`), the running checkout, the workspaces root
 //   and fsRoot themselves, the host tool dirs, the service user's tool/credential
-//   dirs in its home (and the appdir), and every ancestor of any of those;
-// - download: the secrets (daemon state incl. agent-account homes, ssh keys, agent
-//   CLI credentials, /etc/orquester…) and every folder that contains one, since its
-//   zip would carry the secret along.
+//   dirs in its home (and the appdir), every ancestor of any of those, and
+//   anything on a filesystem mounted read-only in the daemon's namespace;
+// - download: the secrets (daemon state incl. agent-account homes, /etc/orquester…),
+//   everything in the service user's home and the appdir except the workspaces root
+//   (and fsRoot when it is in there) — a denylist of credential files can't be
+//   complete — and every folder that contains a refused path, since its zip would
+//   carry it along.
 //
-// `actionsFor` / `projectFor` are pure string logic on canonical paths (the scan's
-// paths are canonical; every configured path is realpath'd once here). `check`
-// is what the action routes call: it resolves the request's path against the
-// real filesystem first, so a symlinked parent is judged where it really points.
-
 import { readFileSync, realpathSync, type Stats } from "node:fs";
 import { lstat, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -22,13 +22,14 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import type { StorageNodeActions } from "@orquester/api";
 import { appConfigDir, daemonConfigDir } from "@orquester/config";
 
+import { KERNEL_TREES } from "./gdu.ts";
 import type { StorageGuardPort } from "./types.ts";
 
 export interface StorageGuardConfig {
   /** "/" in production; a temp dir in tests. */
   rootDir: string;
   /** Every mount point (bind mounts included), e.g. {@link readMountPoints}. Called per evaluation; keep it cheap. */
-  mountPoints: () => string[];
+  mountPoints: () => MountPoint[];
   appdir: string;
   /** The service user's home (on a deployed host the same dir as the appdir). */
   homeDir: string;
@@ -40,6 +41,12 @@ export interface StorageGuardConfig {
   toolDirs: string[];
   /** Extra secret dirs/files refused for download (and protected), e.g. /etc/orquester. */
   secretPaths?: string[];
+}
+
+export interface MountPoint {
+  path: string;
+  /** Mounted read-only in this process' mount namespace (e.g. systemd's ProtectSystem=strict). */
+  readOnly: boolean;
 }
 
 export type StorageAction = "delete" | "rename" | "download";
@@ -77,23 +84,6 @@ const HOME_PROTECTED = [
   ".ssh",
   ".docker"
 ];
-/** The entries in the home (and appdir) that hold credentials: download refuses them. */
-const HOME_SECRETS = [
-  ".ssh",
-  ".claude",
-  ".claude.json",
-  ".codex",
-  ".grok",
-  ".config", // gh, gcloud… tokens
-  ".docker", // registry auth
-  ".gnupg",
-  ".aws",
-  ".kube",
-  ".netrc",
-  ".npmrc",
-  ".git-credentials"
-];
-
 interface Rule {
   path: string;
   /** "subtree": the path and everything inside it; "exact": only the path. */
@@ -107,13 +97,22 @@ const MOUNTS_TTL_MS = 5_000;
 export function createStorageGuard(config: StorageGuardConfig): StorageGuard {
   const rootDir = canonical(config.rootDir);
   const workspacesDir = canonical(config.workspacesDir);
+  const fsRoot = canonical(config.fsRoot);
   const homes = unique([canonical(config.appdir), canonical(config.homeDir)]);
+  // Inside the home, only these trees are downloadable (the workspaces, and the
+  // file browser's root when the home holds it: the Files tab serves it anyway).
+  const homeExceptions = unique([workspacesDir, fsRoot]).filter((dir) =>
+    homes.some((home) => dir === home || isInside(dir, home))
+  );
 
+  const kernelRules: Rule[] = [];
   const protectedRules: Rule[] = [];
   const secretRules: Rule[] = [];
   const add = (rules: Rule[], path: string, scope: Rule["scope"], label: string): void => {
     for (const form of pathForms(path)) rules.push({ path: form, scope, label });
   };
+
+  for (const tree of KERNEL_TREES) add(kernelRules, join(rootDir, tree), "subtree", `the kernel's ${tree}`);
 
   add(protectedRules, daemonConfigDir(config.appdir), "subtree", "Orquester's daemon state");
   add(protectedRules, appConfigDir(config.appdir), "subtree", "Orquester's client config");
@@ -129,54 +128,79 @@ export function createStorageGuard(config: StorageGuardConfig): StorageGuard {
 
   add(secretRules, daemonConfigDir(config.appdir), "subtree", "Orquester's daemon state (keys, sessions, agent accounts)");
   add(secretRules, appConfigDir(config.appdir), "subtree", "Orquester's client config (remote connection passwords)");
-  for (const home of homes) {
-    for (const name of HOME_SECRETS) add(secretRules, join(home, name), "subtree", `${name} (credentials)`);
-  }
   for (const path of config.secretPaths ?? []) {
     add(secretRules, path, "subtree", "credentials");
     add(protectedRules, path, "subtree", "Orquester's host configuration");
   }
 
-  let mounts: { at: number; set: Set<string> } | null = null;
-  const mountSet = (fresh: boolean): Set<string> => {
+  /** Mount point → read-only. */
+  let mounts: { at: number; map: Map<string, boolean> } | null = null;
+  const mountMap = (fresh: boolean): Map<string, boolean> => {
     const now = Date.now();
     if (fresh || !mounts || now - mounts.at > MOUNTS_TTL_MS) {
-      mounts = { at: now, set: new Set(config.mountPoints().map((mount) => resolve(mount))) };
+      mounts = { at: now, map: new Map(config.mountPoints().map((mount) => [resolve(mount.path), mount.readOnly])) };
     }
-    return mounts.set;
+    return mounts.map;
   };
 
-  const homeSecretFile = (path: string): boolean =>
-    // Copies of the Claude config (`.claude.json.bak-…`) carry the same credentials.
-    homes.includes(dirname(path)) && basename(path).startsWith(".claude.json.");
+  /** "the kernel's /proc" when `path` is in a kernel pseudo-filesystem. */
+  const kernelTree = (path: string): string | null =>
+    kernelRules.find((rule) => path === rule.path || isInside(path, rule.path))?.label ?? null;
 
   const modifyReason = (path: string, freshMounts: boolean): string | null => {
     if (path === rootDir) return "The filesystem root can't be changed.";
+    const kernel = kernelTree(path);
+    if (kernel) return `This is ${kernel}, not stored data.`;
     for (const rule of protectedRules) {
       if (path === rule.path || (rule.scope === "subtree" && isInside(path, rule.path))) {
         return `This is ${rule.label}.`;
       }
     }
-    const mountSetNow = mountSet(freshMounts);
-    if (mountSetNow.has(path)) return "This is a mount point (the root of a filesystem).";
+    const mountMapNow = mountMap(freshMounts);
+    if (mountMapNow.has(path)) return "This is a mount point (the root of a filesystem).";
     if (dirname(path) === rootDir) return "Top-level system folders can't be changed.";
     for (const rule of protectedRules) {
       if (isInside(rule.path, path)) return `It contains ${rule.path} (${rule.label}).`;
     }
-    for (const mount of mountSetNow) {
+    let nearest: string | null = null;
+    for (const [mount, readOnly] of mountMapNow) {
       if (isInside(mount, path)) return `It contains the mount point ${mount}.`;
+      if (isInside(path, mount) && (nearest === null || mount.length > nearest.length)) nearest = mount;
+    }
+    if (nearest !== null && mountMapNow.get(nearest)) {
+      return "Read-only for Orquester (this filesystem is mounted read-only in the daemon's sandbox).";
+    }
+    return null;
+  };
+
+  const inHomeExceptions = (path: string): boolean =>
+    homeExceptions.some((dir) => path === dir || isInside(path, dir));
+
+  /** Download refused for `path` itself (not for what a folder contains). */
+  const ownDownloadReason = (path: string): string | null => {
+    // Secrets first: they win over a workspaces root or fsRoot configured to overlap them.
+    for (const rule of secretRules) {
+      if (path === rule.path || isInside(path, rule.path)) return `Not downloadable: this is ${rule.label}.`;
+    }
+    const kernel = kernelTree(path);
+    if (kernel) return `Not downloadable: this is ${kernel}, not stored data.`;
+    if (homes.some((home) => path === home || isInside(path, home)) && !inHomeExceptions(path)) {
+      return "Not downloadable: files in Orquester's home can hold credentials; download from the Files tab or a workspace instead.";
     }
     return null;
   };
 
   const downloadReason = (path: string): string | null => {
-    for (const rule of secretRules) {
-      if (path === rule.path || isInside(path, rule.path)) return `Not downloadable: this is ${rule.label}.`;
-    }
-    if (homeSecretFile(path)) return "Not downloadable: a copy of .claude.json (credentials).";
-    for (const rule of secretRules) {
+    const own = ownDownloadReason(path);
+    if (own) return own;
+    for (const rule of [...secretRules, ...kernelRules]) {
       if (isInside(rule.path, path)) {
         return `Not downloadable: it contains ${rule.path} (${rule.label}), which its zip would include.`;
+      }
+    }
+    for (const home of homes) {
+      if (isInside(home, path)) {
+        return `Not downloadable: it contains ${home} (Orquester's home, which can hold credentials), which its zip would include.`;
       }
     }
     return null;
@@ -217,21 +241,26 @@ export function createStorageGuard(config: StorageGuardConfig): StorageGuard {
 
 /**
  * Mount points of this process' mount namespace, bind mounts included (field 5 of
- * `/proc/self/mountinfo`, octal escapes decoded). Empty when the file is unreadable.
+ * `/proc/self/mountinfo`, octal escapes decoded), each with whether its per-mount
+ * options (field 6) say `ro`. A path mounted more than once is reported once, as
+ * its last (topmost) mount. Empty when the file is unreadable.
  */
-export function readMountPoints(file = "/proc/self/mountinfo"): string[] {
+export function readMountPoints(file = "/proc/self/mountinfo"): MountPoint[] {
   let text: string;
   try {
     text = readFileSync(file, "utf8");
   } catch {
     return [];
   }
-  const points = new Set<string>();
+  const points = new Map<string, boolean>();
   for (const line of text.split("\n")) {
-    const field = line.split(" ")[4];
-    if (field) points.add(field.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8))));
+    const fields = line.split(" ");
+    const field = fields[4];
+    if (!field) continue;
+    const path = field.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
+    points.set(path, (fields[5] ?? "").split(",").includes("ro"));
   }
-  return [...points];
+  return [...points].map(([path, readOnly]) => ({ path, readOnly }));
 }
 
 /**

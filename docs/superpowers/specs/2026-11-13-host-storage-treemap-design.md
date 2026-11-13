@@ -171,14 +171,23 @@ Storage actions are **not** confined to `fsRoot`, so they get their own server-s
     Cache dirs (`.cache`, `.npm/_cacache`, `go/pkg/mod`, …) stay deletable — they are typical space
     hogs and safe to regenerate;
   - anything that is an ancestor of one of those (deleting `/var/lib` would take the appdir with it).
-- **Reading secrets.** Download is refused (403) for the protected set above *plus* a secrets set:
-  `<appdir>/daemon/**` (keys, auth sessions, `daemon.json`, agent-account credential homes),
-  `.ssh`, `.claude`/`.claude.json`/`.codex` credentials, and `/etc/orquester`. Download auth reuses
+- **Reading secrets.** Download is refused (403) for `<appdir>/daemon/**` (keys, auth sessions,
+  `daemon.json`, agent-account credential homes), `<appdir>/app/**` and `/etc/orquester`, and — since
+  no denylist of credential files can be complete — for **everything in the service user's home and
+  the appdir except the workspaces root** (and `fsRoot` when it lies in there); the daemon's state stays
+  refused even if those overlap it. Every action (delete, rename, download) is refused under the kernel
+  pseudo-filesystems `/proc`, `/sys`, `/dev` and `/run` (`/proc/self/environ` is the daemon's env). A
+  folder containing a refused path can't be zipped (so `/`, `/var/lib` and the home itself are refused),
+  and a file download never sends more bytes than its stat size. Download auth reuses
   the existing `?token=` allowance that `/api/fs/download` has (added for exactly this storage
   download route, nothing broader) *(my call)*. The tree itself only ever returns names and sizes,
   never contents.
-- Inside the workspaces root, delete goes through the same side effects as `DELETE /api/fs` (close
-  sessions, browser tabs and desktops rooted there; notify workspaces changed) — ideally by calling the
+- Delete and rename are also refused on a filesystem mounted read-only in the daemon's mount namespace
+  (systemd `ProtectSystem=strict`; the nearest enclosing mount in `/proc/self/mountinfo` decides), so
+  the UI says so up front instead of failing with `EROFS` after the confirm.
+- Every delete first closes the sessions, browser tabs and desktops rooted in the tree (a project can be
+  symlinked outside the workspaces root); inside the workspaces root it also notifies workspaces changed,
+  i.e. the same side effects as `DELETE /api/fs` — ideally by calling the
   same code path, not duplicating it.
 - Outside the workspaces root, delete requires `confirm` to equal the entry's name (typed by the user
   in the dialog); the server checks it. Rename outside the workspaces root needs no typed confirm (it

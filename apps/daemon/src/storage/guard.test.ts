@@ -36,6 +36,8 @@ async function host(t: test.TestContext): Promise<Host> {
     p("opt", "orquester-tools", "gdu", "v5"),
     p("etc", "orquester"),
     p("data", "foo"),
+    p("srv", "ro", "rw"),
+    p("proc", "self"),
     p("usr", "share")
   ]) {
     await mkdir(dir, { recursive: true });
@@ -45,9 +47,18 @@ async function host(t: test.TestContext): Promise<Host> {
   await writeFile(join(appdir, ".claude.json.bak-1"), "{}");
   await writeFile(join(appdir, "daemon", "agent-accounts", "claude", "a1", "home", ".credentials.json"), "{}");
   await writeFile(join(workspaces, "acme", "game", "src", "main.ts"), "x");
+  await writeFile(p("proc", "self", "environ"), "ORQUESTER_HTTP_PASSWORD=x");
   const guard = createStorageGuard({
     rootDir: root,
-    mountPoints: () => [root, p("data"), p("var", "lib", "docker", "overlay", "abc", "merged")],
+    mountPoints: () =>
+      [
+        { path: root, readOnly: false },
+        { path: p("data"), readOnly: false },
+        { path: p("var", "lib", "docker", "overlay", "abc", "merged"), readOnly: false },
+        // read-only in the daemon's namespace, with a writable mount nested inside
+        { path: p("srv", "ro"), readOnly: true },
+        { path: p("srv", "ro", "rw"), readOnly: false }
+      ],
     appdir,
     homeDir: appdir,
     workspacesDir: workspaces,
@@ -79,7 +90,9 @@ test("delete and rename refuse the system skeleton, mount points and Orquester's
     join(h.appdir, "tmp"), // protected whether or not it exists yet
     h.p("etc", "orquester"),
     h.appdir, // ancestors of protected entries
-    h.p("var", "lib")
+    h.p("var", "lib"),
+    h.p("proc", "self", "environ"), // a kernel pseudo-filesystem
+    h.p("srv", "ro", "x") // on a read-only mount
   ];
   for (const path of refused) {
     const actions = h.guard.actionsFor(path, "dir");
@@ -104,7 +117,9 @@ test("caches, project contents, top-level folders of a data volume and look-alik
     join(h.appdir, ".sshx"),
     h.p("opt", "orquester-tools", "gdux"),
     // contents of protected parents' siblings, and of a direct child of the root
-    h.p("usr", "share")
+    h.p("usr", "share"),
+    // the nearest mount decides: a writable mount inside a read-only one
+    h.p("srv", "ro", "rw", "x")
   ];
   for (const path of allowed) {
     const actions = h.guard.actionsFor(path, "dir");
@@ -113,25 +128,62 @@ test("caches, project contents, top-level folders of a data volume and look-alik
   }
 });
 
-test("download refuses secrets and any folder whose zip would contain one", async (t) => {
+test("download refuses the kernel trees and the home outside the workspaces, and any folder whose zip would contain them", async (t) => {
   const h = await host(t);
-  const secrets = [
+  const refused = [
     join(h.appdir, "daemon", "agent-accounts", "claude", "a1", "home", ".credentials.json"),
     join(h.appdir, ".ssh", "id_ed25519"),
-    join(h.appdir, ".claude.json"),
     join(h.appdir, ".claude.json.bak-1"),
     join(h.appdir, "app", "remotes.json"),
-    join(h.appdir, ".claude"),
-    h.p("etc", "orquester")
+    // no credential list can be complete: everything else in the home is refused too
+    join(h.appdir, ".local", "share", "opencode", "auth.json"),
+    join(h.appdir, ".cache"),
+    join(h.appdir, "prod.env"),
+    h.p("etc", "orquester"),
+    h.appdir,
+    h.p("proc", "self", "environ"),
+    h.p("proc")
   ];
-  for (const path of secrets) {
+  for (const path of refused) {
     assert.ok(h.guard.actionsFor(path, "file").download, `download ${path}`);
   }
-  for (const path of [h.appdir, h.p("var"), h.p("etc"), h.root]) {
+  for (const path of [h.p("var", "lib"), h.p("etc"), h.root]) {
     assert.match(h.guard.actionsFor(path, "dir").download ?? "", /contains/, `download ${path}`);
   }
-  for (const path of [h.workspaces, join(h.workspaces, "acme", "game"), h.p("usr"), h.p("data"), join(h.appdir, ".cache")]) {
+  for (const path of [h.workspaces, join(h.workspaces, "acme", "game"), h.p("usr"), h.p("data")]) {
     assert.equal(h.guard.actionsFor(path, "dir").download, null, `download ${path}`);
+  }
+
+  // A file browser rooted at the home opens it to download, but never the daemon's state.
+  const wide = createStorageGuard({
+    rootDir: h.root,
+    mountPoints: () => [],
+    appdir: h.appdir,
+    homeDir: h.appdir,
+    workspacesDir: h.workspaces,
+    fsRoot: h.appdir,
+    daemonCheckoutDir: h.p("opt", "orquester"),
+    toolDirs: []
+  });
+  assert.equal(wide.actionsFor(join(h.appdir, ".cache"), "dir").download, null);
+  assert.ok(wide.actionsFor(join(h.appdir, "daemon", "agent-accounts"), "dir").download);
+});
+
+test("on the real root, /proc/self/environ (the daemon's env) is refused for every action", async (t) => {
+  const h = await host(t);
+  const guard = createStorageGuard({
+    rootDir: "/",
+    mountPoints: () => [{ path: "/", readOnly: false }],
+    appdir: h.appdir,
+    homeDir: h.appdir,
+    workspacesDir: h.workspaces,
+    fsRoot: h.workspaces,
+    daemonCheckoutDir: h.p("opt", "orquester"),
+    toolDirs: []
+  });
+  for (const action of ["download", "delete", "rename"] as const) {
+    const result = await guard.check(action, "/proc/self/environ");
+    assert.equal(!result.ok && result.code, "STORAGE_FORBIDDEN", action);
   }
 });
 
@@ -186,7 +238,7 @@ test("check answers not found for a missing path", async (t) => {
   }
 });
 
-test("readMountPoints lists every mount point once, decoding escaped characters", async (t) => {
+test("readMountPoints lists every mount point once with its read-only flag, decoding escaped characters", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "orq-mountinfo-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = join(dir, "mountinfo");
@@ -194,13 +246,19 @@ test("readMountPoints lists every mount point once, decoding escaped characters"
     file,
     [
       "22 1 9:2 / / rw,relatime shared:1 - ext4 /dev/md2 rw",
-      "30 22 9:2 /etc /etc ro,relatime shared:1 - ext4 /dev/md2 rw",
+      "30 22 9:2 /etc /etc rw,relatime shared:1 - ext4 /dev/md2 rw",
       "31 22 9:3 / /data rw,relatime shared:2 - ext4 /dev/md3 rw",
       "32 31 9:3 /x /mnt/my\\040disk rw - ext4 /dev/md3 rw",
       "33 22 9:2 /etc /etc ro,relatime shared:1 - ext4 /dev/md2 rw",
       ""
     ].join("\n")
   );
-  assert.deepEqual(readMountPoints(file), ["/", "/etc", "/data", "/mnt/my disk"]);
+  // /etc is mounted twice: the later (topmost) mount, read-only, is what applies.
+  assert.deepEqual(readMountPoints(file), [
+    { path: "/", readOnly: false },
+    { path: "/etc", readOnly: true },
+    { path: "/data", readOnly: false },
+    { path: "/mnt/my disk", readOnly: false }
+  ]);
   assert.deepEqual(readMountPoints(join(dir, "missing")), []);
 });
