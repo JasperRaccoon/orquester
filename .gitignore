@@ -17,6 +17,8 @@ release/
 /deploy/targets.conf
 # Version stamp a deploy writes for the daemon's /api/info (deploy/lib/remote-update.sh).
 /.orquester-version.json
+# A release directory's completion marker (/opt/orquester-releases/<sha12>, written last by its build).
+/.orq-release-complete
 
 # Stage Sandbox: keep committed config + seed workspaces, ignore runtime artifacts
 .stage/**/logs/
