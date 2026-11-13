@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 import { useBackClose } from "../../hooks/use-back-close";
 import { cn } from "../../lib/cn";
 import { openTrackedLayer } from "../../lib/open-layers";
+import { usePortalContainer } from "../../lib/portal-container";
 
 export interface ModalProps {
   open: boolean;
@@ -41,6 +42,7 @@ const escapeStack: object[] = [];
  */
 export const Modal: React.FC<ModalProps> = ({ open, onClose, onBackdropClick, children, className, ariaLabel }) => {
   const layerRef = useRef<{ release: () => void; isTopmost: () => boolean } | null>(null);
+  const portalContainer = usePortalContainer();
   useEffect(() => {
     if (!open) return undefined;
     const layer = openTrackedLayer();
@@ -136,7 +138,7 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, onBackdropClick, ch
         {children}
       </div>
     </div>,
-    document.body
+    portalContainer
   );
 };
 

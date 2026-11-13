@@ -17,7 +17,13 @@ export function PortalContainerProvider(props: { container: HTMLElement | null; 
   return <PortalContainerContext.Provider value={props.container}>{props.children}</PortalContainerContext.Provider>;
 }
 
-/** The node portals mount into: the provided container, else `document.body`. */
+/**
+ * The node portals mount into: the provided container, else `document.body`.
+ * Safe to call where there is no document (a server render, which renders no
+ * portal): primitives call it on every render, open or not.
+ */
 export function usePortalContainer(): HTMLElement {
-  return React.useContext(PortalContainerContext) ?? document.body;
+  const provided = React.useContext(PortalContainerContext);
+  if (provided !== null) return provided;
+  return typeof document === "undefined" ? (undefined as unknown as HTMLElement) : document.body;
 }

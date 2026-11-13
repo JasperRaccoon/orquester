@@ -45,9 +45,14 @@ export function VisualDocument(props: {
   shortcuts: readonly HtmlRenderShortcut[];
   /** The page's content height whenever it changes, so an inline frame fits it. */
   onContentHeight?: (height: number) => void;
+  /**
+   * An element already on screen where the page shows, whose theme the page
+   * takes from its first paint. Absent: the frame's own, read once it mounts.
+   */
+  themeAnchor?: React.RefObject<Element | null>;
 }): React.ReactElement {
-  const theme = useVisualTheme();
   const frameRef = React.useRef<HTMLIFrameElement>(null);
+  const theme = useVisualTheme(props.themeAnchor ?? frameRef);
   const [src] = React.useState(() => `${props.src.split("#", 1)[0]}${htmlRenderThemeFragment(theme)}`);
   const [loaded, setLoaded] = React.useState(false);
 

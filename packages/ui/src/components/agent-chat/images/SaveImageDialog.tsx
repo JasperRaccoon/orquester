@@ -1,10 +1,10 @@
 import React from "react";
 
-import { useApi } from "../../../context/orquester-context";
 import { normalizeProjectRelativePath } from "../../../lib/agent-chat/chat-images.logic";
-import { useAppStore } from "../../../store/app";
-import { Button, Input, Modal } from "../../ui";
-import { saveImageToProject } from "./image-actions";
+import { Button } from "../../ui/button";
+import { Input } from "../../ui/input";
+import { Modal } from "../../ui/modal";
+import type { ChatHost } from "../chat-host";
 
 /**
  * "Save to project…" (design 2026-11-10 §9.1): asks where in the project,
@@ -12,12 +12,14 @@ import { saveImageToProject } from "./image-actions";
  * file — the name gets `-v2`, `-v3`, … — then says where it landed.
  */
 export function SaveImageDialog(props: {
+  /** The host's save (`ChatHost.saveImageToProject`). */
+  save: NonNullable<ChatHost["saveImageToProject"]>;
+  notify: ChatHost["notify"];
   projectRoot: string;
   url: string;
   defaultPath: string;
   onClose: () => void;
 }): React.ReactElement {
-  const api = useApi();
   const [value, setValue] = React.useState(props.defaultPath);
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -39,14 +41,9 @@ export function SaveImageDialog(props: {
     setSaving(true);
     setError(null);
     try {
-      const saved = await saveImageToProject({
-        api,
-        projectRoot: props.projectRoot,
-        relativePath,
-        url: props.url
-      });
+      const saved = await props.save({ projectRoot: props.projectRoot, relativePath, url: props.url });
       const shown = saved.startsWith(`${props.projectRoot}/`) ? saved.slice(props.projectRoot.length + 1) : saved;
-      useAppStore.getState().setNotice({ title: "Image saved", message: shown });
+      props.notify?.({ title: "Image saved", message: shown });
       props.onClose();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The image could not be saved.");

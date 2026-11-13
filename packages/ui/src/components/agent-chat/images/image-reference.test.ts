@@ -6,7 +6,7 @@ import type { AttachmentRef } from "@orquester/api/agent-chat";
 import { readPersistedDrafts } from "../../../lib/agent-chat/composer.logic";
 import type { ApiClient } from "../../../lib/api-client";
 import { registerComposerHandle, type ComposerHandle } from "../composer/composer-bridge";
-import { attachImageAsReference } from "./image-actions";
+import { attachImageAsReference } from "./image-reference";
 
 /** A 1×1 PNG's signature and header: enough for the bytes to read as one. */
 const PNG_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";

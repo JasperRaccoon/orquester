@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { createPortal, flushSync } from "react-dom";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
+import { usePortalContainer } from "../../lib/portal-container";
 import {
   dropdownFocusTarget,
   dropdownHorizontalPosition,
@@ -90,7 +91,7 @@ const GAP = 4;
 const MARGIN = 8;
 
 /**
- * Lightweight popover menu. The panel is rendered in a portal on `document.body`
+ * Lightweight popover menu. The panel is rendered in a portal (`usePortalContainer`: `document.body` in the app)
  * with fixed positioning derived from the trigger, so it never gets clipped or
  * pushed around by `overflow`/flex ancestors (e.g. the scrollable tab strip).
  * Closes on outside click or Escape — an open layer while it is up
@@ -135,6 +136,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
   // Open, it is an open layer: Escape is this panel's to close, so the chat's
   // capture-phase listeners stand down (`lib/open-layers.ts`).
   useOpenLayer(open);
+  const portalContainer = usePortalContainer();
 
   // Closed from outside (the caller's `dismissOn`): no focus move — the
   // trigger belongs to whatever just went off screen.
@@ -338,7 +340,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
           >
             <DropdownContext.Provider value={{ close }}>{children}</DropdownContext.Provider>
           </div>,
-          document.body
+          portalContainer
         )}
     </>
   );

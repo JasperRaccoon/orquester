@@ -113,18 +113,29 @@ function baseSurfaceTriple(root: HTMLElement): string | null {
  * agent-published page styles against — T3's names, as hex — mapped from
  * this scheme's `--n-*` and the mode's `--sem-*` / `--lane-*` triples (the
  * mapping is `@orquester/api`'s, which the daemon's bootstrap shares for its
- * stock fallback). Read the document root's computed style, so it answers what
- * `applyTheme` painted.
+ * stock fallback).
+ *
+ * Read off the computed style of the themed element `within` sits in — the
+ * nearest ancestor carrying `data-mode` — so it answers what is painted where
+ * the page shows: in the app that is the document root `applyTheme` stamps;
+ * in the embeddable chat, its own wrapper inside a shadow root, never the
+ * page that embeds it. With no element yet (before mount) the document root.
  */
-export function htmlRenderThemeTokens(mode: ResolvedMode): HtmlRenderTheme {
-  return htmlRenderThemeFromPalette(readRootVariable, mode, HTML_RENDER_DEFAULT_FONTS);
+export function htmlRenderThemeTokens(mode: ResolvedMode, within?: Element | null): HtmlRenderTheme {
+  const themed = themedElement(within);
+  return htmlRenderThemeFromPalette(
+    (variable) => (themed === null ? undefined : getComputedStyle(themed).getPropertyValue(variable).trim() || undefined),
+    mode,
+    HTML_RENDER_DEFAULT_FONTS
+  );
 }
 
-function readRootVariable(variable: string): string | undefined {
-  if (typeof document === "undefined") {
-    return undefined;
+/** The element whose theme variables apply at `within`: its nearest `[data-mode]`, else itself, else the root. */
+function themedElement(within: Element | null | undefined): Element | null {
+  if (within?.isConnected) {
+    return within.closest("[data-mode]") ?? within;
   }
-  return getComputedStyle(document.documentElement).getPropertyValue(variable).trim() || undefined;
+  return typeof document === "undefined" ? null : document.documentElement;
 }
 
 function tripleToHex(triple: string): string {

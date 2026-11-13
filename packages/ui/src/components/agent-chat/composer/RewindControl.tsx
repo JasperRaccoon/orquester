@@ -9,7 +9,7 @@ import { cn } from "../../../lib/cn";
 import { rewindTargetPreview, type RewindTarget } from "../../../lib/agent-chat/rewind.logic";
 import { ChatIconButton, Kbd } from "../primitives";
 import { formatRowTimestamp } from "../timeline/timestamp";
-import { ComposerMenuRow, ComposerPopover } from "./ComposerPopover";
+import { ComposerMenuRow, ComposerPopover } from "../primitives/ComposerPopover";
 
 /**
  * "Rewind to here" — the surfaces (spec §5.5, §7.3, §7.4).
