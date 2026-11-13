@@ -19,7 +19,8 @@
 # health. Nothing the running daemon uses is touched before the switch, so a failed build changes
 # nothing. If the new release never turns healthy, the link flips back to the previous release (no
 # rebuild), which is restarted and health-checked, and the deploy still fails. After a healthy
-# deploy, releases no longer needed are deleted (prune_releases). A plain checkout at $REPO_DIR (a
+# deploy of a layout-aware release, its update scripts go to $RELEASES_DIR/tooling (what self-update
+# runs), and releases no longer needed are deleted (prune_releases). A plain checkout at $REPO_DIR (a
 # real directory with .git/, from before releases) is converted on the way (see "Conversion").
 # Inputs via env:
 #   SUDO          "" or "sudo" — prefix for privileged commands (git/pnpm/node/chown/systemctl)
@@ -644,6 +645,20 @@ if ! restart_healthy; then
   exit 4
 fi
 printf '%s\n' "$new_head" | $SUDO tee "$state_file" >/dev/null
+# The update scripts self-update runs (orquester-update.service copies them from here when it
+# exists): those of the last healthy layout-aware release, so a rollback to a release from before
+# releases — or a flip back — keeps layout-aware tooling. Each is replaced atomically.
+if is_layout_aware "$target_dir"; then
+  tooling="$RELEASES_DIR/tooling"
+  for f in remote-update.sh self-update.sh; do
+    [ -f "$target_dir/deploy/lib/$f" ] || continue
+    if ! { $SUDO install -d -m 0755 -- "$tooling" \
+           && $SUDO install -m 0644 -- "$target_dir/deploy/lib/$f" "$tooling/.$f.tmp" \
+           && $SUDO mv -f -- "$tooling/.$f.tmp" "$tooling/$f"; }; then
+      warn "WARNING: could not install $f into $tooling — self-update keeps the copy it has."
+    fi
+  done
+fi
 prune_releases
 echo "[remote-update] service=$(systemctl is-active orquester)"
 echo "[remote-update] version=$(tree_version "$target_dir") commit=$new_head"

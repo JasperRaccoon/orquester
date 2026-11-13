@@ -15,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   realpathSync,
   renameSync,
@@ -364,7 +365,7 @@ test("a re-deploy or manual rollback to a kept release switches without a rebuil
   assert.equal(head(), good, "reverted to the release the rollback installed");
 });
 
-test("a release from before releases is deployed by this script, and its units are never installed", () => {
+test("a release from before releases is deployed by this script, and neither its units nor its update scripts are installed", () => {
   const units = (tag) => `echo "install-unit ${tag}" >> "$STUB_DIR/calls"\n`;
   const old = release("ok", "1.1.0", {
     "deploy/lib/remote-update.sh": '#!/usr/bin/env bash\necho "[old-script] ran" >> "$STUB_DIR/calls"\nexit 0\n',
@@ -373,10 +374,16 @@ test("a release from before releases is deployed by this script, and its units a
   const current = release("ok", "1.2.0", {
     "deploy/lib/remote-update.sh": OURS,
     "deploy/install-unit.sh": units("current"),
-    "deploy/lib/ensure-web-fallback.sh": 'echo "web-fallback $1" >> "$STUB_DIR/calls"\n'
+    "deploy/lib/ensure-web-fallback.sh": 'echo "web-fallback $1" >> "$STUB_DIR/calls"\n',
+    "deploy/lib/self-update.sh": "# the current self-update wrapper\n"
   });
+  const tooling = join(releases, "tooling");
   assert.equal(deploy({ RESET_REF: old }).code, 0);
+  assert.ok(!existsSync(tooling), "a release from before releases installs no tooling");
   assert.equal(deploy({ ENV_FILE: "/env-file" }).code, 0);
+  assert.equal(readFileSync(join(tooling, "remote-update.sh"), "utf8"), OURS);
+  assert.equal(readFileSync(join(tooling, "self-update.sh"), "utf8"), "# the current self-update wrapper\n");
+  assert.equal(lstatSync(join(tooling, "self-update.sh")).mode & 0o777, 0o644);
   const rollback = deploy({ RESET_REF: old });
   assert.equal(rollback.code, 0, rollback.out + rollback.err);
   assert.equal(live(), dirOf(old));
@@ -387,6 +394,8 @@ test("a release from before releases is deployed by this script, and its units a
     ["web-fallback /env-file", "install-unit current"],
     "only the layout-aware release installed units; the old release's script never ran"
   );
+  assert.equal(readFileSync(join(tooling, "remote-update.sh"), "utf8"), OURS, "the rollback left the layout-aware tooling");
+  assert.deepEqual(readdirSync(tooling).sort(), ["remote-update.sh", "self-update.sh"]);
 });
 
 test("pruning keeps the live, previous and one more release, and every release a running process uses", () => {
