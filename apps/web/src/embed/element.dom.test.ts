@@ -417,46 +417,129 @@ describe("orquester-agent-chat — loaders", () => {
     assert.ok(text().includes("An older request"));
   });
 
-  it("'load full output' asks the itemOutput loader, and is not offered without one", async () => {
-    const command = activity(
-      "tool.completed",
-      { itemType: "command_execution", toolUseId: "call-ls", command: "ls -la /etc", status: "completed", truncated: true, data: { output: "a\nb" } },
-      { id: "cmd-1", turnId: "t1", createdAt: at(1), status: "completed" }
-    );
-    const output: ThreadItemOutputResponse = { toolUseId: "call-ls", output: "every line of it", complete: true, truncated: false };
-    const itemOutput = spy((_request: Parameters<NonNullable<EmbedLoaders["itemOutput"]>>[0], _signal?: AbortSignal) =>
-      Promise.resolve(output)
-    );
-    push({ kind: "snapshot", thread: running([
-        message("user", "list it", { id: "u1", turnId: "t1", createdAt: at(0) }),
-        command,
-        message("assistant", "Listed.", { id: "a1", turnId: "t1", createdAt: at(2) })
-      ]) });
+  describe("'load full output'", () => {
+    type ItemRequest = Parameters<NonNullable<EmbedLoaders["item"]>>[0];
+    type ItemOutputRequest = Parameters<NonNullable<EmbedLoaders["itemOutput"]>>[0];
 
-    const [row] = all<HTMLElement>('[data-activity-id="cmd-1"][role="button"]');
-    assert.ok(row, "the command's row");
-    click(row);
-    const loadButton = (): HTMLButtonElement | undefined =>
-      all<HTMLButtonElement>("button").find((button) => button.textContent === "Load full output");
-    assert.ok(text().includes("ls -la /etc"), "the row is open");
-    assert.ok(loadButton() === undefined, "no loader, no control");
+    /** A command whose result the wire cut: its row offers the item read. */
+    const cutCommand = (payload: Record<string, unknown> = {}): ThreadItem =>
+      activity(
+        "tool.completed",
+        {
+          itemType: "command_execution",
+          toolUseId: "call-ls",
+          command: "ls -la /etc",
+          status: "completed",
+          truncated: true,
+          data: { output: "a\nb" },
+          ...payload
+        },
+        { id: "cmd-1", turnId: "t1", createdAt: at(1), status: "completed" }
+      );
 
-    act(() => {
-      element.loaders = { itemOutput: itemOutput.fn };
+    function pushCommand(): void {
+      push({
+        kind: "snapshot",
+        thread: running([
+          message("user", "list it", { id: "u1", turnId: "t1", createdAt: at(0) }),
+          cutCommand(),
+          message("assistant", "Listed.", { id: "a1", turnId: "t1", createdAt: at(2) })
+        ])
+      });
+      const [row] = all<HTMLElement>('[data-activity-id="cmd-1"][role="button"]');
+      assert.ok(row, "the command's row");
+      click(row);
+      assert.ok(text().includes("ls -la /etc"), "the row is open");
+    }
+
+    const button = (label: string): HTMLButtonElement | undefined =>
+      all<HTMLButtonElement>("button").find((candidate) => candidate.textContent === label);
+    const viewerText = (): string => shadow().querySelector('[role="dialog"]')?.textContent ?? "";
+
+    it("is offered only with both the item and the itemOutput loaders", () => {
+      pushCommand();
+      assert.equal(button("Load full output"), undefined, "no loaders");
+      act(() => {
+        element.loaders = { itemOutput: () => Promise.resolve(null) };
+      });
+      assert.equal(button("Load full output"), undefined, "itemOutput alone");
+      act(() => {
+        element.loaders = { item: () => Promise.reject(new Error("unused")) };
+      });
+      assert.equal(button("Load full output"), undefined, "item alone");
+      act(() => {
+        element.loaders = { item: () => Promise.reject(new Error("unused")), itemOutput: () => Promise.resolve(null) };
+      });
+      assert.ok(button("Load full output"), "both");
     });
-    const load = loadButton();
-    assert.ok(load, "the row offers its full output");
-    click(load);
-    const [request] = await settle(itemOutput.called);
-    assert.equal(request.sessionId, SESSION);
-    assert.equal(request.itemId, "cmd-1");
-    assert.equal(request.offset, 0);
-    await settle(Promise.resolve());
-    assert.ok(
-      (shadow().textContent ?? "").includes("every line of it") || (dom.window.document.body.textContent ?? "").includes("every line of it")
-    );
-  });
 
+    it("reads a cut tool result that never streamed through the item loader", async () => {
+      const whole = cutCommand({ truncated: false, data: { item: { aggregatedOutput: "every line of the listing" } } });
+      const item = spy((_request: ItemRequest, _signal?: AbortSignal) => Promise.resolve({ item: whole }));
+      let outputReads = 0;
+      act(() => {
+        element.loaders = {
+          item: item.fn,
+          itemOutput: (_request: ItemOutputRequest) => {
+            outputReads += 1;
+            return Promise.resolve(null);
+          }
+        };
+      });
+      pushCommand();
+      click(button("Load full output")!);
+      const [request] = await settle(item.called);
+      assert.deepEqual(request, { sessionId: SESSION, itemId: "cmd-1" });
+      await settle(Promise.resolve());
+      assert.ok(viewerText().includes("every line of the listing"), "the viewer shows the item's output");
+      assert.equal(outputReads, 0, "an item that holds its output whole needs no streamed read");
+    });
+
+    it("reads a command's streamed output through itemOutput when its item is stored cut", async () => {
+      const output: ThreadItemOutputResponse = { toolUseId: "call-ls", output: "every line of it", complete: true, truncated: false };
+      const itemOutput = spy((_request: ItemOutputRequest, _signal?: AbortSignal) => Promise.resolve(output));
+      act(() => {
+        element.loaders = { item: () => Promise.resolve({ item: cutCommand() }), itemOutput: itemOutput.fn };
+      });
+      pushCommand();
+      click(button("Load full output")!);
+      const [request] = await settle(itemOutput.called);
+      assert.equal(request.sessionId, SESSION);
+      assert.equal(request.itemId, "cmd-1");
+      assert.equal(request.offset, 0);
+      await settle(Promise.resolve());
+      assert.ok(viewerText().includes("every line of it"));
+    });
+
+    it("reads a cut compaction summary through the item loader", async () => {
+      const compaction = (summary: string, truncated: boolean): ThreadItem =>
+        activity(
+          "context-compaction",
+          { state: "compacted", beforeTokens: 100, afterTokens: 20, summary, ...(truncated ? { truncated: true } : {}) },
+          { id: "cmp-1", turnId: "t1", createdAt: at(1), tone: "info", summary: "Context compacted" }
+        );
+      const item = spy((_request: ItemRequest, _signal?: AbortSignal) =>
+        Promise.resolve({ item: compaction("The whole summary of the dropped turns", false) })
+      );
+      act(() => {
+        element.loaders = { item: item.fn, itemOutput: () => Promise.resolve(null) };
+      });
+      push({
+        kind: "snapshot",
+        thread: thread([
+          message("user", "Keep going", { id: "u1", turnId: "t1", createdAt: at(0) }),
+          compaction("The whole summ", true),
+          message("assistant", "Continuing.", { id: "a1", turnId: "t1", createdAt: at(2) })
+        ])
+      });
+      click(button("Show summary")!);
+      click(button("Load the full summary")!);
+      const [request] = await settle(item.called);
+      assert.deepEqual(request, { sessionId: SESSION, itemId: "cmp-1" });
+      await settle(Promise.resolve());
+      assert.ok(viewerText().includes("The whole summary of the dropped turns"));
+    });
+  });
   it("a show_image row reads its image through the attachment loader", async () => {
     const attachmentId = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-png";
     const attachment = spy((_request: Parameters<NonNullable<EmbedLoaders["attachment"]>>[0], _signal?: AbortSignal) =>

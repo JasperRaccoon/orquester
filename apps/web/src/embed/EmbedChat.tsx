@@ -9,7 +9,8 @@
  * timeline takes as a prop is left out — never a control that does nothing:
  * no rewind, fork, "continue in…", turn diff, file opening (paths are plain
  * text), agent drill-in, queue or background tool, and no "load full output"
- * until the host sets an `itemOutput` loader.
+ * until the host sets both the `item` and the `itemOutput` loaders (a row's
+ * read may need either, and which one is known only once the first answers).
  */
 
 import React from "react";
@@ -83,11 +84,11 @@ export function EmbedChat({ thread, settings, host, portal, onCommand }: EmbedCh
   }, [viewerReads]);
   const onLoadFullOutput = React.useCallback(
     (itemId: string, source?: FullOutputSource) => {
-      const loader = settings.get().loaders.itemOutput;
-      if (loader === undefined || sessionId === null) return;
+      const { item, itemOutput } = settings.get().loaders;
+      if (item === undefined || itemOutput === undefined || sessionId === null) return;
       const signal = viewerReads.begin();
       setViewer({ title: fullOutputViewerCopy(source).title, loading: true });
-      void loadFullOutput(loader, sessionId, itemId, source, signal).then((result) => {
+      void loadFullOutput({ item, itemOutput }, sessionId, itemId, source, signal).then((result) => {
         if (signal.aborted) return;
         setViewer(
           result.kind === "output"
@@ -111,6 +112,7 @@ export function EmbedChat({ thread, settings, host, portal, onCommand }: EmbedCh
   );
   const onLoadOlderHistory = React.useCallback(() => void thread.loadOlder(), [thread]);
   const historyHasOlder = config.loaders.history !== undefined && thread.canLoadOlder();
+  const canLoadFullOutput = config.loaders.item !== undefined && config.loaders.itemOutput !== undefined;
 
   return (
     <ChatHostProvider host={host}>
@@ -127,10 +129,10 @@ export function EmbedChat({ thread, settings, host, portal, onCommand }: EmbedCh
             canRevert={false}
             onRevert={noop}
             // Nothing opens here: no turn diff, file or agent drill-in, so
-            // those render as plain text. Full output only with its loader.
+            // those render as plain text. Full output only with both its loaders.
             onOpenTurnDiff={null}
             onOpenFile={null}
-            onLoadFullOutput={config.loaders.itemOutput === undefined ? null : onLoadFullOutput}
+            onLoadFullOutput={canLoadFullOutput ? onLoadFullOutput : null}
             onOpenAgent={null}
             onSendQueuedNow={noop}
             onReturnQueuedToComposer={noop}

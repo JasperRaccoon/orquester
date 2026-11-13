@@ -14,7 +14,7 @@ This document is the contract. Design and rationale: [`docs/superpowers/specs/20
 | Contract version | `1` (`manifest.contract`) |
 | Input | `AgentChatStreamFrame`s from `GET /api/sessions/:id/events` |
 | Output | DOM events: `orquester-command`, `orquester-pending`, `orquester-resync`, `orquester-stale` |
-| Data beyond frames | four host-supplied loaders (`attachment`, `visualUrl`, `history`, `itemOutput`) |
+| Data beyond frames | five host-supplied loaders (`attachment`, `visualUrl`, `history`, `item`, `itemOutput`) |
 | Styling | `mode` / `scheme` attributes and the `--orq-*` CSS variables below |
 | Licences | `GET https://<orquester>/embed/LICENSES.txt` |
 
@@ -81,7 +81,7 @@ It is a block element with an open shadow root. Give it a height: the thread scr
 |---|---|
 | `pushFrames(frames: AgentChatStreamFrame \| AgentChatStreamFrame[]): void` | Applies frames in order. |
 | `reset(): void` | Empties the thread (before replaying another chat into the same element). |
-| `loaders: EmbedLoaders` | Get/set at any time; see [Loaders](#loaders). Only functions under the four known names are kept. |
+| `loaders: EmbedLoaders` | Get/set at any time; see [Loaders](#loaders). Only functions under the five known names are kept. |
 | `respondFailed(commandId: string, message?: string): void` | The host could not deliver an `orquester-command`: re-enables the card and shows `message` above it. |
 | `readonly sessionId: string \| null` | The thread the frames describe. |
 
@@ -106,18 +106,19 @@ Feed the element the parsed JSON lines of `GET /api/sessions/:id/events` (NDJSON
 - On reconnect, use `?after=<last seq>`; on `orquester-resync`, reconnect without it.
 - Relay frames verbatim; the element is built from the same Orquester as the frames and understands them. Do not reshape them.
 
-**History of a closed chat.** Store one snapshot frame when the chat settles — `{ "kind": "snapshot", "thread": <GET /api/sessions/:id/thread> }` — and replay it with `reset()` then `pushFrames(snapshot)`. Storing every frame gives the same result at a much larger size: replay folds through the same retained window (the latest 500 activities and 2,000 messages). Turns older than that window and full tool outputs come from the daemon on demand through the `history` and `itemOutput` loaders, so they need the chat to still exist on that Orquester. A newer bundle replays frames written by an older Orquester.
+**History of a closed chat.** Store one snapshot frame when the chat settles — `{ "kind": "snapshot", "thread": <GET /api/sessions/:id/thread> }` — and replay it with `reset()` then `pushFrames(snapshot)`. Storing every frame gives the same result at a much larger size: replay folds through the same retained window (the latest 500 activities and 2,000 messages). Turns older than that window and full tool outputs come from the daemon on demand through the `history`, `item` and `itemOutput` loaders, so they need the chat to still exist on that Orquester. A newer bundle replays frames written by an older Orquester.
 
 ## Loaders
 
-The element never talks to Orquester. Everything beyond the frames comes through four async functions the host sets on `el.loaders`. Each returns what the daemon's route returns; proxy them through your backend (with your `orq_…` token) after checking the viewer may see that chat. Every loader is optional; a missing one hides its affordance, and one that rejects shows the GUI's usual "unavailable" state.
+The element never talks to Orquester. Everything beyond the frames comes through five async functions the host sets on `el.loaders`. Each returns what the daemon's route returns; proxy them through your backend (with your `orq_…` token) after checking the viewer may see that chat. Every loader is optional; a missing one hides its affordance, and one that rejects shows the GUI's usual "unavailable" state.
 
 ```ts
 interface EmbedLoaders {
   attachment?(request: { sessionId: string; attachmentId: string; mimeType?: string }, signal?: AbortSignal): Promise<Blob>;
   visualUrl?(request: { sessionId: string; attachmentId: string }): Promise<string>;
   history?(request: { sessionId: string; before?: string; turns?: number; windowCut?: string }, signal?: AbortSignal): Promise<ThreadHistoryPage>;
-  itemOutput?(request: { sessionId: string; itemId: string; offset?: number; maxBytes?: number }, signal?: AbortSignal): Promise<ThreadItemOutputResponse | ThreadItemOutputWindowResponse>;
+  item?(request: { sessionId: string; itemId: string }, signal?: AbortSignal): Promise<ThreadItemResponse>;
+  itemOutput?(request: { sessionId: string; itemId: string; offset?: number; maxBytes?: number }, signal?: AbortSignal): Promise<ThreadItemOutputResponse | ThreadItemOutputWindowResponse | null>;
 }
 ```
 
@@ -126,7 +127,10 @@ interface EmbedLoaders {
 | `attachment` | every image: `show_image`, image attachments in messages and tool results | `GET /api/sessions/:id/attachments/:attachmentId` (return the body as a `Blob`) |
 | `visualUrl` | `html_render` pages | `POST /api/sessions/:id/visuals/:attachmentId/url` → `{ path, expiresAt }`, then `GET <path>` on the Orquester (signed, valid ≤ 15 min, no bearer needed) |
 | `history` | "Load older turns" at the top of a thread whose window was cut | `GET /api/sessions/:id/history?before=&turns=&windowCut=` |
-| `itemOutput` | "Load full output" on a tool call (frames carry a one-line summary) | `GET /api/sessions/:id/items/:itemId/output?offset=&maxBytes=` |
+| `item` | "Load full output", together with `itemOutput`: a cut tool result, a cut compaction summary ("Load the full summary"), a cut agent prompt ("Show full prompt") | `GET /api/sessions/:id/items/:itemId` |
+| `itemOutput` | "Load full output", together with `item`: a command's streamed output (frames carry a one-line summary). Resolve `null` where the route answers 404; the element then reads the item | `GET /api/sessions/:id/items/:itemId/output?offset=&maxBytes=` |
+
+**"Load full output" needs both `item` and `itemOutput`.** A row's whole output is in its item or in its call's streamed output, and which one is known only once the first read answers, so with only one of the two loaders set the element offers none of the full-output controls.
 
 **HTML pages.** `visualUrl` returns a URL the element loads in an iframe with `sandbox="allow-scripts allow-forms"` (never `allow-same-origin`), so the agent's page runs in an opaque origin wherever it is served from. The recommended proxy serves the page from the host's own origin: mint the signed URL, fetch it from the Orquester, and return its body with its response headers — keep `Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups allow-downloads` and add `frame-ancestors` for your origin. (Framing the Orquester's signed URL directly does not work behind the stock `deploy/Caddyfile`, which sends `frame-ancestors 'self'` for `/api/agent-visuals/*`.)
 

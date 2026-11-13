@@ -31,9 +31,9 @@ export const modeOf = (value: string | null): ResolvedMode => (value === "light"
 export const schemeOf = (value: string | null): ColorScheme =>
   value !== null && SCHEMES.has(value) ? (value as ColorScheme) : "mono";
 
-const LOADER_NAMES = ["attachment", "visualUrl", "history", "itemOutput"] as const;
+const LOADER_NAMES = ["attachment", "visualUrl", "history", "item", "itemOutput"] as const;
 
-/** The loaders of a host's value: its functions under the four names, nothing else. */
+/** The loaders of a host's value: its functions under the five names, nothing else. */
 export function loadersOf(value: unknown): Readonly<EmbedLoaders> {
   const loaders: Record<string, unknown> = {};
   if (typeof value === "object" && value !== null) {

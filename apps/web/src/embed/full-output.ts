@@ -1,13 +1,14 @@
 /**
  * "Load full output" in the embed: the app's own read (`readFullOutput`,
- * `lib/agent-chat/full-output.ts`), with the call's streamed output read
- * through the host's `itemOutput` loader window by window, as the app's
- * transport reads `GET …/items/:itemId/output` (`readItemOutput`).
+ * `lib/agent-chat/full-output.ts`), with the two reads `AgentChatView`'s
+ * viewer makes served by the host's loaders — the item through `item`
+ * (`GET …/items/:itemId`, the transport's `readItem`), and the call's
+ * streamed output through `itemOutput`, window by window, as the transport
+ * reads `GET …/items/:itemId/output` (`readItemOutput`). `null` from
+ * `itemOutput` is that route's 404: as in the app, the item answers instead.
  *
- * The embed has no loader for `GET …/items/:itemId` (design §5.5), so the
- * item read is unavailable: a row is read through its call's output first,
- * and where that holds nothing the viewer says the output is unavailable,
- * as it does when any read fails.
+ * The viewer is offered only with both loaders (`EmbedChat`): which of the two
+ * reads a row ends up needing is known only once the first has answered.
  */
 
 import {
@@ -15,7 +16,8 @@ import {
   THREAD_ITEM_OUTPUT_MAX_BYTES,
   THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
   type ThreadItemOutputResponse,
-  type ThreadItemOutputWindowResponse
+  type ThreadItemOutputWindowResponse,
+  type ThreadItemResponse
 } from "@orquester/api/agent-chat";
 
 import {
@@ -30,10 +32,21 @@ import type { EmbedLoaders } from "./types";
 
 type ItemOutputLoader = NonNullable<EmbedLoaders["itemOutput"]>;
 
+/** The two loaders the viewer reads through. */
+export type FullOutputLoaders = Required<Pick<EmbedLoaders, "item" | "itemOutput">>;
+
 /** What the viewer shows once a read settled. */
 export type FullOutputResult =
   | { kind: "output"; title: string; text: string; notes: readonly string[] }
   | { kind: "error"; title: string; error: string };
+
+/** `GET …/items/:itemId`'s answer: an item of a kind the viewer can show. */
+const isItemResponse = (body: unknown): body is ThreadItemResponse => {
+  const item = typeof body === "object" && body !== null ? (body as Record<string, unknown>).item : undefined;
+  if (typeof item !== "object" || item === null) return false;
+  const kind = (item as Record<string, unknown>).kind;
+  return kind === "message" || kind === "activity";
+};
 
 const isWholeOutput = (body: unknown): body is ThreadItemOutputResponse =>
   typeof body === "object" &&
@@ -64,18 +77,22 @@ function nextWindowOffset(window: ThreadItemOutputWindowResponse, offset: number
   return window.nextOffset;
 }
 
-/** The call's whole streamed output, joined from the loader's windows. */
+/**
+ * The call's whole streamed output, joined from the loader's windows, or
+ * `null` where the loader says the route has none (its 404).
+ */
 async function readStreamedOutput(
   loader: ItemOutputLoader,
   sessionId: string,
   itemId: string,
   signal: AbortSignal
-): Promise<ThreadItemOutputResponse> {
+): Promise<ThreadItemOutputResponse | null> {
   const texts: string[] = [];
   let offset = 0;
   let call: string | null = null;
   for (;;) {
     const body: unknown = await loader({ sessionId, itemId, offset, maxBytes: THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES }, signal);
+    if (body === null && offset === 0) return null;
     if (!isThreadItemOutputWindow(body)) {
       if (isWholeOutput(body)) return body;
       throw new Error("Expected a tool call's streamed output.");
@@ -90,11 +107,9 @@ async function readStreamedOutput(
   }
 }
 
-const ITEM_UNAVAILABLE = (): Promise<never> => Promise.reject(new Error("unavailable"));
-
-/** Read one row's whole output for the viewer; never rejects. */
+/** Read one row's whole output for the viewer, as the app's viewer does; never rejects. */
 export async function loadFullOutput(
-  loader: ItemOutputLoader,
+  loaders: FullOutputLoaders,
   sessionId: string,
   itemId: string,
   source: FullOutputSource | undefined,
@@ -104,13 +119,15 @@ export async function loadFullOutput(
   try {
     const output = await readFullOutput(
       {
-        item: ITEM_UNAVAILABLE,
-        streamedOutput: (id) => readStreamedOutput(loader, sessionId, id, signal)
+        item: async (id) => {
+          const body: unknown = await loaders.item({ sessionId, itemId: id }, signal);
+          if (!isItemResponse(body)) throw new Error("Expected a thread item.");
+          return body;
+        },
+        streamedOutput: (id) => readStreamedOutput(loaders.itemOutput, sessionId, id, signal)
       },
       itemId,
-      // The call's output is the one read there is: asked first for every row
-      // but an agent's launch prompt, which only its item holds.
-      source === "prompt" ? "prompt" : "streamed"
+      source
     );
     return {
       kind: "output",
