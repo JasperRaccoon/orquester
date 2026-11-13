@@ -20,6 +20,7 @@ import type { ChatHost } from "../../../../packages/ui/src/components/agent-chat
 import { EmbedChat, type EmbedCommandRequest } from "./EmbedChat";
 import { EmbedSettings, loadersOf, modeOf, schemeOf, type EmbedSettingsState } from "./settings";
 import { adoptEmbedStyles } from "./styles";
+import { EMBED_ROOT_CLASS } from "./contract";
 import { EmbedThread } from "./thread";
 import type {
   EmbedCommandDetail,
@@ -118,7 +119,7 @@ export function createEmbedElementClass(): CustomElementConstructor {
       shadow.append(layout);
       adoptEmbedStyles(shadow);
       this.#wrapper = document.createElement("div");
-      this.#wrapper.className = "orq-embed-root";
+      this.#wrapper.className = EMBED_ROOT_CLASS;
       this.#app = document.createElement("div");
       this.#app.className = "orq-embed-app";
       // Portals mount here, inside the wrapper, so they paint with its

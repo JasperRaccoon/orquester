@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
-    "build": "vite build",
+    "build": "vite build && vite build -c vite.embed.config.ts",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "TSX_DISABLE_CACHE=1 node --import tsx --import ../../packages/ui/test/svg-loader.mjs --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find test -name '*.test.mjs') $(find src -name '*.test.ts')"
+    "test": "TSX_DISABLE_CACHE=1 node --import tsx --import ../../packages/ui/test/svg-loader.mjs --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find test src vite -name '*.test.mjs' -o -name '*.test.ts')"
   },
   "dependencies": {
     "@orquester/api": "workspace:*",
