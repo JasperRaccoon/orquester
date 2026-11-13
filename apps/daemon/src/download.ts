@@ -23,15 +23,23 @@ export function contentDisposition(name: string): string {
  * still piping when the function resolves to `undefined`, so Fastify sends that
  * `undefined` and clobbers the stream — content-length:0, empty body. Returning
  * the reply tells Fastify the response is taken. `size` (from the stat) gives
- * the browser a progress bar.
+ * the browser a progress bar and bounds the body: `open` is asked for exactly
+ * bytes 0..size-1 (not called for an empty file), so a file that grew since the
+ * stat — or one whose stat size is 0 but reads non-empty — never sends more bytes
+ * than the Content-Length promised (which would desync a keep-alive connection).
  */
-export function sendFileDownload(reply: FastifyReply, name: string, size: number, body: Readable): FastifyReply {
+export function sendFileDownload(
+  reply: FastifyReply,
+  name: string,
+  size: number,
+  open: (range: { start: number; end: number }) => Readable
+): FastifyReply {
   return reply
     .header("Content-Disposition", contentDisposition(name))
     .header("Content-Length", String(size))
     .header("X-Content-Type-Options", "nosniff")
     .type("application/octet-stream")
-    .send(body);
+    .send(size > 0 ? open({ start: 0, end: size - 1 }) : Buffer.alloc(0));
 }
 
 /**

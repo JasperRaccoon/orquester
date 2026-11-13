@@ -3609,7 +3609,7 @@ export function createServer(
     // File: stream the bytes as-is. createReadStream (not readFile) means no
     // memory cap. MUST be returned (see sendFileDownload).
     if (info.isFile()) {
-      return sendFileDownload(reply, name, info.size, createReadStream(safe));
+      return sendFileDownload(reply, name, info.size, (range) => createReadStream(safe, range));
     }
 
     // Directory: spawn a zip tool and stream its stdout.

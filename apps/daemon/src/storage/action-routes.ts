@@ -2,7 +2,8 @@
 // scanned path on the host the service user may touch, outside the /api/fs
 // sandbox. Every request is re-judged by the guard against the real filesystem
 // (a symlinked parent is judged where it points), then mirrors its /api/fs
-// sibling: DELETE /api/fs's side effects inside the workspaces root, rename's
+// sibling: DELETE /api/fs's side effects (closing what is rooted in the tree on
+// every delete, the workspaces notice inside the workspaces root), rename's
 // no-overwrite rule, download's streaming and zip.
 
 import { constants } from "node:fs";
@@ -53,11 +54,12 @@ export function registerStorageActionRoutes(app: FastifyInstance, deps: StorageA
       if (checked.actions.confirmDelete && body?.confirm !== name) {
         return fail(reply, 400, "STORAGE_CONFIRM_MISMATCH", `Type "${name}" to confirm deleting it.`);
       }
-      // Outside the workspaces root the delete needs the typed confirm; inside it
-      // nothing can be rooted elsewhere, so it is what DELETE /api/fs does there.
+      // Outside the workspaces root the delete needs the typed confirm. Sessions,
+      // tabs and desktops can be rooted anywhere (a project symlinked to /data/proj),
+      // so whatever is rooted in the tree is closed first for every delete.
       const inWorkspaces = !checked.actions.confirmDelete;
       const freedBytes = tree.sizeOf(target);
-      if (inWorkspaces) await deps.closeTreeUsers(target, resolve(path));
+      await deps.closeTreeUsers(target, resolve(path));
       // `force: false`: a path that vanished meanwhile is an error, not a silent no-op.
       // A final symlink is removed itself, never followed (the guard judged the link).
       await rm(target, { recursive: true, force: false });
@@ -91,8 +93,14 @@ export function registerStorageActionRoutes(app: FastifyInstance, deps: StorageA
       if (newName === basename(source)) return { ok: true, path: source };
       const parent = dirname(source);
       const target = join(parent, newName);
-      const refused = guard.actionsFor(target, checked.stats.isDirectory() ? "dir" : "file").rename;
-      if (refused) return fail(reply, 403, "STORAGE_FORBIDDEN", `Can't rename it to "${newName}": ${refused}`);
+      const targetActions = guard.actionsFor(target, checked.stats.isDirectory() ? "dir" : "file");
+      if (targetActions.rename) {
+        return fail(reply, 403, "STORAGE_FORBIDDEN", `Can't rename it to "${newName}": ${targetActions.rename}`);
+      }
+      // A rename must not turn something download refuses into something it allows.
+      if (checked.actions.download && !targetActions.download) {
+        return fail(reply, 403, "STORAGE_FORBIDDEN", `Can't rename it to "${newName}": that would make it downloadable. ${checked.actions.download}`);
+      }
       const existing = await lstat(target).catch(() => null);
       if (existing && !(existing.dev === checked.stats.dev && existing.ino === checked.stats.ino)) {
         return fail(reply, 409, "STORAGE_EXISTS", `A file or folder named "${newName}" already exists.`);
@@ -130,7 +138,9 @@ export function registerStorageActionRoutes(app: FastifyInstance, deps: StorageA
             await handle.close();
             return fail(reply, 400, "STORAGE_ERROR", "The file changed while it was being opened.");
           }
-          return sendFileDownload(reply, name, opened.size, handle.createReadStream());
+          // The helper reads no more than `opened.size` bytes and none at all for an empty file.
+          if (opened.size === 0) await handle.close();
+          return sendFileDownload(reply, name, opened.size, (range) => handle.createReadStream(range));
         } catch (error) {
           await handle.close().catch(() => undefined);
           throw error;

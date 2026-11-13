@@ -38,7 +38,10 @@ async function harness(t: test.TestContext, options: { supported?: boolean } = {
   await writeFile(join(root, "data", "foo", "b.bin"), Buffer.from([0, 1, 2, 250]));
   const guard = createStorageGuard({
     rootDir: root,
-    mountPoints: () => [root, join(root, "data")],
+    mountPoints: () => [
+      { path: root, readOnly: false },
+      { path: join(root, "data"), readOnly: false }
+    ],
     appdir,
     homeDir: appdir,
     workspacesDir: workspaces,
@@ -91,8 +94,9 @@ test("delete outside the workspaces root needs the typed name, then frees the sc
   assert.equal(ok.statusCode, 200);
   assert.deepEqual(ok.json(), { ok: true, freedBytes: 4096 });
   assert.equal(existsSync(target), false);
-  // Nothing of a project can be rooted out here: no session closing, no workspace notice.
-  assert.deepEqual(h.calls, [`sizeOf ${target}`, `applyDelete ${target}`]);
+  // A project symlinked out here roots its sessions here: they are closed first. No workspace notice.
+  assert.deepEqual(h.calls, [`sizeOf ${target}`, `closeTreeUsers ${target} ${target}`, `applyDelete ${target}`]);
+  assert.deepEqual(h.closedWhileExisting, [true]);
 });
 
 test("delete inside the workspaces root closes what is rooted there first, then notifies", async (t) => {
@@ -176,6 +180,14 @@ test("download streams a file, zips a folder, and refuses secrets", async (t) =>
   assert.equal(viaLink.statusCode, 403);
   assert.ok(!viaLink.body.includes("KEY"));
 
+  // A file in the home that was never on a credential list, renamed or not, stays in the home.
+  await mkdir(join(h.appdir, ".gnupg"));
+  await writeFile(join(h.appdir, ".gnupg", "secring.gpg"), "GPG");
+  assert.equal((await ren(h, { path: join(h.appdir, ".gnupg"), newName: "gnupg-old" })).statusCode, 200);
+  const renamed = await download(h, join(h.appdir, "gnupg-old", "secring.gpg"));
+  assert.equal(renamed.statusCode, 403);
+  assert.ok(!renamed.body.includes("GPG"));
+
   if (!resolveZipTool()) return t.diagnostic("no zip tool on PATH: folder zip not exercised");
   const folder = await download(h, join(h.root, "data", "foo", "nested"));
   assert.equal(folder.statusCode, 200);
@@ -194,6 +206,16 @@ test("download streams a file, zips a folder, and refuses secrets", async (t) =>
     });
   });
   assert.ok(names.includes("nested/a.txt"), names.join(","));
+});
+
+test("a file download never sends more bytes than its stat size promised", async (t) => {
+  const h = await harness(t);
+  // procfs files stat as size 0 but read non-empty: the extreme of a file that grew after its stat.
+  // (This harness's guard is rooted in a temp dir, so its kernel-tree rule doesn't cover the real /proc.)
+  const res = await download(h, "/proc/self/status");
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(res.headers["content-length"], "0");
+  assert.equal(res.rawPayload.length, 0);
 });
 
 test("every action answers 501 off Linux", async (t) => {
