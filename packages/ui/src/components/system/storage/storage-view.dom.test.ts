@@ -395,7 +395,7 @@ describe("Host status → Storage", () => {
 
   it("an older daemon without the storage routes says so", async () => {
     await show();
-    const apiWithout = { ...api(), storageStatus: async () => { throw new ApiError(404, "GET", "/api/system/storage", {}, undefined); } };
+    const apiWithout = { ...api(), storageStatus: async () => { throw new ApiError(404, "GET", "/api/system/storage", {}, { code: "NOT_FOUND", message: "Route not found." }); } };
     await act(async () => {
       root.render(
         createElement(OrquesterProvider, {

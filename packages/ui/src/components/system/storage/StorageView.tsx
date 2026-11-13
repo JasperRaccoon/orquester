@@ -216,6 +216,8 @@ export const StorageView: React.FC = () => {
       }
       finishedAt.current.set(volume.id, at);
     }
+    // Pin the first pick, so a later scan of an earlier volume doesn't switch the map under the user.
+    setVolumeId((current) => current ?? defaultVolume(next.volumes)?.id ?? null);
     setStatus(next);
   }, []);
 
@@ -233,7 +235,9 @@ export const StorageView: React.FC = () => {
         else setStatusError("The daemon sent a storage status this app cannot read.");
       },
       (error: unknown) => {
-        if (errorStatus(error) === 404 && storageErrorCode(error) === null) setUnavailable(true);
+        // An older daemon has no such route: its 404 carries no storage code
+        // (remote: NOT_FOUND; the socket: Fastify's default body).
+        if (errorStatus(error) === 404 && !storageErrorCode(error)?.startsWith("STORAGE_")) setUnavailable(true);
         else setStatusError(errorText(error));
       }
     );
