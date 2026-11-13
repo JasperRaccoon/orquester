@@ -397,7 +397,7 @@ describe("orquester-agent-chat — loaders", () => {
     );
   });
 
-  it("a show_image row reads its image through the attachment loader", { todo: "the image path still reads useApi(); passes once images/ reads ChatHost.fetchAttachment" }, async () => {
+  it("a show_image row reads its image through the attachment loader", async () => {
     const attachmentId = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-png";
     const attachment = spy((_request: Parameters<NonNullable<EmbedLoaders["attachment"]>>[0], _signal?: AbortSignal) =>
       Promise.resolve(new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" }))
@@ -416,7 +416,7 @@ describe("orquester-agent-chat — loaders", () => {
     assert.deepEqual(request, { sessionId: SESSION, attachmentId });
   });
 
-  it("an html_render row loads its page through the visualUrl loader", { todo: "VisualFrame still reads useApi(); passes once visual/ reads ChatHost.visualPageUrl" }, async () => {
+  it("an html_render row loads its page through the visualUrl loader", async () => {
     const attachmentId = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
     const visualUrl = spy((_request: Parameters<NonNullable<EmbedLoaders["visualUrl"]>>[0]) =>
       Promise.resolve("https://host.example/visuals/page.html")
