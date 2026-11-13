@@ -312,6 +312,17 @@ describe("Host status → Storage", () => {
     assert.equal(fake.calls.filter((c) => c === "tree / (root)").length, before + 1);
   });
 
+  it("a delete elsewhere that edits the shown volume's scan reads its map again", async () => {
+    fake.trees.set("/|", rootTree());
+    await show();
+    await openStorage();
+    const before = fake.calls.filter((c) => c === "tree / (root)").length;
+    // The daemon edits the saved scan in place: same finishedAt, smaller totals.
+    const edited = { ...scanSummary("2026-11-13T02:04:00.000Z"), scannedBytes: 49 * 2 ** 30, items: 119_000 };
+    await emit(statusOf({ volumes: [volumeOf("/", edited), volumeOf("/data", scanSummary("2026-11-13T02:10:00.000Z"))] }));
+    assert.equal(fake.calls.filter((c) => c === "tree / (root)").length, before + 1);
+  });
+
   it("switching volume reads that volume's map", async () => {
     fake.trees.set("/|", rootTree());
     fake.trees.set("/data|", treeOf("/data", dir("/data", { children: [dir("/data/backups")] })));
