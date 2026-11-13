@@ -197,7 +197,7 @@ const NotificationsSection: React.FC = () => {
   );
 };
 
-/** The connected daemon's version and commit (`GET /api/info`); hidden when it reports neither. */
+/** The connected daemon's commit (`GET /api/info`), which is its version; hidden when it reports none. */
 const ServerVersionRow: React.FC = () => {
   const api = useApi();
   const [label, setLabel] = useState<string | null>(null);
