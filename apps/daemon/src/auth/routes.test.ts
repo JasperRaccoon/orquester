@@ -17,7 +17,7 @@ import bcrypt from "bcryptjs";
 import { WebSocket } from "ws";
 
 import { agentChatRoutes } from "@orquester/api/agent-chat";
-import { authRoutes, authSessionPath, type AuthIssuedTokenResponse, type AuthSessionsResponse } from "@orquester/api";
+import { authRoutes, authSessionPath, storageRoutes, type AuthIssuedTokenResponse, type AuthSessionsResponse } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig, type DaemonConfig } from "@orquester/config";
 
 import { createServer } from "../index.ts";
@@ -150,6 +150,11 @@ test("the download's ?token= and /mcp accept a session token and refuse the lega
   const download = (credential: string) => h.remote.inject({ method: "GET", url: `/api/fs/download?p=Lw&token=${encodeURIComponent(credential)}` });
   assert.equal((await download(LEGACY)).statusCode, 401);
   assert.notEqual((await download(token)).statusCode, 401);
+  // The storage view's download has the same allowance — and only it, not its sibling routes.
+  const query = (path: string, credential: string) => h.remote.inject({ method: "GET", url: `${path}?path=%2F&token=${encodeURIComponent(credential)}` });
+  assert.equal((await query(storageRoutes.download, LEGACY)).statusCode, 401);
+  assert.notEqual((await query(storageRoutes.download, token)).statusCode, 401);
+  assert.equal((await query(storageRoutes.tree, token)).statusCode, 401);
 
   const mcp = (credential: string) => h.remote.inject({ method: "GET", url: "/mcp", headers: { authorization: `Bearer ${credential}` } });
   assert.equal((await mcp(LEGACY)).statusCode, 401);

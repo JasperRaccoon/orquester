@@ -37,7 +37,7 @@ export const STORAGE_CHANGED_EVENT = "storage.changed";
 
 /** Error codes in `{ code, message }` error bodies from the storage routes. */
 export type StorageErrorCode =
-  | "STORAGE_UNSUPPORTED" // 501: not Linux
+  | "STORAGE_UNSUPPORTED" // 501: not Linux (or, downloading a folder, no zip tool on the server)
   | "STORAGE_SCANNER_MISSING" // 501: gdu is not installed
   | "STORAGE_UNKNOWN_VOLUME" // 404
   | "STORAGE_SCAN_RUNNING" // 409: one scan at a time, host-wide
@@ -45,6 +45,7 @@ export type StorageErrorCode =
   | "STORAGE_PATH_NOT_FOUND" // 404: path is not in the saved scan, or no longer exists on disk
   | "STORAGE_FORBIDDEN" // 403: the guard refuses this path; `message` is the reason to show
   | "STORAGE_CONFIRM_MISMATCH" // 400: delete outside the workspaces root without the right typed name
+  | "STORAGE_EXISTS" // 409: rename onto a name that is already taken (like /api/fs/rename's FS_EXISTS)
   | "INVALID_REQUEST" // 400
   | "STORAGE_ERROR"; // 400: the OS refused (EACCES, EBUSY, ENOTEMPTY…); `message` is the OS's reason
 
