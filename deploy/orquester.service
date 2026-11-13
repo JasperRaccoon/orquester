@@ -53,7 +53,9 @@ NoNewPrivileges=false
 # a root session. DAC still gates writes: the unprivileged daemon user can't touch these paths; only
 # root-via-sudo-apt can. If a maintainer script ever hits a read-only path, switch this to `off`.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/orquester /usr /etc /var /run /tmp
+# `-/data`: a separate data disk, writable so Settings → Host status → Storage can delete and rename
+# there (the storage guard refuses read-only mounts). The leading `-` skips it on hosts without one.
+ReadWritePaths=/var/lib/orquester /usr /etc /var /run /tmp -/data
 ProtectHome=true
 # tmux socket lives under /var/lib/orquester, not /tmp:
 PrivateTmp=false
