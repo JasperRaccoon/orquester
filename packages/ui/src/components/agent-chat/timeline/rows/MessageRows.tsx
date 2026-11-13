@@ -486,7 +486,7 @@ export const AgentPromptRow = React.memo(function AgentPromptRow({
   row: Row<"message">;
   prompt: AgentPrompt;
 }): React.ReactElement {
-  const ctx = useTimelineRowContext();
+  const { onLoadFullOutput: loadFullOutput } = useTimelineRowContext();
   const text = row.message.text;
   // A workflow's coordinator was "prompted" with the script it runs.
   const script = prompt.script === true;
@@ -504,10 +504,12 @@ export const AgentPromptRow = React.memo(function AgentPromptRow({
         <ClampedBubbleText
           text={text}
           mono={script}
-          showLabel={script ? "Show full script" : "Show full prompt"}
+          // Cut on the wire with nothing to read the whole from (the embed
+          // without its loader): what is here unclamps, and claims no more.
+          showLabel={prompt.truncated && !loadFullOutput ? "Show more" : script ? "Show full script" : "Show full prompt"}
           // Cut on the wire: its one "Show full prompt" reads the whole prompt
           // in the parent's viewer, never unclamps the cut text.
-          onShowFull={prompt.truncated ? () => ctx.onLoadFullOutput(prompt.itemId, "prompt") : undefined}
+          onShowFull={prompt.truncated && loadFullOutput ? () => loadFullOutput(prompt.itemId, "prompt") : undefined}
         />
         {prompt.cutAtRest ? (
           <p className="mt-1.5 text-xs text-neutral-400">{PROMPT_CUT_AT_REST_NOTE}</p>

@@ -298,6 +298,61 @@ describe("orquester-agent-chat — frames", () => {
   });
 });
 
+describe("orquester-agent-chat — what it cannot open", () => {
+  it("shows changed files and workspace links as plain text, with no turn diff, and keeps web links", () => {
+    push({
+      kind: "snapshot",
+      thread: thread(
+        [
+          message("user", "Fix the port", { id: "u1", turnId: "t1", createdAt: at(0) }),
+          message("assistant", "Edited [the server](src/server.ts), per [the docs](https://docs.example/ports).", {
+            id: "a1",
+            turnId: "t1",
+            createdAt: at(2)
+          })
+        ],
+        {
+          checkpoints: [
+            {
+              turnId: "t1",
+              checkpointTurnCount: 1,
+              checkpointRef: "refs/orquester/checkpoints/x/turn/1",
+              status: "ready",
+              files: [{ path: "src/server.ts", additions: 3, deletions: 1 }],
+              assistantMessageId: "a1",
+              completedAt: at(5)
+            }
+          ]
+        }
+      )
+    });
+    assert.ok(text().includes("1 changed file"), "the changed-files card");
+    assert.ok(text().includes("server.ts"));
+    assert.ok(text().includes("the server"));
+    const buttons = all<HTMLButtonElement>("button");
+    assert.ok(!buttons.some((button) => button.getAttribute("aria-label") === "Open the full diff for this turn"), "no turn diff");
+    assert.ok(!buttons.some((button) => /server\.ts|the server/.test(button.textContent ?? "")), "no file opens");
+    assert.equal(all('a[href="src/server.ts"]').length, 0, "a workspace path navigates nowhere");
+    const [web] = all<HTMLAnchorElement>('a[href="https://docs.example/ports"]');
+    assert.equal(web?.target, "_blank", "a web link stays a link");
+  });
+
+  it("lists a delegated child as its call recorded it, never as a closed tab", () => {
+    push({
+      kind: "snapshot",
+      thread: running([
+        message("user", "Split the audit", { id: "u1", turnId: "t1", createdAt: at(0) }),
+        ...sessionToolCall("create_session", { threadRef: { threadId: "child-1", title: "Audit the database", relation: "delegate" } })
+      ])
+    });
+    const [toggle] = all<HTMLButtonElement>("[data-delegate-group] button[aria-expanded]");
+    assert.ok(toggle, "the subagent strip");
+    click(toggle);
+    assert.ok(text().includes("Audit the database"));
+    assert.doesNotMatch(text(), /closed/i);
+  });
+});
+
 describe("orquester-agent-chat — questions", () => {
   it("fires orquester-pending for an open question, and an answer as an AnswerCommandBody until respondFailed", async () => {
     const pending = next<EmbedPendingDetail>("orquester-pending");
@@ -362,7 +417,7 @@ describe("orquester-agent-chat — loaders", () => {
     assert.ok(text().includes("An older request"));
   });
 
-  it("'load full output' asks the itemOutput loader", async () => {
+  it("'load full output' asks the itemOutput loader, and is not offered without one", async () => {
     const command = activity(
       "tool.completed",
       { itemType: "command_execution", toolUseId: "call-ls", command: "ls -la /etc", status: "completed", truncated: true, data: { output: "a\nb" } },
@@ -372,9 +427,6 @@ describe("orquester-agent-chat — loaders", () => {
     const itemOutput = spy((_request: Parameters<NonNullable<EmbedLoaders["itemOutput"]>>[0], _signal?: AbortSignal) =>
       Promise.resolve(output)
     );
-    act(() => {
-      element.loaders = { itemOutput: itemOutput.fn };
-    });
     push({ kind: "snapshot", thread: running([
         message("user", "list it", { id: "u1", turnId: "t1", createdAt: at(0) }),
         command,
@@ -384,7 +436,15 @@ describe("orquester-agent-chat — loaders", () => {
     const [row] = all<HTMLElement>('[data-activity-id="cmd-1"][role="button"]');
     assert.ok(row, "the command's row");
     click(row);
-    const load = all<HTMLButtonElement>("button").find((button) => button.textContent === "Load full output");
+    const loadButton = (): HTMLButtonElement | undefined =>
+      all<HTMLButtonElement>("button").find((button) => button.textContent === "Load full output");
+    assert.ok(text().includes("ls -la /etc"), "the row is open");
+    assert.ok(loadButton() === undefined, "no loader, no control");
+
+    act(() => {
+      element.loaders = { itemOutput: itemOutput.fn };
+    });
+    const load = loadButton();
     assert.ok(load, "the row offers its full output");
     click(load);
     const [request] = await settle(itemOutput.called);

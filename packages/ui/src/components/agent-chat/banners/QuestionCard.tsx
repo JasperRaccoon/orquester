@@ -69,9 +69,10 @@ export interface QuestionCardProps {
   active?: boolean;
   /**
    * Opens a workspace-relative link of the question's markdown in an editor
-   * tab, as the timeline's messages do. Without it such a link navigates.
+   * tab, as the timeline's messages do. Without it such a link navigates;
+   * `null`: nothing opens files here, so such a link is its plain text.
    */
-  onOpenFile?: ((path: string) => void) | undefined;
+  onOpenFile?: ((path: string) => void) | null | undefined;
   /**
    * The chat whose composer answers this card: a message sent there while the
    * card is up is the active question's typed answer (`applyComposerAnswer`,

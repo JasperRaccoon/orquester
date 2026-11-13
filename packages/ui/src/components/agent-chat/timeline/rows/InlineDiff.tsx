@@ -14,7 +14,8 @@ import { shortenPath } from "../../../../lib/agent-chat/presentation.logic";
  * field; when it parses as a diff we render it the way the git tab does — same
  * `--diff-add-*` / `--diff-del-*` tokens, same line-number gutter — rather than
  * as an undifferentiated block of `pre` text with plus signs in it. Clicking the
- * file heading opens it in an editor tab (§7.3).
+ * file heading opens it in an editor tab (§7.3); with no `onOpenFile` the
+ * heading is plain.
  */
 export const InlineDiff = React.memo(function InlineDiff({
   diff,
@@ -23,7 +24,7 @@ export const InlineDiff = React.memo(function InlineDiff({
 }: {
   diff: string;
   workspaceRoot: string | undefined;
-  onOpenFile: (path: string) => void;
+  onOpenFile: ((path: string) => void) | null;
 }): React.ReactElement {
   const files = React.useMemo(() => splitUnifiedDiff(diff), [diff]);
   if (files.length === 0) {
@@ -38,22 +39,31 @@ export const InlineDiff = React.memo(function InlineDiff({
       {files.map((file) => {
         const parsed = parseUnifiedDiff(file.patch);
         const stat = countDiffLines(file.patch);
+        const heading = (
+          <>
+            <FileDiff size={13} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
+            <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-300">
+              {shortenPath(file.path, workspaceRoot)}
+            </span>
+            <span className="ac-tabular shrink-0 font-mono text-[10px]">
+              <span className="text-[color:var(--diff-add-fg)]">+{stat.additions}</span>{" "}
+              <span className="text-[color:var(--diff-del-fg)]">−{stat.deletions}</span>
+            </span>
+          </>
+        );
         return (
           <div key={file.path} className="overflow-hidden rounded-md border border-neutral-800">
-            <button
-              type="button"
-              onClick={() => onOpenFile(file.path)}
-              className="flex w-full min-w-0 items-center gap-2 bg-neutral-900/60 px-2 py-1 text-left transition-colors hover:bg-neutral-800/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-            >
-              <FileDiff size={13} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-300">
-                {shortenPath(file.path, workspaceRoot)}
-              </span>
-              <span className="ac-tabular shrink-0 font-mono text-[10px]">
-                <span className="text-[color:var(--diff-add-fg)]">+{stat.additions}</span>{" "}
-                <span className="text-[color:var(--diff-del-fg)]">−{stat.deletions}</span>
-              </span>
-            </button>
+            {onOpenFile ? (
+              <button
+                type="button"
+                onClick={() => onOpenFile(file.path)}
+                className="flex w-full min-w-0 items-center gap-2 bg-neutral-900/60 px-2 py-1 text-left transition-colors hover:bg-neutral-800/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+              >
+                {heading}
+              </button>
+            ) : (
+              <div className="flex w-full min-w-0 items-center gap-2 bg-neutral-900/60 px-2 py-1">{heading}</div>
+            )}
             {file.binary ? (
               <div className="px-2 py-1 text-xs italic text-neutral-600">Binary file</div>
             ) : (
