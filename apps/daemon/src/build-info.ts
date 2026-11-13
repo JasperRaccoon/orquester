@@ -50,7 +50,7 @@ export function findRepoRoot(start: string): string | null {
 }
 
 /** The git directory of a checkout: `.git` itself, or the one a linked worktree's `.git` file names. */
-function gitDirOf(root: string): string | null {
+export function gitDirOf(root: string): string | null {
   const dotGit = join(root, ".git");
   try {
     if (statSync(dotGit).isDirectory()) return dotGit;
@@ -60,6 +60,12 @@ function gitDirOf(root: string): string | null {
   const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(readText(dotGit) ?? "")?.[1];
   if (!pointer) return null;
   return isAbsolute(pointer) ? pointer : resolve(root, pointer);
+}
+
+/** The repository's shared git dir (branches, packed-refs, config): a linked worktree's `commondir`, else `gitDir`. */
+export function gitCommonDirOf(gitDir: string): string {
+  const common = readText(join(gitDir, "commondir"))?.trim();
+  return common ? (isAbsolute(common) ? common : resolve(gitDir, common)) : gitDir;
 }
 
 /** The commit HEAD points at, read from the git files; null when it cannot be told. */
@@ -72,8 +78,8 @@ export function readGitCommit(root: string): string | null {
   const ref = /^ref:\s*(\S+)$/.exec(head)?.[1];
   if (!ref) return null;
   // A linked worktree keeps its own HEAD; branches live in the main repository's git dir.
-  const common = readText(join(gitDir, "commondir"))?.trim();
-  const dirs = [gitDir, ...(common ? [isAbsolute(common) ? common : resolve(gitDir, common)] : [])];
+  const common = gitCommonDirOf(gitDir);
+  const dirs = common === gitDir ? [gitDir] : [gitDir, common];
   for (const dir of dirs) {
     const loose = readText(join(dir, ref))?.trim();
     if (loose && SHA.test(loose)) return loose;
@@ -95,7 +101,12 @@ export function readBuildInfo(root: string | null): BuildInfo {
   return { version, commit: readGitCommit(root) ?? stampCommit };
 }
 
+/** The root of the checkout this module was loaded from; null outside one. */
+export function daemonRepoRoot(): string | null {
+  return findRepoRoot(dirname(fileURLToPath(import.meta.url)));
+}
+
 /** The running daemon's build info, from the checkout this module was loaded from. */
 export function daemonBuildInfo(): BuildInfo {
-  return readBuildInfo(findRepoRoot(dirname(fileURLToPath(import.meta.url))));
+  return readBuildInfo(daemonRepoRoot());
 }
