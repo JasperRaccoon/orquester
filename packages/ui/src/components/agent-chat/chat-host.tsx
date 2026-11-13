@@ -1,5 +1,7 @@
 import React from "react";
 
+import type { GitHubLinkPreview } from "@orquester/api";
+
 import type { ColorScheme, ResolvedMode } from "../../lib/theme";
 import type { VisualFrameUrl } from "../../lib/agent-chat/visual-frame";
 
@@ -50,6 +52,40 @@ export interface ChatHost {
 
   // ── Images, visuals and banner-card affordances (app-only, optional) ──────
   // (added by the images/visuals/banners decoupling; keep this section's fields together)
+  /** Tell the user how an action went (a copy that failed, an image saved). Absent: no notice is shown. */
+  notify?: (notice: { title: string; message: string }) => void;
+  /**
+   * Save a loaded chat image (its object `url`) into the project at
+   * `relativePath`, never replacing a file; answers the path it landed at.
+   * Absent: no "Save to project…".
+   */
+  saveImageToProject?: (input: { projectRoot: string; relativePath: string; url: string }) => Promise<string>;
+  /** Show a project file in the file browser. Absent: no "Reveal in files". */
+  revealInFiles?: (path: string) => void;
+  /**
+   * Upload a loaded chat image (its object `url`) to its chat and stage it in
+   * that chat's composer for the next message. Absent: no "Use as reference".
+   */
+  attachImageToComposer?: (input: { sessionId: string; url: string; name: string }) => Promise<void>;
+  /**
+   * Whether a layer outside the chat holds the keyboard (a dialog, settings,
+   * the palette, a menu): a question card's digit keys stand down while one
+   * does. Absent: only the open-layer registry (`lib/open-layers`) is asked.
+   */
+  keyboardLayerOpen?: () => boolean;
+  /**
+   * A forge link's live details (a GitHub pull request's state, checks…) for
+   * its pill's hover card, read for `projectPath`'s account. Keep it the same
+   * function for the host's life: previews are cached per reader. Absent: the
+   * pill is a plain link whose card names the link, with no details.
+   */
+  fetchForgeLinkPreview?: (url: string, projectPath: string | null) => Promise<GitHubLinkPreview>;
+  /**
+   * HOOK: the `owner/repo` key of the project at `projectPath`, so a link into
+   * the chat's own repository drops it from its label. Present or absent for
+   * the host's whole life. Absent: links keep their full label.
+   */
+  useProjectRepoKey?: (projectPath: string | null) => string | null;
 }
 
 const DARK_MONO = { mode: "dark", scheme: "mono" } as const satisfies ReturnType<ChatHost["useAppearance"]>;

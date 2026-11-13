@@ -1,7 +1,7 @@
 import React from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
-import { Modal, ModalCloseButton } from "../../ui";
+import { Modal, ModalCloseButton } from "../../ui/modal";
 import { ChatIconButton } from "../primitives";
 import { useChatImageUrl, type ChatImageItem } from "./chat-image";
 import { ChatImageActions } from "./ChatImageActions";

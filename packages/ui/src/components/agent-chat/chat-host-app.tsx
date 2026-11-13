@@ -1,6 +1,9 @@
 import React from "react";
 
 import { useApi } from "../../context/orquester-context";
+import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
+import { saveImageToProject } from "./images/image-actions";
+import { attachImageAsReference } from "./images/image-reference";
 import { visualPageUrl } from "./visual/VisualFrame";
 import { useAppStore } from "../../store/app";
 import { ChatHostProvider, type ChatHost } from "./chat-host";
@@ -13,6 +16,12 @@ import { ChatHostProvider, type ChatHost } from "./chat-host";
  *
  * This module may import the app; `chat-host.tsx` may not.
  */
+function useAppProjectRepoKey(projectPath: string | null): string | null {
+  return useAppStore((state) =>
+    projectPath ? (state.projects.find((project) => project.path === projectPath)?.repoKey ?? null) : null
+  );
+}
+
 function useAppAppearance(): ReturnType<ChatHost["useAppearance"]> {
   const mode = useAppStore((state) => state.resolvedMode);
   const scheme = useAppStore((state) => state.colorScheme);
@@ -31,6 +40,13 @@ export function AppChatHostProvider(props: { children: React.ReactNode }): React
       // ── Timeline, rows and markdown affordances ──
 
       // ── Images, visuals and banner-card affordances ──
+      notify: (notice) => useAppStore.getState().setNotice(notice),
+      saveImageToProject: (input) => saveImageToProject({ api, ...input }),
+      revealInFiles: (path) => useAppStore.getState().revealInFileBrowser(path),
+      attachImageToComposer: (input) => attachImageAsReference({ api, ...input }),
+      keyboardLayerOpen: anotherLayerOwnsTheKeyboard,
+      fetchForgeLinkPreview: async (url, projectPath) => (await api.getGitHubLinkPreview(url, projectPath)).preview,
+      useProjectRepoKey: useAppProjectRepoKey
     }),
     [api]
   );

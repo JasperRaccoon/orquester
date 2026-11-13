@@ -31,10 +31,8 @@ import {
   type GitHubPreviewTarget
 } from "@orquester/api";
 
-import { useOptionalApi } from "../../../context/orquester-context";
 import { BitbucketIcon } from "../../../icons/Bitbucket";
 import { cn } from "../../../lib/cn";
-import type { ApiClient } from "../../../lib/api-client";
 import {
   checksPresentation,
   forgePillPresentation,
@@ -43,9 +41,10 @@ import {
   type ForgePillIcon,
   type ForgePillTone
 } from "../../../lib/github-links/pill.logic";
-import { LinkPreviewStore, type LinkPreviewState } from "../../../lib/github-links/preview-store";
+import { LinkPreviewStore, type LinkPreviewFetcher, type LinkPreviewState } from "../../../lib/github-links/preview-store";
+import { usePortalContainer } from "../../../lib/portal-container";
 import { relativeTime } from "../../../lib/relative-time";
-import { useAppStore } from "../../../store/app";
+import { useChatHost } from "../chat-host";
 import { useTimelineRowContext } from "../timeline/context";
 
 /**
@@ -121,27 +120,29 @@ export interface ForgeLinkScope {
   currentRepoKey: string | null;
 }
 
+const NO_REPO_KEY = (): string | null => null;
+
 /** The scope a pill renders in: the given project, else the timeline's. */
 export function useForgeLinkScope(projectPath?: string | null): ForgeLinkScope {
   const { workspaceRoot } = useTimelineRowContext();
   const path = projectPath === undefined ? (workspaceRoot ?? null) : projectPath;
-  const currentRepoKey = useAppStore((state) =>
-    path ? (state.projects.find((project) => project.path === path)?.repoKey ?? null) : null
-  );
+  // A host knows its projects or never does, so the hook called is the same every render.
+  const useProjectRepoKey = useChatHost().useProjectRepoKey ?? NO_REPO_KEY;
+  const currentRepoKey = useProjectRepoKey(path);
   return { projectPath: path, currentRepoKey };
 }
 
 // ---------------------------------------------------------------------------
-// Previews: one store per API client, read when a pill is seen
+// Previews: one store per host's reader, read when a pill is seen
 // ---------------------------------------------------------------------------
 
-const stores = new WeakMap<ApiClient, LinkPreviewStore>();
+const stores = new WeakMap<LinkPreviewFetcher, LinkPreviewStore>();
 
-function storeFor(api: ApiClient): LinkPreviewStore {
-  let store = stores.get(api);
+function storeFor(fetcher: LinkPreviewFetcher): LinkPreviewStore {
+  let store = stores.get(fetcher);
   if (!store) {
-    store = new LinkPreviewStore(async (url, projectPath) => (await api.getGitHubLinkPreview(url, projectPath)).preview);
-    stores.set(api, store);
+    store = new LinkPreviewStore(fetcher);
+    stores.set(fetcher, store);
   }
   return store;
 }
@@ -150,8 +151,8 @@ const IDLE: LinkPreviewState = { status: "idle" };
 const NO_SUBSCRIPTION = (): (() => void) => () => undefined;
 
 function useLinkPreview(target: GitHubPreviewTarget | null, url: string, projectPath: string | null, wanted: boolean): LinkPreviewState {
-  const api = useOptionalApi();
-  const store = api ? storeFor(api) : null;
+  const fetcher = useChatHost().fetchForgeLinkPreview;
+  const store = fetcher ? storeFor(fetcher) : null;
   const key = store && target ? store.keyOf(target, projectPath) : null;
   const subscribe = React.useCallback(
     (listener: () => void) => (store && key ? store.subscribe(key, listener) : NO_SUBSCRIPTION()),
@@ -392,8 +393,12 @@ export function ForgeLinkPill({ link, children, projectPath, variant = "inline",
   const [position, setPosition] = React.useState<CardPosition | null>(null);
   const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const cardId = React.useId();
+  const portalContainer = usePortalContainer();
 
   const state = useLinkPreview(target, link.url, scope.projectPath, seen || open);
+  // A host that reads no previews: the card says what the link is, never "Loading details…".
+  const readsPreviews = useChatHost().fetchForgeLinkPreview !== undefined;
+  const fetchable = target !== null && readsPreviews;
   const preview = state.status === "ready" ? state.preview : null;
   const presentation = forgePillPresentation(link, preview);
   const Icon = ICONS[presentation.icon];
@@ -538,7 +543,7 @@ export function ForgeLinkPill({ link, children, projectPath, variant = "inline",
                 "shadow-xl shadow-black/40"
               )}
             >
-              <CardBody link={link} state={state} fetchable={target !== null} />
+              <CardBody link={link} state={state} fetchable={fetchable} />
               <a
                 href={link.url}
                 target="_blank"
@@ -552,7 +557,7 @@ export function ForgeLinkPill({ link, children, projectPath, variant = "inline",
                 <ExternalLink size={11} aria-hidden />
               </a>
             </div>,
-            document.body
+            portalContainer
           )
         : null}
     </>

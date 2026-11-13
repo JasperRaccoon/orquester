@@ -2,9 +2,9 @@
  * Forge links rendered where the chat shows text: assistant markdown (autolinks
  * become short-label pills, a link with the author's words keeps them, a badge
  * image link and other links stay as they were) and a user's plain-text bubble.
- * Rendered, not mounted, and with no API client: nothing is read. (Server
- * rendering reads the store's initial state, which has no projects, so every
- * label here carries its owner/repo; the DOM test covers the project's own repo.)
+ * Rendered, not mounted, and with no chat host: nothing is read. (No host
+ * knows no projects, so every label here carries its owner/repo; the DOM test
+ * covers the project's own repo.)
  */
 
 import assert from "node:assert/strict";

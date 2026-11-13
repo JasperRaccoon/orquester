@@ -14,11 +14,17 @@ import {
   VISUAL_VIEWER_MIN_ZOOM,
   stepVisualZoom
 } from "../../../lib/agent-chat/visual-frame";
-import { Modal, ModalCloseButton } from "../../ui";
+import { Modal, ModalCloseButton } from "../../ui/modal";
 import { ChatIconButton } from "../primitives";
 import { VisualDocument } from "./VisualDocument";
 
-export function VisualViewer(props: { src: string; title: string; onClose: () => void }): React.ReactElement {
+export function VisualViewer(props: {
+  src: string;
+  title: string;
+  onClose: () => void;
+  /** Where the page's theme is read (`VisualDocument.themeAnchor`). */
+  themeAnchor?: React.RefObject<Element | null>;
+}): React.ReactElement {
   const [zoom, setZoom] = React.useState(1);
   return (
     <Modal open onClose={props.onClose} className="h-[min(90vh,calc(100vh-48px))] max-w-[min(96vw,1400px)]">
@@ -61,6 +67,7 @@ export function VisualViewer(props: { src: string; title: string; onClose: () =>
               title={props.title}
               shortcuts={VISUAL_VIEWER_SHORTCUTS}
               className="block size-full"
+              {...(props.themeAnchor !== undefined ? { themeAnchor: props.themeAnchor } : {})}
             />
           </div>
         </div>

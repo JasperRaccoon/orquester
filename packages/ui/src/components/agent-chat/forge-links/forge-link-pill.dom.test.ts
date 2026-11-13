@@ -19,6 +19,7 @@ let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let ForgeLinkPill: typeof import("./ForgeLinkPill").ForgeLinkPill;
 let OrquesterProvider: typeof import("../../../context/orquester-context").OrquesterProvider;
+let AppChatHostProvider: typeof import("../chat-host-app").AppChatHostProvider;
 
 let dom: JSDOM;
 const globals = [
@@ -62,6 +63,7 @@ before(async () => {
   ({ createRoot } = await import("react-dom/client"));
   ({ ForgeLinkPill } = await import("./ForgeLinkPill"));
   ({ OrquesterProvider } = await import("../../../context/orquester-context"));
+  ({ AppChatHostProvider } = await import("../chat-host-app"));
 });
 
 after(() => {
@@ -133,7 +135,14 @@ describe("forge link pill", () => {
       }
     } as unknown as ApiClient;
     await act(async () => {
-      root.render(createElement(OrquesterProvider, { runtime: "web" as never, api, useTitlebar: false, children: element }));
+      root.render(
+        createElement(OrquesterProvider, {
+          runtime: "web" as never,
+          api,
+          useTitlebar: false,
+          children: createElement(AppChatHostProvider, { children: element })
+        })
+      );
     });
   };
 
