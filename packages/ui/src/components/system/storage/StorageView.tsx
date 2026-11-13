@@ -269,12 +269,14 @@ export const StorageView: React.FC = () => {
   }, [adoptStatus, loadStatus]);
 
   const scanning = status?.scan.state === "scanning" ? status.scan : null;
+  // The local clock behind "Scanned 6h ago" and the progress bar (never a
+  // daemon read): every second while a scan runs, else once a minute.
+  const ticking = scanning !== null;
   useEffect(() => {
-    if (!scanning) return undefined;
     setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const timer = setInterval(() => setNow(Date.now()), ticking ? 1000 : 60_000);
     return () => clearInterval(timer);
-  }, [scanning]);
+  }, [ticking]);
 
   const volumes = status?.volumes ?? [];
   const volume = volumes.find((v) => v.id === volumeId) ?? defaultVolume(volumes);

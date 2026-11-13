@@ -323,6 +323,20 @@ describe("Host status → Storage", () => {
     assert.equal(fake.calls.filter((c) => c === "tree / (root)").length, before + 1);
   });
 
+  it("relative times keep moving while no scan runs, without reading the daemon", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.parse("2026-11-13T02:04:30.000Z") });
+    fake.trees.set("/|", rootTree());
+    await show();
+    await openStorage();
+    const calls = fake.calls.length;
+    const before = text();
+    await act(async () => {
+      t.mock.timers.tick(60_000);
+    });
+    assert.notEqual(text(), before, "the scan's age moved on");
+    assert.equal(fake.calls.length, calls, "no daemon reads");
+  });
+
   it("switching volume reads that volume's map", async () => {
     fake.trees.set("/|", rootTree());
     fake.trees.set("/data|", treeOf("/data", dir("/data", { children: [dir("/data/backups")] })));
