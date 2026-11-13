@@ -19,9 +19,9 @@ export const storageRoutes = {
   /** POST StorageRenameRequest → StorageRenameResponse. */
   rename: "/api/system/storage/rename",
   /**
-   * GET ?path= — streams a file, or a folder zipped on the fly, like
-   * /api/fs/download (and, like it, also accepts the auth token as ?token= so a
-   * native `<a download>` works).
+   * GET ?p=<base64url path> (or plain ?path=) — streams a file, or a folder
+   * zipped on the fly, like /api/fs/download (and, like it, also accepts the
+   * auth token as ?token= so a native `<a download>` works).
    */
   download: "/api/system/storage/download"
 } as const;
