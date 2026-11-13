@@ -32,7 +32,7 @@ export interface SavedScan {
 }
 
 /** Response children narrower than this share of the response root fold into `other`. */
-const MIN_DRAW_SHARE = 0.0015;
+const MIN_DRAW_SHARE = 0.0005;
 /** At most this many children per directory are returned; the rest fold into `other`. */
 const MAX_CHILDREN = 150;
 

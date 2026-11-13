@@ -114,7 +114,7 @@ test("a manual scan runs in the background, then its saved tree survives a resta
   const pending = await nextRun;
   // Other volumes below this one and the scans dir stay out of the scan; the keep threshold follows the disk.
   assert.deepEqual(pending.run.ignore, ["/data", storageScansDir(h.baseDir)]);
-  assert.equal(pending.run.minKeepBytes, 3_500_000);
+  assert.equal(pending.run.minKeepBytes, 1_400_000);
   const finished = h.nextEvent(idle);
   pending.resolve(await parsed("/"));
   const status = await finished;

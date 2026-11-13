@@ -27,7 +27,7 @@ const NIGHTLY_HOUR = 4;
 const NIGHTLY_SKIP_MS = 20 * 60 * 60 * 1000;
 /** Entries smaller than max(this, used / KEEP_DIVISOR) fold into their directory's `smaller`. */
 const MIN_KEEP_BYTES = 1024 * 1024;
-const KEEP_DIVISOR = 200_000;
+const KEEP_DIVISOR = 500_000;
 /** Export bytes per entry with `--output-attrs name,asize,dsize,ino`, generously rounded up. */
 const EXPORT_BYTES_PER_ENTRY = 96;
 /** A scan never starts with less free space than this where the export is written. */
