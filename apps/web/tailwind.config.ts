@@ -3,7 +3,8 @@ import { orquesterPreset } from "../../packages/ui/tailwind-preset";
 
 export default {
   presets: [orquesterPreset],
-  content: ["./index.html", "./src/**/*.{ts,tsx}", "../../packages/ui/src/**/*.{ts,tsx}"],
+  // The embed (src/embed) compiles its own CSS: vite.embed.config.ts.
+  content: ["./index.html", "./src/**/*.{ts,tsx}", "!./src/embed/**", "../../packages/ui/src/**/*.{ts,tsx}"],
   theme: {
     extend: {}
   },
