@@ -307,3 +307,20 @@ test("deletes and renames update the saved tree, its file and its watchers; one 
   assert.equal(again.service.sizeOf("/swap"), 0);
   assert.equal(again.service.sizeOf("/var/lib/blob"), 50003968);
 });
+
+test("a delete made mid-scan, before the used space is read, leaves used and unaccounted as the disk reports them", async (t) => {
+  // The disk's used space, read once gdu is done, no longer holds /var/lib/blob.
+  const usedAfter = SCANNED - 50003968 + 5 * GB;
+  const h = await harness(t, { usedAfter });
+  const nextRun = h.nextRun();
+  await h.service.startScan("/");
+  const pending = await nextRun;
+  await h.service.applyDelete("/var/lib/blob");
+  const finished = h.nextEvent(idle);
+  pending.resolve(await parsed("/"));
+  const summary = (await finished).volumes.find((entry) => entry.id === "/")!.lastScan!;
+  assert.deepEqual(
+    [summary.scannedBytes, summary.usedBytesAtScan, summary.unaccountedBytes],
+    [SCANNED - 50003968, usedAfter, 5 * GB]
+  );
+});

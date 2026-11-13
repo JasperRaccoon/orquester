@@ -331,17 +331,26 @@ export class StorageScanService implements StorageTreeMutations {
         apparentBytes: root.apparent,
         items: root.items,
         unreadableDirs: parsed.unreadableDirs,
-        usedBytesAtScan,
-        unaccountedBytes: usedBytesAtScan === null ? 0 : Math.max(0, usedBytesAtScan - root.size)
+        // Null through the first replay below (a replayed delete would lower it), then set.
+        usedBytesAtScan: null,
+        unaccountedBytes: 0
       }
     };
     await this.write(async () => {
-      for (const apply of running.replay) apply(scan);
+      // gdu may have walked a path deleted or renamed while it ran: correct the tree. The used
+      // space read above already left out what was deleted before it, so only later ones lower it.
+      for (const apply of running.replay.slice(0, reflected)) apply(scan);
+      scan.summary.usedBytesAtScan = usedBytesAtScan;
+      for (const apply of running.replay.slice(reflected)) apply(scan);
+      const used = scan.summary.usedBytesAtScan;
+      scan.summary.unaccountedBytes = used === null ? 0 : Math.max(0, used - scan.root.size);
       await writeSavedScan(this.dir, scan);
       this.scans.set(volume.id, scan);
     });
   }
 
+    // Deletes/renames applied by now are already reflected in the used space read next.
+    const reflected = running.replay.length;
   private write<T>(task: () => Promise<T>): Promise<T> {
     const result = this.writes.then(task);
     this.writes = result.catch(() => undefined);
