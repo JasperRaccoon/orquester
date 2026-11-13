@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch for the Orquester daemon's self-update request
+
+[Path]
+# The daemon (POST /api/self-update) creates this file; its content is ignored. While it exists,
+# systemd starts orquester-update.service, also again after a run ends, so the service removes it
+# first. The default trigger and start rate limits apply.
+PathExists=/var/lib/orquester/daemon/update-request
+Unit=orquester-update.service
+
+[Install]
+WantedBy=paths.target

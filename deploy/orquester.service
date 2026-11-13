@@ -29,6 +29,9 @@ ExecStartPre=/usr/bin/mkdir -p /var/lib/orquester/.npm-global/bin
 # daemon builds into the appdir on demand with this toolchain (pinned and installed by
 # deploy/install-go.sh). If Go is missing the daemon still runs; boxes report builds unavailable.
 Environment=GO=/usr/local/go/bin/go
+# Self-update: the status file root's orquester-update.service writes (deploy/lib/self-update.sh);
+# the daemon only reads it, and offers the update only when this is set.
+Environment=ORQUESTER_SELF_UPDATE_STATUS=/var/lib/orquester-update/status.json
 # This monorepo is noEmit (TS is run via tsx, same as `pnpm dev:daemon`); there is
 # no standalone dist build, so run the daemon through tsx as a single node process.
 ExecStart=/usr/bin/node --import tsx /opt/orquester/apps/daemon/src/cli.ts --appdir /var/lib/orquester

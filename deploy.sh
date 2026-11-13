@@ -261,6 +261,7 @@ echo \"HEAD=\$(${s:+$s }git -C /opt/orquester rev-parse --short HEAD)\"
 echo \"stamp=\$(cat /opt/orquester/.orquester-version.json 2>/dev/null || echo 'none')\"
 curl -fsS http://127.0.0.1:47831/health; echo
 echo \"service=\$(systemctl is-active orquester)\"
+echo \"update-path=\$(systemctl is-active orquester-update.path || true)\"
 echo \"bundle=\$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)\"
 echo \"box-agent=\$(node -p \"require('/opt/orquester/apps/box-agent/dist/manifest.json').version\" 2>/dev/null || echo 'not prebuilt')\"
 echo \"go=\$(/usr/local/go/bin/go version 2>/dev/null || echo missing)\""
