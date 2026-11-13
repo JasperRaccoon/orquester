@@ -411,9 +411,9 @@ export function nodeNote(node: StorageNode): string | null {
     case "unaccounted":
       return "Used space the scan could not read — other users' files, /home and /root hidden from the service.";
     case "smaller":
-      return `${formatItems(node.items)} too small to keep in the scan, folded together.`;
+      return `Entries too small to keep in the scan, folded together (${formatItems(node.items)} inside).`;
     case "other":
-      return `${formatItems(node.items)} too small to draw at this zoom, folded together.`;
+      return `Entries too small to draw at this zoom, folded together (${formatItems(node.items)} inside).`;
     default:
       return node.kind === "dir" && node.unreadable
         ? "Not fully readable — part of its contents is missing from this size."

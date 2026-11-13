@@ -312,6 +312,31 @@ describe("Host status → Storage", () => {
     assert.equal(fake.calls.filter((c) => c === "tree / (root)").length, before + 1);
   });
 
+  it("a delete elsewhere that edits the shown volume's scan reads its map again", async () => {
+    fake.trees.set("/|", rootTree());
+    await show();
+    await openStorage();
+    const before = fake.calls.filter((c) => c === "tree / (root)").length;
+    // The daemon edits the saved scan in place: same finishedAt, smaller totals.
+    const edited = { ...scanSummary("2026-11-13T02:04:00.000Z"), scannedBytes: 49 * 2 ** 30, items: 119_000 };
+    await emit(statusOf({ volumes: [volumeOf("/", edited), volumeOf("/data", scanSummary("2026-11-13T02:10:00.000Z"))] }));
+    assert.equal(fake.calls.filter((c) => c === "tree / (root)").length, before + 1);
+  });
+
+  it("relative times keep moving while no scan runs, without reading the daemon", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.parse("2026-11-13T02:04:30.000Z") });
+    fake.trees.set("/|", rootTree());
+    await show();
+    await openStorage();
+    const calls = fake.calls.length;
+    const before = text();
+    await act(async () => {
+      t.mock.timers.tick(60_000);
+    });
+    assert.notEqual(text(), before, "the scan's age moved on");
+    assert.equal(fake.calls.length, calls, "no daemon reads");
+  });
+
   it("switching volume reads that volume's map", async () => {
     fake.trees.set("/|", rootTree());
     fake.trees.set("/data|", treeOf("/data", dir("/data", { children: [dir("/data/backups")] })));
@@ -374,6 +399,20 @@ describe("Host status → Storage", () => {
     await click(confirm());
     assert.deepEqual(fake.deletes, [{ path: "/scratch", confirm: "scratch" }]);
     assert.ok(text().includes("freed 1.0 GB"), text());
+  });
+
+  it("rename refuses a name the daemon would refuse", async () => {
+    fake.trees.set("/|", rootTree());
+    await show();
+    await openStorage();
+    await rightClick("var");
+    await click(menuItem("Rename")!);
+    const input = doc().querySelector('input[aria-label="New name"]') as HTMLInputElement;
+    const submit = () => input.form!.querySelector('button[type="submit"]') as HTMLButtonElement;
+    await type(input, "logs");
+    assert.equal(submit().disabled, false);
+    await type(input, "a\\b");
+    assert.equal(submit().disabled, true);
   });
 
   it("a folder that no longer exists falls back to the volume root", async () => {

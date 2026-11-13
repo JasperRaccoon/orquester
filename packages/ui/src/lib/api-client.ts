@@ -405,6 +405,15 @@ function serverFieldFromBody(body: unknown): string | null {
   return null;
 }
 
+/** A refusal's JSON body (`{ code, message }`) that arrived over a byte channel, or undefined when it isn't JSON. */
+function jsonBodyOf(data: ArrayBuffer): unknown {
+  try {
+    return JSON.parse(new TextDecoder().decode(data));
+  } catch {
+    return undefined;
+  }
+}
+
 /** A device request the caller sends with `fetch` (see {@link ApiClient.deviceHttpRequest}). */
 export interface DeviceHttpRequest {
   /** Absolute URL, without credentials. */
@@ -881,7 +890,7 @@ export class ApiClient {
       signal
     });
     if (!response.ok) {
-      throw new ApiError(response.status, "GET", "/api/fs/download", response.headers, undefined);
+      throw new ApiError(response.status, "GET", "/api/fs/download", response.headers, jsonBodyOf(response.data));
     }
     return response.data;
   }
@@ -1671,14 +1680,7 @@ export class ApiClient {
     const path = sessionProfileRoutes.exportProfile(profileId);
     const response = await this.transporter.requestBytes({ method: "GET", path, signal });
     if (!response.ok) {
-      // The refusal's JSON body arrives as bytes: decode it so the reason reaches the UI.
-      let body: unknown;
-      try {
-        body = JSON.parse(new TextDecoder().decode(response.data));
-      } catch {
-        body = undefined;
-      }
-      throw new ApiError(response.status, "GET", path, response.headers, body);
+      throw new ApiError(response.status, "GET", path, response.headers, jsonBodyOf(response.data));
     }
     return response.data;
   }
@@ -2731,7 +2733,7 @@ export class ApiClient {
       return null;
     }
     const base = this.connection.endpoint.replace(/\/$/, "");
-    const params = new URLSearchParams({ path });
+    const params = new URLSearchParams(fsPathQuery(path));
     if (this.connection.password) {
       params.set("token", this.connection.password);
     }
@@ -2743,9 +2745,14 @@ export class ApiClient {
     if (!this.transporter.requestBytes) {
       throw new Error("Download is not supported on this connection.");
     }
-    const response = await this.transporter.requestBytes({ method: "GET", path: storageRoutes.download, query: { path }, signal });
+    const response = await this.transporter.requestBytes({
+      method: "GET",
+      path: storageRoutes.download,
+      query: fsPathQuery(path),
+      signal
+    });
     if (!response.ok) {
-      throw new ApiError(response.status, "GET", storageRoutes.download, response.headers, undefined);
+      throw new ApiError(response.status, "GET", storageRoutes.download, response.headers, jsonBodyOf(response.data));
     }
     return response.data;
   }

@@ -183,6 +183,16 @@ function sizeCanvas(canvas: HTMLCanvasElement, width: number, height: number, dp
   if (canvas.height !== h) canvas.height = h;
 }
 
+/**
+ * The pointer in map coordinates: relative to the container's padding box,
+ * where the absolutely placed canvases and tooltip start — inside its border.
+ */
+function mapPoint(box: HTMLElement | null, event: { clientX: number; clientY: number }): { x: number; y: number } | null {
+  if (!box) return null;
+  const rect = box.getBoundingClientRect();
+  return { x: event.clientX - rect.left - box.clientLeft, y: event.clientY - rect.top - box.clientTop };
+}
+
 function summary(root: StorageNode): string {
   const top = sortedChildren(root)
     .slice(0, 5)
@@ -242,9 +252,8 @@ export const StorageTreemap: React.FC<StorageMapProps> = ({ root, onOpen, onCont
 
   const tileAt = useCallback(
     (event: { clientX: number; clientY: number }) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return null;
-      return hitTest(layout, event.clientX - rect.left, event.clientY - rect.top);
+      const at = mapPoint(containerRef.current, event);
+      return at ? hitTest(layout, at.x, at.y) : null;
     },
     [layout]
   );
@@ -266,8 +275,8 @@ export const StorageTreemap: React.FC<StorageMapProps> = ({ root, onOpen, onCont
 
   const onPointerMove = (event: React.PointerEvent) => {
     const tile = tileAt(event);
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (rect) pointer.current = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    const at = mapPoint(containerRef.current, event);
+    if (at) pointer.current = at;
     if ((tile?.node ?? null) !== hovered) setHovered(tile?.node ?? null);
     placeTooltip();
   };

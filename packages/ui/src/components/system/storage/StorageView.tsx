@@ -15,7 +15,13 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import type { StorageNode, StorageStatusResponse, StorageTreeResponse, StorageVolume } from "@orquester/api";
+import type {
+  StorageNode,
+  StorageScanSummary,
+  StorageStatusResponse,
+  StorageTreeResponse,
+  StorageVolume
+} from "@orquester/api";
 import { useApi } from "../../../context/orquester-context";
 import { useIsDesktop } from "../../../hooks";
 import { cn } from "../../../lib/cn";
@@ -57,6 +63,15 @@ const absolute = (iso: string) => {
   const at = new Date(iso);
   return Number.isNaN(at.getTime()) ? iso : at.toLocaleString();
 };
+
+/**
+ * Identifies one state of a saved scan, or null without one. A delete/rename
+ * edits the summary but keeps `finishedAt`, so the totals are part of it.
+ */
+function scanFingerprint(scan: StorageScanSummary | null): string | null {
+  if (!scan) return null;
+  return [scan.finishedAt, scan.scannedBytes, scan.apparentBytes, scan.items, scan.unreadableDirs, scan.usedBytesAtScan].join("|");
+}
 
 /** The volume shown first: one with a saved scan, else the first one. */
 function defaultVolume(volumes: StorageVolume[]): StorageVolume | null {
@@ -201,20 +216,21 @@ export const StorageView: React.FC = () => {
   const [now, setNow] = useState(() => Date.now());
 
   /**
-   * Take a status (route answer or event). A volume whose latest scan changed
+   * Take a status (route answer or event). A volume whose saved scan changed —
+   * a new scan, or a delete/rename (from any window) that edited it in place —
    * drops its cached subtrees; the tree effect, keyed on that scan, reads again.
    */
-  const finishedAt = useRef(new Map<string, string | null>());
+  const scanSeen = useRef(new Map<string, string | null>());
   const adoptStatus = useCallback((next: StorageStatusResponse) => {
     for (const volume of next.volumes) {
-      const at = volume.lastScan?.finishedAt ?? null;
-      const before = finishedAt.current.get(volume.id);
-      if (before !== undefined && before !== at) {
+      const seen = scanFingerprint(volume.lastScan);
+      const before = scanSeen.current.get(volume.id);
+      if (before !== undefined && before !== seen) {
         for (const key of [...cache.current.keys()]) {
           if (key.startsWith(`${volume.id}\u0000`)) cache.current.delete(key);
         }
       }
-      finishedAt.current.set(volume.id, at);
+      scanSeen.current.set(volume.id, seen);
     }
     // Pin the first pick, so a later scan of an earlier volume doesn't switch the map under the user.
     setVolumeId((current) => current ?? defaultVolume(next.volumes)?.id ?? null);
@@ -253,20 +269,22 @@ export const StorageView: React.FC = () => {
   }, [adoptStatus, loadStatus]);
 
   const scanning = status?.scan.state === "scanning" ? status.scan : null;
+  // The local clock behind "Scanned 6h ago" and the progress bar (never a
+  // daemon read): every second while a scan runs, else once a minute.
+  const ticking = scanning !== null;
   useEffect(() => {
-    if (!scanning) return undefined;
     setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const timer = setInterval(() => setNow(Date.now()), ticking ? 1000 : 60_000);
     return () => clearInterval(timer);
-  }, [scanning]);
+  }, [ticking]);
 
   const volumes = status?.volumes ?? [];
   const volume = volumes.find((v) => v.id === volumeId) ?? defaultVolume(volumes);
-  const scanFinishedAt = volume?.lastScan?.finishedAt ?? null;
+  const shownScan = scanFingerprint(volume?.lastScan ?? null);
   const currentKey = volume ? treeKey(volume.id, path) : null;
 
   useEffect(() => {
-    if (!volume || scanFinishedAt === null) return undefined;
+    if (!volume || shownScan === null) return undefined;
     const key = treeKey(volume.id, path);
     const cached = cache.current.get(key);
     if (cached) {
@@ -300,7 +318,7 @@ export const StorageView: React.FC = () => {
     return () => controller.abort();
     // `volume` is read through its id; a new status object for the same volume must not refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, volume?.id, path, scanFinishedAt, revision]);
+  }, [api, volume?.id, path, shownScan, revision]);
 
   const navigate = (target: string) => {
     if (!volume) return;
