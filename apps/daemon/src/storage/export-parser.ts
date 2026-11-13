@@ -98,6 +98,22 @@ const SIMPLE_ESCAPES: Record<number, string> = {
   0x74: "\t"
 };
 
+/** Keys of the export, most frequent first: matched on their bytes instead of decoded each time. */
+const KNOWN_KEYS = ["name", "dsize", "asize", "ino", "hlnkc", "read_error", "items", "mtime", "notreg", "shsize", "progver"].map(
+  (key) => ({ key, bytes: Buffer.from(key) })
+);
+
+function knownKey(buf: Buffer, start: number, end: number): string | null {
+  const length = end - start;
+  for (const { key, bytes } of KNOWN_KEYS) {
+    if (bytes.length !== length) continue;
+    let j = 0;
+    while (j < length && buf[start + j] === bytes[j]) j++;
+    if (j === length) return key;
+  }
+  return null;
+}
+
 /** A push tokenizer for any RFC 8259 JSON text; containers are reported, never built. */
 class JsonTokenizer {
   private state = State.Value;
@@ -179,7 +195,10 @@ class JsonTokenizer {
           if (c === 0x22) {
             let value: string;
             if (this.rawParts.length === 0 && this.decoded === "") {
-              value = buf.toString("utf8", start, i);
+              value = (this.stringIsKey && knownKey(buf, start, i)) || buf.toString("utf8", start, i);
+            } else if (this.rawParts.length === 0) {
+              value = this.decoded + buf.toString("utf8", start, i);
+              this.decoded = "";
             } else {
               if (i > start) this.rawParts.push(buf.subarray(start, i));
               this.flushRaw();
@@ -189,8 +208,13 @@ class JsonTokenizer {
             i++;
             this.emitString(value);
           } else {
-            if (i > start) this.rawParts.push(buf.subarray(start, i));
-            this.flushRaw();
+            // A backslash never splits a UTF-8 sequence, so a run inside this chunk decodes on its own.
+            if (this.rawParts.length === 0) {
+              if (i > start) this.decoded += buf.toString("utf8", start, i);
+            } else {
+              if (i > start) this.rawParts.push(buf.subarray(start, i));
+              this.flushRaw();
+            }
             i++;
             this.state = State.Escape;
           }
