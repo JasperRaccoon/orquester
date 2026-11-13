@@ -5,8 +5,9 @@
  * child with its status, agent, model and account, its latest progress or result, and "Open".
  *
  * The row holds ids only (`delegate-group`, rows.logic); everything live comes from the children's
- * tab summaries in the store, kept fresh by the `sessions` bus. A child whose tab was closed keeps
- * its line, shown closed, with Open disabled.
+ * tab summaries, through the chat host (`ChatHost.delegates`; in the app, its store, kept fresh by
+ * the `sessions` bus). A child whose tab was closed keeps its line, shown closed, with Open
+ * disabled. A host with no tabs shows each child as its call recorded it, with no Open.
  *
  * *T3: `MessagesTimeline.tsx` `V2SubagentGroup` and `V2LifecycleRow`.*
  */
@@ -17,24 +18,31 @@ import { ArrowUpRight } from "lucide-react";
 import { cn } from "../../../../lib/cn";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
 import {
+  delegateChildView,
   delegateGroupLabel,
   delegateGroupTiming,
   summarizeDelegateStatuses,
+  type DelegateChildRef,
   type DelegateChildView
 } from "../../../../lib/agent-chat/delegates.logic";
+import { useChatHost } from "../../chat-host";
 import { DisclosureChevron, ElapsedTicker, StatusDot } from "../../primitives";
 import {
   DelegateAvatar,
   DelegateAvatars,
   delegateStatusVisual,
-  delegateSummaryTone,
-  openDelegateTab,
-  useDelegateChildViews,
-  useDelegateMetaLine
+  delegateSummaryTone
 } from "../../delegates/DelegateParts";
 import { useTimelineRowContext } from "../context";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
+
+/** No host tabs: each child as its call recorded it. */
+function useRecordedChildViews(refs: readonly DelegateChildRef[]): DelegateChildView[] {
+  return React.useMemo(() => refs.map((ref) => delegateChildView(ref, undefined)), [refs]);
+}
+
+const useNoMetaLine = (): string => "";
 
 export const DelegateGroupRow = React.memo(function DelegateGroupRow({
   row
@@ -43,7 +51,8 @@ export const DelegateGroupRow = React.memo(function DelegateGroupRow({
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
   const expanded = ctx.isExpanded(row.groupId);
-  const views = useDelegateChildViews(row.children);
+  const useChildViews = useChatHost().delegates?.useChildViews ?? useRecordedChildViews;
+  const views = useChildViews(row.children);
   const statuses = views.map((view) => view.status);
   const summary = summarizeDelegateStatuses(statuses);
   const timing = delegateGroupTiming(views);
@@ -95,7 +104,9 @@ export const DelegateGroupRow = React.memo(function DelegateGroupRow({
 /** One child: status dot, agent, title and status word, agent · model · account, preview, Open. */
 function DelegateChildLine({ view }: { view: DelegateChildView }): React.ReactElement {
   const visual = delegateStatusVisual(view.status);
-  const meta = useDelegateMetaLine(view);
+  const delegates = useChatHost().delegates;
+  const useMetaLine = delegates?.useMetaLine ?? useNoMetaLine;
+  const meta = useMetaLine(view);
   const threadId = view.ref.threadId;
   const openable = threadId !== null && view.status !== "closed";
   return (
@@ -133,25 +144,27 @@ function DelegateChildLine({ view }: { view: DelegateChildView }): React.ReactEl
           <span className="mt-0.5 block text-xs text-neutral-500">Its tab was closed.</span>
         ) : null}
       </span>
-      <button
-        type="button"
-        disabled={!openable}
-        onClick={() => {
-          if (threadId !== null) openDelegateTab(threadId);
-        }}
-        title={openable ? `Open “${view.title}”` : view.status === "closed" ? "That chat's tab was closed" : "Opening the chat…"}
-        aria-label={openable ? `Open ${view.title}` : `${view.title} cannot be opened`}
-        className={cn(
-          "inline-flex h-6 shrink-0 items-center gap-0.5 rounded px-1.5 text-[11px] transition-colors",
-          "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
-          openable
-            ? "text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-100"
-            : "cursor-not-allowed text-neutral-600"
-        )}
-      >
-        Open
-        <ArrowUpRight size={11} strokeWidth={1.8} aria-hidden />
-      </button>
+      {delegates ? (
+        <button
+          type="button"
+          disabled={!openable}
+          onClick={() => {
+            if (threadId !== null) delegates.open(threadId);
+          }}
+          title={openable ? `Open “${view.title}”` : view.status === "closed" ? "That chat's tab was closed" : "Opening the chat…"}
+          aria-label={openable ? `Open ${view.title}` : `${view.title} cannot be opened`}
+          className={cn(
+            "inline-flex h-6 shrink-0 items-center gap-0.5 rounded px-1.5 text-[11px] transition-colors",
+            "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+            openable
+              ? "text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-100"
+              : "cursor-not-allowed text-neutral-600"
+          )}
+        >
+          Open
+          <ArrowUpRight size={11} strokeWidth={1.8} aria-hidden />
+        </button>
+      ) : null}
     </li>
   );
 }

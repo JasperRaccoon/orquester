@@ -23,6 +23,7 @@ let act: typeof import("react").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let ChatTimeline: typeof import("./ChatTimeline").ChatTimeline;
 let OrquesterProvider: typeof import("../../../context/orquester-context").OrquesterProvider;
+let AppChatHostProvider: typeof import("../chat-host-app").AppChatHostProvider;
 let ensureThreadStore: typeof import("../../../lib/agent-chat/store").ensureThreadStore;
 let releaseThreadStore: typeof import("../../../lib/agent-chat/store").releaseThreadStore;
 
@@ -89,6 +90,7 @@ before(async () => {
   ({ createRoot } = await import("react-dom/client"));
   ({ ChatTimeline } = await import("./ChatTimeline"));
   ({ OrquesterProvider } = await import("../../../context/orquester-context"));
+  ({ AppChatHostProvider } = await import("../chat-host-app"));
   ({ ensureThreadStore, releaseThreadStore } = await import("../../../lib/agent-chat/store"));
 });
 
@@ -183,7 +185,8 @@ describe("restoring a remembered position whose row is gone", () => {
               get: (target, key) => (key in target ? target[key as string] : () => new Promise(() => {}))
             }) as never,
             useTitlebar: false,
-            children: createElement(ChatTimeline, {
+            // The app's chat host: the timeline reaches the thread store through it.
+            children: createElement(AppChatHostProvider, null, createElement(ChatTimeline, {
               sessionId,
               rows,
               follow: false,
@@ -202,7 +205,7 @@ describe("restoring a remembered position whose row is gone", () => {
               errorBanner: null,
               onDismissErrorBanner: noop,
               scroll
-            })
+            }))
           })
         );
       });

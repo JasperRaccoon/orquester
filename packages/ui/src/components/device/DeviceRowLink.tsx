@@ -1,20 +1,21 @@
 /**
  * A device tool's chat row extras (devices spec §10.3): **Show device**, which brings the Device
  * panel up on the lease the call used, and the thumbnail of a screenshot the daemon kept (loaded
- * from the authenticated screenshot route with a query token, like a desktop socket).
+ * from the authenticated screenshot route with a query token, like a desktop socket). The app's
+ * chat host hands them to the timeline's tool rows (`ChatHost.deviceRows`).
  */
 
 import React from "react";
 import { ImageOff, Smartphone } from "lucide-react";
 
-import { Modal, ModalCloseButton } from "../../../ui/modal";
+import { Modal, ModalCloseButton } from "../ui/modal";
 
 import { deviceRoutes, type DeviceLeaseSummary, type DeviceToolReference } from "@orquester/api";
 
-import { cn } from "../../../../lib/cn";
-import { useDevicesEnabled, useDevicesState } from "../../../../lib/devices/hooks";
-import { showDeviceInPanel } from "../../../../lib/devices/panel-focus";
-import { useAppStore } from "../../../../store/app";
+import { cn } from "../../lib/cn";
+import { useDevicesEnabled, useDevicesState } from "../../lib/devices/hooks";
+import { showDeviceInPanel } from "../../lib/devices/panel-focus";
+import { useAppStore } from "../../store/app";
 
 /** The live lease a reference names (by lease id, else by device key), or undefined once released. */
 function leaseOf(leases: readonly DeviceLeaseSummary[] | null, link: DeviceToolReference): DeviceLeaseSummary | undefined {

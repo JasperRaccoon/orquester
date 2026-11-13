@@ -2,17 +2,18 @@
  * A desktop tool's chat row extras (spec 2026-11-10 R2.6): **Show desktop**, which opens the
  * desktop's tab, and the thumbnail of a screenshot the daemon kept (from the authenticated
  * screenshot route with a query token, as a device screenshot's). Mirrors `DeviceRowLink.tsx`.
+ * The app's chat host hands them to the timeline's tool rows (`ChatHost.desktopRows`).
  */
 
 import React from "react";
 import { ImageOff, Monitor } from "lucide-react";
 
-import { Modal, ModalCloseButton } from "../../../ui/modal";
+import { Modal, ModalCloseButton } from "../ui/modal";
 
-import { cn } from "../../../../lib/cn";
-import type { DesktopRowLink } from "../../../../lib/desktops/chat-rows.logic";
-import { jumpToProject, resolveProjectRef } from "../../../../lib/session-nav";
-import { useAppStore } from "../../../../store/app";
+import { cn } from "../../lib/cn";
+import type { DesktopRowLink } from "../../lib/desktops/chat-rows.logic";
+import { jumpToProject, resolveProjectRef } from "../../lib/session-nav";
+import { useAppStore } from "../../store/app";
 
 /** The desktop's title as the store knows it (a primitive, so a row re-renders only when it changes). */
 export function useDesktopLinkTitle(link: DesktopRowLink | undefined): string | undefined {
