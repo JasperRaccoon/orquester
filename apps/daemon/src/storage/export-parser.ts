@@ -616,7 +616,10 @@ class GduExportBuilder implements JsonHandler {
 }
 
 /** Parse and prune a gdu export read from `source` (e.g. `createReadStream(file)`). */
-export async function parseGduExport(source: AsyncIterable<Buffer | string>, options: PruneOptions): Promise<ParsedScan> {
+export async function parseGduExport(
+  source: AsyncIterable<Buffer | string> | Iterable<Buffer | string>,
+  options: PruneOptions
+): Promise<ParsedScan> {
   const builder = new GduExportBuilder(options);
   const tokenizer = new JsonTokenizer(builder);
   for await (const chunk of source) {

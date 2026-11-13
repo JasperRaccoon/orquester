@@ -7,7 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import Fastify from "fastify";
+import Fastify, { type InjectOptions } from "fastify";
 import { storageRoutes, type StorageNodeActions, type StorageStatusResponse, type StorageTreeResponse } from "@orquester/api";
 
 import { parseGduExport, type ParsedScan } from "./export-parser.ts";
@@ -99,7 +99,7 @@ test("without gdu a scan is refused as scanner missing", async (t) => {
 
 test("bad requests are 400 and an unknown volume or unscanned volume 404", async (t) => {
   const { app } = await harness(t);
-  const cases: Array<[Parameters<typeof app.inject>[0], number, string]> = [
+  const cases: Array<[InjectOptions, number, string]> = [
     [{ method: "POST", url: storageRoutes.scan, payload: {} }, 400, "INVALID_REQUEST"],
     [{ method: "POST", url: storageRoutes.scan, payload: { volume: "/nope" } }, 404, "STORAGE_UNKNOWN_VOLUME"],
     [{ method: "GET", url: storageRoutes.tree }, 400, "INVALID_REQUEST"],
