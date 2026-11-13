@@ -5,6 +5,8 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
 
 - `orquester.service` → `/etc/systemd/system/orquester.service`
   - Runs the daemon via `node --import tsx` (the repo is `noEmit`; no dist build).
+- `orquester-update.service`, `orquester-update.path` → `/etc/systemd/system/`: self-update from
+  the UI (see "Self-update" below); installed by `install-unit.sh`.
 - `daemon.env.example` → copy to `/etc/orquester/daemon.env` (chmod 600), fill the password.
   `ORQUESTER_PUBLIC_URL=https://<domain>` is the daemon's public origin: Ephemeral AI VMs use it as
   the default Public URL, and macOS boxes (GitHub Actions runners, outside any tailnet) always dial
@@ -54,9 +56,30 @@ successful deploy (`.git/orq-last-deployed-head`), rebuilds it, restarts it and 
 way. The deploy fails either way: exit 3 means the previous release is back and healthy (the summary
 says `AUTO-REVERTED`), exit 4 means it did not come back either and the daemon needs attention now
 (`./deploy.sh logs <target>`). A build or native-module failure before the restart never restarts
-the daemon. `./deploy.sh rollback <target> <sha>` runs the same cycle with that sha.
+the daemon. `./deploy.sh rollback <target> <sha>` runs the same cycle with that sha. One update runs
+per checkout at a time (`flock` on `.git/orq-deploy.lock`, shared with self-update below): a second
+one exits 5 without touching anything.
 `deploy/lib/remote-update.test.mjs` (in `pnpm test`) drives the script against a throwaway checkout
 with stubbed `systemctl`, `curl` and `pnpm`.
+
+### Self-update
+
+Settings → General → About offers **Update** when the daemon's commit is behind its origin's `main`
+and its unit sets `ORQUESTER_SELF_UPDATE_STATUS`. The button makes the daemon create
+`/var/lib/orquester/daemon/update-request` (content ignored); `orquester-update.path` sees it and
+starts the root oneshot `orquester-update.service`, which removes the request, copies
+`lib/self-update.sh` and `lib/remote-update.sh` to `/run/orquester-update/` and runs the same cycle
+as `./deploy.sh deploy` on `main` (fetch, reset, install, build, restart, health check, automatic
+revert; no browser smoke test). It runs outside the daemon's unit, so the restart doesn't stop it.
+The wrapper records the run in `/var/lib/orquester-update/status.json` (root-owned, world-readable):
+`running`, then `succeeded`, `reverted` (exit 3) or `failed`, with `from`, `startedAt`,
+`finishedAt` and `exitCode` (`from` is the stamped commit the daemon runs). A run is limited to 2 h
+(`TimeoutStartSec`); the daemon reports a `running` record older than 3 h as failed, and a request
+nothing took for 5 minutes (the path unit is not active) as stalled — a new click replaces it. The
+page reloads once the daemon is back on a new commit. Its output
+is in `journalctl -u orquester-update`. `install-unit.sh` installs and enables the units, so an
+existing VPS gets self-update after one more `./deploy.sh deploy`; `./deploy.sh verify` prints
+`update-path=active`. `deploy/lib/self-update.test.mjs` drives the wrapper with a stub update script.
 
 Rolling back to a build from before agent host generations is safe only while the daemon has never
 switched agent hosts during an update. After a switch, first end the `orqsvc-agent-host-<N>` tmux

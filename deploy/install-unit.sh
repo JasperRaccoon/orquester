@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Install the daemon's systemd unit and its needrestart exclusion from this checkout. Idempotent:
-# a file already up to date is left alone, and `systemctl daemon-reload` runs only when the unit
-# changed. It never starts, stops or restarts anything — the caller's own restart picks the unit
-# up. Run as root from the checkout root:
+# Install the daemon's systemd units and its needrestart exclusion from this checkout. Idempotent:
+# a file already up to date is left alone, and one `systemctl daemon-reload` runs only when a unit
+# changed. It never starts, stops or restarts the daemon or the update service — the caller's own
+# restart picks the daemon's unit up; it only enables and starts the self-update path unit. Run as
+# root from the checkout root:
 #
 #     [sudo] bash deploy/install-unit.sh
 #
@@ -10,6 +11,10 @@
 #
 # - /etc/systemd/system/orquester.service ← deploy/orquester.service (OOMPolicy=continue: one
 #   OOM-killed agent process must not stop the whole unit).
+# - /etc/systemd/system/orquester-update.{service,path} ← deploy/orquester-update.{service,path}:
+#   self-update. The path unit (enabled and started here) starts the root oneshot service when the
+#   daemon creates /var/lib/orquester/daemon/update-request; the service runs deploy/lib/self-update.sh.
+#   Refs without them (old rollbacks) leave installed ones in place.
 # - /etc/needrestart/conf.d/orquester.conf: needrestart (Ubuntu's apt hook) must never restart
 #   orquester.service after a library upgrade — an unattended upgrade would otherwise restart the
 #   daemon behind the deploy's drain. Validated with `perl -c` before it is moved into place.
@@ -21,6 +26,10 @@ set -euo pipefail
 
 UNIT_SRC=deploy/orquester.service
 UNIT_DST=/etc/systemd/system/orquester.service
+UPDATE_SERVICE_SRC=deploy/orquester-update.service
+UPDATE_SERVICE_DST=/etc/systemd/system/orquester-update.service
+UPDATE_PATH_SRC=deploy/orquester-update.path
+UPDATE_PATH_DST=/etc/systemd/system/orquester-update.path
 NEEDRESTART_DIR=/etc/needrestart/conf.d
 NEEDRESTART_DST="$NEEDRESTART_DIR/orquester.conf"
 TMPFILES_SRC=deploy/orquester-tmpfiles.conf
@@ -34,12 +43,35 @@ fail() { printf '[install-unit] ERROR: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || fail "must run as root (use sudo)"
 [ -f "$UNIT_SRC" ] || fail "run from the checkout root ($UNIT_SRC not found)"
 
-if [ -f "$UNIT_DST" ] && cmp -s "$UNIT_SRC" "$UNIT_DST"; then
-  log "unit already up to date"
-else
-  install -m 0644 "$UNIT_SRC" "$UNIT_DST"
+units_changed=0
+install_unit() { # <src> <dst>
+  if [ -f "$2" ] && cmp -s "$1" "$2"; then
+    log "$(basename "$2") already up to date"
+  else
+    install -m 0644 "$1" "$2"
+    units_changed=1
+    log "$(basename "$2") installed"
+  fi
+}
+install_unit "$UNIT_SRC" "$UNIT_DST"
+self_update=0
+if [ -f "$UPDATE_SERVICE_SRC" ] && [ -f "$UPDATE_PATH_SRC" ]; then
+  install_unit "$UPDATE_SERVICE_SRC" "$UPDATE_SERVICE_DST"
+  install_unit "$UPDATE_PATH_SRC" "$UPDATE_PATH_DST"
+  self_update=1
+fi
+if [ "$units_changed" -eq 1 ]; then
   systemctl daemon-reload
-  log "unit installed; systemd reloaded (applies at the next start of orquester)"
+  log "systemd reloaded (a changed orquester.service applies at the next start of orquester)"
+fi
+# Idempotent; the update service itself is only ever started by the path unit. Self-update is
+# optional, so a failure here warns instead of failing the deploy.
+if [ "$self_update" -eq 1 ]; then
+  if systemctl enable --now orquester-update.path; then
+    log "self-update path unit enabled and active"
+  else
+    log "WARNING: could not enable orquester-update.path; self-update will not start"
+  fi
 fi
 
 conf="$(mktemp)"

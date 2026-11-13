@@ -48,8 +48,9 @@ from one button.
 
 **Detection (daemon).** A module reads the checkout's `origin` URL from `.git/config` and the
 branch the install tracks (`main`). When origin is a GitHub repo it calls
-`GET https://api.github.com/repos/<owner>/<repo>/compare/<running commit>...<branch>`
-(unauthenticated; the repo is public, 1 request/hour per host is far under the limit). `status:
+`GET https://api.github.com/repos/<owner>/<repo>/compare/<branch>...<running commit>`
+(unauthenticated; the repo is public, 1 request/hour per host is far under the limit; base = branch, so
+`base_commit.sha` is the branch head). `status:
 "behind"` with `behind_by` → out of date; `identical`/`ahead`/`diverged` → not. Result cached in
 memory with `checkedAt`; network or API errors keep the last result and record the error. Checks at
 boot and hourly. Using the install's own origin means the check and the update always look at the
@@ -78,7 +79,8 @@ already pending) answers 409.
 
 **UI.** The commit-only label in About; an "Updates" row: up to date / N commits behind / checking
 error, plus **Update** when `canUpdate`. An `UpdateAvailableToast` in the `ToastStack` shows when
-`behindBy > 0`, dismissible per latest commit (localStorage, validated), with "Open settings".
+`canUpdate && behindBy > 0` (a dev checkout or the desktop app's daemon is never nagged; the
+Settings row still reports "behind" everywhere), dismissible per latest commit (localStorage, validated), with "Open settings".
 After POST the row shows "Updating…" and polls `GET /api/self-update` (the daemon disappears during the
 restart; failed requests are expected). When `/api/info` reports a commit different from the one
 the update started from, the client runs the existing reload (service-worker update + reload). A

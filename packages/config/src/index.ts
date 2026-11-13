@@ -75,6 +75,14 @@ export function daemonConfigDir(baseDir: string): string {
 }
 
 /**
+ * `<appdir>/daemon/update-request`: the daemon creates it to ask the host for a self-update; the
+ * root `orquester-update.path` unit (deploy/) watches this exact path, so it must not move.
+ */
+export function selfUpdateRequestPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "update-request");
+}
+
+/**
  * `<appdir>/tmp`: the scratch directory the agent host and its agent processes get as `TMPDIR`
  * when the daemon itself was started without one (`/tmp` may be unavailable under systemd).
  */
