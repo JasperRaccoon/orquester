@@ -37,7 +37,9 @@ const GLOBALS_CSS = readFileSync(path("../../packages/ui/src/styles/globals.css"
 const TAILWIND_CONTENT = [
   path("../../packages/ui/src/components/agent-chat/"),
   path("../../packages/ui/src/components/ui/"),
-  path("../../packages/ui/src/lib/agent-chat/"),
+  path("../../packages/ui/src/lib/"),
+  path("../../packages/ui/src/icons/"),
+  path("../../packages/ui/src/components/git/"),
   path("./src/embed/")
 ];
 

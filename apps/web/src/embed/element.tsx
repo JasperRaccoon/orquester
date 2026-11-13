@@ -84,7 +84,9 @@ let staleListening = false;
 function listenForStaleChunks(): void {
   if (staleListening || typeof window === "undefined") return;
   staleListening = true;
-  const base = new URL(".", import.meta.url).href;
+  // Not `new URL(".", import.meta.url)`: Vite reads that form as an asset reference
+  // and would emit the entry's source as a file.
+  const base = import.meta.url.slice(0, import.meta.url.lastIndexOf("/") + 1);
   window.addEventListener("vite:preloadError", (event) => {
     const payload = (event as Event & { payload?: unknown }).payload;
     const message = payload instanceof Error ? payload.message : typeof payload === "string" ? payload : "";
