@@ -59,7 +59,10 @@ says `AUTO-REVERTED`), exit 4 means it did not come back either and the daemon n
 (`./deploy.sh logs <target>`). A build or native-module failure before the restart never restarts
 the daemon. `./deploy.sh rollback <target> <sha>` runs the same cycle with that sha. One update runs
 per checkout at a time (`flock` on `.git/orq-deploy.lock`, shared with self-update below): a second
-one exits 5 without touching anything.
+one exits 5 without touching anything. Both `./deploy.sh` and self-update run the *running* release's
+`remote-update.sh`; once the tree is reset, a release whose own copy differs takes over the rest of
+the cycle (a copy in `$TMPDIR`, with the same lock), so steps a release adds run on the update that
+delivers it.
 `deploy/lib/remote-update.test.mjs` (in `pnpm test`) drives the script against a throwaway checkout
 with stubbed `systemctl`, `curl` and `pnpm`.
 

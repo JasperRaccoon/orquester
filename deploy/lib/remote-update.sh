@@ -16,6 +16,10 @@
 #   HEALTH_URL  for local testing only (default http://127.0.0.1:47831/health)
 #   HEALTH_WAIT seconds the health check retries for after a restart (default 600)
 #   AUTO_REVERT 1 (default) rolls a release that fails its health check back; 0 leaves it
+# After the reset, a release whose own deploy/lib/remote-update.sh differs from this one runs the
+# rest of the update with it (a copy in $TMPDIR, exec'd once), so a step a release adds — an
+# installer, say — runs on the update that delivers it rather than on the next one. The handed-over
+# run keeps this run's lock (fd 9), its starting HEAD and the commit just reset to (ORQ_UPDATE_*).
 # Exit codes: 0 deployed; 1 failed before or without a revert; 3 the new release
 # failed its health check and the previous one was restored (running, healthy);
 # 4 the previous one failed to come back too (the daemon is DOWN); 5 another update
@@ -46,7 +50,12 @@ cd "$REPO_DIR"
 # behind (git's detached auto-gc) get fd 9 closed. A host without flock (not Linux), or a .git the
 # deploy user cannot read, runs unlocked with a warning rather than not at all.
 lock_held=0
-if command -v flock >/dev/null 2>&1; then
+if [ -n "${ORQ_UPDATE_HANDOFF:-}" ]; then
+  # Handed over by the previous release's script: its lock came with the exec on fd 9. The copy is
+  # unlinked now; bash keeps reading it through its open descriptor.
+  rm -f -- "$ORQ_UPDATE_HANDOFF"
+  lock_held="${ORQ_UPDATE_LOCK_HELD:-0}"
+elif command -v flock >/dev/null 2>&1; then
   lock_file="$REPO_DIR/.git/orq-deploy.lock"
   [ -e "$lock_file" ] || $SUDO install -m 0644 /dev/null "$lock_file" 2>/dev/null || true
   [ -r "$lock_file" ] || $SUDO chmod 0644 "$lock_file" 2>/dev/null || true
@@ -59,7 +68,7 @@ if command -v flock >/dev/null 2>&1; then
   fi
 fi
 [ "$lock_held" -eq 1 ] || echo "[remote-update] WARNING: running without the update lock (no flock, or $REPO_DIR/.git/orq-deploy.lock unreadable)." >&2
-old_head="$($SUDO git rev-parse HEAD)"
+old_head="${ORQ_UPDATE_OLD_HEAD:-$($SUDO git rev-parse HEAD)}"
 # Base the Caddyfile-drift check on the last SUCCESSFUL deploy, not the current
 # checkout: a deploy that dies after `git reset` leaves the tree at the new HEAD,
 # and on the retry old==new would silently skip the reconcile reminder. The same
@@ -77,6 +86,15 @@ $SUDO git rev-parse --verify --quiet "$RESET_REF^{commit}" >/dev/null \
 $SUDO git reset --hard -q "$RESET_REF"
 new_head="$($SUDO git rev-parse HEAD)"
 echo "[remote-update] HEAD: ${old_head:0:7} -> ${new_head:0:7}"
+
+if [ -z "${ORQ_UPDATE_HANDOFF:-}" ] && [ -f deploy/lib/remote-update.sh ] \
+   && ! cmp -s -- "${BASH_SOURCE[0]}" deploy/lib/remote-update.sh; then
+  handoff="$(mktemp "${TMPDIR:-/tmp}/orq-remote-update.XXXXXX")"
+  cat deploy/lib/remote-update.sh > "$handoff"
+  echo "[remote-update] ${new_head:0:7} has its own remote-update.sh — continuing with it."
+  exec env ORQ_UPDATE_HANDOFF="$handoff" ORQ_UPDATE_OLD_HEAD="$old_head" ORQ_UPDATE_LOCK_HELD="$lock_held" \
+    RESET_REF="$new_head" bash "$handoff"
+fi
 
 tree_version() { # the checked-out package.json's version (no node: it may be the thing that is broken)
   sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n1

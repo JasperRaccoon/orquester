@@ -174,6 +174,25 @@ test("AUTO_REVERT=0 leaves the unhealthy release in place and fails", () => {
   assert.deepEqual(restarts(), [bad]);
 });
 
+test("a release with its own remote-update.sh finishes the update with it, under the same lock", () => {
+  // The release's script: this one, plus a line that reports itself and whether the checkout's lock
+  // is still held (flock -n from another process fails while the update holds it).
+  const ours = readFileSync(SCRIPT, "utf8");
+  const lockLine = '[ "$lock_held" -eq 1 ] || echo';
+  assert.ok(ours.includes(lockLine));
+  const theirs = ours.replace(
+    lockLine,
+    'if flock -n "$REPO_DIR/.git/orq-deploy.lock" true; then echo "[release-script] lock free"; else echo "[release-script] lock held"; fi\n' + lockLine
+  );
+  const next = release("ok", "1.1.0", { "deploy/lib/remote-update.sh": theirs });
+  const result = deploy();
+  assert.equal(result.code, 0, result.out + result.err);
+  assert.match(result.out, /\[release-script\] lock held/);
+  assert.match(result.out, new RegExp(`HEAD: ${good.slice(0, 7)} -> ${next.slice(0, 7)}`), "the handed-over run reports where the update started");
+  assert.deepEqual(restarts(), [next], "one restart, by the release's script");
+  assert.equal(lastDeployed(), next);
+});
+
 test("a failed build never restarts the daemon", () => {
   release("ok", "1.1.0");
   writeFileSync(join(stubs, "fail-install"), "");
