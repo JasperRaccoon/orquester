@@ -558,7 +558,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const buildInfo = daemonBuildInfo();
   // Self-update (spec 2026-11-13): the running commit against its origin's branch on GitHub, at
-  // start and hourly. The host updater's status file is set only by a unit with the update units.
+  // start and hourly. ORQUESTER_SELF_UPDATE_STATUS is set only by a unit installed with the update units.
   const selfUpdate = new SelfUpdateService({
     repoRoot: daemonRepoRoot(),
     commit: buildInfo.commit,
