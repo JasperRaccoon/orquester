@@ -19,10 +19,11 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { AccountError } from "./account-error";
+import { writeFileAtomic } from "./agent-hooks";
 import { ensureKnownHosts } from "./known-hosts";
 import { providerFor } from "./providers";
 import {
@@ -300,13 +301,11 @@ export class AccountsService {
   }
 
   private async write(config: AccountsConfig): Promise<void> {
-    await mkdir(dirname(this.configPath), { recursive: true });
-    // 0600: accounts.json holds the provider token at rest (same care as keys/, 0700).
-    // `mode` only applies on create, so chmod afterwards to also fix existing files.
+    // Always 0600: accounts.json holds the provider token at rest (same care as keys/, 0700).
+    // Atomic and durable: a full disk or a crash mid-write keeps the previous file.
     // serializeAccountsConfig mirrors legacy githubLogin/githubKeyId on github
     // records so a rolled-back (pre-provider) daemon can still parse the file.
-    await writeFile(this.configPath, `${JSON.stringify(serializeAccountsConfig(config), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    await chmod(this.configPath, 0o600).catch(() => undefined);
+    await writeFileAtomic(this.configPath, `${JSON.stringify(serializeAccountsConfig(config), null, 2)}\n`, 0o600, false, { durable: true });
   }
 
   /**

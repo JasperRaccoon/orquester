@@ -122,7 +122,7 @@ import { AuthSessionStore } from "./auth/sessions.ts";
 import { LoginThrottle, clientIp } from "./auth/throttle.ts";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
-import { AgentHooks } from "./agent-hooks";
+import { AgentHooks, writeFileAtomic } from "./agent-hooks";
 import { DailyLogStream } from "./daily-log.ts";
 import { daemonBuildInfo, type BuildInfo } from "./build-info.ts";
 import { listAgentConversations } from "./agent-conversations.ts";
@@ -302,7 +302,6 @@ import {
   desktopsIndexPath,
   desktopsRuntimeDir,
   createDefaultClientConfig,
-  createDefaultDaemonConfig,
   createDefaultRemotesConfig,
   createDefaultWorkspacesConfig,
   expandVars,
@@ -351,7 +350,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { fsPathFromQuery } from "./fs-path-query.js";
 import { randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
-import bcrypt from "bcryptjs";
+import { hashPassword, loadDaemonConfig, migrateHttpPassword } from "./daemon-config.ts";
 // boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
 import { registerTemporaryBoxRoutes, TemporaryBoxTools } from "./boxes/temporary/index.ts";
 // boxes: every box module wired over the daemon's services.
@@ -520,7 +519,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     appdir,
     env
   });
-  const config = await loadConfig(paths, env);
+  const config = await loadDaemonConfig(paths, env);
   validateTransportConfig(config);
 
   const resolved: ResolvedPaths = {
@@ -2532,7 +2531,7 @@ export function createServer(
       // patch the one field.
       //
       // An unreadable/corrupt file fails the request instead of being healed
-      // from memory: boot (`loadConfig`) always materializes daemon.json, so
+      // from memory: boot (`loadDaemonConfig`) always materializes daemon.json, so
       // there is no legitimate "no file yet" case here, and writing the live
       // in-memory config out would bake env-derived values (the
       // ORQUESTER_HTTP_PASSWORD hash, host, port) into a deliberately partial
@@ -6115,42 +6114,13 @@ async function pruneArchivedProject(
 }
 
 /**
- * Persist JSON state atomically: write a sibling temp file, then rename over
- * the target (rename is atomic within a filesystem). A crash or a SIGTERM
- * hard-exit mid-write can therefore never leave a truncated half-JSON file
- * behind — readers see either the old or the new content.
+ * Persist JSON state atomically and durably: a sibling temp file, fsynced, then
+ * renamed over the target. A crash, a power cut or a full disk mid-write
+ * leaves the old content, never a truncated or empty file. An existing file
+ * keeps its mode; a new one lands at 0644.
  */
 async function writeJsonFile(file: string, value: unknown): Promise<void> {
-  await mkdir(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    // Create the temp file restrictive (0600) rather than at the ambient umask:
-    // it can hold secrets (daemon.json's bcrypt passwordHash) and would
-    // otherwise sit world-readable for the window between write and chmod.
-    await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    // rename() carries the temp file's mode over, so replay the target's own
-    // mode first — a tightened daemon.json must not silently widen on every
-    // save, and a pre-existing non-secret file must not silently tighten to
-    // 0600 either. A brand-new file lands at 0644, matching what the ambient
-    // umask used to produce.
-    const mode = await stat(file).then(
-      (info) => info.mode & 0o777,
-      () => 0o644
-    );
-    await chmod(tmp, mode).catch(() => undefined);
-    await rename(tmp, file);
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
-/** bcrypt-hash a plaintext password (stable hash persisted at rest). Cost 12
- *  slows offline cracking / per-guess derivation if a hash ever leaks; the
- *  expensive hash runs only at password-set and client-side login, so
- *  per-request auth stays cheap. */
-function hashPassword(plaintext: string): string {
-  return bcrypt.hashSync(plaintext, bcrypt.genSaltSync(12));
+  await writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`, 0o644, true, { durable: true });
 }
 
 /** The embeddable chat's files that keep their name across builds; every other file under `/embed/` is content-hashed. */
@@ -6168,55 +6138,6 @@ function safeDecodePath(path: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-/**
- * Migrate a legacy/env plaintext `password` into a bcrypt `passwordHash` and
- * drop the plaintext. Returns true when the config changed (needs persisting).
- */
-function migrateHttpPassword(config: DaemonConfig): boolean {
-  const http = config.transports.http;
-  if (http.password) {
-    if (!http.passwordHash) {
-      http.passwordHash = hashPassword(http.password);
-    }
-    http.password = undefined;
-    return true;
-  }
-  return false;
-}
-
-async function loadConfig(paths: DaemonPaths, env: NodeJS.ProcessEnv): Promise<DaemonConfig> {
-  const defaults = createDefaultDaemonConfig({ env });
-  let config: DaemonConfig;
-  let fileExists = true;
-
-  try {
-    const raw = await readFile(paths.configPath, "utf8");
-    const fromDisk = JSON.parse(raw) as Partial<DaemonConfig>;
-    config = parseDaemonConfig({
-      ...defaults,
-      ...fromDisk,
-      transports: {
-        http: { ...defaults.transports.http, ...fromDisk.transports?.http }
-      }
-    });
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") {
-      config = defaults;
-      fileExists = false;
-    } else {
-      throw error;
-    }
-  }
-
-  // Hash any plaintext password and persist so nothing sensitive stays at rest.
-  const changed = migrateHttpPassword(config);
-  if (!fileExists || changed) {
-    await mkdir(paths.daemonDir, { recursive: true });
-    await writeFile(paths.configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-  }
-  return config;
 }
 
 function validateTransportConfig(config: DaemonConfig): void {
