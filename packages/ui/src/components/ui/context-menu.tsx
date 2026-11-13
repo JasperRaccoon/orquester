@@ -98,21 +98,30 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
             onClose();
           }}
           className={cn(
-            "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors",
-            "disabled:pointer-events-none disabled:opacity-40",
+            "flex w-full gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors",
+            // A described item dims only its icon and label: its reason stays readable.
+            item.description ? "items-start" : "items-center disabled:opacity-40",
+            "disabled:pointer-events-none",
             item.danger
               ? "text-danger hover:bg-danger-500/10"
               : "text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
           )}
         >
           {item.icon && (
-            <span className="flex h-4 w-4 items-center justify-center text-neutral-500">
+            <span
+              className={cn(
+                "flex h-4 w-4 items-center justify-center text-neutral-500",
+                // Level with the label's line, not the middle of a wrapped reason.
+                item.description && "mt-0.5",
+                item.description && item.disabled && "opacity-40"
+              )}
+            >
               {item.icon}
             </span>
           )}
           {item.description ? (
             <span className="min-w-0 flex-1">
-              <span className="block truncate">{item.label}</span>
+              <span className={cn("block truncate", item.disabled && "opacity-40")}>{item.label}</span>
               <span className="block whitespace-normal break-words text-[11px] leading-snug text-neutral-500">
                 {item.description}
               </span>
