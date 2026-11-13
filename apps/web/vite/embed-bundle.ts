@@ -305,3 +305,40 @@ export function embedFiles(options: EmbedFilesOptions): Plugin {
     }
   };
 }
+
+/** Vite's preload helper, which every lazy `import()` of the bundle goes through. */
+const PRELOAD_HELPER_ID = "\0vite/preload-helper.js";
+/** The event that helper dispatches on `window` when a chunk fails to load. */
+const VITE_PRELOAD_ERROR = /(["'`])vite:preloadError\1/g;
+
+export interface EmbedPreloadErrorEventOptions {
+  /** The embed's own event name (`EMBED_PRELOAD_ERROR_EVENT`). */
+  eventName: string;
+}
+
+/**
+ * Renames the event the embed's preload helper dispatches on `window` from
+ * Vite's `vite:preloadError` to the embed's own. Vite's name is shared with
+ * the host page: a host built with Vite that reloads on `vite:preloadError`
+ * (Vite's documented pattern) would reload when an embed chunk failed, and the
+ * element would take a host chunk's failure for its own. A chunk holding the
+ * helper without that name fails the build, so a Vite upgrade that changes
+ * the helper cannot silently undo the rename.
+ */
+export function embedPreloadErrorEvent(options: EmbedPreloadErrorEventOptions): Plugin {
+  const renamed = JSON.stringify(options.eventName);
+  return {
+    name: "orquester-embed-preload-error-event",
+    apply: "build",
+    renderChunk(code, chunk) {
+      const rewritten = code.replace(VITE_PRELOAD_ERROR, renamed);
+      if (rewritten !== code) return { code: rewritten, map: null };
+      if (chunk.moduleIds.includes(PRELOAD_HELPER_ID)) {
+        this.error(
+          `Vite's preload helper in ${chunk.fileName} no longer dispatches "vite:preloadError": update the embed's rename`
+        );
+      }
+      return null;
+    }
+  };
+}

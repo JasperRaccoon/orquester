@@ -19,6 +19,7 @@ import type {
 
 import { activity, head, message, snapshot } from "../../../../packages/ui/src/lib/agent-chat/test-helpers";
 
+import { EMBED_PRELOAD_ERROR_EVENT } from "./contract";
 import type { EmbedCommandDetail, EmbedLoaders, EmbedPendingDetail, EmbedResyncDetail } from "./types";
 
 type EmbedElement = HTMLElement & {
@@ -300,6 +301,15 @@ describe("orquester-agent-chat — frames", () => {
     const resync = next<EmbedResyncDetail>("orquester-resync");
     push({ kind: "synchronized", hostInstanceId: "h2" });
     assert.deepEqual(await resync, { sessionId: SESSION });
+  });
+
+  it("says orquester-stale for its own chunk failures only, never for the page's vite:preloadError", () => {
+    let stale = 0;
+    element.addEventListener("orquester-stale", () => (stale += 1));
+    dom.window.dispatchEvent(new dom.window.Event("vite:preloadError"));
+    assert.equal(stale, 0, "the host page's own chunk failure");
+    dom.window.dispatchEvent(new dom.window.Event(EMBED_PRELOAD_ERROR_EVENT));
+    assert.equal(stale, 1, "the embed's chunk failure");
   });
 });
 

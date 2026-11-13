@@ -8,8 +8,10 @@
  * - `base: "./"`: lazy chunks and fonts resolve against the entry's own URL
  *   (`import.meta.url`), on whatever origin served it.
  * - All CSS goes into the shadow root (src/embed/styles.ts); none is emitted.
- * - A lazy chunk that fails to load (a redeploy removed it) fires Vite's
- *   `vite:preloadError` on `window` (the preload helper wraps every `import()`).
+ * - A lazy chunk that fails to load (a redeploy removed it) fires
+ *   `EMBED_PRELOAD_ERROR_EVENT` on `window` (the preload helper wraps every
+ *   `import()`), renamed from Vite's `vite:preloadError`, which the host
+ *   page's own Vite build may listen to (`embedPreloadErrorEvent`).
  *
  * `ORQUESTER_EMBED_GUARD=report` lists forbidden app modules instead of failing.
  */
@@ -23,8 +25,8 @@ import svgr from "vite-plugin-svgr";
 import { defineConfig } from "vite";
 import { orquesterBuildDefine } from "../../packages/ui/vite/build-id";
 import { orquesterPreset } from "../../packages/ui/tailwind-preset";
-import { EMBED_CONTRACT, EMBED_ELEMENT, EMBED_ROOT_CLASS } from "./src/embed/contract";
-import { embedCssImports, embedFiles, embedGuard } from "./vite/embed-bundle";
+import { EMBED_CONTRACT, EMBED_ELEMENT, EMBED_PRELOAD_ERROR_EVENT, EMBED_ROOT_CLASS } from "./src/embed/contract";
+import { embedCssImports, embedFiles, embedGuard, embedPreloadErrorEvent } from "./vite/embed-bundle";
 import { bodyFontStack, embedCssVariables, embedShadowCss } from "./vite/embed-css";
 
 const path = (relative: string): string => fileURLToPath(new URL(relative, import.meta.url));
@@ -106,6 +108,7 @@ export default defineConfig({
       mode: process.env.ORQUESTER_EMBED_GUARD === "report" ? "report" : "fail",
       tailwindContent: TAILWIND_CONTENT
     }),
+    embedPreloadErrorEvent({ eventName: EMBED_PRELOAD_ERROR_EVENT }),
     embedFiles({
       repoRoot: REPO_ROOT,
       contract: EMBED_CONTRACT,

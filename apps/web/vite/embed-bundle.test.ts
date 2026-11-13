@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { forbiddenEmbedModules } from "./embed-bundle";
+import { embedPreloadErrorEvent, forbiddenEmbedModules } from "./embed-bundle";
 
 const UI = "/repo/packages/ui";
 
@@ -39,5 +39,39 @@ describe("forbiddenEmbedModules", () => {
       "\0vite/preload-helper.js"
     ];
     assert.deepEqual(forbiddenEmbedModules(ids, UI), []);
+  });
+});
+
+describe("embedPreloadErrorEvent", () => {
+  const plugin = embedPreloadErrorEvent({ eventName: "orquester-embed:preloadError" });
+  const HELPER = "\0vite/preload-helper.js";
+
+  /** The plugin's `renderChunk` on `code`, as Rollup calls it; `this.error` throws, as Rollup's does. */
+  function render(code: string, moduleIds: string[]): string | null {
+    const hook = plugin.renderChunk as (this: unknown, code: string, chunk: unknown) => { code: string } | null;
+    const context = {
+      error(message: string): never {
+        throw new Error(message);
+      }
+    };
+    return hook.call(context, code, { fileName: "agent-chat.js", moduleIds })?.code ?? null;
+  }
+
+  it("renames the event the preload helper dispatches, whatever the quotes", () => {
+    const helper =
+      'function s(l){const u=new Event("vite:preloadError",{cancelable:!0});u.payload=l,window.dispatchEvent(u)}' +
+      "const t=new Event('vite:preloadError');";
+    const code = render(helper, [HELPER, "/repo/apps/web/src/embed/index.ts"]);
+    assert.ok(code !== null);
+    assert.ok(!code.includes("vite:preloadError"));
+    assert.equal(code.match(/"orquester-embed:preloadError"/g)?.length, 2);
+  });
+
+  it("fails the build when the helper no longer names vite:preloadError", () => {
+    assert.throws(() => render('const u=new Event("vite:chunkError",{cancelable:!0});', [HELPER]), /preload helper/);
+  });
+
+  it("leaves a chunk with neither the helper nor the name untouched", () => {
+    assert.equal(render("export const a = 1;", ["/repo/apps/web/src/embed/index.ts"]), null);
   });
 });
