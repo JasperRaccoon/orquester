@@ -369,6 +369,22 @@ describe("orquester-agent-chat — what it cannot open", () => {
 });
 
 describe("orquester-agent-chat — questions", () => {
+  it("fires orquester-pending only when the set of open requests changes", () => {
+    const events: EmbedPendingDetail[] = [];
+    element.addEventListener("orquester-pending", (event) => events.push((event as CustomEvent<EmbedPendingDetail>).detail));
+    push([{ kind: "snapshot", thread: thread(conversation()) }, { kind: "synchronized", hostInstanceId: "h1" }]);
+    act(() => element.reset());
+    assert.equal(events.length, 0, "a session with nothing open, and its reset, announce nothing");
+
+    push({ kind: "snapshot", thread: thread(conversation(), { pending: { approvals: [], userInputs: [question] } }) });
+    push({ kind: "synchronized", hostInstanceId: "h1" });
+    act(() => element.reset());
+    assert.deepEqual(events, [
+      { sessionId: SESSION, pending: [{ requestId: "req-1", kind: "question" }] },
+      { sessionId: null, pending: [] }
+    ]);
+  });
+
   it("fires orquester-pending for an open question, and an answer as an AnswerCommandBody until respondFailed", async () => {
     const pending = next<EmbedPendingDetail>("orquester-pending");
     push({ kind: "snapshot", thread: thread(conversation(), { pending: { approvals: [], userInputs: [question] } }) });

@@ -114,7 +114,8 @@ export function createEmbedElementClass(): CustomElementConstructor {
     readonly #portal: HTMLDivElement;
     readonly #host: ChatHost;
     #root: Root | null = null;
-    #pending: readonly EmbedPendingRequest[] = [];
+    /** The open requests last announced: the thread's own empty list at first, so its first frames announce none. */
+    #pending: readonly EmbedPendingRequest[] = this.#thread.getView().pending;
 
     constructor() {
       super();
@@ -157,8 +158,9 @@ export function createEmbedElementClass(): CustomElementConstructor {
         }
       };
 
-      // `orquester-pending` on every change of the open requests; the view
-      // keeps the list's identity while it holds the same requests.
+      // `orquester-pending` only when the set of open requests changes — never
+      // for frames, a reset or a new session that leave it as it was: the
+      // view keeps the list's identity while it holds the same requests.
       this.#thread.subscribe(() => {
         const view = this.#thread.getView();
         if (view.pending === this.#pending) return;

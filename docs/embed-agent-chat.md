@@ -57,7 +57,7 @@ async function loadOrquesterChat(origin) {
 
 - `define(tagName = "orquester-agent-chat"): CustomElementConstructor` registers the element, or returns the constructor this bundle already registered under that name. If one page may load two builds (for example after the viewer switches Orquester without a reload), give each its own name: ``embed.define(`orquester-agent-chat-${manifest.build}`)``. Each bundle carries its own React 18, so builds do not interfere with each other or with the page's React.
 - The bundle adds exactly one thing to the page outside its own shadow roots: a `<style data-orquester-embed-fonts="<build>">` in `document.head` with KaTeX's `@font-face` rules (fonts cannot be declared inside a shadow root).
-- If the host page sends a Content-Security-Policy, it must allow the Orquester origin in `script-src` and `font-src`, `blob:` in `img-src` (images are shown through object URLs), and the URLs `visualUrl` returns in `frame-src`.
+- If the host page sends a Content-Security-Policy, it must allow the Orquester origin in `script-src` and `font-src`, `blob:` in `img-src` (images are shown through object URLs), and in `frame-src` both `blob:` (HTML snippets in messages and question-option previews load as `blob:` frames) and the URLs `visualUrl` returns.
 
 ## The element
 
@@ -92,7 +92,7 @@ All are `CustomEvent`s with `bubbles: true` and `composed: true`, fired on the e
 | Event | `detail` | When |
 |---|---|---|
 | `orquester-command` | `{ sessionId, command: "answer" \| "dismiss" \| "approval", body }` | The user answered, dismissed or decided a pending question or approval. `body` is exactly `AnswerCommandBody`, `DismissCommandBody` or `ApprovalCommandBody` (`packages/api/src/agent-chat/wire.ts`), including an element-minted `commandId`. POST `body` unchanged to `/api/sessions/:sessionId/<command>`. The card stays "responding" until the frames show the request settled, or `respondFailed(commandId)` is called. Retrying with the same `commandId` is safe: commands are idempotent by it. |
-| `orquester-pending` | `{ sessionId, pending: Array<{ requestId, kind: "question" \| "approval" }> }` | Whenever the set of open questions/approvals changes. The element has no "answer by typing" bridge: while `pending` is non-empty, a host with its own text field should hold it or point the user at the card. |
+| `orquester-pending` | `{ sessionId, pending: Array<{ requestId, kind: "question" \| "approval" }> }` | Only when the set of open questions/approvals changes — not on connect, on frames that leave it as it was, or on a `reset()` of a thread with none open (an element starts with an empty set, so a thread with nothing open never fires it). The element has no "answer by typing" bridge: while `pending` is non-empty, a host with its own text field should hold it or point the user at the card. |
 | `orquester-resync` | `{ sessionId }` | A `synchronized` frame named a different agent-host instance. Reopen the stream **without** `after`; its fresh `snapshot` replaces the thread. |
 | `orquester-stale` | `{ build }` | A lazily loaded chunk of this bundle failed (usually: the Orquester redeployed under the page). The affected block degrades (math and diagrams show their source, code is unhighlighted). The host may re-read the manifest and remount. The bundle neither dispatches nor listens to Vite's `vite:preloadError`, so a Vite-built host page's own reload-on-chunk-failure handler never fires for the embed's chunks, and its chunk failures never fire this event. |
 
