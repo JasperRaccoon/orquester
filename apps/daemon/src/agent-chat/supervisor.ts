@@ -829,11 +829,36 @@ export class AgentHostSupervisor implements HostDirectory {
    *   4. the socket answers but rejects the token → foreign; log, never kill;
    *   5. nothing answers → spawn, poll READINESS (not just the socket), adopt.
    */
-  init(): Promise<void> {
+  init(options: { updateAfterBoot?: boolean } = {}): Promise<void> {
     return this.transition(async () => {
       this.supervising = true;
-      await this.boot();
+      this.updateAfterBoot = options.updateAfterBoot === true;
+      try {
+        await this.boot();
+      } finally {
+        this.updateAfterBoot = false;
+      }
     });
+  }
+
+  /**
+   * Set during an {@link init} asked to `updateAfterBoot`: a stale host found by the boot is updated
+   * as the NEXT queued step instead of inside the boot, so `init()` returns with the old host
+   * adopted and serving and the daemon's transports listen at once rather than after the
+   * replacement is up (6–9 s on a VPS). The update is the same {@link restartIfDrained} the health
+   * tick runs; a chat request in its gap is answered HOST_UNAVAILABLE, which clients retry.
+   */
+  private updateAfterBoot = false;
+
+  /** The boot's update of a stale host: now, or queued right after the boot (see {@link updateAfterBoot}). */
+  private async updateStaleHostAtBoot(): Promise<void> {
+    if (!this.updateAfterBoot) {
+      await this.restartIfDrained();
+      return;
+    }
+    this.transition(async () => {
+      if (this.supervising) await this.restartIfDrained();
+    }).catch((error) => this.log("error", "agent host update failed", error));
   }
 
   /**
@@ -890,7 +915,7 @@ export class AgentHostSupervisor implements HostDirectory {
         this.pendingVersionRestart = true;
         this.log("warn", `${this.staleReason(probed.health)}; restarting once drained`);
         this.emit();
-        await this.restartIfDrained();
+        await this.updateStaleHostAtBoot();
       }
       return;
     }
@@ -2761,7 +2786,7 @@ export class AgentHostSupervisor implements HostDirectory {
     await this.persistRegistry();
     for (const host of otherProtocol) await this.endRetiringHost(host, "protocol");
     this.scheduleRetiringPoll();
-    if (this.pendingVersionRestart && primary !== undefined) await this.restartIfDrained();
+    if (this.pendingVersionRestart && primary !== undefined) await this.updateStaleHostAtBoot();
   }
 
   private addRetiringHost(

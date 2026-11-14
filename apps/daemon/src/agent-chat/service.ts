@@ -607,7 +607,9 @@ export class AgentChatService {
 
   /** Boot: adopt or spawn the host, then start the coarse subscription. */
   async init(): Promise<void> {
-    await this.supervisor.init();
+    // A stale host is updated right after the boot, not inside it: the daemon's transports listen
+    // with the old host serving instead of waiting for its replacement.
+    await this.supervisor.init({ updateAfterBoot: true });
     // Clear the durable delete queue as soon as a host is adopted, and again on
     // every later adoption (a respawn or the drain-restart).
     await this.replayPendingThreadDeletes();

@@ -301,6 +301,26 @@ test("case 3: a version mismatch adopts first, then restarts once drained", asyn
   await h.cleanup();
 });
 
+test("case 3, updateAfterBoot: init returns with the old host adopted; the update runs as the next step", async () => {
+  // The daemon's transports start listening when init() returns: they must not wait for the
+  // replacement host (6–9 s on a VPS) — the old host serves until the update right after.
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  h.probeHook = mismatchUntilReplaced(h);
+  await h.supervisor.init({ updateAfterBoot: true });
+  assert.equal(h.spawns.length, 0, "no replacement was started inside the boot");
+  assert.equal(h.stopRequests, 0, "the old host was not stopped inside the boot");
+  assert.equal(h.supervisor.status().state, "healthy");
+  assert.equal(h.supervisor.status().hostInstanceId, "host-1", "the old host serves meanwhile");
+  assert.equal(h.supervisor.status().pendingVersionRestart, true);
+  // The health tick is queued behind the update, so it returns once the update is done.
+  await h.supervisor.checkHealth();
+  assert.equal(h.stopRequests, 1);
+  assert.equal(h.spawns.length, 1, "the replacement was started right after the boot");
+  assert.equal(h.supervisor.status().pendingVersionRestart, false);
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  await h.cleanup();
+});
+
 test("case 3: a moved CODE stamp is a drain-restart too, not only a protocol bump", async () => {
   // A deploy that changes only host code used to leave the surviving host on
   // the old code for as long as it lived (the protocol version was the only

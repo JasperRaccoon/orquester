@@ -336,6 +336,25 @@ test("update flow: a busy stale primary retires, keeping its working chats, whil
   await h.cleanup();
 });
 
+test("update flow, updateAfterBoot: init returns with the stale primary serving; the busy-chat update follows", async (t) => {
+  const h = await makeHarness(t);
+  await staleBusyPrimary(h);
+  await h.supervisor.init({ updateAfterBoot: true });
+  assert.deepEqual(h.retires, [], "nothing retired inside the boot");
+  assert.equal(h.spawns.length, 0, "no replacement started inside the boot");
+  assert.equal(h.supervisor.primary()?.generation, 0, "the old host serves meanwhile");
+  assert.equal((await h.supervisor.hostForThread("t-other"))?.generation, 0);
+
+  // The health tick is queued behind the update, so it returns once the update is done.
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.retires, [0]);
+  assert.deepEqual(h.stops, [], "nothing is interrupted");
+  assert.equal(h.supervisor.primary()?.generation, 1);
+  assert.equal((await h.supervisor.hostForThread("t-busy"))?.generation, 0);
+  assert.equal((await h.supervisor.hostForThread("t-other"))?.generation, 1);
+  await h.cleanup();
+});
+
 test("update flow: a replacement that never becomes ready is killed, the old host unretired, the registry restored — then Phase 1", async (t) => {
   const h = await makeHarness(t);
   h.spawnReady = false;
