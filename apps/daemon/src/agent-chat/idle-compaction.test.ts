@@ -233,7 +233,9 @@ test("each guard on the tab keeps it from compacting", async () => {
     { goal: { objective: "ship", status: "active", continuing: true } },
     { lineage: { parentThreadId: "p", relation: "delegate", createdAt: iso(T0) } },
     { owner: { kind: "workflow", workflowId: "w", runId: "r", nodeId: "n" } },
-    { latestTurn: { turnId: "t1", state: "interrupted", startedAt: null, completedAt: iso(T0) } }
+    { latestTurn: { turnId: "t1", state: "interrupted", startedAt: null, completedAt: iso(T0) } },
+    // A busy account switch in flight: a compaction now would fail it after its stop.
+    { accountSwitch: { commandId: "sw-1", fromAccountId: "acc1", toAccountId: "acc2", startedAt: iso(T0), step: "settling", goal: null } }
   ];
   for (const guard of guards) {
     const h = harness();

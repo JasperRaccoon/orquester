@@ -356,7 +356,11 @@ describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () =>
     const busy = { ...idle, busySwitch: true };
     assert.equal(identitySwitchRefusal({ ...busy, goalContinuing: true }), null);
     assert.equal(identitySwitchRefusal({ ...busy, goalHeldForUpdate: true, goalContinuing: true }), null);
+    // Held: skipped even while the pause's own update trails (the goal still reads active).
+    assert.equal(identitySwitchRefusal({ ...busy, goalHeldForUpdate: true, goalContinuing: true, goalRunning: true }), null);
     for (const state of [
+      // A goal still going on (active, or just set going again) was not paused by a stop.
+      { ...busy, goalContinuing: true, goalRunning: true },
       { ...busy, goalHeldForUpdate: true, compacting: true },
       { ...busy, goalContinuing: true, activeTurnId: "turn-1" },
       { ...busy, hasUnsettledTurn: true },

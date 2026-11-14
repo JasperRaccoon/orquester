@@ -5514,7 +5514,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       goalHeldForUpdate: goalHeld(runtime, adapter),
       // Spec 2026-11-14 §3–§4: the daemon's busy switch stopped the work (pausing a continuing
       // goal) or found a held goal, whose marks this switch leaves on the head.
-      busySwitch: request.busySwitch === true
+      busySwitch: request.busySwitch === true,
+      goalRunning: runtime.state.goal?.status === "active" || goalJustResumed(runtime, head, adapter)
     }, accountChanged ? "accounts" : "profiles");
     if (refusal !== null) {
       throw commandRejected(refusal);

@@ -1057,7 +1057,28 @@ describe("spec 2026-11-14 §4 — a busy account switch of a held goal", () => {
     await host.stop();
   });
 
-  it("keeps a pending resume mark too", async () => {
+  it("a goal still going on — active, or just set going again — is refused even for a busy switch", async () => {
+    const { host, codex } = codexHost();
+    const threadId = await continuingGoal(host, { running: false });
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true }),
+      (error: unknown) => isAgentChatCommandError(error) && error.message === "Pause the goal before switching accounts."
+    );
+    await host.orchestrator.holdContinuingGoals();
+    // The lease runs out and the host sets the goal going again; Codex's own update trails.
+    codex.trailing.add("resume");
+    await clockFrom(host)(120_000);
+    assert.equal(heldMark(host), undefined);
+    assert.equal(continuing(host, threadId), true);
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true }),
+      (error: unknown) => isAgentChatCommandError(error) && error.message === "Pause the goal before switching accounts."
+    );
+    assert.equal(host.store.heads.get(threadId)?.accountId, "acc1");
+    await host.stop();
+  });
+
+  it("a goal whose resume is owed after a restart is going on: refused too, its mark kept", async () => {
     const { host: first } = codexHost();
     const threadId = await continuingGoal(first, { running: false });
     await first.orchestrator.markThreadsForContinuation();
@@ -1065,9 +1086,8 @@ describe("spec 2026-11-14 §4 — a busy account switch of a held goal", () => {
     const next = codexHost({ store: first.store, launchConfigs: first.launchConfigs });
     await next.host.orchestrator.readThread(threadId);
     assert.equal(continuing(next.host, threadId), true, "the resume is owed");
-    await assert.rejects(() => next.host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2 }));
-    await next.host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true });
-    assert.equal(next.host.store.heads.get(threadId)?.accountId, "acc2");
+    await assert.rejects(() => next.host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true }));
+    assert.equal(next.host.store.heads.get(threadId)?.accountId, "acc1");
     assert.equal(next.host.store.heads.get(threadId)?.resumeGoalAfterRestart, true);
     await next.host.stop();
   });

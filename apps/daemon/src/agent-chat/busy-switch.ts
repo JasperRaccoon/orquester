@@ -28,12 +28,16 @@
  * resumes by itself on the new account after the update.
  *
  * The step is persisted on the tab record (`SessionSummary.accountSwitch`) BEFORE its side effect,
- * and every side effect goes out under a command id derived from the switch's own, so a daemon
- * restart re-runs the sequence from its step and the host's receipts make repeats no-ops
- * ({@link ChatBusySwitch.start}). While the record stands, the chat's `/turn` route refuses every
- * other turn with `TURN_NOT_IDLE` ({@link busySwitchTurnRefusal}). A failure after the stop lifts
- * the fence, sends nothing more and writes a warning row on the chat's timeline.
+ * and every side effect goes out under a command id derived from the switch's own and a private
+ * nonce kept on the record (never published), so a daemon restart re-runs the sequence from its
+ * step, the host's receipts make repeats no-ops ({@link ChatBusySwitch.start}), and no client can
+ * post under one of them. While the record stands, the chat's routes refuse every other turn,
+ * answer, compaction and revert ({@link busySwitchCommandRefusal}). A failure after the stop lifts
+ * the fence, sends nothing more and writes a warning row on the chat's timeline; the failure is
+ * that command's final answer (a retry of it never switches anew).
  */
+
+import { randomBytes } from "node:crypto";
 
 import { SYSTEM_ACCOUNT_ID, type AgentAdapterId, type SessionSummary } from "@orquester/api";
 import {
@@ -71,8 +75,15 @@ const COMPACTION_REFUSAL = "Wait for the context compaction to finish before swi
 /** The words the `/turn` fence refuses with. */
 export const BUSY_SWITCH_FENCE_MESSAGE = "This chat is moving to another account. Send the message again once the switch is done.";
 
+/**
+ * Owed, not answered: the switch is still persisted (a restarted one waiting for its host) or
+ * nothing happened yet (the preflight read failed), so a repeat of its command may run it.
+ */
+const OWED = Symbol("owed");
+
 /** A refusal or a failure the account route maps onto the §6.2 envelope. */
 export class BusySwitchError extends Error {
+  [OWED]?: true;
   constructor(
     message: string,
     readonly code: AgentChatErrorCode
@@ -82,12 +93,20 @@ export class BusySwitchError extends Error {
   }
 }
 
+/** A failure a repeat of the same command may still run past ({@link OWED}). */
+function owed(error: BusySwitchError): BusySwitchError {
+  error[OWED] = true;
+  return error;
+}
+
 /** The tab records the switch reads and writes (`ChatSessionManager`). */
 export interface BusySwitchChat {
   get(id: string): SessionSummary | undefined;
   list(): SessionSummary[];
   accountSwitchOf(id: string): ChatBusySwitchState | null;
-  setAccountSwitch(id: string, state: ChatBusySwitchState | null): unknown;
+  /** The switch's private nonce: persisted on the tab record, never published. */
+  accountSwitchNonceOf(id: string): string | null;
+  setAccountSwitch(id: string, state: SwitchState | null): unknown;
 }
 
 export interface BusySwitchOptions {
@@ -107,27 +126,70 @@ export interface BusySwitchOptions {
   retryMs?: number;
 }
 
-/** The command id of one of the switch's side effects: stable for the switch, within the id cap. */
-export function busySwitchCommandId(sessionId: string, commandId: string, part: "interrupt" | "interrupt-background" | "account" | "continue" | "notice"): string {
-  return limitCommandId("busy-switch", sessionId, commandId, part);
+/** A switch as the daemon holds it: the published state plus its private nonce. */
+export type SwitchState = ChatBusySwitchState & { nonce?: string };
+
+type SwitchPart = "interrupt" | "interrupt-background" | "account" | "continue" | `notice-${ChatBusySwitchStep}`;
+
+/**
+ * The command id of one of the switch's side effects: stable for the switch (a restart re-posts
+ * it), within the id cap, and built on the switch's private nonce — which the summary never
+ * publishes — so no client can post under it (and get past the fence, or answer the daemon's own
+ * command with its receipt).
+ */
+export function busySwitchCommandId(sessionId: string, state: Pick<SwitchState, "commandId" | "nonce">, part: SwitchPart): string {
+  return limitCommandId("busy-switch", sessionId, state.nonce !== undefined ? `${state.commandId}:${state.nonce}` : state.commandId, part);
+}
+
+/** The chat commands the fence holds back: each starts (or rewrites) agent work. */
+const FENCED_COMMANDS: Readonly<Record<string, { code: "TURN_NOT_IDLE" | "COMMAND_REJECTED"; message: string }>> = {
+  turn: { code: "TURN_NOT_IDLE", message: "This chat is moving to another account. Send the message again once the switch is done." },
+  // A message-mode answer starts a turn; a compaction started now would fail the switch.
+  answer: { code: "TURN_NOT_IDLE", message: "This chat is moving to another account. Answer again once the switch is done." },
+  compact: { code: "TURN_NOT_IDLE", message: "This chat is moving to another account. Compact once the switch is done." },
+  revert: { code: "COMMAND_REJECTED", message: "This chat is moving to another account. Revert once the switch is done." }
+};
+
+/**
+ * The fence: why the chat's command route refuses this command now, or null. While a busy switch
+ * stands on the tab record, `turn`, `answer`, `compact` and `revert` are refused — whoever sends
+ * them — except the switch's own continue turn, matched by its nonce-bearing command id.
+ */
+export function busySwitchCommandRefusal(
+  sessionId: string,
+  state: SwitchState | null,
+  name: string,
+  body: unknown
+): { code: "TURN_NOT_IDLE" | "COMMAND_REJECTED"; message: string } | null {
+  if (state === null) return null;
+  const refusal = FENCED_COMMANDS[name];
+  if (refusal === undefined) return null;
+  const commandId = (body as { commandId?: unknown } | null)?.commandId;
+  if (name === "turn" && commandId === busySwitchCommandId(sessionId, state, "continue")) return null;
+  return refusal;
+}
+
+/** The goal the summary says is going on (a held goal, or one just set going again, reads `paused` and continuing). */
+function summaryGoalBusy(tab: SessionSummary): boolean {
+  return tab.goal?.continuing === true;
 }
 
 /**
- * The fence: why the chat's `/turn` route refuses this turn, or null. While a busy switch stands
- * on the tab record, only its own continue turn (matched by its command id) goes through.
+ * The goal the switch handles (§4), decided from the host's live head before anything happens:
+ * - `held` only when the head carries an update's hold (`goalHeldForHandover`) on a goal that may
+ *   still go on — a goal the host has just set going again reads `paused` and continuing too, but
+ *   it is going, not held;
+ * - `continuing` for any goal going on by itself: `active` on an adapter that continues goals
+ *   across turns (the Stop pauses it, whatever the summary's grace says), or one the summary reads
+ *   continuing (just resumed). The switch ends with `/goal resume`.
+ * An older host names neither the hold-less adapter capability nor the compaction: the summary's
+ * verdict then decides as before.
  */
-export function busySwitchTurnRefusal(sessionId: string, state: ChatBusySwitchState | null, body: unknown): string | null {
-  if (state === null) return null;
-  const commandId = (body as { commandId?: unknown } | null)?.commandId;
-  return commandId === busySwitchCommandId(sessionId, state.commandId, "continue") ? null : BUSY_SWITCH_FENCE_MESSAGE;
-}
-
-/** The goal a switch has to handle (§4): a continuing one is paused and resumed, a held one kept. */
-function goalOf(tab: SessionSummary): ChatBusySwitchGoal | null {
-  if (tab.goal?.continuing !== true) return null;
-  if (tab.goal.status === "active") return "continuing";
-  // A paused goal reads continuing only while an update holds it (goals §5.7).
-  if (tab.goal.status === "paused") return "held";
+function goalToHandle(tab: SessionSummary, head: ThreadHeadResponse): ChatBusySwitchGoal | null {
+  const status = head.goal?.status ?? tab.goal?.status;
+  if (head.head.goalHeldForHandover === true && (status === "paused" || status === "active")) return "held";
+  if (head.goal?.status === "active" && head.goalContinuesAcrossTurns === true) return "continuing";
+  if (summaryGoalBusy(tab)) return "continuing";
   return null;
 }
 
@@ -148,7 +210,10 @@ function turnSettled(tab: SessionSummary): boolean {
 function idleForSwitch(tab: SessionSummary, goal: ChatBusySwitchGoal | null): boolean {
   if (!turnSettled(tab) || (tab.backgroundLiveness ?? null) !== null) return false;
   // A held goal reads continuing until the next host resumes it; the switch keeps it so.
-  return goal === "held" || !(tab.goal?.continuing === true && tab.goal.status === "active");
+  if (goal === "held") return true;
+  // A goal the stop pauses: wait for its pause to land (the host refuses an active one).
+  if (goal === "continuing") return tab.goal?.status !== "active";
+  return !(tab.goal?.continuing === true && tab.goal.status === "active");
 }
 
 /** The account route's id for a stored account ("" is the system login). */
@@ -238,7 +303,7 @@ export class ChatBusySwitch {
   /** Finish (or abandon) the switch a restart found on the chat. */
   private resumeOwed(id: string): void {
     if (this.stopped || this.running.has(id)) return;
-    const state = this.opts.chat.accountSwitchOf(id);
+    const state = this.stateOf(id);
     if (!state || !this.opts.chat.get(id)) return;
     const age = this.opts.clock.now().getTime() - Date.parse(state.startedAt);
     const past = state.step === "switching" || state.step === "continuing";
@@ -264,8 +329,8 @@ export class ChatBusySwitch {
       },
       (error: unknown) => {
         const failure = error instanceof BusySwitchError ? error : new BusySwitchError(describe(error).message, describe(error).code);
-        // A host that was away is no answer: the switch is still owed, and a repeat joins it.
-        if (failure.code !== "HOST_UNAVAILABLE") this.remember(id, commandId, failure);
+        // Every answer is final for its command — a repeat gets the same — except one still owed.
+        if (failure[OWED] !== true) this.remember(id, commandId, failure);
         forget();
       }
     );
@@ -317,17 +382,20 @@ export class ChatBusySwitch {
     if (!tab) return Promise.reject(new BusySwitchError("No chat session with that id.", "THREAD_NOT_FOUND"));
     const from = tab.accountId ?? "";
     const to = input.accountId === SYSTEM_ACCOUNT_ID ? "" : input.accountId;
-    const goal = goalOf(tab);
     // The account it runs on (a receipt, nothing else), or an idle chat: today's switch.
-    if (to === from || (goal === null && idleForSwitch(tab, null))) {
+    if (to === from || (!summaryGoalBusy(tab) && idleForSwitch(tab, null))) {
       return this.opts.switchAccount(id, { commandId: input.commandId, accountId: input.accountId });
-    }
-    if (tab.chatSessionStatus === "starting" && goal !== "held") {
-      return Promise.reject(new BusySwitchError("Wait for the agent to start before switching accounts.", "COMMAND_REJECTED"));
     }
     const api = this.api;
     if (!api) return Promise.reject(new BusySwitchError("The daemon is still starting. Try again in a moment.", "HOST_UNAVAILABLE"));
-    return this.track(id, input.commandId, this.begin(api, id, { commandId: input.commandId, from, to, goal }));
+    return this.track(id, input.commandId, this.begin(api, id, { commandId: input.commandId, accountId: input.accountId, from, to }));
+  }
+
+  private stateOf(id: string): SwitchState | null {
+    const state = this.opts.chat.accountSwitchOf(id);
+    if (state === null) return null;
+    const nonce = this.opts.chat.accountSwitchNonceOf(id);
+    return nonce !== null ? { ...state, nonce } : state;
   }
 
   /**
@@ -339,28 +407,39 @@ export class ChatBusySwitch {
   private async begin(
     api: DaemonApi,
     id: string,
-    input: { commandId: string; from: string; to: string; goal: ChatBusySwitchGoal | null }
+    input: { commandId: string; accountId: string; from: string; to: string }
   ): Promise<{ seq: number }> {
     let head: ThreadHeadResponse;
     try {
       head = await readThreadHead(api, id);
     } catch (error) {
       const { message, code } = describe(error);
-      throw new BusySwitchError(`The chat could not be read, so nothing was stopped: ${message}`, code);
+      // Nothing happened yet: a repeat of the command may try again.
+      throw owed(new BusySwitchError(`The chat could not be read, so nothing was stopped: ${message}`, code));
     }
     if (head.compacting === true) throw new BusySwitchError(COMPACTION_REFUSAL, "COMMAND_REJECTED");
-    const goal = input.goal ?? (head.goal?.status === "active" && head.goalContinuesAcrossTurns === true ? "continuing" : null);
+    const tab = this.opts.chat.get(id);
+    if (!tab) throw new BusySwitchError("No chat session with that id.", "THREAD_NOT_FOUND");
+    const goal = goalToHandle(tab, head);
+    // It went idle while the head was read: today's switch, nothing stopped, nothing sent.
+    if (goal === null && idleForSwitch(tab, null)) {
+      return this.opts.switchAccount(id, { commandId: input.commandId, accountId: input.accountId });
+    }
+    if (tab.chatSessionStatus === "starting" && goal !== "held") {
+      throw new BusySwitchError("Wait for the agent to start before switching accounts.", "COMMAND_REJECTED");
+    }
     if (this.opts.chat.accountSwitchOf(id) !== null) {
       throw new BusySwitchError("An account switch is already in progress in this chat.", "COMMAND_REJECTED");
     }
-    const state: ChatBusySwitchState = {
+    const state: SwitchState = {
       commandId: input.commandId,
       fromAccountId: input.from,
       toAccountId: input.to,
       startedAt: this.opts.clock.now().toISOString(),
       // A held goal is not stopped: a Stop would take the update's hold back.
       step: goal === "held" ? "settling" : "stopping",
-      goal
+      goal,
+      nonce: randomBytes(16).toString("hex")
     };
     this.opts.chat.setAccountSwitch(id, state);
     return this.sequence(id, state, { restarted: false });
@@ -370,13 +449,13 @@ export class ChatBusySwitch {
   // The sequence
   // -------------------------------------------------------------------------
 
-  private advance(id: string, state: ChatBusySwitchState, step: ChatBusySwitchStep): ChatBusySwitchState {
+  private advance(id: string, state: SwitchState, step: ChatBusySwitchStep): SwitchState {
     const next = { ...state, step };
     this.opts.chat.setAccountSwitch(id, next);
     return next;
   }
 
-  private async sequence(id: string, first: ChatBusySwitchState, opts: { restarted: boolean }): Promise<{ seq: number }> {
+  private async sequence(id: string, first: SwitchState, opts: { restarted: boolean }): Promise<{ seq: number }> {
     let state = first;
     let seq = 0;
     try {
@@ -392,7 +471,7 @@ export class ChatBusySwitch {
         try {
           seq = (
             await this.opts.switchAccount(id, {
-              commandId: busySwitchCommandId(id, state.commandId, "account"),
+              commandId: busySwitchCommandId(id, state, "account"),
               accountId: routeAccountId(state.toAccountId),
               busySwitch: true
             })
@@ -406,17 +485,19 @@ export class ChatBusySwitch {
     } catch (error) {
       const failure = error instanceof StepFailure ? error : new StepFailure(describe(error).message, describe(error).code);
       if (opts.restarted && failure.code === "HOST_UNAVAILABLE" && this.retryLater(id)) {
-        throw new BusySwitchError(failure.reason, failure.code);
+        throw owed(new BusySwitchError(failure.reason, failure.code));
       }
       await this.sequenceFailed(id, state, failure.reason);
-      throw new BusySwitchError(this.failureAnswer(state, failure.reason), failure.code);
+      // The switch is over (fence lifted, row written): a final answer, never one to retry — a
+      // repeat of the command gets it again rather than switching anew.
+      throw new BusySwitchError(this.failureAnswer(state, failure.reason), failure.code === "HOST_UNAVAILABLE" ? "COMMAND_REJECTED" : failure.code);
     }
     // Switched: whatever comes of the continue turn, the switch itself succeeded.
     try {
       await this.continueTurn(id, state);
     } catch (error) {
       const { message, code } = describe(error);
-      if (opts.restarted && code === "HOST_UNAVAILABLE" && this.retryLater(id)) throw new BusySwitchError(message, code);
+      if (opts.restarted && code === "HOST_UNAVAILABLE" && this.retryLater(id)) throw owed(new BusySwitchError(message, code));
       await this.continueFailed(id, state, message);
       return { seq };
     }
@@ -425,10 +506,10 @@ export class ChatBusySwitch {
   }
 
   /** The session-scoped interrupt, `cascade: false`, under the switch's derived command id. */
-  private async interrupt(id: string, state: ChatBusySwitchState, part: "interrupt" | "interrupt-background"): Promise<void> {
+  private async interrupt(id: string, state: SwitchState, part: "interrupt" | "interrupt-background"): Promise<void> {
     const api = this.requireApi();
     try {
-      await sendCommand(api, id, "interrupt", { cascade: false }, { commandId: busySwitchCommandId(id, state.commandId, part), retryDelayMs: () => 0 });
+      await sendCommand(api, id, "interrupt", { cascade: false }, { commandId: busySwitchCommandId(id, state, part), retryDelayMs: () => 0 });
     } catch (error) {
       const { message, code } = describe(error);
       throw new StepFailure(`The running work could not be stopped: ${message}`, code);
@@ -441,7 +522,7 @@ export class ChatBusySwitch {
    * with nothing running (it ends the session's background work); a held goal is never
    * interrupted, so its switch only waits. Bounded as a whole by the settle timeout.
    */
-  private async settle(id: string, state: ChatBusySwitchState): Promise<void> {
+  private async settle(id: string, state: SwitchState): Promise<void> {
     const api = this.requireApi();
     const deadline = this.opts.clock.now().getTime() + this.settleTimeoutMs;
     const remaining = (): number => Math.max(0, deadline - this.opts.clock.now().getTime());
@@ -460,7 +541,7 @@ export class ChatBusySwitch {
   }
 
   /** The continue turn, or `/goal resume`, through the chat's own `/turn`; nothing for a held goal. */
-  private async continueTurn(id: string, state: ChatBusySwitchState): Promise<void> {
+  private async continueTurn(id: string, state: SwitchState): Promise<void> {
     if (state.goal === "held") return;
     const api = this.requireApi();
     const tab = this.opts.chat.get(id);
@@ -476,7 +557,7 @@ export class ChatBusySwitch {
       api,
       agentChatCommandPath(id, "turn"),
       { input, interactionMode: head.interactionMode, ifIdle: true },
-      { commandId: busySwitchCommandId(id, state.commandId, "continue"), retryDelayMs: () => 0 }
+      { commandId: busySwitchCommandId(id, state, "continue"), retryDelayMs: () => 0 }
     );
   }
 
@@ -493,7 +574,7 @@ export class ChatBusySwitch {
   }
 
   /** A switch a restart found too old to finish: given up, as a failure at its step. */
-  private async abandon(id: string, state: ChatBusySwitchState): Promise<{ seq: number }> {
+  private async abandon(id: string, state: SwitchState): Promise<{ seq: number }> {
     const reason = "Orquester restarted while it was switching the account, and the switch was given up.";
     const moved =
       state.step === "continuing" || (state.step === "switching" && (this.opts.chat.get(id)?.accountId ?? "") === state.toAccountId);
@@ -506,7 +587,7 @@ export class ChatBusySwitch {
   }
 
   /** Switched, but the continue turn did not go out: the fence lifts and the timeline says so. */
-  private async continueFailed(id: string, state: ChatBusySwitchState, reason: string): Promise<void> {
+  private async continueFailed(id: string, state: SwitchState, reason: string): Promise<void> {
     this.opts.chat.setAccountSwitch(id, null);
     if (state.goal === "held") return;
     await this.notice(id, state, {
@@ -518,7 +599,7 @@ export class ChatBusySwitch {
   }
 
   /** The switch failed before it applied: the fence lifts, nothing is sent, the timeline says so. */
-  private async sequenceFailed(id: string, state: ChatBusySwitchState, reason: string): Promise<void> {
+  private async sequenceFailed(id: string, state: SwitchState, reason: string): Promise<void> {
     this.opts.chat.setAccountSwitch(id, null);
     const stopped = state.goal !== "held" && state.step !== "stopping";
     const summary = state.goal === "held" ? "Account switch failed" : stopped ? "Account switch failed after stopping the work" : "Account switch failed while stopping the work";
@@ -532,13 +613,14 @@ export class ChatBusySwitch {
   }
 
   /** What the route answers for a failed switch. */
-  private failureAnswer(state: ChatBusySwitchState, reason: string): string {
+  private failureAnswer(state: SwitchState, reason: string): string {
     if (state.goal === "held") return `The account was not switched: ${reason}`;
     return `The account was not switched after stopping the work: ${reason}`;
   }
 
-  private async notice(id: string, state: ChatBusySwitchState, row: { summary: string; detail: string }): Promise<void> {
-    await this.opts.appendNotice(id, { commandId: busySwitchCommandId(id, state.commandId, "notice"), ...row }).catch((error: unknown) => {
+  private async notice(id: string, state: SwitchState, row: { summary: string; detail: string }): Promise<void> {
+    // One row per switch and step it ended at: a later switch (its own command and nonce) gets its own.
+    await this.opts.appendNotice(id, { commandId: busySwitchCommandId(id, state, `notice-${state.step}`), ...row }).catch((error: unknown) => {
       this.opts.logger?.warn?.("[busy-switch] the warning row could not be written", { sessionId: id, error: describe(error).message });
     });
   }

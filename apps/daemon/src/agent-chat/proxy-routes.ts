@@ -96,12 +96,13 @@ export interface AgentChatRouteDeps {
    */
   switchAccount(id: string, body: { commandId: string; accountId: string; whileBusy?: boolean }): Promise<{ seq: number }>;
   /**
-   * Why this chat refuses a `/turn` right now, or null: a busy account switch in flight fences the
-   * chat (`busy-switch.ts`) — every turn but its own continue turn is refused with `TURN_NOT_IDLE`,
-   * whoever sends it. Every turn sender (GUI, MCP, workflows, scheduled prompts, limit recovery)
-   * reaches the host through this route. Optional: route tests build partial deps.
+   * Why this chat refuses a command right now, or null: a busy account switch in flight fences the
+   * chat (`busy-switch.ts`) — `turn`, `answer`, `compact` and `revert` are refused, whoever sends
+   * them, but the switch's own continue turn. Every sender (GUI, MCP, workflows, scheduled
+   * prompts, limit recovery, deliveries) reaches the host through these routes. Optional: route
+   * tests build partial deps.
    */
-  turnRefusal?(id: string, body: unknown): string | null;
+  commandRefusal?(id: string, name: AgentChatCommandName, body: unknown): { code: "TURN_NOT_IDLE" | "COMMAND_REJECTED"; message: string } | null;
   /**
    * The Agent Profile switch (spec 2026-10-18 §5.3), daemon-owned like {@link switchAccount}:
    * only the daemon resolves the profile's prepared directory and recomposes the launch.
@@ -267,10 +268,10 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         if (!deps.isHostHealthy()) {
           return reply.code(503).send(HOST_UNAVAILABLE);
         }
-        // Spec 2026-11-14 §3: a busy account switch in flight takes no other turn.
-        const fenced = name === "turn" ? (deps.turnRefusal?.(id, request.body ?? {}) ?? null) : null;
+        // Spec 2026-11-14 §3: a busy account switch in flight takes no other agent work.
+        const fenced = deps.commandRefusal?.(id, name, request.body ?? {}) ?? null;
         if (fenced !== null) {
-          return reply.code(CHAT_ERROR_STATUS.TURN_NOT_IDLE).send(chatError("TURN_NOT_IDLE", fenced));
+          return reply.code(CHAT_ERROR_STATUS[fenced.code]).send(chatError(fenced.code, fenced.message));
         }
         // boxes: a turn in a chat whose box is gone would wait for a CLI that can never start.
         const refusal = name === "turn" || name === "compact" ? (deps.agentRunRefusal?.(id) ?? null) : null;
