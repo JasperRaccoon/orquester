@@ -49,6 +49,7 @@ import {
   type HostThreadProfile,
   type HostThreadServerPool,
   type SetThreadIdentityRequest,
+  type AppendThreadNoticeRequest,
   type SetThreadIdentityResponse,
   type ThreadLaunchProfileResponse
 } from "../agent-host/host-protocol.ts";
@@ -62,6 +63,7 @@ import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import type { SessionIndexContributor } from "../sessions.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
+import { busySwitchTurnRefusal, type ChatBusySwitch } from "./busy-switch.ts";
 import { HostUnavailableError, RoutingHostClient, type HostClient } from "./host-client.ts";
 import type { HostDirectory } from "./host-directory.ts";
 import { markClaudeProjectTrusted } from "./home-prep.ts";
@@ -545,11 +547,33 @@ export class AgentChatService {
   private usageLimitsListener: (reading: ThreadUsageReading) => void = () => undefined;
 
   private usageLimitNoticeListener: (threadId: string, notice: ThreadUsageLimitNotice | null) => void = () => undefined;
+  private busySwitch: ChatBusySwitch | null = null;
   private idleCompactionListener: (threadId: string, candidate: IdleCompactionCandidate | null) => void = () => undefined;
 
   /** The idle compaction (`idle-compaction.ts`): each open chat's candidate on every summary read. */
   setIdleCompactionListener(listener: (threadId: string, candidate: IdleCompactionCandidate | null) => void): void {
     this.idleCompactionListener = listener;
+  }
+
+  /** The busy account switch (`busy-switch.ts`, built in `index.ts`): the account route's `whileBusy`. */
+  setBusySwitch(busySwitch: ChatBusySwitch): void {
+    this.busySwitch = busySwitch;
+  }
+
+  /**
+   * One `runtime.warning` row on the chat's timeline (the host's `notice` route): a busy account
+   * switch that failed after stopping the work. Never throws: a host that predates the route, or
+   * is away, only costs the row (logged).
+   */
+  async appendTimelineNotice(id: string, input: AppendThreadNoticeRequest): Promise<void> {
+    try {
+      const response = await this.client.json<{ error?: { message?: string } }>("POST", agentHostRoutes.notice(id), input);
+      if (response.status >= 400) {
+        this.opts.logger?.warn?.(`agent chat: the host did not take the timeline notice for ${id}`, response.value?.error?.message ?? response.status);
+      }
+    } catch (error) {
+      this.opts.logger?.warn?.(`agent chat: could not write the timeline notice for ${id}`, error);
+    }
   }
 
   /** Where each thread's current usage limit goes (`index.ts`: the usage-limit recovery). */
@@ -1029,6 +1053,8 @@ export class AgentChatService {
       noteSeq: (id, seq) => this.chat.noteSeq(id, seq),
       agentRunRefusal: (id) => this.destroyedBoxRefusal(id),
       switchAccount: (id, body) => this.switchAccount(id, body),
+      // Spec 2026-11-14 §3: the fence is the persisted busy switch itself.
+      turnRefusal: (id, body) => busySwitchTurnRefusal(id, this.chat.accountSwitchOf(id), body),
       switchProfile: (id, body) => this.switchProfile(id, body),
       profileCatalog: (summary) => this.profileCatalog(summary),
       hostStatus: () => {
@@ -1894,8 +1920,29 @@ export class AgentChatService {
    */
   async switchAccount(
     id: string,
-    input: { commandId: string; accountId: string }
+    input: { commandId: string; accountId: string; whileBusy?: boolean }
   ): Promise<{ seq: number }> {
+    // Spec 2026-11-14 §3: the user confirmed the busy-switch modal. Everything that can refuse
+    // the account itself refuses before anything is stopped.
+    if (input?.whileBusy === true && this.busySwitch !== null) {
+      const { commandId, requestedAccountId } = this.checkAccountSwitch(id, input);
+      return this.busySwitch.run(id, { commandId, accountId: requestedAccountId });
+    }
+    // A busy switch in flight owns the chat's account until it ends.
+    if (this.chat.accountSwitchOf(id) !== null) {
+      throw new ChatSessionError("An account switch is already in progress in this chat.", "COMMAND_REJECTED");
+    }
+    return this.switchAccountNow(id, input);
+  }
+
+  /**
+   * What an account switch checks before anything happens: the tab, the command id, the
+   * registry entry and its adapter, and an account of the entry's family.
+   */
+  private checkAccountSwitch(
+    id: string,
+    input: { commandId: string; accountId: string }
+  ): { summary: SessionSummary; entry: RegistryEntry; adapter: AgentAdapterId; commandId: string; requestedAccountId: string } {
     const summary = this.chat.get(id);
     if (!summary) {
       throw new ChatSessionError("No chat session with that id.", "THREAD_NOT_FOUND");
@@ -1941,6 +1988,18 @@ export class AgentChatService {
         );
       }
     }
+    return { summary, entry, adapter, commandId, requestedAccountId };
+  }
+
+  /**
+   * The account switch itself ({@link switchAccount}). `busySwitch`: the busy switch's own
+   * `switching` step (`busy-switch.ts`), which lifts only the host's goal refusals.
+   */
+  async switchAccountNow(
+    id: string,
+    input: { commandId: string; accountId: string; busySwitch?: true }
+  ): Promise<{ seq: number }> {
+    const { summary, entry, adapter, commandId, requestedAccountId } = this.checkAccountSwitch(id, input);
     if (!this.supervisor.isHealthy()) {
       throw this.hostUnavailable();
     }
@@ -1993,7 +2052,15 @@ export class AgentChatService {
     // it out would move a keyed thread to the global server.
     const receipt = await this.postIdentity(
       id,
-      { commandId, accountId, home, ...launchFields, ...profileFields, ...boxField },
+      {
+        commandId,
+        accountId,
+        home,
+        ...launchFields,
+        ...profileFields,
+        ...boxField,
+        ...(input.busySwitch === true ? { busySwitch: true as const } : {})
+      },
       "The agent host refused the account switch."
     );
     // Only after the host accepted: `sessions.json`, the tab badge and

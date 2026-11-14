@@ -94,7 +94,14 @@ export interface AgentChatRouteDeps {
    * environment, prepares the home and only then calls the host, which is why
    * this route exists here rather than in {@link AGENT_CHAT_COMMAND_NAMES}.
    */
-  switchAccount(id: string, body: { commandId: string; accountId: string }): Promise<{ seq: number }>;
+  switchAccount(id: string, body: { commandId: string; accountId: string; whileBusy?: boolean }): Promise<{ seq: number }>;
+  /**
+   * Why this chat refuses a `/turn` right now, or null: a busy account switch in flight fences the
+   * chat (`busy-switch.ts`) — every turn but its own continue turn is refused with `TURN_NOT_IDLE`,
+   * whoever sends it. Every turn sender (GUI, MCP, workflows, scheduled prompts, limit recovery)
+   * reaches the host through this route. Optional: route tests build partial deps.
+   */
+  turnRefusal?(id: string, body: unknown): string | null;
   /**
    * The Agent Profile switch (spec 2026-10-18 §5.3), daemon-owned like {@link switchAccount}:
    * only the daemon resolves the profile's prepared directory and recomposes the launch.
@@ -260,6 +267,11 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         if (!deps.isHostHealthy()) {
           return reply.code(503).send(HOST_UNAVAILABLE);
         }
+        // Spec 2026-11-14 §3: a busy account switch in flight takes no other turn.
+        const fenced = name === "turn" ? (deps.turnRefusal?.(id, request.body ?? {}) ?? null) : null;
+        if (fenced !== null) {
+          return reply.code(CHAT_ERROR_STATUS.TURN_NOT_IDLE).send(chatError("TURN_NOT_IDLE", fenced));
+        }
         // boxes: a turn in a chat whose box is gone would wait for a CLI that can never start.
         const refusal = name === "turn" || name === "compact" ? (deps.agentRunRefusal?.(id) ?? null) : null;
         if (refusal !== null) {
@@ -299,7 +311,7 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
   }
 
   // --- §3.4 the account switch (daemon-owned, not a proxied command) -------
-  app.post<{ Params: { id: string }; Body: { commandId?: unknown; accountId?: unknown } }>(
+  app.post<{ Params: { id: string }; Body: { commandId?: unknown; accountId?: unknown; whileBusy?: unknown } }>(
     pattern(agentChatRoutes.account(":id")),
     async (request, reply) => {
       const { id } = request.params;
@@ -313,7 +325,9 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
       try {
         return await deps.switchAccount(id, {
           commandId: String(body.commandId ?? ""),
-          accountId: String(body.accountId ?? "")
+          accountId: String(body.accountId ?? ""),
+          // The user's own confirmation of the busy-switch modal: valid on both transports.
+          ...(body.whileBusy === true ? { whileBusy: true } : {})
         });
       } catch (error) {
         const code = accountSwitchErrorCode(error);

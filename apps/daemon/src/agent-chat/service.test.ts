@@ -841,6 +841,35 @@ test("switching to System clears the account and never falls back to the family 
   await f.cleanup();
 });
 
+test("a busy switch's own step asks the host to lift its goal refusals; the ordinary switch never does", async () => {
+  const f = await switchableFixture();
+  await f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "acc-2" });
+  await f.service.switchAccountNow(f.sessionId, { commandId: "c2", accountId: "acc-1", busySwitch: true });
+  assert.deepEqual(
+    f.identities.map((identity) => identity.body.busySwitch),
+    [undefined, true]
+  );
+  await f.cleanup();
+});
+
+test("while a busy switch stands on the tab, another account switch is refused before it reaches the host", async () => {
+  const f = await switchableFixture();
+  f.service.chat.setAccountSwitch(f.sessionId, {
+    commandId: "sw-1",
+    fromAccountId: "acc-1",
+    toAccountId: "acc-2",
+    startedAt: new Date().toISOString(),
+    step: "settling",
+    goal: null
+  });
+  await assert.rejects(
+    () => f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "acc-2" }),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "COMMAND_REJECTED"
+  );
+  assert.equal(f.identities.length, 0);
+  await f.cleanup();
+});
+
 test("an account of another family is refused rather than silently degraded to System", async () => {
   // `AgentAccountsService.resolveLaunchEnv` answers null for a wrong-family id,
   // which would launch the SYSTEM identity while the tab claimed the account.
