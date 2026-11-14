@@ -32,6 +32,22 @@ const DESKTOP_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SHOT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const EXTENSIONS: Record<ImageType, string> = { "image/png": "png", "image/jpeg": "jpg" };
 
+let idSequence = 0;
+
+/**
+ * A new screenshot id that sorts in creation order: a millisecond stamp, then this process's
+ * counter, then random. File mtimes come from the kernel's coarse clock, so screenshots taken a few
+ * milliseconds apart share one, and a restart must still find which is oldest ({@link listIds}).
+ */
+function newScreenshotId(): string {
+  idSequence = (idSequence + 1) % 36 ** 4;
+  return (
+    Date.now().toString(36).padStart(10, "0") +
+    idSequence.toString(36).padStart(4, "0") +
+    randomUUID().replace(/-/g, "").slice(0, 6)
+  );
+}
+
 export class DesktopScreenshotStore {
   /** Per desktop, the kept screenshots' facts, oldest first (this process's; a restart reads the directory). */
   private readonly kept = new Map<string, Map<string, DesktopScreenshotMeta>>();
@@ -50,7 +66,7 @@ export class DesktopScreenshotStore {
    */
   async save(desktopId: string, image: { mimeType: ImageType; data: Buffer }, meta: Omit<DesktopScreenshotMeta, "mimeType">): Promise<string> {
     if (!DESKTOP_ID.test(desktopId)) throw new Error("Not a desktop id.");
-    const id = randomUUID().replace(/-/g, "").slice(0, 20);
+    const id = newScreenshotId();
     const facts: DesktopScreenshotMeta = { mimeType: image.mimeType, ...meta };
     const kept = this.kept.get(desktopId) ?? new Map<string, DesktopScreenshotMeta>();
     kept.set(id, facts);
@@ -120,7 +136,7 @@ export class DesktopScreenshotStore {
   }
 }
 
-/** The ids on disk, oldest first. */
+/** The ids on disk, oldest first: by mtime, and by id among equal mtimes ({@link newScreenshotId}). */
 async function listIds(dir: string): Promise<string[]> {
   const names = await readdir(dir).catch(() => [] as string[]);
   const shots = await Promise.all(
@@ -128,7 +144,7 @@ async function listIds(dir: string): Promise<string[]> {
       .filter((name) => /^[A-Za-z0-9_-]{1,64}\.(png|jpg)$/.test(name))
       .map(async (name) => ({ id: name.replace(/\.(png|jpg)$/, ""), at: (await stat(join(dir, name)).catch(() => null))?.mtimeMs ?? 0 }))
   );
-  return shots.sort((a, b) => a.at - b.at).map((shot) => shot.id);
+  return shots.sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((shot) => shot.id);
 }
 
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
