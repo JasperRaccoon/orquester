@@ -605,9 +605,13 @@ scan_in_use() { # <proc root> <releases dir>
   }' | sort -u
 }
 
-# After a healthy deploy: keep the live release, the previous one, one more (the one that went live
-# most recently of the rest) and every release a running process still uses — the agent host
+# After a healthy deploy: keep the live release, the previous one, one more (of the rest, the one that
+# last went live healthy) and every release a running process still uses — the agent host
 # outlives daemon restarts and loads files from its own release on demand. Delete the rest.
+# A release's marker mtime records when it last went live AND passed its health check, so pruning's
+# one extra rollback target is the last good release, never one that failed.
+went_live_healthy() { $SUDO touch -- "$1/$COMPLETE_FILE" || true; }
+
 prune_releases() {
   local live prev d id one_more in_use kept=0 pinned="" candidates=()
   live="$(readlink -f -- "$REPO_DIR")"
@@ -619,8 +623,6 @@ prune_releases() {
     fi
   done
   [ "${#candidates[@]}" -gt 0 ] || return 0
-  one_more="$($SUDO find "${candidates[@]}" -maxdepth 1 -name "$COMPLETE_FILE" -printf '%T@ %h\n' 2>/dev/null \
-    | sort -rn | head -n1 | cut -d' ' -f2- || true)"
   if [ "$PROC_ROOT" = /proc ] && [ -z "$SUDO" ] && [ "$(id -u)" -ne 0 ]; then
     warn "WARNING: not pruning releases: only root can tell which ones running processes use."
     return 0
@@ -628,6 +630,16 @@ prune_releases() {
   if ! in_use="$($SUDO bash -c "$(declare -f scan_in_use); scan_in_use \"\$1\" \"\$2\"" scan "$PROC_ROOT" "$RELEASES_DIR")"; then
     warn "WARNING: not pruning releases: could not scan $PROC_ROOT for the ones in use."
     return 0
+  fi
+  # The extra rollback target: the most recently healthy release among those not kept anyway.
+  local spare=()
+  for d in "${candidates[@]}"; do
+    grep -qxF -- "${d##*/}" <<<"$in_use" || spare+=("$d")
+  done
+  one_more=""
+  if [ "${#spare[@]}" -gt 0 ]; then
+    one_more="$($SUDO find "${spare[@]}" -maxdepth 1 -name "$COMPLETE_FILE" -printf '%T@ %h\n' 2>/dev/null \
+      | sort -rn | head -n1 | cut -d' ' -f2- || true)"
   fi
   for d in "${candidates[@]}"; do
     id="${d##*/}"
@@ -674,8 +686,6 @@ fi
 if [ "$target_dir" != "$live_dir" ]; then
   link_to "$PREVIOUS_LINK" "$live_dir"
 fi
-# Its marker's mtime: when the release went live last (prune_releases keeps the latest one).
-$SUDO touch -- "$target_dir/$COMPLETE_FILE"
 say "switched: $target_dir is live; restarting."
 
 if ! restart_healthy; then
@@ -706,6 +716,7 @@ if ! restart_healthy; then
     revert_ok=1
   fi
   if [ "$revert_ok" -eq 1 ]; then
+    went_live_healthy "$revert_dir"
     echo "[remote-update] service=$(systemctl is-active orquester)"
     echo "[remote-update] version=$(tree_version "$revert_dir") commit=$revert_sha"
     echo "[remote-update] release=$revert_dir"
@@ -718,6 +729,7 @@ if ! restart_healthy; then
   exit 4
 fi
 printf '%s\n' "$new_head" | $SUDO tee "$state_file" >/dev/null
+went_live_healthy "$target_dir"
 # Those of the last healthy layout-aware release, so a rollback to a release from before releases
 # — or a flip back — keeps layout-aware tooling.
 install_tooling "$target_dir" always

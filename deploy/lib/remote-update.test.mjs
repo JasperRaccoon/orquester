@@ -471,6 +471,23 @@ test("pruning keeps the live, previous and one more release, and every release a
   assert.ok(!/prunable|locked/.test(listed), listed);
 });
 
+test("pruning's extra rollback target is the last healthy release, never a failed one or one kept anyway", () => {
+  // good -> B -> C (unhealthy, flipped back to B) -> rollback to good -> D, with a process still in C.
+  const b = release("ok", "2.0.0");
+  assert.equal(deploy().code, 0);
+  const c = release("fail", "3.0.0");
+  assert.equal(deploy().code, 3);
+  assert.equal(deploy({ RESET_REF: good }).code, 0);
+  mkdirSync(join(proc, "500"));
+  symlinkSync(join(dirOf(c), "apps", "daemon"), join(proc, "500", "cwd"));
+  const d = release("ok", "4.0.0");
+  const result = deploy();
+  assert.equal(result.code, 0, result.out + result.err);
+  assert.ok(existsSync(dirOf(d)) && existsSync(dirOf(good)), "live and previous");
+  assert.ok(existsSync(dirOf(c)), "the release a process uses");
+  assert.ok(existsSync(dirOf(b)), "B, the last release that ran healthy, stays as the extra rollback target");
+});
+
 test("a conversion interrupted at any step is finished by the next update", async (t) => {
   // Each case leaves the host as a run killed at that point would; the next deploy must end with
   // the same layout as an uninterrupted one.

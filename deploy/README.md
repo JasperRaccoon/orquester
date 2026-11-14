@@ -92,9 +92,10 @@ hashed asset the live `ORQUESTER_WEB_DIR` lacks from `ORQUESTER_WEB_FALLBACK_DIR
 build. `ensure-web-fallback.sh` adds the line to `daemon.env` when it has none; set it empty to turn
 the fallback off.
 
-After a healthy deploy, releases are pruned: the live one, the previous one and one more are kept,
-and so is every release a running process still uses (cwd, executable, command line or open files
-under it — e.g. an agent host that survived the restart). A deploy that keeps more than a few warns
+After a healthy deploy, releases are pruned: the live one, the previous one and one more (of the
+rest, the one that last ran healthy) are kept, and so is every release a running process still
+uses (cwd, executable, command line or open files under it — e.g. an agent host that survived the
+restart). A deploy that keeps more than a few warns
 in its summary instead of deleting one in use.
 
 `./deploy.sh verify` prints `release=` (the live `<sha12>`), `previous=` and `releases=` (every
