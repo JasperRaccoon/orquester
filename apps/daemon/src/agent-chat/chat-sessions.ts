@@ -13,6 +13,7 @@
 import { EventEmitter } from "node:events";
 import type {
   AgentChatSessionSummaryFields,
+  ChatBusySwitchState,
   ChatLimitFailover,
   ChatUsageLimitState,
   PendingMergeBack,
@@ -23,6 +24,7 @@ import type {
 import { scheduledPromptView, type ScheduledPrompt } from "@orquester/api/agent-chat";
 import type {
   AgentChatHome,
+  ChatBusySwitchRecord,
   ChatLimitFailoverRecord,
   ChatUsageLimitRecord,
   ScheduledPromptRecord,
@@ -87,6 +89,8 @@ interface ChatSession {
     /** Usage-limit recovery (`limit-recovery.ts`): kept whole, unknown fields included. */
     usageLimit?: ChatUsageLimitRecord;
     limitFailover?: ChatLimitFailoverRecord;
+    /** A busy account switch in flight (`busy-switch.ts`): kept whole, unknown fields included. */
+    accountSwitch?: ChatBusySwitchRecord;
     /** Scheduled prompts (`scheduled-prompts.ts`), in send order, unknown fields included. */
     scheduledPrompts?: ScheduledPromptRecord[];
   };
@@ -110,6 +114,21 @@ const USAGE_LIMIT_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 const LIMIT_FAILOVER_KEYS: ReadonlySet<string> = new Set(["fromAccountId", "toAccountId", "at", "automatic"]);
+
+/** `ChatBusySwitchState`'s own keys. */
+const BUSY_SWITCH_KEYS: ReadonlySet<string> = new Set(["commandId", "fromAccountId", "toAccountId", "startedAt", "step", "goal"]);
+
+/** The stored busy switch's own fields, without the unknown ones a newer daemon may have written. */
+function publicBusySwitch(record: ChatBusySwitchRecord): ChatBusySwitchState {
+  return {
+    commandId: record.commandId,
+    fromAccountId: record.fromAccountId,
+    toAccountId: record.toAccountId,
+    startedAt: record.startedAt,
+    step: record.step,
+    goal: record.goal
+  };
+}
 
 /** `ScheduledPrompt`'s own keys. */
 const SCHEDULED_PROMPT_KEYS: ReadonlySet<string> = new Set([
@@ -469,6 +488,36 @@ export class ChatSessionManager {
     return { ...session.summary };
   }
 
+  /** The busy account switch in flight on the chat (`SessionSummary.accountSwitch`), or null. */
+  accountSwitchOf(id: string): ChatBusySwitchState | null {
+    const record = this.sessions.get(id)?.chat.accountSwitch;
+    return record ? publicBusySwitch(record) : null;
+  }
+
+  /**
+   * Set (or clear, `null`) the busy account switch: persisted on the tab record and published —
+   * with an explicit `null` when cleared (a client merges summaries field-wise). "updated" only on
+   * a change.
+   */
+  setAccountSwitch(id: string, state: ChatBusySwitchState | null): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const before = session.chat.accountSwitch;
+    if (state === null) {
+      if (before === undefined) return null;
+      delete session.chat.accountSwitch;
+      session.summary.accountSwitch = null;
+    } else {
+      const next = withUnknownFields(before, BUSY_SWITCH_KEYS, state) as ChatBusySwitchRecord;
+      if (before !== undefined && JSON.stringify(before) === JSON.stringify(next)) return null;
+      session.chat.accountSwitch = next;
+      session.summary.accountSwitch = publicBusySwitch(next);
+    }
+    this.lifecycle.emit("updated", { ...session.summary });
+    this.options.requestPersist();
+    return { ...session.summary };
+  }
+
   /** The chat's scheduled prompts, in send order (`[]` when none). */
   scheduledPromptsOf(id: string): ScheduledPrompt[] {
     return (this.sessions.get(id)?.chat.scheduledPrompts ?? []).map(publicScheduledPrompt);
@@ -647,6 +696,7 @@ export class ChatSessionManager {
         profileId: record.chat.profileId ?? null,
         ...(record.chat.usageLimit ? { usageLimit: publicUsageLimit(record.chat.usageLimit) } : {}),
         ...(record.chat.limitFailover ? { limitFailover: publicLimitFailover(record.chat.limitFailover) } : {}),
+        ...(record.chat.accountSwitch ? { accountSwitch: publicBusySwitch(record.chat.accountSwitch) } : {}),
         ...(record.chat.scheduledPrompts && record.chat.scheduledPrompts.length > 0
           ? { scheduledPrompts: record.chat.scheduledPrompts.map((p) => scheduledPromptView(publicScheduledPrompt(p))) }
           : {})
@@ -667,6 +717,7 @@ export class ChatSessionManager {
           ...(record.chat.unattended === true ? { unattended: true as const } : {}),
           ...(record.chat.usageLimit ? { usageLimit: record.chat.usageLimit } : {}),
           ...(record.chat.limitFailover ? { limitFailover: record.chat.limitFailover } : {}),
+          ...(record.chat.accountSwitch ? { accountSwitch: record.chat.accountSwitch } : {}),
           ...(record.chat.scheduledPrompts && record.chat.scheduledPrompts.length > 0
             ? { scheduledPrompts: record.chat.scheduledPrompts }
             : {})

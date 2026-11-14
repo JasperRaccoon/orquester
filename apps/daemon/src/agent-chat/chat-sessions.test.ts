@@ -489,6 +489,42 @@ test("a chat running through an Agent Profile home still pins its account for th
   assert.deepEqual([...chat.liveAccountIds()], ["acc-9"], "a profile switch is not an account switch");
 });
 
+test("a busy account switch is persisted on its record, keeps a newer daemon's fields, and clears with an explicit null", () => {
+  const state = {
+    commandId: "sw-1",
+    fromAccountId: "acc-1",
+    toAccountId: "acc-2",
+    startedAt: "2026-11-14T06:00:00.000Z",
+    step: "settling" as const,
+    goal: null
+  };
+  const parsed = parseSessionsConfig({
+    sessions: [
+      {
+        id: "t1",
+        title: "chat",
+        order: 0,
+        projectPath: "/w/p",
+        refId: "claude",
+        kind: "agent-chat",
+        cwd: "/w/p",
+        createdAt: "2026-11-14T05:00:00.000Z",
+        chat: { threadId: "t1", accountId: "acc-1", home: "account", lastSeq: 0, accountSwitch: { ...state, newer: true } }
+      }
+    ]
+  });
+  const chat = chatManager(() => undefined);
+  chat.adopt(parsed.sessions);
+  assert.deepEqual(chat.get("t1")?.accountSwitch, state, "the summary carries the known fields only");
+  chat.setAccountSwitch("t1", { ...state, step: "switching" });
+  const record = chat.records()[0]?.chat?.accountSwitch as Record<string, unknown> | undefined;
+  assert.equal(record?.step, "switching");
+  assert.equal(record?.newer, true, "an unknown field survives the rewrite");
+  chat.setAccountSwitch("t1", null);
+  assert.equal(chat.get("t1")?.accountSwitch, null);
+  assert.equal(chat.records()[0]?.chat?.accountSwitch, undefined);
+});
+
 test("a chat's usage-limit state is persisted on its record, keeps a newer daemon's fields, and clears with an explicit null", () => {
   const limit = {
     noticeId: "a1",

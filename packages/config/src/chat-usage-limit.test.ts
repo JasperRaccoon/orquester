@@ -67,3 +67,31 @@ test("a malformed field falls back on its own; a block that does not parse is dr
   assert.equal(broken.sessions[0]?.chat?.limitFailover, undefined);
   assert.equal(broken.sessions[0]?.chat?.lastSeq, 3);
 });
+
+const BUSY_SWITCH = {
+  commandId: "switch-1",
+  fromAccountId: "acc1",
+  toAccountId: "acc2",
+  startedAt: "2026-11-14T06:00:00.000Z",
+  step: "settling",
+  goal: "continuing"
+};
+
+test("a chat record's busy account switch round-trips, keeping fields a newer daemon wrote", () => {
+  const parsed = parseSessionsConfig({ sessions: [chatRecord({ accountSwitch: { ...BUSY_SWITCH, futureField: [1] } })] });
+  const state = parsed.sessions[0]?.chat?.accountSwitch;
+  assert.equal(state?.step, "settling");
+  assert.equal(state?.goal, "continuing");
+  assert.deepEqual((state as Record<string, unknown> | undefined)?.futureField, [1]);
+});
+
+test("a busy switch with an unknown goal keeps going without one; one without its step or start is dropped alone", () => {
+  const tolerant = parseSessionsConfig({ sessions: [chatRecord({ accountSwitch: { ...BUSY_SWITCH, goal: "orbiting" } })] });
+  assert.equal(tolerant.sessions[0]?.chat?.accountSwitch?.goal, null);
+
+  for (const broken of [{ ...BUSY_SWITCH, step: "teleporting" }, { ...BUSY_SWITCH, startedAt: "soon" }, "nope"]) {
+    const parsed = parseSessionsConfig({ sessions: [chatRecord({ accountSwitch: broken })] });
+    assert.equal(parsed.sessions.length, 1, "the tab survives");
+    assert.equal(parsed.sessions[0]?.chat?.accountSwitch, undefined);
+  }
+});
