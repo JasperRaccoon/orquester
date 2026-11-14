@@ -3,7 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash, createHmac, createPublicKey, generateKeyPairSync, randomBytes, sign as cryptoSign, verify as cryptoVerify, type KeyObject } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -206,6 +206,8 @@ const sessionBind = (key: Buffer, sessionId: Buffer, signature: Buffer, forwardi
   Buffer.concat([sshString(SESSION_BIND_EXTENSION), sshString(key), sshString(sessionId), sshString(signature), Buffer.from([forwarding ? 1 : 0])]);
 
 const localUser = async (): Promise<string> => (await exec("id", ["-un"])).stdout.trim();
+/** sshd runs a `ForceCommand` through the user's login shell: a service account's nologin refuses it. */
+const loginShellRunsCommands = (): boolean => !/\/(nologin|false)$/.test(userInfo().shell ?? "");
 
 // ---------------------------------------------------------------------------
 // The agent through the registered channel
@@ -394,8 +396,13 @@ for (const type of ["ed25519", "rsa"] as const) {
         const agent = await policySocket(dir, policy);
         try {
           const result = await sshLogin(sshd, dir, agent.path, user);
-          assert.equal(result.code, 0, result.stderr);
-          assert.equal(result.stdout, "orq-box-ok\n");
+          assert.match(result.stderr, /Authenticated to 127\.0\.0\.1 .* using "publickey"/, result.stderr);
+          // The login is what this tests; the command after it runs through the user's login shell,
+          // which a service account's nologin refuses.
+          if (loginShellRunsCommands()) {
+            assert.equal(result.code, 0, result.stderr);
+            assert.equal(result.stdout, "orq-box-ok\n");
+          }
         } finally {
           agent.server.close();
         }
