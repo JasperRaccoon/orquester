@@ -19,6 +19,10 @@
  *    for Codex and Grok) — or `/goal resume` for a continuing goal — through the chat's own
  *    `/turn` route.
  *
+ * Before anything is stopped, the host's live head read refuses a running compaction (its own
+ * words) and names an adapter that continues goals by itself, whose `active` goal the Stop pauses
+ * and the switch therefore resumes, whatever the summary's grace says.
+ *
  * A goal held for an update skips the stop (a Stop would take the hold back): the switch waits
  * for anything still running, applies, keeps the head's hold marks and sends nothing; the goal
  * resumes by itself on the new account after the update.
@@ -39,7 +43,8 @@ import {
   type AgentChatErrorCode,
   type ChatBusySwitchGoal,
   type ChatBusySwitchState,
-  type ChatBusySwitchStep
+  type ChatBusySwitchStep,
+  type ThreadHeadResponse
 } from "@orquester/api/agent-chat";
 
 import type { DaemonApi } from "../mcp/daemon-api.ts";
@@ -59,6 +64,9 @@ const DEFAULT_RETRY_MS = 30_000;
 /** Answered switches remembered for a repeat of their `commandId`. */
 const MAX_REMEMBERED = 200;
 const GOAL_RESUME_COMMAND = "/goal resume";
+
+/** The host's own refusal for a running compaction (`identitySwitchRefusal`), which a busy switch keeps. */
+const COMPACTION_REFUSAL = "Wait for the context compaction to finish before switching accounts.";
 
 /** The words the `/turn` fence refuses with. */
 export const BUSY_SWITCH_FENCE_MESSAGE = "This chat is moving to another account. Send the message again once the switch is done.";
@@ -317,18 +325,45 @@ export class ChatBusySwitch {
     if (tab.chatSessionStatus === "starting" && goal !== "held") {
       return Promise.reject(new BusySwitchError("Wait for the agent to start before switching accounts.", "COMMAND_REJECTED"));
     }
-    if (!this.api) return Promise.reject(new BusySwitchError("The daemon is still starting. Try again in a moment.", "HOST_UNAVAILABLE"));
+    const api = this.api;
+    if (!api) return Promise.reject(new BusySwitchError("The daemon is still starting. Try again in a moment.", "HOST_UNAVAILABLE"));
+    return this.track(id, input.commandId, this.begin(api, id, { commandId: input.commandId, from, to, goal }));
+  }
+
+  /**
+   * Ask the host what the summary cannot tell, before anything is stopped: a running compaction
+   * refuses the switch (the host's own words), and on an adapter that continues goals by itself
+   * an `active` goal is one the Stop pauses — so the switch resumes it, whatever the summary's
+   * grace says. An older host answers neither: nothing is refused, the summary's goal stands.
+   */
+  private async begin(
+    api: DaemonApi,
+    id: string,
+    input: { commandId: string; from: string; to: string; goal: ChatBusySwitchGoal | null }
+  ): Promise<{ seq: number }> {
+    let head: ThreadHeadResponse;
+    try {
+      head = await readThreadHead(api, id);
+    } catch (error) {
+      const { message, code } = describe(error);
+      throw new BusySwitchError(`The chat could not be read, so nothing was stopped: ${message}`, code);
+    }
+    if (head.compacting === true) throw new BusySwitchError(COMPACTION_REFUSAL, "COMMAND_REJECTED");
+    const goal = input.goal ?? (head.goal?.status === "active" && head.goalContinuesAcrossTurns === true ? "continuing" : null);
+    if (this.opts.chat.accountSwitchOf(id) !== null) {
+      throw new BusySwitchError("An account switch is already in progress in this chat.", "COMMAND_REJECTED");
+    }
     const state: ChatBusySwitchState = {
       commandId: input.commandId,
-      fromAccountId: from,
-      toAccountId: to,
+      fromAccountId: input.from,
+      toAccountId: input.to,
       startedAt: this.opts.clock.now().toISOString(),
       // A held goal is not stopped: a Stop would take the update's hold back.
       step: goal === "held" ? "settling" : "stopping",
       goal
     };
     this.opts.chat.setAccountSwitch(id, state);
-    return this.track(id, input.commandId, this.sequence(id, state, { restarted: false }));
+    return this.sequence(id, state, { restarted: false });
   }
 
   // -------------------------------------------------------------------------

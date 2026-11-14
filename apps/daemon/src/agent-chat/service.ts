@@ -2136,6 +2136,12 @@ export class AgentChatService {
     } catch (error) {
       return Promise.reject(error);
     }
+    // Spec 2026-11-14 §3: a busy account switch in flight owns the chat's launch until it ends.
+    if (this.chat.accountSwitchOf(id) !== null) {
+      return Promise.reject(
+        new ChatSessionError("This chat is moving to another account. Switch the profile once the switch is done.", "COMMAND_REJECTED")
+      );
+    }
     const key = `${id}\u0000${commandId}`;
     const known = this.profileSwitches.get(key);
     if (known) {

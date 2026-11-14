@@ -48,10 +48,12 @@ class FakeApi implements DaemonApi {
   receipts = new Map<string, number>();
   onInterrupt?: (body: Record<string, unknown>) => void;
   turnAnswer: DaemonResponse = { status: 200, body: { seq: 9 } };
+  /** What the host's live head read adds (`compacting`, `goal`, `goalContinuesAcrossTurns`). */
+  head: Record<string, unknown> = {};
 
   async request(method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse> {
     if (method === "GET" && path.endsWith("/head")) {
-      return { status: 200, body: { head: { session: { status: "ready", activeTurnId: null } }, interactionMode: "default" } };
+      return { status: 200, body: { head: { session: { status: "ready", activeTurnId: null } }, interactionMode: "default", goal: null, ...this.head } };
     }
     const body = (opts?.body ?? {}) as Record<string, unknown>;
     this.posts.push({ path, body });
@@ -272,6 +274,27 @@ test("a continuing Codex goal is paused by the stop and resumed with /goal resum
   ]);
   assert.equal(h.api.interrupts()[1]?.commandId, busySwitchCommandId("s1", "sw-1", "interrupt-background"));
   assert.equal(h.api.turns()[0]?.input, "/goal resume");
+});
+
+test("an active Codex goal past the summary's grace is still resumed: the stop pauses it whatever the grace says", async () => {
+  const h = harness({ refId: "codex", fields: { ...RUNNING, goal: { objective: "ship it", status: "active", continuing: false } } });
+  h.api.head = { goal: { objective: "ship it", status: "active" }, goalContinuesAcrossTurns: true };
+  settlesAfterInterrupt(h, { ...IDLE, goal: { objective: "ship it", status: "paused", continuing: false } });
+  await h.busy.run("s1", { commandId: "sw-1", accountId: "acc2" });
+  assert.deepEqual(h.api.turns().map((turn) => turn.input), ["/goal resume"]);
+});
+
+test("a running compaction refuses the switch before anything is stopped or persisted", async () => {
+  const h = harness({ fields: RUNNING });
+  h.api.head = { compacting: true };
+  await assert.rejects(h.busy.run("s1", { commandId: "sw-1", accountId: "acc2" }), {
+    message: "Wait for the context compaction to finish before switching accounts.",
+    code: "COMMAND_REJECTED"
+  });
+  assert.deepEqual(h.api.interrupts(), []);
+  assert.deepEqual(h.switches, []);
+  assert.equal(h.chat.get("s1")?.accountSwitch, undefined, "no fence was ever set");
+  assert.deepEqual(h.notices, []);
 });
 
 test("a goal held for an update is not stopped: the switch applies at once and nothing is sent", async () => {
