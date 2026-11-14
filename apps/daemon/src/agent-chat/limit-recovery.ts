@@ -395,7 +395,9 @@ export class ChatLimitRecovery {
     };
     this.opts.chat.setUsageLimit(id, state);
 
-    if (prefs.switchAccount && this.canFailOver(tab)) {
+    // A busy account switch in flight (`busy-switch.ts`) is already moving the chat: no failover
+    // of its own on top of it.
+    if (prefs.switchAccount && this.canFailOver(tab) && !tab.accountSwitch) {
       const switched = await this.failover(id, {
         commandId: limitCommandId("limit-switch", id, state.turnId ?? state.noticeId),
         automatic: true
@@ -525,6 +527,12 @@ export class ChatLimitRecovery {
       this.schedule(id, state);
       return;
     }
+    // A busy account switch in flight (`busy-switch.ts`) fences the chat's turns: the resume waits
+    // for it instead of meeting the fence and disarming.
+    if (tab.accountSwitch) {
+      this.retryAt(id, state, now + this.retryMs);
+      return;
+    }
     // The setting turning off disarms every schedule at once (`prefsChanged`): one still armed is
     // either the setting's or the user's own "Resume at reset", and goes out.
     const prefs = await this.opts.prefs();
@@ -563,6 +571,13 @@ export class ChatLimitRecovery {
   // -------------------------------------------------------------------------
   // Actions
   // -------------------------------------------------------------------------
+
+  /** A busy account switch in flight (`busy-switch.ts`) owns the chat's next turn and its account. */
+  private requireNoBusySwitch(id: string): void {
+    if (this.opts.chat.get(id)?.accountSwitch) {
+      throw new UsageLimitError("The chat is moving to another account. Try again once the switch is done.", "COMMAND_REJECTED");
+    }
+  }
 
   private requireApi(): DaemonApi {
     if (!this.api) throw new UsageLimitError("The daemon is still starting. Try again in a moment.", "HOST_UNAVAILABLE");
@@ -664,6 +679,7 @@ export class ChatLimitRecovery {
     const command = validCommandId(commandId);
     return this.lane(id, async () => {
       this.requireLimited(id);
+      this.requireNoBusySwitch(id);
       this.requireApi();
       await this.resume(id, { commandId: command, automatic: false });
       return this.view(id);
@@ -675,6 +691,7 @@ export class ChatLimitRecovery {
     const command = validCommandId(input.commandId);
     return this.lane(id, async () => {
       const state = this.requireLimited(id);
+      this.requireNoBusySwitch(id);
       this.requireApi();
       const tab = this.opts.chat.get(id)!;
       if (!this.canSwitch(tab)) {
@@ -891,29 +908,7 @@ export class ChatLimitRecovery {
 
   /** Resolve once the chat is not busy, on the bus (never a sleep), or false at the deadline. */
   private waitSettled(api: DaemonApi, id: string): Promise<boolean> {
-    const idle = (): boolean => {
-      const tab = this.opts.chat.get(id);
-      return tab !== undefined && !isBusy(tab);
-    };
-    if (idle()) return Promise.resolve(true);
-    return new Promise<boolean>((resolve) => {
-      let done = false;
-      const finish = (value: boolean): void => {
-        if (done) return;
-        done = true;
-        off();
-        timer.cancel();
-        resolve(value);
-      };
-      const off = api.subscribe((event) => {
-        if (event.channel !== "sessions") return;
-        const payload = event.payload as { id?: unknown } | null;
-        if (payload?.id !== id) return;
-        if (!this.opts.chat.get(id)) finish(false);
-        else if (idle()) finish(true);
-      });
-      const timer = this.opts.clock.setTimeout(() => finish(idle()), this.opts.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS);
-    });
+    return waitForChat(api, { chat: this.opts.chat, clock: this.opts.clock, timeoutMs: this.opts.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS }, id, (tab) => !isBusy(tab));
   }
 
   /** Post the continue turn under `commandId`, only into a chat that can take it (`ifIdle`). */
@@ -948,6 +943,42 @@ export class ChatLimitRecovery {
       return { kind: "unavailable" };
     }
   }
+}
+
+/**
+ * Resolve once `ready` holds for the chat's tab record, checked now and again on each of its
+ * `sessions` events on the bus (never a sleep or a poll); false when the tab goes away, or when
+ * `ready` still fails at `timeoutMs`. Limit recovery's settle wait, and the busy account switch's.
+ */
+export function waitForChat(
+  api: DaemonApi,
+  opts: { chat: { get(id: string): SessionSummary | undefined }; clock: Clock; timeoutMs: number },
+  id: string,
+  ready: (tab: SessionSummary) => boolean
+): Promise<boolean> {
+  const holds = (): boolean => {
+    const tab = opts.chat.get(id);
+    return tab !== undefined && ready(tab);
+  };
+  if (holds()) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    let done = false;
+    const finish = (value: boolean): void => {
+      if (done) return;
+      done = true;
+      off();
+      timer.cancel();
+      resolve(value);
+    };
+    const off = api.subscribe((event) => {
+      if (event.channel !== "sessions") return;
+      const payload = event.payload as { id?: unknown } | null;
+      if (payload?.id !== id) return;
+      if (!opts.chat.get(id)) finish(false);
+      else if (holds()) finish(true);
+    });
+    const timer = opts.clock.setTimeout(() => finish(holds()), opts.timeoutMs);
+  });
 }
 
 /** A reset stamp in the future and believable, as ISO; null otherwise. */

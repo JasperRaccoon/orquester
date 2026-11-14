@@ -143,6 +143,7 @@ import { LineageService } from "./agent-chat/lineage.ts";
 import { DelegateStopCascade } from "./agent-chat/delegates.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 import { ChatLimitRecovery } from "./agent-chat/limit-recovery.ts";
+import { ChatBusySwitch } from "./agent-chat/busy-switch.ts";
 import { ChatIdleCompaction } from "./agent-chat/idle-compaction.ts";
 import { registerUsageLimitRoutes } from "./agent-chat/limit-recovery-routes.ts";
 import { ChatScheduledPrompts } from "./agent-chat/scheduled-prompts.ts";
@@ -1458,6 +1459,19 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   agentChat.setUsageLimitNoticeListener((threadId, notice) => limitRecovery.onNotice(threadId, notice));
   limitRecovery.start();
+  // Switching a busy chat's account (`agent-chat/busy-switch.ts`): the account route's `whileBusy`
+  // runs stop → settle → switch → continue, persisted on the tab record before each step, so
+  // `start` finishes (or abandons) a switch a restart cut short once the API is bound below.
+  const busySwitch = new ChatBusySwitch({
+    chat: agentChat.chat,
+    switchAccount: (id, input) => agentChat.switchAccountNow(id, input),
+    appendNotice: (id, input) => agentChat.appendTimelineNotice(id, input),
+    adapterOf: (refId) => registry.get(refId)?.chat?.adapter ?? null,
+    clock: realClock,
+    logger: console
+  });
+  agentChat.setBusySwitch(busySwitch);
+  busySwitch.start();
   // Scheduled prompts (`agent-chat/scheduled-prompts.ts`): persisted on the tab records, so `start`
   // re-arms every one; their sends wait for the daemon's own API (`attachApi` below).
   const scheduledPrompts = new ChatScheduledPrompts({ chat: agentChat.chat, clock: realClock, logger: console });
@@ -1895,6 +1909,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // the in-process API just made. Before the boot manifest refresh below, so chats see its collections.
   await knowledge.start().catch((error) => console.error("Knowledge Graph start failed", error instanceof Error ? error.message : error));
   limitRecovery.attachApi(services.internalApi);
+  busySwitch.attachApi(services.internalApi);
   scheduledPrompts.attachApi(services.internalApi);
   idleCompaction.attachApi(services.internalApi);
   delegateStops.attachApi(services.internalApi);
@@ -2047,6 +2062,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     delegateStops.stop();
     await lineage.stop();
     limitRecovery.stop();
+    busySwitch.stop();
     scheduledPrompts.stop();
     idleCompaction.stop();
     // umcp:t3 begin

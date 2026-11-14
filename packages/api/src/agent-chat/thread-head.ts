@@ -91,6 +91,19 @@ export interface ThreadHeadResponse {
    * of the window.
    */
   matchedTurns?: Turn[];
+  /**
+   * Host-only (the host's live read; never derived from a snapshot): a context compaction is
+   * running, or turns are queued behind one. A busy account switch is refused while it is
+   * (spec 2026-11-14 §3), before anything is stopped. Absent from an older host and when not
+   * compacting.
+   */
+  compacting?: true;
+  /**
+   * Host-only: the thread's adapter continues a goal across turns by itself
+   * (`AdapterGoalSupport.continuesAcrossTurns`, Codex), so a Stop pauses an `active` goal
+   * (goals §5.6) and a busy account switch must resume it. Absent from an older host and when not.
+   */
+  goalContinuesAcrossTurns?: true;
 }
 
 /** What {@link threadHeadOf} reads: a snapshot, or the host's fold with its head-only state applied. */

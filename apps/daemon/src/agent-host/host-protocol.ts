@@ -144,6 +144,15 @@ export const agentHostRoutes = {
    */
   setThreadIdentity: (threadId: string): string => `${thread(threadId)}/identity`,
   /**
+   * `POST` {@link AppendThreadNoticeRequest} → `{seq}`: the daemon appends a `runtime.warning`
+   * row to the thread's timeline — a busy account switch that failed after stopping the work
+   * (spec 2026-11-14 §3). Receipt-tracked by `commandId`. Daemon-only: the host socket serves
+   * only the daemon, and no client route forwards here. Additive: a host that predates it
+   * answers its generic route-miss 404 until its drain-restart (the daemon then only logs);
+   * `AGENT_HOST_PROTOCOL_VERSION` did not move for it.
+   */
+  notice: (threadId: string): string => `${thread(threadId)}/notice`,
+  /**
    * Thread lineage (spec 2026-10-14 §6): `POST` {@link ForkHostThreadRequest}
    * on the PARENT → {@link ForkHostThreadResponse}. Creates the child thread
    * as `createThread` does, its conversation the parent's up to the fork
@@ -1029,6 +1038,26 @@ export interface SetThreadIdentityRequest {
   profile?: HostThreadProfile | null;
   /** A mirror of `profile`'s id (`null` for Global); refused when it disagrees with `profile`. */
   profileId?: string | null;
+  /**
+   * Daemon-only, never taken from a client: the switch is the `switching` step of a busy account
+   * switch (spec 2026-11-14 §3–§4). The daemon has stopped the work (which paused a continuing
+   * goal) or found a goal held for an update, so the host skips ONLY its two goal refusals
+   * (continuing, held); every other refusal — compaction, a running turn, an open request,
+   * queued turns, live background work — stands. Additive: an older host ignores it and refuses
+   * as before, which the daemon reports as the switch's failure.
+   */
+  busySwitch?: true;
+}
+
+/**
+ * `POST /threads/:id/notice` ({@link agentHostRoutes.notice}): one `runtime.warning` row on the
+ * thread's timeline, written for the daemon. `summary` is the row's label, `detail` its body.
+ */
+export interface AppendThreadNoticeRequest {
+  /** The idempotency key: a repeat answers the first receipt and appends nothing. */
+  commandId: string;
+  summary: string;
+  detail?: string;
 }
 
 /**

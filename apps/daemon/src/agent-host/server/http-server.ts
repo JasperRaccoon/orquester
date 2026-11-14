@@ -76,7 +76,8 @@ import {
   type HostThreadCatalogResponse,
   type SessionToolsRefreshRequest,
   type SessionToolsRefreshResponse,
-  type SetThreadIdentityRequest
+  type SetThreadIdentityRequest,
+  type AppendThreadNoticeRequest
 } from "../host-protocol.ts";
 import type { ThreadStore } from "../services.ts";
 import {
@@ -772,6 +773,13 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       const body = (await readJsonBody(request)) as SetThreadIdentityRequest;
       const receipt = await orchestrator.setIdentity(threadId, body);
       sendJson(response, 200, receipt);
+      return;
+    }
+
+    // The daemon's timeline notice (a busy account switch that failed after the stop).
+    if (rest === "/notice" && method === "POST") {
+      const body = (await readJsonBody(request)) as AppendThreadNoticeRequest;
+      sendJson(response, 200, await orchestrator.appendNotice(threadId, body));
       return;
     }
 

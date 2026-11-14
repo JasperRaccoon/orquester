@@ -184,6 +184,13 @@ export interface IdentitySwitchState {
    * host has just set going again is not held any more — it continues.
    */
   goalHeldForUpdate: boolean;
+  /**
+   * The switch is a busy account switch's own (`SetThreadIdentityRequest.busySwitch`): the
+   * daemon stopped the work first — which paused a continuing goal, though the summary's
+   * predicate may still read it continuing — or found a goal held for an update, whose hold the
+   * switch keeps. Only the two goal refusals are skipped; absent reads as no.
+   */
+  busySwitch?: boolean;
 }
 
 /** The refusal for a continuing goal — the composer mirror shows these very words. */
@@ -226,10 +233,10 @@ function identitySwitchRefusalWords(state: IdentitySwitchState): string | null {
   // works. Behind the compaction, which a goal command waits for too. A held
   // goal continues as well, but its pause is the deploy's: its own words say
   // how to take it back (goals §5.7).
-  if (state.goalHeldForUpdate) {
+  if (state.goalHeldForUpdate && state.busySwitch !== true) {
     return GOAL_HELD_SWITCH_REFUSAL;
   }
-  if (state.goalContinuing) {
+  if (state.goalContinuing && state.busySwitch !== true) {
     return GOAL_CONTINUING_SWITCH_REFUSAL;
   }
   if (
