@@ -30,6 +30,7 @@
 #   DOMAIN        the target's public domain (optional): adds ORQUESTER_PUBLIC_URL=https://$DOMAIN
 #                 to /etc/orquester/daemon.env when it has none
 #   HEALTH_WAIT   seconds the health check retries for after a restart (default 600)
+#   CRASH_RESTARTS  crash-restarts of the daemon that end the health check early (default 2)
 #   AUTO_REVERT   1 (default) rolls a release that fails its health check back; 0 leaves it
 #   RELEASE_MIN_FREE_MB  free space (MB) the releases volume must have before a build (default 4096)
 #   WARM_TIMEOUT  seconds the warm-up may take before it is stopped (passed on to warm-release.sh;
@@ -65,6 +66,8 @@ HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:47831/health}"
 # A loaded host can take minutes to bring the daemon up — the first start after a large update
 # compiles every new module (tsx's cache is cold); 3 min was seen on a busy host.
 HEALTH_WAIT="${HEALTH_WAIT:-600}"
+# Automatic restarts of a crashed daemon after which a release counts as unhealthy (restart_healthy).
+CRASH_RESTARTS="${CRASH_RESTARTS:-2}"
 AUTO_REVERT="${AUTO_REVERT:-1}"
 PROC_ROOT="${PROC_ROOT:-/proc}"
 # A release's own files are ~100 MB plus node_modules (1.6 GB as counted by du, mostly hard links
@@ -572,14 +575,38 @@ prepare_host() { # <release dir>
   fi
 }
 
-# Restart and wait (bounded by HEALTH_WAIT) for /health and an active unit. The retries are
-# quiet — one connection-refused line per second would bury the rest of the output — and a last
-# plain request shows why the check failed.
+# Restart and wait (bounded by HEALTH_WAIT) for /health and an active unit. A release whose daemon
+# keeps crashing is given up on at once instead of after HEALTH_WAIT: the unit restarts a crashed
+# daemon by itself (Restart=always), so CRASH_RESTARTS automatic restarts since this restart — or the
+# unit failing outright (its start limit) — mean it will not come up. A slow but live start still
+# gets the whole HEALTH_WAIT. Polls once a second (systemd and /health offer nothing to wait on); the
+# retries are quiet and a last plain request shows why the check failed.
 restart_healthy() {
+  local base restarts waited=0
   $SUDO systemctl restart orquester || return 1
-  curl -fsS --retry "$HEALTH_WAIT" --retry-delay 1 --retry-max-time "$HEALTH_WAIT" --retry-connrefused \
-    --max-time 10 "$HEALTH_URL" 2>/dev/null \
-    || curl -fsS --max-time 10 "$HEALTH_URL" || return 1
+  base="$(systemctl show -p NRestarts --value orquester 2>/dev/null || true)"
+  [[ "$base" =~ ^[0-9]+$ ]] || base=0
+  while [ "$waited" -lt "$HEALTH_WAIT" ]; do
+    if curl -fsS --max-time 10 "$HEALTH_URL" >/dev/null 2>&1; then
+      curl -fsS --max-time 10 "$HEALTH_URL" || return 1
+      echo
+      [ "$(systemctl is-active orquester 2>/dev/null || true)" = "active" ]
+      return
+    fi
+    restarts="$(systemctl show -p NRestarts --value orquester 2>/dev/null || true)"
+    if [[ "$restarts" =~ ^[0-9]+$ ]] && [ "$((restarts - base))" -ge "$CRASH_RESTARTS" ]; then
+      echo "[remote-update] the daemon crashed and was restarted $((restarts - base)) times — not waiting longer." >&2
+      curl -fsS --max-time 10 "$HEALTH_URL" >/dev/null 2>&1 || true
+      return 1
+    fi
+    if systemctl is-failed --quiet orquester 2>/dev/null; then
+      echo "[remote-update] the orquester unit failed — not waiting longer." >&2
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  curl -fsS --max-time 10 "$HEALTH_URL" || return 1
   echo
   [ "$(systemctl is-active orquester 2>/dev/null || true)" = "active" ]
 }
@@ -689,7 +716,7 @@ fi
 say "switched: $target_dir is live; restarting."
 
 if ! restart_healthy; then
-  echo "[remote-update] ERROR: release ${new_head:0:7} did not report healthy within ${HEALTH_WAIT}s." >&2
+  echo "[remote-update] ERROR: release ${new_head:0:7} did not report healthy (waited at most ${HEALTH_WAIT}s)." >&2
   # Back to the last successful deploy when it is still on disk, else to the release that was live.
   revert_dir=""
   if [ "$AUTO_REVERT" = "1" ]; then

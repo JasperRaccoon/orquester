@@ -1917,13 +1917,19 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
   attachWorkflowEngine(workflowDaemon.runtime.engine);
   // Runs resume and missed schedules fire as the engine starts, and their account selection reads
-  // usage at once: let the first reading land first (the persisted one, usually no request at all).
+  // usage at once: let the first reading land first (the persisted one, usually no request at all;
+  // up to 15 s when it has to be fetched). Only the engine waits for it — the remote transport below
+  // starts listening meanwhile, so a restart's "Reconnecting…" doesn't last that long. Its routes
+  // already tolerate an engine that hasn't started: the unix transport serves before this point.
   const usageStarted = performance.now();
-  await usage.whenFirstReading(15_000);
-  bootPhase("usage", usageStarted);
-  const workflowsStarted = performance.now();
-  await workflowDaemon.start(services.internalApi).catch((error) => console.error("Workflow engine start failed", error));
-  bootPhase("workflows", workflowsStarted);
+  const workflowApi = services.internalApi;
+  const workflowsReady = (async () => {
+    await usage.whenFirstReading(15_000);
+    bootPhase("usage", usageStarted);
+    const workflowsStarted = performance.now();
+    await workflowDaemon.start(workflowApi).catch((error) => console.error("Workflow engine start failed", error));
+    bootPhase("workflows", workflowsStarted);
+  })();
 
   // The external HTTP transport is opt-in and hot-reloadable: changing its
   // config (password / host / port / enabled) restarts THIS transport only —
@@ -1975,6 +1981,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const httpStarted = performance.now();
   await startHttp();
   bootPhase("http", httpStarted);
+  await workflowsReady;
   // Agent profile change detection (fs watchers on each installed agent's config), after boot.
   agentProfile.start();
   // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.

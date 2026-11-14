@@ -118,7 +118,9 @@ plain checkout, it updates that checkout in place and leaves the conversion to t
 ### Deploy health check and automatic revert
 
 `remote-update.sh` restarts the daemon and then waits up to 10 minutes (`HEALTH_WAIT`, 600 s) for
-`/health` and an active unit. If the new release never gets there, it switches the link back,
+`/health` and an active unit — but gives up at once when the daemon keeps crashing (the unit has
+restarted it `CRASH_RESTARTS`, 2, times, or the unit failed), so a broken release is down for
+seconds, not minutes. If the new release never gets there, it switches the link back,
 without a rebuild, to the last successful deploy (`repo.git/orq-last-deployed-head`) when that
 release is still complete on disk, else to the release that was live — on the converting update
 that is the converted checkout — restarts it and checks it the same way. The deploy fails either

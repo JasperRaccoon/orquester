@@ -46,6 +46,15 @@ echo "systemctl $*" >> "$STUB_DIR/calls"
 case "$1" in
   restart) cp "$REPO_DIR/HEALTH" "$STUB_DIR/running"; git -C "$REPO_DIR" rev-parse HEAD >> "$STUB_DIR/restarts" ;;
   is-active) if [ "$(cat "$STUB_DIR/running" 2>/dev/null)" = "ok" ] && [ ! -f "$STUB_DIR/all-unhealthy" ]; then echo active; else echo failed; exit 3; fi ;;
+  is-failed) exit 1 ;;
+  show)
+    # NRestarts: a daemon that will not come up is restarted by the unit (Restart=always) — one more
+    # automatic restart each time the update looks, unless the test says it only hangs.
+    n="$(cat "$STUB_DIR/nrestarts" 2>/dev/null || echo 0)"
+    if { [ "$(cat "$STUB_DIR/running" 2>/dev/null)" != "ok" ] || [ -f "$STUB_DIR/all-unhealthy" ]; } && [ ! -f "$STUB_DIR/hangs" ]; then
+      n=$((n + 1)); echo "$n" > "$STUB_DIR/nrestarts"
+    fi
+    echo "$n" ;;
 esac
 `,
   curl: `#!/usr/bin/env bash
@@ -443,6 +452,25 @@ test("a release from before releases is deployed by this script, and neither its
   );
   assert.equal(readFileSync(join(tooling, "remote-update.sh"), "utf8"), OURS, "the rollback left the layout-aware tooling");
   assert.deepEqual(readdirSync(tooling).sort(), ["remote-update.sh", "self-update.sh"]);
+});
+
+test("a release whose daemon keeps crashing is flipped back at once, not after the whole health wait", () => {
+  release("fail", "2.0.0");
+  const result = deploy({ HEALTH_WAIT: "600" });
+  assert.equal(result.code, 3, result.out + result.err);
+  assert.match(result.err, /crashed and was restarted 2 times/);
+  const healthChecks = readFileSync(join(stubs, "calls"), "utf8").split("\n").filter((line) => line === "curl health").length;
+  assert.ok(healthChecks < 10, `gave up after ${healthChecks} health checks, not ${600}`);
+});
+
+test("a release that is slow to come up (no crash) still gets the whole health wait", () => {
+  release("fail", "2.0.0");
+  writeFileSync(join(stubs, "hangs"), "");
+  const result = deploy({ HEALTH_WAIT: "3" });
+  assert.equal(result.code, 3, result.out + result.err);
+  assert.doesNotMatch(result.err, /crashed and was restarted/);
+  const healthChecks = readFileSync(join(stubs, "calls"), "utf8").split("\n").filter((line) => line === "curl health").length;
+  assert.ok(healthChecks >= 3, `waited through ${healthChecks} health checks`);
 });
 
 test("pruning keeps the live, previous and one more release, and every release a running process uses", () => {
