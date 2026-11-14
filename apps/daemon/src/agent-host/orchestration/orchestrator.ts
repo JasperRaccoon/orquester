@@ -2059,6 +2059,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         decision.restart = true;
         decision.reasons.push("sessionTools");
       }
+      // The session itself asks for a fresh process (`AgentAdapter.wantsSessionRestart`), carrying
+      // the cursor.
+      if (!decision.restart && adapter.wantsSessionRestart?.(runtime.id) === true) {
+        decision.restart = true;
+        decision.reasons.push("adapterRequested");
+      }
       // A restart kills the provider process and everything running inside it — the turn, its
       // subagents, its monitors — so it only ever happens at an idle point; a busy thread keeps
       // its live session (a steer goes into it) and restarts at the first send that finds it idle.

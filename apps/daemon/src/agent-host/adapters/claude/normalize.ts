@@ -1240,6 +1240,16 @@ export class ClaudeNormalizer {
   }
 
   /**
+   * Whether a user's stop of this task can leave the CLI's `stoppedByUser` mark on a subagent
+   * (spec 2026-11-14 §2): a subagent (`local_agent`), or a task this process never typed. A
+   * shell's or monitor's mark means nothing, and a workflow's agents are not resumed one by one.
+   */
+  stopMayMarkSubagent(taskId: string): boolean {
+    const taskType = this.taskAgents.get(taskId)?.taskType;
+    return taskType === undefined || taskType === "local_agent";
+  }
+
+  /**
    * True for a call of background work: its owner — or an agent that owner
    * runs inside — is a live task the CLI runs in the background. A foreground
    * agent the parent is waiting on (`is_backgrounded: false`, or absent on an

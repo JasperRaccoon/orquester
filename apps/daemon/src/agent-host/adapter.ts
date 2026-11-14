@@ -510,6 +510,16 @@ export interface AgentAdapter {
    */
   backgroundTaskLive?(threadId: string, taskId: string): boolean | undefined;
   /**
+   * Whether the thread's live session asks for a fresh provider process, resuming the same
+   * conversation: the host then restarts it on the send path exactly as for a launch change,
+   * cursor carried, and — like every restart — only at an idle point (no turn, request, live
+   * background work or continuing goal); a busy send goes into the live session and the next
+   * idle one asks again. A new session starts without the ask. Synchronous and cheap. Claude: a
+   * per-task Stop reached a subagent, whose resume the live CLI refuses until it restarts (spec
+   * 2026-11-14 §2). Optional: an adapter without it never asks.
+   */
+  wantsSessionRestart?(threadId: string): boolean;
+  /**
    * `options.endedByUser`: the user ended the session — the session stop
    * command or a closed tab (`stopSessionInternal`) — rather than the host
    * restarting it for a thread that goes on (an account, permission-mode or

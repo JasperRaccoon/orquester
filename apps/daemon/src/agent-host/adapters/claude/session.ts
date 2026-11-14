@@ -103,6 +103,7 @@ import {
   type WorkflowAgentChange
 } from "./normalize.ts";
 import { PromptQueue } from "./prompt-queue.ts";
+import { clearSubagentStopMarkers, type SubagentMarkerClear } from "./stopped-subagents.ts";
 import { buildAskUserQuestionReply, parseAskUserQuestionInput } from "./questions.ts";
 import {
   ROLLBACK_COMPACTED,
@@ -384,6 +385,12 @@ export class ClaudeSession {
   private readonly transcriptWalksWaiting: TranscriptWalk[] = [];
   /** The pending verdict re-read, if any ({@link GOAL_VERDICT_REREAD_DELAYS_MS}). */
   private verdictRereadTimer: NodeJS.Timeout | undefined;
+  /**
+   * A per-task Stop (`stopTask`) reached a subagent in THIS CLI process, so the CLI holds its
+   * `stoppedByUser` mark in memory and would refuse to resume it until it restarts
+   * ({@link wantsRestart}; spec 2026-11-14 §2). A new session starts without it.
+   */
+  private subagentStopped = false;
 
   constructor(options: ClaudeSessionOptions) {
     this.options = options;
@@ -460,6 +467,23 @@ export class ClaudeSession {
    */
   get trackedGoal(): AgentGoal | null {
     return this.normalizer.goals.lastEmitted;
+  }
+
+  /**
+   * Whether this session asks the host to restart its CLI, resuming the same conversation, at the
+   * next send (spec 2026-11-14 §2): a per-task Stop reached a subagent, and nothing of this
+   * process runs any more — no turn, no live task — so a restart kills nothing. The restart clears
+   * the meta files' marks before the new CLI starts (`clearStopMarkers`). Never in a box: its
+   * CLI's meta files are the box's, which that clear does not reach, so a restart would not help.
+   */
+  get wantsRestart(): boolean {
+    return (
+      this.subagentStopped &&
+      !this.closed &&
+      this.options.box === undefined &&
+      this.normalizer.turnState === undefined &&
+      this.normalizer.liveTasks().size === 0
+    );
   }
 
   /** boxes: the box launch this session's CLI runs under; undefined on this machine. */
@@ -584,7 +608,20 @@ export class ClaudeSession {
       this.profileFiles = profileFiles;
     }
 
+    // Spec 2026-11-14 §2: a resumed session's subagents lose the `stoppedByUser` mark a per-task
+    // Stop left, before the CLI that would read it starts. Not in a box (see `wantsRestart`).
+    const markerProblems =
+      box === undefined && built.options.resume !== undefined ? await this.clearStopMarkers(built.options.resume) : [];
+
     this.emit([this.normalizer.sessionStarted(this.options.resumeCursor)]);
+    // One row per meta file left as it was: that subagent may still refuse to resume.
+    this.emit(
+      markerProblems.map((problem) =>
+        this.normalizer.warning(
+          `Could not clear the stop mark in ${nodePath.basename(problem.path)}: ${problem.reason}. A subagent of this chat that was stopped may refuse to resume.`
+        )
+      )
+    );
 
     // The CLI's MCP servers (and what they start) are stopped at every end of this launch;
     // never the user's work, nor a shared daemon (`support/provider-leftovers.ts`). Not in a box.
@@ -675,6 +712,31 @@ export class ClaudeSession {
     // not wait on a display refresh.
     void this.refreshContextUsage(undefined);
     return this.session;
+  }
+
+  /**
+   * Clear the `stoppedByUser` marks of `sessionId`'s subagents (`stopped-subagents.ts`); answers
+   * what had to be left as it was, each logged here and shown in the chat by the caller.
+   */
+  private async clearStopMarkers(sessionId: string): Promise<SubagentMarkerClear["problems"]> {
+    const { cleared, problems } = await clearSubagentStopMarkers({
+      configDir: claudeConfigDir(this.options.env),
+      cwd: this.options.cwd,
+      sessionId
+    });
+    if (cleared.length > 0) {
+      this.options.context.logger.info(
+        `claude: cleared the stop mark of ${cleared.length} subagent(s) before resuming ${sessionId}`,
+        { threadId: this.threadId, files: cleared }
+      );
+    }
+    for (const problem of problems) {
+      this.options.context.logger.warn(`claude: could not clear a subagent's stop mark in ${problem.path}`, {
+        threadId: this.threadId,
+        reason: problem.reason
+      });
+    }
+    return problems;
   }
 
   /**
@@ -2216,6 +2278,11 @@ export class ClaudeSession {
   async stopTask(taskId: string): Promise<void> {
     if (this.closed || this.query === undefined) {
       throw new Error("No live Claude session to stop a task in.");
+    }
+    // Before the control goes out: a stop that times out may still have landed, and the mark it
+    // left is what a later resume trips on (spec 2026-11-14 §2).
+    if (this.normalizer.stopMayMarkSubagent(taskId)) {
+      this.subagentStopped = true;
     }
     await withDeadline(this.query.stopTask(taskId), {
       label: "claude/stop_task",
