@@ -152,6 +152,8 @@ export function acceptsMessage(summary: SessionSummary, thread: Pick<ThreadHeadR
   if (summary.latestTurn?.state === "running" || summary.latestTurn?.state === "pending") return false;
   if (summary.hasPendingApprovals || summary.hasPendingUserInput) return false;
   if (summary.goal?.continuing === true) return false;
+  // A busy account switch fences the chat's turns until it ends (`busy-switch.ts`).
+  if ((summary.accountSwitch ?? null) !== null) return false;
   const head = thread.head.session;
   if (head.activeTurnId !== null || head.status === "running" || head.status === "starting") return false;
   const last = thread.recentTurns.at(-1);

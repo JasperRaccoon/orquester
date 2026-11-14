@@ -494,12 +494,17 @@ export class ChatSessionManager {
     return record ? publicBusySwitch(record) : null;
   }
 
+  /** The busy switch's private nonce (persisted, never published), or null. */
+  accountSwitchNonceOf(id: string): string | null {
+    return this.sessions.get(id)?.chat.accountSwitch?.nonce ?? null;
+  }
+
   /**
    * Set (or clear, `null`) the busy account switch: persisted on the tab record and published —
    * with an explicit `null` when cleared (a client merges summaries field-wise). "updated" only on
-   * a change.
+   * a change. `nonce` is kept on the record only; a rewrite without one keeps the stored one.
    */
-  setAccountSwitch(id: string, state: ChatBusySwitchState | null): SessionSummary | null {
+  setAccountSwitch(id: string, state: (ChatBusySwitchState & { nonce?: string }) | null): SessionSummary | null {
     const session = this.sessions.get(id);
     if (!session) return null;
     const before = session.chat.accountSwitch;

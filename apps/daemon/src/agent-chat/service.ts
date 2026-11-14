@@ -63,7 +63,7 @@ import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import type { SessionIndexContributor } from "../sessions.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
-import { busySwitchTurnRefusal, type ChatBusySwitch } from "./busy-switch.ts";
+import { busySwitchCommandRefusal, type ChatBusySwitch } from "./busy-switch.ts";
 import { HostUnavailableError, RoutingHostClient, type HostClient } from "./host-client.ts";
 import type { HostDirectory } from "./host-directory.ts";
 import { markClaudeProjectTrusted } from "./home-prep.ts";
@@ -1053,8 +1053,12 @@ export class AgentChatService {
       noteSeq: (id, seq) => this.chat.noteSeq(id, seq),
       agentRunRefusal: (id) => this.destroyedBoxRefusal(id),
       switchAccount: (id, body) => this.switchAccount(id, body),
-      // Spec 2026-11-14 §3: the fence is the persisted busy switch itself.
-      turnRefusal: (id, body) => busySwitchTurnRefusal(id, this.chat.accountSwitchOf(id), body),
+      // Spec 2026-11-14 §3: the fence is the persisted busy switch itself (its nonce never leaves here).
+      commandRefusal: (id, name, body) => {
+        const state = this.chat.accountSwitchOf(id);
+        const nonce = this.chat.accountSwitchNonceOf(id);
+        return busySwitchCommandRefusal(id, state === null ? null : { ...state, ...(nonce !== null ? { nonce } : {}) }, name, body);
+      },
       switchProfile: (id, body) => this.switchProfile(id, body),
       profileCatalog: (summary) => this.profileCatalog(summary),
       hostStatus: () => {

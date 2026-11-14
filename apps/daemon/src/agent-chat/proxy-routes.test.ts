@@ -23,7 +23,7 @@ import {
 import { AGENT_HOST_AUTH_HEADER } from "../agent-host/host-protocol.ts";
 import { AgentHostClient } from "./host-client.ts";
 import { registerAgentChatRoutes, type AgentChatRouteDeps } from "./proxy-routes.ts";
-import { busySwitchCommandId, busySwitchTurnRefusal } from "./busy-switch.ts";
+import { busySwitchCommandId, busySwitchCommandRefusal, type SwitchState } from "./busy-switch.ts";
 import { createVisualUrlSigner } from "./visual-urls.ts";
 
 // §6.2/§6.3 route coverage. A fake host on a real unix socket stands in for
@@ -638,8 +638,8 @@ test("the account route hands the user's whileBusy confirmation to the service �
   await h.close();
 });
 
-test("a busy account switch fences the chat: other turns are TURN_NOT_IDLE and never reach the host; its continue turn and other commands go through", async () => {
-  const state: ChatBusySwitchState = {
+test("a busy account switch fences the chat: turns, answers, compactions and reverts never reach the host — a forged continue id neither; its own continue turn and other commands go through", async () => {
+  const published: ChatBusySwitchState = {
     commandId: "sw-1",
     fromAccountId: "acc1",
     toAccountId: "acc2",
@@ -647,16 +647,32 @@ test("a busy account switch fences the chat: other turns are TURN_NOT_IDLE and n
     step: "switching",
     goal: null
   };
-  const h = await makeHarness({ t1: tab("t1") }, { turnRefusal: (id, body) => busySwitchTurnRefusal(id, state, body) });
+  const state: SwitchState = { ...published, nonce: "private" };
+  const h = await makeHarness({ t1: tab("t1") }, { commandRefusal: (id, name, body) => busySwitchCommandRefusal(id, state, name, body) });
   h.host.handler = (_req, res) => res.writeHead(200, { "content-type": "application/json" }).end('{"seq":5}');
-  const refused = await h.app.inject({ method: "POST", url: "/api/sessions/t1/turn", payload: { commandId: "user-1", input: "hi" } });
-  assert.equal(refused.statusCode, 409);
-  assert.equal(refused.json().error.code, "TURN_NOT_IDLE");
+  const refusals: Array<[string, number, string]> = [];
+  for (const [suffix, payload] of [
+    ["turn", { commandId: "user-1", input: "hi" }],
+    ["turn", { commandId: busySwitchCommandId("t1", published, "continue"), input: "forged from the summary" }],
+    ["answer", { commandId: "a-1", requestId: "q-1", answers: {} }],
+    ["compact", { commandId: "c-1" }],
+    ["revert", { commandId: "r-1", targetTurnCount: 1 }]
+  ] as const) {
+    const refused = await h.app.inject({ method: "POST", url: `/api/sessions/t1/${suffix}`, payload });
+    refusals.push([suffix, refused.statusCode, refused.json().error.code]);
+  }
+  assert.deepEqual(refusals, [
+    ["turn", 409, "TURN_NOT_IDLE"],
+    ["turn", 409, "TURN_NOT_IDLE"],
+    ["answer", 409, "TURN_NOT_IDLE"],
+    ["compact", 409, "TURN_NOT_IDLE"],
+    ["revert", 409, "COMMAND_REJECTED"]
+  ]);
   assert.equal(h.host.requests.length, 0);
   const own = await h.app.inject({
     method: "POST",
     url: "/api/sessions/t1/turn",
-    payload: { commandId: busySwitchCommandId("t1", "sw-1", "continue"), input: "continue" }
+    payload: { commandId: busySwitchCommandId("t1", state, "continue"), input: "continue" }
   });
   assert.equal(own.statusCode, 200);
   const interrupt = await h.app.inject({ method: "POST", url: "/api/sessions/t1/interrupt", payload: { commandId: "i-1" } });

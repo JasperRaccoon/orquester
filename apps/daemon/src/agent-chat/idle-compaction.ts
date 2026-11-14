@@ -151,7 +151,7 @@ export class ChatIdleCompaction {
     if (this.stopped) return;
     this.candidates.set(id, candidate);
     const tab = this.opts.chat.get(id);
-    const key = tab === undefined ? "" : JSON.stringify([candidate, ruleTab(tab)]);
+    const key = tab === undefined ? "" : JSON.stringify([candidate, ruleTab(tab), tab.accountSwitch ? 1 : 0]);
     if (this.decided.get(id) === key) return;
     this.decided.set(id, key);
     this.decide(id);
@@ -206,7 +206,8 @@ export class ChatIdleCompaction {
   private async windowOf(id: string): Promise<ReturnType<typeof idleCompactionWindow>> {
     const tab = this.opts.chat.get(id);
     const candidate = this.candidates.get(id) ?? null;
-    if (!tab || candidate === null || this.opts.adapterOf(tab.refId) !== "claude") return null;
+    // A busy account switch in flight (`busy-switch.ts`): a compaction now would fail it.
+    if (!tab || tab.accountSwitch || candidate === null || this.opts.adapterOf(tab.refId) !== "claude") return null;
     const prefs = await this.opts.prefs();
     if (resolveIdleCompaction(prefs, tab.accountId || SYSTEM_ACCOUNT_ID) !== "beforeCacheExpires") return null;
     return idleCompactionWindow(ruleTab(tab), candidate, this.opts.clock.now().getTime());

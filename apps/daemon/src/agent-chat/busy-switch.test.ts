@@ -11,7 +11,7 @@ import {
 import type { DaemonApi, DaemonMethod, DaemonRequestOptions, DaemonResponse } from "../mcp/daemon-api.ts";
 import type { Clock } from "../workflows/contracts.ts";
 import { ChatSessionManager } from "./chat-sessions.ts";
-import { BUSY_SWITCH_FENCE_MESSAGE, ChatBusySwitch, busySwitchCommandId, busySwitchTurnRefusal } from "./busy-switch.ts";
+import { BUSY_SWITCH_FENCE_MESSAGE, ChatBusySwitch, busySwitchCommandId, busySwitchCommandRefusal } from "./busy-switch.ts";
 
 const T0 = Date.parse("2026-11-14T06:00:00.000Z");
 const SETTLE_MS = 10_000;
@@ -118,7 +118,12 @@ interface Harness {
   /** The next switch fails with this. */
   refuseSwitch: Error | null;
   fields(fields: AgentChatSessionSummaryFields): void;
+  /** The switch's private nonce, as last seen on the tab record. */
+  nonce: string | undefined;
 }
+
+/** The switch `sw-1`'s command-id key (its id and the nonce the daemon gave it). */
+const sw1 = (h: Harness): { commandId: string; nonce?: string } => ({ commandId: "sw-1", ...(h.nonce !== undefined ? { nonce: h.nonce } : {}) });
 
 function harness(opts: { refId?: string; fields?: AgentChatSessionSummaryFields; chat?: ChatSessionManager; clock?: FakeClock; attach?: boolean } = {}): Harness {
   const clock = opts.clock ?? new FakeClock();
@@ -134,9 +139,11 @@ function harness(opts: { refId?: string; fields?: AgentChatSessionSummaryFields;
     const step = summary.accountSwitch === undefined ? undefined : (summary.accountSwitch?.step ?? null);
     if (step !== undefined && step !== lastStep) log.push(`persist:${step}`);
     lastStep = step;
+    h.nonce = chat.accountSwitchNonceOf("s1") ?? h.nonce;
     api.emit(summary.id);
   });
   const h: Harness = {
+    nonce: chat.accountSwitchNonceOf("s1") ?? undefined,
     clock,
     chat,
     api,
@@ -207,13 +214,13 @@ test("a busy switch stops with cascade off, waits for idle on the bus, switches,
     "persist:null"
   ]);
   assert.equal(h.api.interrupts()[0]?.turnId, undefined, "session-scoped: no turn named");
-  assert.equal(h.api.interrupts()[0]?.commandId, busySwitchCommandId("s1", "sw-1", "interrupt"));
+  assert.equal(h.api.interrupts()[0]?.commandId, busySwitchCommandId("s1", sw1(h), "interrupt"));
   assert.equal(h.switches[0]?.accountId, "acc2");
   assert.deepEqual(h.api.turns()[0], {
     input: BUSY_SWITCH_CONTINUE_MESSAGE,
     interactionMode: "default",
     ifIdle: true,
-    commandId: busySwitchCommandId("s1", "sw-1", "continue")
+    commandId: busySwitchCommandId("s1", sw1(h), "continue")
   });
   assert.equal(h.chat.get("s1")?.accountSwitch, null);
   assert.equal(h.chat.get("s1")?.accountId, "acc2");
@@ -272,7 +279,7 @@ test("a continuing Codex goal is paused by the stop and resumed with /goal resum
     "turn /goal resume",
     "persist:null"
   ]);
-  assert.equal(h.api.interrupts()[1]?.commandId, busySwitchCommandId("s1", "sw-1", "interrupt-background"));
+  assert.equal(h.api.interrupts()[1]?.commandId, busySwitchCommandId("s1", sw1(h), "interrupt-background"));
   assert.equal(h.api.turns()[0]?.input, "/goal resume");
 });
 
@@ -299,6 +306,11 @@ test("a running compaction refuses the switch before anything is stopped or pers
 
 test("a goal held for an update is not stopped: the switch applies at once and nothing is sent", async () => {
   const h = harness({ refId: "codex", fields: { ...IDLE, goal: { objective: "ship it", status: "paused", continuing: true } } });
+  h.api.head = {
+    head: { session: { status: "ready", activeTurnId: null }, goalHeldForHandover: true },
+    goal: { objective: "ship it", status: "paused" },
+    goalContinuesAcrossTurns: true
+  };
   await h.busy.run("s1", { commandId: "sw-1", accountId: "acc2" });
   assert.deepEqual(h.log, ["persist:settling", "persist:switching", "switch busySwitch=true", "persist:continuing", "persist:null"]);
   assert.deepEqual(h.api.interrupts(), []);
@@ -306,20 +318,38 @@ test("a goal held for an update is not stopped: the switch applies at once and n
   assert.equal(h.chat.get("s1")?.accountId, "acc2");
 });
 
-test("the fence refuses every other turn while the switch stands, but lets its own continue turn through", async () => {
+test("the fence refuses turns, answers, compactions and reverts while the switch stands, but lets its own continue turn through — not one forged from the summary", async () => {
   const h = harness({ fields: RUNNING });
-  let fenced: { other: string | null; own: string | null } | null = null;
+  let fenced: Record<string, string | null> | null = null;
   h.api.onInterrupt = () => {
-    const state = h.chat.accountSwitchOf("s1");
+    const published = h.chat.accountSwitchOf("s1")!;
+    const state = { ...published, nonce: h.chat.accountSwitchNonceOf("s1")! };
+    const refusal = (name: string, body: unknown): string | null => busySwitchCommandRefusal("s1", state, name, body)?.code ?? null;
     fenced = {
-      other: busySwitchTurnRefusal("s1", state, { commandId: "user-turn", input: "hi" }),
-      own: busySwitchTurnRefusal("s1", state, { commandId: busySwitchCommandId("s1", "sw-1", "continue") })
+      turn: refusal("turn", { commandId: "user-turn", input: "hi" }),
+      answer: refusal("answer", { commandId: "a-1" }),
+      compact: refusal("compact", { commandId: "c-1" }),
+      revert: refusal("revert", { commandId: "r-1" }),
+      interrupt: refusal("interrupt", { commandId: "i-1" }),
+      own: refusal("turn", { commandId: busySwitchCommandId("s1", state, "continue") }),
+      // What a client can derive from the published summary alone: refused, no nonce.
+      forged: refusal("turn", { commandId: busySwitchCommandId("s1", { commandId: published.commandId }, "continue") })
     };
+    assert.equal(busySwitchCommandRefusal("s1", state, "turn", { commandId: "x" })?.message, BUSY_SWITCH_FENCE_MESSAGE);
     setImmediate(() => h.fields(IDLE));
   };
   await h.busy.run("s1", { commandId: "sw-1", accountId: "acc2" });
-  assert.deepEqual(fenced, { other: BUSY_SWITCH_FENCE_MESSAGE, own: null });
-  assert.equal(busySwitchTurnRefusal("s1", h.chat.accountSwitchOf("s1"), { commandId: "user-turn" }), null, "lifted once done");
+  assert.deepEqual(fenced, {
+    turn: "TURN_NOT_IDLE",
+    answer: "TURN_NOT_IDLE",
+    compact: "TURN_NOT_IDLE",
+    revert: "COMMAND_REJECTED",
+    interrupt: null,
+    own: null,
+    forged: "TURN_NOT_IDLE"
+  });
+  assert.equal("nonce" in (h.chat.get("s1")?.accountSwitch ?? {}), false, "never published");
+  assert.equal(busySwitchCommandRefusal("s1", null, "turn", { commandId: "user-turn" }), null, "lifted once done");
 });
 
 test("work that never settles fails the switch: the fence lifts, the chat stays put, nothing is sent and the timeline says so", async () => {
@@ -359,13 +389,13 @@ test("a restart finishes a persisted switch from its step under the same command
     step: "switching",
     goal: null
   };
-  chat.setAccountSwitch("s1", persisted);
+  chat.setAccountSwitch("s1", { ...persisted, nonce: "n-1" });
   chat.applyFields("s1", IDLE);
   const h = harness({ chat, clock });
   await h.busy.idle();
   assert.deepEqual(h.log, ["switch busySwitch=true", "persist:continuing", `turn ${BUSY_SWITCH_CONTINUE_MESSAGE_PLAIN.slice(0, 24)}`, "persist:null"]);
-  assert.equal(h.switches[0]?.commandId, busySwitchCommandId("s1", "sw-1", "account"));
-  assert.equal(h.api.turns()[0]?.commandId, busySwitchCommandId("s1", "sw-1", "continue"));
+  assert.equal(h.switches[0]?.commandId, busySwitchCommandId("s1", { commandId: "sw-1", nonce: "n-1" }, "account"));
+  assert.equal(h.api.turns()[0]?.commandId, busySwitchCommandId("s1", { commandId: "sw-1", nonce: "n-1" }, "continue"));
   assert.deepEqual(h.api.interrupts(), [], "the stop it had already made is not made again");
 });
 
@@ -387,6 +417,51 @@ test("a restart abandons a switch still stopping past the settle bound, with the
   assert.deepEqual(h.switches, []);
   assert.deepEqual(h.api.interrupts(), []);
   assert.deepEqual(h.api.turns(), []);
-  assert.equal(h.notices[0]?.commandId, busySwitchCommandId("s1", "sw-1", "notice"));
+  assert.equal(h.notices[0]?.commandId, busySwitchCommandId("s1", sw1(h), "notice-settling"));
   assert.match(h.notices[0]!.detail, /Orquester restarted while it was switching the account/);
+});
+
+test("a host that is away at the switch ends the switch for good: a retry of its command gets the same failure, never a plain switch; a new switch gets its own row", async () => {
+  const h = harness({ refId: "codex", fields: { ...RUNNING, goal: { objective: "ship it", status: "active", continuing: true } } });
+  const paused: AgentChatSessionSummaryFields = { ...IDLE, goal: { objective: "ship it", status: "paused", continuing: false } };
+  settlesAfterInterrupt(h, paused);
+  h.refuseSwitch = Object.assign(new Error("The agent host is restarting."), { code: "HOST_UNAVAILABLE" });
+  const failed = { code: "COMMAND_REJECTED", message: /not switched after stopping the work: The agent host refused the switch: The agent host is restarting/ };
+  await assert.rejects(h.busy.run("s1", { commandId: "sw-1", accountId: "acc2" }), failed);
+  // The chat reads idle now; the client retries the same command.
+  await assert.rejects(h.busy.run("s1", { commandId: "sw-1", accountId: "acc2" }), failed);
+  assert.equal(h.switches.length, 1, "no plain switch under the user's command");
+  assert.deepEqual(h.api.turns(), []);
+  assert.equal(h.notices.length, 1);
+
+  // A new switch of the busy chat fails again: its own warning row.
+  h.fields({ ...RUNNING, goal: { objective: "ship it", status: "active", continuing: true } });
+  h.refuseSwitch = Object.assign(new Error("The agent host is restarting."), { code: "HOST_UNAVAILABLE" });
+  await assert.rejects(h.busy.run("s1", { commandId: "sw-2", accountId: "acc2" }), { code: "COMMAND_REJECTED" });
+  assert.equal(h.notices.length, 2);
+  assert.notEqual(h.notices[0]?.commandId, h.notices[1]?.commandId);
+});
+
+test("a goal the host just set going again (paused, continuing, no hold) is stopped and resumed, not kept as held", async () => {
+  const h = harness({ refId: "codex", fields: { ...IDLE, goal: { objective: "ship it", status: "paused", continuing: true } } });
+  h.api.head = { goal: { objective: "ship it", status: "paused" }, goalContinuesAcrossTurns: true };
+  settlesAfterInterrupt(h, { ...IDLE, goal: { objective: "ship it", status: "paused", continuing: false } });
+  await h.busy.run("s1", { commandId: "sw-1", accountId: "acc2" });
+  assert.equal(h.api.interrupts().length, 1);
+  assert.deepEqual(h.api.turns().map((turn) => turn.input), ["/goal resume"]);
+});
+
+test("a chat that went idle while the host was asked switches as without whileBusy: nothing stopped, nothing sent", async () => {
+  const h = harness({ fields: RUNNING });
+  const read = h.api.request.bind(h.api);
+  h.api.request = async (method, path, requestOpts) => {
+    const answer = await read(method, path, requestOpts);
+    if (method === "GET" && path.endsWith("/head")) h.fields(IDLE);
+    return answer;
+  };
+  assert.deepEqual(await h.busy.run("s1", { commandId: "sw-1", accountId: "acc2" }), { seq: 8 });
+  assert.deepEqual(h.switches, [{ commandId: "sw-1", accountId: "acc2" }]);
+  assert.deepEqual(h.api.interrupts(), []);
+  assert.deepEqual(h.api.turns(), []);
+  assert.deepEqual(h.log.filter((line) => line.startsWith("persist")), []);
 });

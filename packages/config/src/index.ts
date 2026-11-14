@@ -1959,7 +1959,12 @@ export const chatBusySwitchRecordSchema = z
     toAccountId: z.string().max(200),
     startedAt: z.string().max(64).refine((value) => Number.isFinite(Date.parse(value))),
     step: z.enum(["stopping", "settling", "switching", "continuing"]),
-    goal: z.enum(["continuing", "held"]).nullable().catch(null)
+    goal: z.enum(["continuing", "held"]).nullable().catch(null),
+    /**
+     * The daemon's private part of every command id the switch derives (never published on the
+     * summary), so no client can post under one of them. Absent on a record that predates it.
+     */
+    nonce: z.string().min(1).max(200).optional().catch(undefined)
   })
   .passthrough();
 export type ChatBusySwitchRecord = z.infer<typeof chatBusySwitchRecordSchema>;
