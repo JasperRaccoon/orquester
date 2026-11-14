@@ -4,6 +4,8 @@
 // (plus NODE_BIN for the native-module guard). Each commit carries a HEALTH file ("ok" or "fail");
 // the systemctl stub's restart "runs" whatever REPO_DIR points at then, and the curl stub answers
 // /health from it. PROC_ROOT is a fake /proc the test fills in when a process should use a release.
+// Every commit carries this remote-update.sh (it is layout-aware) unless it says otherwise; the one
+// the plain checkout runs predates releases, as on a real host.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -31,6 +33,7 @@ import { afterEach, beforeEach, test } from "node:test";
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "remote-update.sh");
 const OURS = readFileSync(SCRIPT, "utf8");
 const HAS_FLOCK = spawnSync("sh", ["-c", "command -v flock"]).status === 0;
+const PRE_LAYOUT_SCRIPT = "#!/usr/bin/env bash\n# a remote-update.sh from before releases (no layout marker)\nexit 0\n";
 
 const STUBS = {
   pnpm: `#!/usr/bin/env bash
@@ -62,6 +65,11 @@ exit 0
 if [ "$1" = "-v" ]; then echo v24.0.0; exit 0; fi
 echo "node $*" >> "$STUB_DIR/calls"
 exit 0
+`,
+  // For SUDO=sudo runs: like sudo's env_reset, the command gets a fresh environment — only what the
+  // other stubs and git need on this fake host survives.
+  "fake-sudo": `#!/usr/bin/env bash
+exec env -i PATH="$PATH" HOME="$HOME" STUB_DIR="$STUB_DIR" REPO_DIR="$REPO_DIR" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "$@"
 `
 };
 
@@ -92,7 +100,7 @@ function git(cwd, ...args) {
 /** Commit a release whose daemon is healthy or not (plus `files`), push it to origin main; returns its sha. */
 function release(health, version, files = {}) {
   writeFileSync(join(work, "HEALTH"), `${health}\n`);
-  for (const [path, body] of Object.entries(files)) {
+  for (const [path, body] of Object.entries({ "deploy/lib/remote-update.sh": OURS, ...files })) {
     mkdirSync(dirname(join(work, path)), { recursive: true });
     writeFileSync(join(work, path), body);
   }
@@ -168,7 +176,7 @@ function setUpHost() {
   git(root, "init", "-q", "--bare", "-b", "main", origin);
   git(root, "clone", "-q", origin, work);
   git(work, "checkout", "-q", "-b", "main");
-  good = release("ok", "1.0.0");
+  good = release("ok", "1.0.0", { "deploy/lib/remote-update.sh": PRE_LAYOUT_SCRIPT });
   // The release running now, deployed successfully earlier into a plain checkout.
   git(root, "clone", "-q", "-b", "main", origin, repo);
   writeFileSync(join(repo, ".git", "orq-last-deployed-head"), `${good}\n`);
@@ -289,12 +297,11 @@ test("a release with its own layout-aware remote-update.sh finishes the update w
   assert.equal(live(), dirOf(old));
 });
 
-test("an update a script from before releases hands over puts the plain checkout back and builds beside it", { skip: !HAS_FLOCK && "no flock on this host" }, () => {
-  // What the pre-release script does: lock the checkout, reset it in place, hand over to the
-  // target's own script with its lock on fd 9.
-  const preRelease = join(root, "pre-release-update.sh");
+/** What an update script from before releases does: lock the checkout, reset it in place, hand over to the target's own script with its lock on fd 9. */
+function preReleaseUpdate(env = {}) {
+  const script = join(root, "pre-release-update.sh");
   writeFileSync(
-    preRelease,
+    script,
     `#!/usr/bin/env bash
 set -euo pipefail
 cd "$REPO_DIR"
@@ -310,14 +317,57 @@ cat deploy/lib/remote-update.sh > "$handoff"
 exec env ORQ_UPDATE_HANDOFF="$handoff" ORQ_UPDATE_OLD_HEAD="$old_head" ORQ_UPDATE_LOCK_HELD=1 RESET_REF="$new_head" bash "$handoff"
 `
   );
-  const next = release("ok", "1.1.0", { "deploy/lib/remote-update.sh": OURS });
-  const result = spawnSync("bash", [preRelease], { encoding: "utf8", env: hostEnv() });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const result = spawnSync("bash", [script], { encoding: "utf8", env: hostEnv(env) });
+  return { code: result.status, out: result.stdout, err: result.stderr };
+}
+
+const checkoutScript = () => readFileSync(join(repo, "deploy", "lib", "remote-update.sh"), "utf8");
+
+test("an update a script from before releases hands over puts the plain checkout back and builds beside it", { skip: !HAS_FLOCK && "no flock on this host" }, () => {
+  const next = release("ok", "1.1.0");
+  const result = preReleaseUpdate();
+  assert.equal(result.code, 0, result.out + result.err);
   assertRelease(dirOf(good), good);
-  assert.ok(!existsSync(join(dirOf(good), "deploy", "lib", "remote-update.sh")), "the old release's tree is back at its own commit");
+  assert.equal(readFileSync(join(dirOf(good), "deploy", "lib", "remote-update.sh"), "utf8"), PRE_LAYOUT_SCRIPT, "the old release's tree is back at its own commit");
   assert.deepEqual(installs(), [`pnpm install --frozen-lockfile cwd=${dirOf(next)} live=${repo}`]);
   assert.equal(live(), dirOf(next));
   assert.deepEqual(restarts(), [next]);
+});
+
+test("a hand-over from a script from before releases that stops before the switch leaves the checkout at its own commit", { skip: !HAS_FLOCK && "no flock on this host" }, () => {
+  release("ok", "1.1.0");
+  const result = preReleaseUpdate({ RELEASE_MIN_FREE_MB: "999999999" });
+  assert.equal(result.code, 1, result.out + result.err);
+  assert.match(result.err, /not enough disk space/);
+  assert.ok(isPlainCheckout());
+  assert.equal(head(), good);
+  assert.equal(checkoutScript(), PRE_LAYOUT_SCRIPT);
+  assert.deepEqual(restarts(), []);
+});
+
+test("a plain checkout is not converted to a release from before releases", () => {
+  const old = release("ok", "1.1.0", { "deploy/lib/remote-update.sh": PRE_LAYOUT_SCRIPT });
+  const result = deploy({ RESET_REF: old });
+  assert.equal(result.code, 1, result.out + result.err);
+  assert.match(result.err, /still uses the in-place layout/);
+  assert.match(result.err, /Deploy a current commit first/);
+  assert.ok(isPlainCheckout());
+  assert.equal(head(), good);
+  assert.ok(!existsSync(sharedGit()));
+  assert.ok(!existsSync(dirOf(old)));
+  assert.deepEqual(restarts(), []);
+});
+
+test("a converting deploy whose release fails its health check still installs that release's update tooling", () => {
+  const units = 'echo "install-unit bad" >> "$STUB_DIR/calls"\n';
+  release("fail", "2.0.0", { "deploy/install-unit.sh": units, "deploy/lib/self-update.sh": "# the current self-update wrapper\n" });
+  const result = deploy();
+  assert.equal(result.code, 3, result.out + result.err);
+  assert.equal(live(), dirOf(good));
+  assert.ok(calls().includes("install-unit bad"), "the failed release installed its update unit");
+  const tooling = join(releases, "tooling");
+  assert.equal(readFileSync(join(tooling, "remote-update.sh"), "utf8"), OURS, "which finds layout-aware scripts, not the reverted release's");
+  assert.equal(readFileSync(join(tooling, "self-update.sh"), "utf8"), "# the current self-update wrapper\n");
 });
 
 test("an update while another holds the lock touches nothing and exits 5, before and after the conversion", { skip: !HAS_FLOCK && "no flock on this host" }, () => {
@@ -372,14 +422,11 @@ test("a release from before releases is deployed by this script, and neither its
     "deploy/install-unit.sh": units("old")
   });
   const current = release("ok", "1.2.0", {
-    "deploy/lib/remote-update.sh": OURS,
     "deploy/install-unit.sh": units("current"),
     "deploy/lib/ensure-web-fallback.sh": 'echo "web-fallback $1" >> "$STUB_DIR/calls"\n',
     "deploy/lib/self-update.sh": "# the current self-update wrapper\n"
   });
   const tooling = join(releases, "tooling");
-  assert.equal(deploy({ RESET_REF: old }).code, 0);
-  assert.ok(!existsSync(tooling), "a release from before releases installs no tooling");
   assert.equal(deploy({ ENV_FILE: "/env-file" }).code, 0);
   assert.equal(readFileSync(join(tooling, "remote-update.sh"), "utf8"), OURS);
   assert.equal(readFileSync(join(tooling, "self-update.sh"), "utf8"), "# the current self-update wrapper\n");
@@ -388,7 +435,7 @@ test("a release from before releases is deployed by this script, and neither its
   assert.equal(rollback.code, 0, rollback.out + rollback.err);
   assert.equal(live(), dirOf(old));
   assert.equal(readlinkSync(previous), dirOf(current));
-  assert.deepEqual(restarts(), [old, current, old]);
+  assert.deepEqual(restarts(), [current, old]);
   assert.deepEqual(
     calls().filter((line) => /^(install-unit|web-fallback|\[old-script\])/.test(line)),
     ["web-fallback /env-file", "install-unit current"],
@@ -492,13 +539,31 @@ test("a conversion interrupted at any step is finished by the next update", asyn
 });
 
 test("a plain checkout an in-place update left half-built is rebuilt in place when its commit is deployed", () => {
-  writeFileSync(join(repo, ".orquester-version.json"), `{"commit":"${"1".repeat(40)}","version":"0.9.0","deployedAt":"2026-11-01T00:00:00Z"}\n`);
-  const result = deploy({ RESET_REF: good });
+  // An updater from before releases reset the checkout to `current` and stopped before its stamp.
+  const current = release("ok", "1.1.0");
+  git(repo, "fetch", "-q", "origin");
+  git(repo, "reset", "-q", "--hard", current);
+  const result = deploy({ RESET_REF: current });
   assert.equal(result.code, 0, result.out + result.err);
   assert.deepEqual(installs(), [`pnpm install --frozen-lockfile cwd=${repo} live=${repo}`]);
-  assert.equal(live(), dirOf(good));
-  assertRelease(dirOf(good), good);
-  assert.deepEqual(restarts(), [good]);
+  assert.equal(live(), dirOf(current));
+  assertRelease(dirOf(current), current);
+  assert.deepEqual(restarts(), [current]);
+});
+
+test("a release whose tree was reset in place to another commit is rebuilt, not reused, when its commit is deployed", () => {
+  const next = release("ok", "1.1.0");
+  assert.equal(deploy().code, 0);
+  release("ok", "1.2.0");
+  assert.equal(deploy().code, 0);
+  // The previous release, marked complete as `next`, now holds another commit's tree.
+  git(dirOf(next), "reset", "-q", "--hard", good);
+  const result = deploy({ RESET_REF: next });
+  assert.equal(result.code, 0, result.out + result.err);
+  assert.equal(installs().length, 3, "built again");
+  assert.equal(live(), dirOf(next));
+  assertRelease(dirOf(next), next);
+  assert.equal(restarts().at(-1), next);
 });
 
 test("an update that would leave the volume nearly full is refused before anything changes", () => {
@@ -534,6 +599,16 @@ test("the warm-up runs in the new release before the switch, and a failure only 
   assert.equal(live(), dirOf(failing));
   assert.match(failed.out, /^\[remote-update\] warm=FAILED: deploy\/lib\/warm-release\.sh exited 7$/m);
   assert.match(failed.err, /WARNING: warm-up FAILED/);
+});
+
+test("with SUDO=sudo, which resets the environment, WARM_TIMEOUT still reaches the warm-up, and a timed-out one says so", () => {
+  const warm = 'echo "warm timeout=${WARM_TIMEOUT:-unset}" >> "$STUB_DIR/calls"\nexit 124\n';
+  const next = release("ok", "1.1.0", { "deploy/lib/warm-release.sh": warm });
+  const result = deploy({ SUDO: join(stubs, "bin", "fake-sudo"), WARM_TIMEOUT: "42" });
+  assert.equal(result.code, 0, result.out + result.err);
+  assert.equal(live(), dirOf(next));
+  assert.ok(calls().includes("warm timeout=42"), calls().join("\n"));
+  assert.match(result.out, /^\[remote-update\] warm=FAILED: deploy\/lib\/warm-release\.sh timed out after 42s$/m);
 });
 
 test("voxl's install is best-effort: its version is reported, and a failure only warns", () => {

@@ -15,13 +15,14 @@
 # Update cycle: lock -> fetch -> the target release: a complete one is reused as is; otherwise it is
 # built in a fresh worktree beside the live one (pnpm install -> SPA build -> Go + orq-agent
 # (best-effort) -> voxl + gdu (best-effort) -> native-module guard -> chown -> completion marker)
-# -> warm-up (best-effort) -> version stamp -> public URL + units -> switch the link -> restart ->
-# health. Nothing the running daemon uses is touched before the switch, so a failed build changes
-# nothing. If the new release never turns healthy, the link flips back to the previous release (no
-# rebuild), which is restarted and health-checked, and the deploy still fails. After a healthy
-# deploy of a layout-aware release, its update scripts go to $RELEASES_DIR/tooling (what self-update
-# runs), and releases no longer needed are deleted (prune_releases). A plain checkout at $REPO_DIR (a
-# real directory with .git/, from before releases) is converted on the way (see "Conversion").
+# -> warm-up (best-effort) -> version stamp -> host setup (public URL, web fallback, missing update
+# tooling, units) -> switch the link(s) -> restart -> health. Nothing the running daemon uses is
+# touched before the switch, so a failed build changes nothing. If the new release never turns
+# healthy, the link flips back to the previous release (no rebuild), which is restarted and
+# health-checked, and the deploy still fails. After a healthy deploy of a layout-aware release, its
+# update scripts go to $RELEASES_DIR/tooling (what self-update runs), and releases no longer needed
+# are deleted (prune_releases). A plain checkout at $REPO_DIR (a real directory with .git/, from
+# before releases) is converted on the way (see "Conversion"), but only to a layout-aware release.
 # Inputs via env:
 #   SUDO          "" or "sudo" — prefix for privileged commands (git/pnpm/node/chown/systemctl)
 #   BRANCH        branch to deploy (default main)
@@ -31,7 +32,8 @@
 #   HEALTH_WAIT   seconds the health check retries for after a restart (default 600)
 #   AUTO_REVERT   1 (default) rolls a release that fails its health check back; 0 leaves it
 #   RELEASE_MIN_FREE_MB  free space (MB) the releases volume must have before a build (default 4096)
-#   WARM_TIMEOUT  seconds the warm-up may take before it is stopped (default 600)
+#   WARM_TIMEOUT  seconds the warm-up may take before it is stopped (passed on to warm-release.sh;
+#                 unset: its default)
 #   ENV_FILE, REPO_DIR, RELEASES_DIR, PREVIOUS_LINK, NODE_BIN, HEALTH_URL, PROC_ROOT
 #                 for local testing only (defaults /etc/orquester/daemon.env, /opt/orquester,
 #                 /opt/orquester-releases, /opt/orquester-previous, /usr/bin/node,
@@ -42,7 +44,7 @@
 # handed-over run keeps this run's locks (fd 9, and fd 8 during a conversion), the live release's
 # commit and the commit to deploy (ORQ_UPDATE_*; ORQ_UPDATE_LAYOUT=1 says the sender is
 # layout-aware — a script from before releases hands over without it, after resetting the plain
-# checkout in place).
+# checkout in place; this script puts that checkout back before anything else can stop it).
 # Exit codes: 0 deployed; 1 failed before or without a revert; 3 the new release
 # failed its health check and the previous one was restored (running, healthy);
 # 4 the previous one failed to come back too (the daemon is DOWN); 5 another update
@@ -68,7 +70,7 @@ PROC_ROOT="${PROC_ROOT:-/proc}"
 # A release's own files are ~100 MB plus node_modules (1.6 GB as counted by du, mostly hard links
 # into the pnpm store); the margin also keeps room for the daemon's own data on the same volume.
 RELEASE_MIN_FREE_MB="${RELEASE_MIN_FREE_MB:-4096}"
-WARM_TIMEOUT="${WARM_TIMEOUT:-600}"
+WARM_TIMEOUT="${WARM_TIMEOUT:-}"
 SHARED_GIT="$RELEASES_DIR/repo.git"
 LAYOUT_MARKER='# orq-release-layout: 1'
 COMPLETE_FILE=".orq-release-complete"
@@ -80,7 +82,14 @@ warn() { echo "[remote-update] $*" >&2; }
 g() { $SUDO git --git-dir="$SHARED_GIT" "$@"; }
 
 is_plain_checkout() { [ -d "$REPO_DIR" ] && [ ! -L "$REPO_DIR" ] && [ -d "$REPO_DIR/.git" ]; }
-is_complete() { [ "$($SUDO cat -- "$1/$COMPLETE_FILE" 2>/dev/null || true)" = "$2" ]; } # <dir> <sha>
+# A release is complete when its marker names the commit and its tree still is that commit, with no
+# tracked file changed (builds only write ignored files): an in-place reset — by an updater from
+# before releases, say — leaves the marker of the commit it replaced behind.
+is_complete() { # <dir> <sha>
+  [ "$($SUDO cat -- "$1/$COMPLETE_FILE" 2>/dev/null || true)" = "$2" ] \
+    && [ "$($SUDO git -C "$1" rev-parse HEAD 2>/dev/null || true)" = "$2" ] \
+    && $SUDO git -C "$1" diff --quiet HEAD -- 2>/dev/null
+}
 is_layout_aware() { [ -f "$1/deploy/lib/remote-update.sh" ] && grep -qxF -- "$LAYOUT_MARKER" "$1/deploy/lib/remote-update.sh"; }
 release_id_ok() { [[ "$1" =~ ^[0-9a-f]{12}$ ]]; }
 
@@ -143,8 +152,14 @@ take_lock() {
 # ---------- Conversion of a plain checkout ----------
 # A plain checkout at $REPO_DIR becomes the release of its HEAD without a rebuild. Every step is
 # idempotent, and each partial state is told apart from the filesystem when a run is interrupted:
-#   1. (under the checkout's own lock, .git/orq-deploy.lock, which updaters from before releases
-#      take) copy its .git to repo.git.tmp, make it bare, rename it to repo.git. A leftover
+#   0. Under the checkout's own lock (.git/orq-deploy.lock, which updaters from before releases take):
+#      when one of them handed over, it has already reset the checkout to the target — put it back at
+#      the commit it was at first (restore_reset_tree), so any exit from here on leaves it as it was.
+#      Then the target must be layout-aware (check_conversion_target, in the checkout's own git dir):
+#      one from before releases would leave this host with the update unit from before releases
+#      (a release's units are installed only when it is layout-aware) and no tooling, so the next
+#      self-update would reset the live release in place. Refused (exit 1) before anything changes.
+#   1. (still under that lock) copy its .git to repo.git.tmp, make it bare, rename it to repo.git. A leftover
 #      repo.git.tmp is a copy that never finished: it is deleted and the copy redone. Then the
 #      shared lock in repo.git is taken as well; both are held to the end.
 #   2. Each run while $REPO_DIR is still a plain checkout: carry orq-last-deployed-head over from its
@@ -207,6 +222,31 @@ prepare_conversion() { # sets conv_sha, conv_id
   fi
 }
 
+# A script from before releases reset the live tree in place to the target before it handed over
+# (ORQ_UPDATE_OLD_HEAD: the commit it was at). Its build products still belong to that commit: put
+# it back (the target is built beside it). A no-op otherwise.
+restore_reset_tree() { # <dir>
+  [ -n "$handed_over" ] && [ "$from_layout_script" -eq 0 ] && [ -n "${ORQ_UPDATE_OLD_HEAD:-}" ] || return 0
+  [ "$($SUDO git -C "$1" rev-parse HEAD)" != "$ORQ_UPDATE_OLD_HEAD" ] || return 0
+  $SUDO git -C "$1" rev-parse --verify --quiet "$ORQ_UPDATE_OLD_HEAD^{commit}" >/dev/null || return 0
+  say "the live tree was reset in place by the previous script; restoring ${ORQ_UPDATE_OLD_HEAD:0:7} there."
+  $SUDO git -C "$1" reset --hard -q "$ORQ_UPDATE_OLD_HEAD"
+}
+
+check_conversion_target() { # step 0: pins RESET_REF to the commit checked
+  local sha script
+  $SUDO git -C "$REPO_DIR" fetch origin -q 9<&- 8<&-
+  sha="$($SUDO git -C "$REPO_DIR" rev-parse --verify --quiet "$RESET_REF^{commit}")" \
+    || { warn "ref not found: $RESET_REF"; exit 1; }
+  script="$($SUDO git -C "$REPO_DIR" show "$sha:deploy/lib/remote-update.sh" 2>/dev/null || true)"
+  if ! grep -qxF -- "$LAYOUT_MARKER" <<<"$script"; then
+    warn "${sha:0:7} predates the release layout, and this host still uses the in-place layout ($REPO_DIR is a plain checkout)."
+    warn "Not converting it to that release: nothing was changed. Deploy a current commit first (it converts the host), then roll back to ${sha:0:7}."
+    exit 1
+  fi
+  RESET_REF="$sha"
+}
+
 degit_release() { # <release dir>: its own .git directory -> a link to the shared one (step 5)
   local dir="$1" old="$1/.git-pre-layout" id sha
   id="$(basename -- "$dir")"
@@ -266,6 +306,9 @@ else
   fi
   if is_plain_checkout; then
     [ "$old_lock" -eq 1 ] || take_lock "$REPO_DIR/.git/orq-deploy.lock" 8 || true
+    # Conversion step 0, before anything else that can end this run.
+    restore_reset_tree "$REPO_DIR"
+    check_conversion_target
     [ -d "$SHARED_GIT" ] || convert_git_dir
   fi
   if [ ! -d "$SHARED_GIT" ]; then
@@ -278,16 +321,10 @@ fi
 
 # ---------- The live release ----------
 relink_missing_repo_dir
-if [ -n "$handed_over" ] && [ "$from_layout_script" -eq 0 ] && [ -n "${ORQ_UPDATE_OLD_HEAD:-}" ]; then
-  # A script from before releases reset the live tree in place to the target before it handed over.
-  # Its build products still belong to the commit it was at: put that back, build the target beside it.
-  if is_plain_checkout; then reset_dir="$REPO_DIR"; else reset_dir="$(readlink -f -- "$REPO_DIR")"; fi
-  if [ "$($SUDO git -C "$reset_dir" rev-parse HEAD)" != "$ORQ_UPDATE_OLD_HEAD" ] \
-     && $SUDO git -C "$reset_dir" rev-parse --verify --quiet "$ORQ_UPDATE_OLD_HEAD^{commit}" >/dev/null; then
-    say "the live tree was reset in place by the previous script; restoring ${ORQ_UPDATE_OLD_HEAD:0:7} there."
-    $SUDO git -C "$reset_dir" reset --hard -q "$ORQ_UPDATE_OLD_HEAD"
-  fi
-fi
+# A plain checkout was restored above, under its own lock. A script from before releases that ran on
+# a converted host (it cannot take the lock there: .git is a file) reset the live release in place;
+# that is put back only under the shared lock, so a concurrent update's switch is never undone.
+is_plain_checkout || restore_reset_tree "$(readlink -f -- "$REPO_DIR")"
 converting=0
 conv_sha=""
 conv_id=""
@@ -337,8 +374,10 @@ if is_complete "$target_dir" "$new_head"; then
   reused=1
   say "release $target_dir is already built — switching to it without a rebuild."
 elif [ "$target_dir" = "$live_dir" ] || [ "$target_dir" = "$prev_dir_before" ]; then
-  # Never delete the release that runs (or the previous one) to rebuild it.
-  warn "WARNING: $target_dir was never completely built; building it in place."
+  # Never delete the release that runs (or the previous one) to rebuild it. Its tree may have been
+  # reset in place to another commit (see is_complete): build the one it is deployed as.
+  warn "WARNING: $target_dir is not a complete build of ${new_head:0:7}; building it in place."
+  $SUDO git -C "$target_dir" reset --hard -q "$new_head"
 elif [ "$from_layout_script" -eq 1 ] && [ "$($SUDO git -C "$target_dir" rev-parse HEAD 2>/dev/null)" = "$new_head" ]; then
   fresh=1 # created by the script that handed over, just before
 else
@@ -459,18 +498,20 @@ if ! g diff --quiet "$drift_base" "$new_head" -- deploy/Caddyfile; then
 fi
 
 # Fill the daemon's transpile cache for the release before the switch, so the restart doesn't
-# start cold (the script drops to the daemon user itself). Best-effort, bounded by WARM_TIMEOUT.
+# start cold (the script drops to the daemon user itself). Best-effort, bounded by the script's own
+# timeout (it exits 124 when that stops it): WARM_TIMEOUT, passed on explicitly because sudo resets
+# the environment; unset, warm-release.sh's default — the one place it is set.
 warm="skipped"
 warm_release() { # <release dir>
-  local rc=0 limit=()
+  local rc=0 pass=()
   [ -f "$1/deploy/lib/warm-release.sh" ] || return 0
-  if command -v timeout >/dev/null 2>&1; then limit=(timeout "$WARM_TIMEOUT"); fi
-  (cd "$1" && $SUDO "${limit[@]}" bash deploy/lib/warm-release.sh "$1" </dev/null 9<&- 8<&-) || rc=$?
+  [ -z "$WARM_TIMEOUT" ] || pass=("WARM_TIMEOUT=$WARM_TIMEOUT")
+  (cd "$1" && $SUDO env "${pass[@]}" bash deploy/lib/warm-release.sh "$1" </dev/null 9<&- 8<&-) || rc=$?
   if [ "$rc" -eq 0 ]; then
     warm="ok"
   else
     warm="FAILED: deploy/lib/warm-release.sh exited $rc"
-    [ "$rc" -ne 124 ] || warm="FAILED: deploy/lib/warm-release.sh timed out after ${WARM_TIMEOUT}s"
+    [ "$rc" -ne 124 ] || warm="FAILED: deploy/lib/warm-release.sh timed out${WARM_TIMEOUT:+ after ${WARM_TIMEOUT}s}"
     warn "WARNING: warm-up $warm — continuing; the first start compiles what it needs."
   fi
 }
@@ -480,13 +521,40 @@ write_stamp() { # <release dir> <commit>
     | $SUDO tee "$1/$STAMP_FILE" >/dev/null
 }
 
+# The update scripts self-update runs: orquester-update.service copies them from
+# $RELEASES_DIR/tooling when it has them, else from the live release's deploy/lib/. Only a
+# layout-aware release's are ever installed. <always>: after a healthy deploy, that release's replace
+# them; <missing>: only when there are none yet, or none that are layout-aware — the update unit a
+# layout-aware release installs must find layout-aware scripts there even if that release then fails
+# its health check and a release from before releases goes live again. Each file is replaced
+# atomically; a failure only warns.
+install_tooling() { # <release dir> <always|missing>
+  local tooling="$RELEASES_DIR/tooling" f
+  is_layout_aware "$1" || return 0
+  if [ "$2" = missing ] && [ -f "$tooling/self-update.sh" ] \
+     && grep -qxF -- "$LAYOUT_MARKER" "$tooling/remote-update.sh" 2>/dev/null; then
+    return 0
+  fi
+  for f in remote-update.sh self-update.sh; do
+    [ -f "$1/deploy/lib/$f" ] || continue
+    if ! { $SUDO install -d -m 0755 -- "$tooling" \
+           && $SUDO install -m 0644 -- "$1/deploy/lib/$f" "$tooling/.$f.tmp" \
+           && $SUDO mv -f -- "$tooling/.$f.tmp" "$tooling/$f"; }; then
+      warn "WARNING: could not install $f into $tooling — self-update keeps the copy it has."
+    fi
+  done
+}
+
 # A release's host setup, run before each restart (the revert's too, so the unit matches the
 # release it starts): the daemon's public origin from the target's domain (an existing value is
-# kept) and the web fallback to the previous release, then the units and the needrestart
-# exclusion — a changed unit is reloaded here and applies at the restart; nothing else is
-# restarted. The env-file helpers run from any release that has them (they only add missing
-# lines). The units come only from a layout-aware release: one from before releases would install
-# an update unit whose updates reset the live release in place, so its units are left as they are.
+# kept) and the web fallback to the previous release, then the update tooling when it is missing
+# and the units and the needrestart exclusion — a changed unit is reloaded here and applies at the
+# restart; nothing else is restarted. The env-file helpers run from any release that has them (they
+# only add missing lines). Tooling and units come only from a layout-aware release: one from before
+# releases would install an update unit whose updates reset the live release in place, so its units
+# are left as they are — on a revert to such a release that means the failed release's units stay
+# installed (orquester.service included); they are layout-aware and start any release through
+# $REPO_DIR, and the next deploy installs its own.
 prepare_host() { # <release dir>
   if [ -f "$1/deploy/lib/ensure-public-url.sh" ]; then
     (cd "$1" && $SUDO bash deploy/lib/ensure-public-url.sh "$ENV_FILE" "$DOMAIN" </dev/null) || return 1
@@ -494,6 +562,7 @@ prepare_host() { # <release dir>
   if [ -f "$1/deploy/lib/ensure-web-fallback.sh" ]; then
     (cd "$1" && $SUDO bash deploy/lib/ensure-web-fallback.sh "$ENV_FILE" </dev/null) || return 1
   fi
+  install_tooling "$1" missing
   if [ -f "$1/deploy/install-unit.sh" ]; then
     if is_layout_aware "$1"; then
       (cd "$1" && $SUDO bash deploy/install-unit.sh </dev/null) || return 1
@@ -583,7 +652,11 @@ prune_releases() {
 # ---------- Switch ----------
 warm_release "$target_dir"
 write_stamp "$target_dir" "$new_head"
-prepare_host "$target_dir" || { warn "host setup failed — NOT switching; the running daemon is untouched."; exit 1; }
+if ! prepare_host "$target_dir"; then
+  warn "host setup failed — NOT switching or restarting: the daemon keeps running its release, and $REPO_DIR still points at it."
+  warn "The steps that ran before the failure stay: lines added to $ENV_FILE, the update tooling, units installed and systemd reloaded (a changed orquester.service applies at the daemon's next start). Fix the failure and deploy again."
+  exit 1
+fi
 if [ "$converting" -eq 1 ]; then
   # Step 4 of the conversion: the plain checkout moves into the releases dir and $REPO_DIR becomes
   # the link, back to back. The running daemon keeps its open files and loaded modules.
@@ -645,20 +718,9 @@ if ! restart_healthy; then
   exit 4
 fi
 printf '%s\n' "$new_head" | $SUDO tee "$state_file" >/dev/null
-# The update scripts self-update runs (orquester-update.service copies them from here when it
-# exists): those of the last healthy layout-aware release, so a rollback to a release from before
-# releases — or a flip back — keeps layout-aware tooling. Each is replaced atomically.
-if is_layout_aware "$target_dir"; then
-  tooling="$RELEASES_DIR/tooling"
-  for f in remote-update.sh self-update.sh; do
-    [ -f "$target_dir/deploy/lib/$f" ] || continue
-    if ! { $SUDO install -d -m 0755 -- "$tooling" \
-           && $SUDO install -m 0644 -- "$target_dir/deploy/lib/$f" "$tooling/.$f.tmp" \
-           && $SUDO mv -f -- "$tooling/.$f.tmp" "$tooling/$f"; }; then
-      warn "WARNING: could not install $f into $tooling — self-update keeps the copy it has."
-    fi
-  done
-fi
+# Those of the last healthy layout-aware release, so a rollback to a release from before releases
+# — or a flip back — keeps layout-aware tooling.
+install_tooling "$target_dir" always
 prune_releases
 echo "[remote-update] service=$(systemctl is-active orquester)"
 echo "[remote-update] version=$(tree_version "$target_dir") commit=$new_head"

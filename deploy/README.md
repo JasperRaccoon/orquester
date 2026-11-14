@@ -61,23 +61,30 @@ touches the running daemon or the pages it serves:
 /opt/orquester-releases/
   repo.git/              shared git dir (bare clone + remote.origin.fetch for refs/remotes/origin/*);
                          also holds the update lock orq-deploy.lock and orq-last-deployed-head
-  tooling/               remote-update.sh + self-update.sh of the last layout-aware release deployed
+  tooling/               remote-update.sh + self-update.sh that self-update runs: the last healthy
+                         layout-aware release's (before there is one: the first one set up)
   <sha12>/               one release: a linked worktree (git worktree add --detach) at that commit,
-                         fully built; .orq-release-complete (the full sha) is written last
+                         fully built; .orq-release-complete (the full sha) is written last. It counts
+                         as complete only while its HEAD is still that commit with no tracked file
+                         changed (an in-place reset leaves the marker behind)
 /opt/orquester           -> the live release           (symlink; the unit, daemon.env and git -C use it)
 /opt/orquester-previous  -> the release before it      (symlink; may be absent)
 ```
 
 An update (`./deploy.sh deploy`, `rollback` or self-update) fetches into `repo.git`, creates
-`<sha12>/` and builds it there (install, SPA, orq-agent, native-module guard, warm-up of the
-daemon's tsx cache, version stamp, completion marker). A failed build leaves the live release as it
-was. Then it runs the new release's host setup (`ensure-public-url.sh`, `ensure-web-fallback.sh`,
-`install-unit.sh`), points `/opt/orquester-previous` at the live release, swaps `/opt/orquester`
-atomically and restarts: the only interruption is the restart's "Reconnecting…". A release that
-fails its health check is flipped back to the previous one and restarted, without a rebuild. A
-complete release still on disk (a re-deploy, or a rollback to a kept sha) is switched to without
-building. A running daemon keeps loading from the release it started in (systemd and node resolve
-the symlink at start).
+`<sha12>/` and builds it there (install, SPA, orq-agent, voxl and gdu, native-module guard, chown,
+then the completion marker). A failed build deletes the directory it created and leaves the live
+release as it was. Then, in this order: the warm-up of the daemon's tsx cache (best-effort, bounded by
+`WARM_TIMEOUT`, default 600 s in `warm-release.sh`), the version stamp, the new release's host setup
+(`ensure-public-url.sh`, `ensure-web-fallback.sh`, the update tooling when `tooling/` has none, and
+`install-unit.sh`), the swap of `/opt/orquester` to the new release, then of
+`/opt/orquester-previous` to the one that was live (each symlink replaced atomically), and the
+restart: the only interruption is the restart's "Reconnecting…". A release that fails its health
+check is flipped back to the previous one and restarted, without a rebuild. A complete release
+still on disk (a re-deploy, or a rollback to a kept sha) is switched to without building; an
+incomplete one that is live or previous is reset to its commit and rebuilt in place. A running
+daemon keeps loading from the release it started in (systemd and node resolve the symlink at
+start).
 
 Pages opened before the switch keep lazily loading chunks of the old build: the daemon serves a
 hashed asset the live `ORQUESTER_WEB_DIR` lacks from `ORQUESTER_WEB_FALLBACK_DIR`
@@ -98,30 +105,46 @@ the line `# orq-release-layout: 1`): the checkout's git dir becomes `repo.git` (
 included), the old directory is registered as the release of its commit without a rebuild, the new
 release is built beside it, and at the switch the old directory moves to
 `/opt/orquester-releases/<sha12>` with the symlink put in its place, immediately before the
-restart. Each step can be re-run after an interruption. `remote-provision.sh` creates the layout
-directly on a fresh host; re-run on a host that is still a plain checkout, it updates that checkout
-in place and leaves the conversion to the next deploy.
+restart. Each step can be re-run after an interruption. On a self-update, the checkout's own (older)
+`remote-update.sh` runs first: it resets the checkout to the target in place and hands over to the
+target's script, which resets the checkout back to the commit it was at before anything else, so a
+conversion that stops before the switch leaves the checkout as it was. A host is converted only to
+a layout-aware release: a deploy or rollback of an older commit on a host that is still a plain
+checkout exits 1 without changing anything (deploy a current commit first, then roll back).
+`remote-provision.sh` creates the layout directly on a fresh host; re-run on a host that is still a
+plain checkout, it updates that checkout in place and leaves the conversion to the next deploy.
 
 ### Deploy health check and automatic revert
 
 `remote-update.sh` restarts the daemon and then waits up to 10 minutes (`HEALTH_WAIT`, 600 s) for
-`/health` and an active unit. If the new release never gets there, it switches back to the last
-successful deploy (`repo.git/orq-last-deployed-head`; a plain checkout not converted yet: resets the
-tree to it and rebuilds it), restarts it and checks it the same way. The deploy fails either way: exit 3 means the previous release is back and healthy (the summary
-says `AUTO-REVERTED`), exit 4 means it did not come back either and the daemon needs attention now
+`/health` and an active unit. If the new release never gets there, it switches the link back,
+without a rebuild, to the last successful deploy (`repo.git/orq-last-deployed-head`) when that
+release is still complete on disk, else to the release that was live — on the converting update
+that is the converted checkout — restarts it and checks it the same way. The deploy fails either
+way: exit 3 means the previous release is back and healthy (the summary says `AUTO-REVERTED`),
+exit 4 means it did not come back either and the daemon needs attention now
 (`./deploy.sh logs <target>`). A build or native-module failure before the restart never restarts
-the daemon. `./deploy.sh rollback <target> <sha>` runs the same cycle with that sha. One update runs
-per host at a time (`flock` on `repo.git/orq-deploy.lock`, shared by every release and with
-self-update below): a second one exits 5 without touching anything. Both `./deploy.sh` and
-self-update run the *running* release's `remote-update.sh`; once the new release's worktree exists,
-a layout-aware copy there that differs takes over the rest of the cycle (a copy in `$TMPDIR`, with
+the daemon; neither does a failed host setup, though what it did before failing (lines added to
+`daemon.env`, tooling, units installed and systemd reloaded) stays. `./deploy.sh rollback <target>
+<sha>` runs the same cycle with that sha. One update runs per host at a time (`flock` on
+`repo.git/orq-deploy.lock`, shared by every release and with self-update below): a second one exits
+5 without touching anything.
+
+Which `remote-update.sh` runs: `./deploy.sh` copies the operator's *local* `deploy/lib/remote-update.sh`
+to the host and runs it, so deploy only from an up-to-date checkout. Self-update runs
+`/opt/orquester-releases/tooling/remote-update.sh`, or the live release's `deploy/lib/` copy when
+`tooling/` has none (a host not converted yet). Once the new release's worktree exists, a
+layout-aware copy there that differs takes over the rest of the cycle (a copy in `$TMPDIR`, with
 the same lock), so steps a release adds run on the update that delivers it. A release from before
-the layout never takes over, and its units are not installed: a rollback to it is carried out by the
-current script and keeps the current units. Every successful update to a layout-aware release (and
-provision) installs that release's `remote-update.sh` and `self-update.sh` into
-`/opt/orquester-releases/tooling/` (copied beside and renamed into place); `orquester-update.service`
-runs those, so self-update keeps layout-aware tooling after a rollback to an older release. Without
-them (a host not converted yet) it takes the live release's `deploy/lib/` copies.
+the layout never takes over, and neither its units nor its scripts are installed: a rollback to it
+is carried out by the current script and keeps the current units and tooling. That also holds for
+an automatic revert to such a release: the failed release's units (`orquester.service` included)
+stay installed; they are layout-aware and start whichever release `/opt/orquester` points at, and
+the next deploy installs its own. A layout-aware release installs its `remote-update.sh` and
+`self-update.sh` into `tooling/` (copied beside and renamed into place) during its host setup when
+`tooling/` has none, so the update unit it installs never falls back to an older release's script
+even if it then fails its health check; every healthy deploy of a layout-aware release (and
+provision) replaces them with its own.
 `deploy/lib/remote-update.test.mjs` (in `pnpm test`) drives the script against a throwaway checkout
 with stubbed `systemctl`, `curl` and `pnpm`.
 
