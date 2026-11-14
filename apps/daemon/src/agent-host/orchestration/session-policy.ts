@@ -188,9 +188,16 @@ export interface IdentitySwitchState {
    * The switch is a busy account switch's own (`SetThreadIdentityRequest.busySwitch`): the
    * daemon stopped the work first — which paused a continuing goal, though the summary's
    * predicate may still read it continuing — or found a goal held for an update, whose hold the
-   * switch keeps. Only the two goal refusals are skipped; absent reads as no.
+   * switch keeps. Only the two goal refusals may be skipped, and only for a goal that is not
+   * going on ({@link goalRunning}) or one an update really holds; absent reads as no.
    */
   busySwitch?: boolean;
+  /**
+   * The goal is going on right now: the fold reads it `active`, or the host has just set it going
+   * again and the provider's own update has not landed (`goalJustResumed`). A busy switch's stop
+   * pauses such a goal first; one still going on keeps the continuing refusal. Absent reads as no.
+   */
+  goalRunning?: boolean;
 }
 
 /** The refusal for a continuing goal — the composer mirror shows these very words. */
@@ -233,10 +240,13 @@ function identitySwitchRefusalWords(state: IdentitySwitchState): string | null {
   // works. Behind the compaction, which a goal command waits for too. A held
   // goal continues as well, but its pause is the deploy's: its own words say
   // how to take it back (goals §5.7).
-  if (state.goalHeldForUpdate && state.busySwitch !== true) {
+  // A busy switch keeps a held goal held (it reads continuing, maybe still `active` while its
+  // pause's update trails); any other goal it may switch only once the stop paused it.
+  const busyMaySwitchGoal = state.busySwitch === true && (state.goalHeldForUpdate || state.goalRunning !== true);
+  if (state.goalHeldForUpdate && !busyMaySwitchGoal) {
     return GOAL_HELD_SWITCH_REFUSAL;
   }
-  if (state.goalContinuing && state.busySwitch !== true) {
+  if (state.goalContinuing && !busyMaySwitchGoal) {
     return GOAL_CONTINUING_SWITCH_REFUSAL;
   }
   if (
