@@ -35,6 +35,8 @@ export interface ConnectionLogState {
   serverProtocol: number | null;
   /** The daemon checkout's commit from `/api/info`, when it reports one. */
   serverBuild: string | null;
+  /** The build of the web app the daemon serves on this connection, from `/api/info`, when it reports one. */
+  serverWebBuild: string | null;
   /** When the daemon last announced it is stopping (restart, deploy, Remote access change). */
   stoppingAt: number | null;
   /** Epoch ms of the last established connection. */
@@ -48,6 +50,7 @@ const EMPTY: ConnectionLogState = {
   recent: [],
   serverProtocol: null,
   serverBuild: null,
+  serverWebBuild: null,
   stoppingAt: null,
   connectedAt: null,
   ws: {}
@@ -90,11 +93,12 @@ export function noteServerHealth(health: { protocol?: number }): void {
 }
 
 /** The daemon answered `/api/info`. */
-export function noteServerInfo(info: { protocol?: number; build?: string | null }): void {
+export function noteServerInfo(info: { protocol?: number; build?: string | null; webBuild?: string | null }): void {
   update({
     ...state,
     serverProtocol: info.protocol ?? state.serverProtocol,
-    serverBuild: typeof info.build === "string" ? info.build : null
+    serverBuild: typeof info.build === "string" ? info.build : null,
+    serverWebBuild: typeof info.webBuild === "string" && info.webBuild ? info.webBuild : null
   });
 }
 

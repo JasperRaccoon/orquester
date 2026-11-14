@@ -124,7 +124,7 @@ import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks, writeFileAtomic } from "./agent-hooks";
 import { DailyLogStream } from "./daily-log.ts";
-import { daemonBuildInfo, daemonRepoRoot, type BuildInfo } from "./build-info.ts";
+import { daemonBuildInfo, daemonRepoRoot, readWebBuild, type BuildInfo } from "./build-info.ts";
 import { StorageScanService } from "./storage/scan-service.ts";
 import { registerStorageRoutes } from "./storage/routes.ts";
 import { createStorageGuard, readMountPoints, type StorageGuard } from "./storage/guard.ts";
@@ -351,10 +351,10 @@ import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createReadStream, existsSync, realpathSync } from "node:fs";
+import { createReadStream, existsSync, realpathSync, statSync } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fsPathFromQuery } from "./fs-path-query.js";
 import { randomUUID } from "node:crypto";
@@ -430,6 +430,8 @@ export interface StartDaemonOptions {
   homeDir?: string;
   platform?: NodeJS.Platform | string;
   webDir?: string;
+  /** The previous release's web build (env `ORQUESTER_WEB_FALLBACK_DIR`): hashed assets `webDir` lacks are served from it. */
+  webFallbackDir?: string;
 }
 
 export interface RunningDaemon {
@@ -516,6 +518,12 @@ export function aggregateWorstAccountUsage(
 }
 
 export async function startDaemon(options: StartDaemonOptions = {}): Promise<RunningDaemon> {
+  // Boot timing for the journal: `performance.now()` counts from process start, so its value here
+  // is the time spent loading (and, on a cold tsx cache, transpiling) the module graph.
+  const bootPhases: string[] = [`modules ${bootSeconds(performance.now())}`];
+  const bootPhase = (name: string, since: number): void => {
+    bootPhases.push(`${name} ${bootSeconds(performance.now() - since)}`);
+  };
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
   const runtimePlatform = options.platform ?? osPlatform();
@@ -1148,6 +1156,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     }
   }
   await registry.init();
+  const reattachStarted = performance.now();
   // Reattach to any tmux sessions that outlived a previous daemon process
   // (KillMode=process keeps the tmux server alive across restarts). No-op on the
   // local backend. Best-effort: a tmux/socket error must not block startup.
@@ -1157,6 +1166,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       sessionsReattached = true;
     })
     .catch((error) => console.error("Session reattach failed", error));
+  bootPhase("sessions", reattachStarted);
   // The removed model proxy's one-time handover: stop it and hand the accounts
   // it refreshed back to the refresher started below, fresher tokens first.
   await retireModelProxy({
@@ -1811,11 +1821,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // chat tab records are already loaded, and before any transport serves.
   // Best-effort: a host failure must not block the daemon — every chat route
   // then answers 503 HOST_UNAVAILABLE.
+  const agentHostStarted = performance.now();
   await agentChat.init().catch((error) => console.error("Agent host init failed", error));
+  bootPhase("agent host", agentHostStarted);
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
   const webDir = webDirEnv ? resolve(cwd, webDirEnv) : undefined;
   const serveWeb = webDir && existsSync(join(webDir, "index.html")) ? webDir : undefined;
+  const webFallbackEnv = options.webFallbackDir ?? env.ORQUESTER_WEB_FALLBACK_DIR;
+  const webFallback = serveWeb && webFallbackEnv ? webFallbackRoot(serveWeb, resolve(cwd, webFallbackEnv)) : undefined;
 
   // The local unix socket transport is always present.
   if (runtimePlatform !== "win32") {
@@ -1904,8 +1918,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   attachWorkflowEngine(workflowDaemon.runtime.engine);
   // Runs resume and missed schedules fire as the engine starts, and their account selection reads
   // usage at once: let the first reading land first (the persisted one, usually no request at all).
+  const usageStarted = performance.now();
   await usage.whenFirstReading(15_000);
+  bootPhase("usage", usageStarted);
+  const workflowsStarted = performance.now();
   await workflowDaemon.start(services.internalApi).catch((error) => console.error("Workflow engine start failed", error));
+  bootPhase("workflows", workflowsStarted);
 
   // The external HTTP transport is opt-in and hot-reloadable: changing its
   // config (password / host / port / enabled) restarts THIS transport only —
@@ -1922,12 +1940,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     const app = createServer(config, resolved, clientConfig, logStream, services, {
       authRequired: true,
       mode: "remote",
-      serveWeb
+      serveWeb,
+      webFallback
     });
     await app.listen({ host: config.transports.http.host, port: config.transports.http.port });
     httpServer = app;
     console.log(
-      `http transport on ${config.transports.http.host}:${config.transports.http.port}${serveWeb ? " (+web)" : ""}`
+      `http transport on ${config.transports.http.host}:${config.transports.http.port}${serveWeb ? (webFallback ? ` (+web, missing assets from ${webFallback})` : " (+web)") : ""}`
     );
   };
   const stopHttp = async () => {
@@ -1953,7 +1972,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     }
   };
 
+  const httpStarted = performance.now();
   await startHttp();
+  bootPhase("http", httpStarted);
   // Agent profile change detection (fs watchers on each installed agent's config), after boot.
   agentProfile.start();
   // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.
@@ -2064,6 +2085,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const running = buildInfo.commit ? ` ${buildInfo.version ?? "?"} (${buildInfo.commit.slice(0, 12)})` : "";
   console.log(`Orquester daemon${running} ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
+  console.log(`[boot] ready in ${bootSeconds(performance.now())} (${bootPhases.join(", ")})`);
 
   return {
     daemonId,
@@ -2242,7 +2264,7 @@ export function createServer(
   clientConfig: ClientConfig,
   logStream: { write(line: string): void },
   services: Services,
-  options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
+  options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string; webFallback?: string }
 ): FastifyInstance {
   const { registry, sessions, accounts, git, todos, recentProjects, usage, usageTokens, subagentCacheTtl, push, agentAccounts } = services;
 
@@ -2461,6 +2483,7 @@ export function createServer(
     workspacesDir: resolved.workspacesDir,
     protocol: ORQUESTER_PROTOCOL_VERSION,
     build: services.buildInfo.commit?.slice(0, 12) ?? null,
+    webBuild: options.serveWeb ? await readWebBuild(options.serveWeb) : null,
     capabilities: {
       terminals: true,
       sessions: true,
@@ -5642,8 +5665,16 @@ export function createServer(
   // `/embed/` holds the embeddable chat's build (spec 2026-11-13 §5.2): public, data-free files that
   // foreign origins load as cross-origin module scripts and fonts. Every response under it — hit,
   // miss or preflight — is open to any origin, and a miss is a JSON 404, never index.html.
+  //
+  // `webFallback` is the previous release's build (staged releases, spec 2026-11-13): a page loaded
+  // before the switch still asks for its own lazy chunks, which the new build does not have. A hashed
+  // asset the live build lacks is served from there, with the live headers; everything else —
+  // index.html, the service worker, the manifest, any unhashed file — only ever comes from the live
+  // build. An `/assets/` miss in both is a JSON 404 too: index.html under an asset URL is a module
+  // error in the page, and the service worker would cache it there for good.
   if (options.serveWeb) {
-    const embedDir = join(options.serveWeb, "embed") + sep;
+    const liveRoot = options.serveWeb;
+    const fallbackRoot = options.webFallback;
     app.addHook("onRequest", async (request, reply) => {
       const path = safeDecodePath(request.url.split("?")[0] ?? "");
       if (path === undefined || !isEmbedPath(path)) return;
@@ -5655,20 +5686,26 @@ export function createServer(
       }
     });
     void app.register(fastifyStatic, {
-      root: options.serveWeb,
+      // Tried in order: a file missing from the live build is looked up in the fallback next.
+      root: fallbackRoot ? [liveRoot, fallbackRoot] : liveRoot,
       wildcard: true,
+      allowedPath: (pathname, root) => root !== fallbackRoot || fallbackAssetAllowed(fallbackRoot, pathname),
       // Called only for a file that exists (so a 404 never carries `immutable`), before `send`
       // fills in its default `public, max-age=0`, which it skips when Cache-Control is already set.
       setHeaders: (res, filePath) => {
-        if (!filePath.startsWith(embedDir)) return;
-        const name = filePath.slice(embedDir.length);
+        const root = fallbackRoot && filePath.startsWith(fallbackRoot + sep) ? fallbackRoot : liveRoot;
+        const rel = relative(root, filePath).split(sep).join("/");
+        if (!rel.startsWith("embed/")) return;
+        const name = rel.slice("embed/".length);
         res.setHeader("cache-control", EMBED_UNHASHED_FILES.has(name) ? "no-cache" : "public, max-age=31536000, immutable");
       }
     });
     app.setNotFoundHandler((request, reply) => {
       const url = request.url;
+      const path = safeDecodePath(url.split("?")[0] ?? "") ?? "";
       const isApi =
-        isEmbedPath(safeDecodePath(url.split("?")[0] ?? "") ?? "") ||
+        isEmbedPath(path) ||
+        path.startsWith("/assets/") ||
         url.startsWith("/api") ||
         url.startsWith("/health") ||
         url.startsWith("/events") ||
@@ -5700,6 +5737,11 @@ export function parseAppdir(args: string[]): string | undefined {
   }
 
   return undefined;
+}
+
+/** `1234.5` ms → `"1.2s"`, for the `[boot]` line. */
+function bootSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 /** Resolve a (possibly relative) appdir to an absolute path, or undefined. */
@@ -6164,6 +6206,52 @@ async function writeJsonFile(file: string, value: unknown): Promise<void> {
 
 /** The embeddable chat's files that keep their name across builds; every other file under `/embed/` is content-hashed. */
 const EMBED_UNHASHED_FILES = new Set(["manifest.json", "LICENSES.txt", "variables.json"]);
+
+/** A Vite output name with its content hash: `index-B3x_k9aZ.js` (the app), `katex.5e6f7a8b.js` (the embed). */
+const HASHED_FILE_NAME = /[.-][A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/;
+
+/**
+ * Whether `rel` (a path inside a web build, `/`-separated) is a content-hashed build output: the
+ * app's `assets/` or the embed's files other than its fixed-name ones. Such a file never changes
+ * under its name, so a previous build's copy is as good as the one it was built with.
+ */
+function isHashedWebAsset(rel: string): boolean {
+  const parts = rel.split("/");
+  const name = parts[parts.length - 1] ?? "";
+  if (parts.length < 2 || !HASHED_FILE_NAME.test(name)) return false;
+  if (parts[0] === "assets") return true;
+  return parts[0] === "embed" && !(parts.length === 2 && EMBED_UNHASHED_FILES.has(name));
+}
+
+/**
+ * Whether the fallback build may answer for `pathname` (the request path): it must name a hashed
+ * asset after resolving `..` and symlinks, inside the fallback root. A missing file is refused here
+ * too, so the miss goes straight to the not-found handler.
+ */
+function fallbackAssetAllowed(fallbackRoot: string, pathname: string): boolean {
+  try {
+    const real = realpathSync(join(fallbackRoot, pathname));
+    const rel = relative(fallbackRoot, real);
+    if (rel === "" || rel.startsWith("..") || rel.startsWith(sep) || !statSync(real).isFile()) return false;
+    return isHashedWebAsset(rel.split(sep).join("/"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The fallback web build's real path, or undefined when it is missing, not a directory, or the live
+ * build itself (an unset or not-yet-created previous release leaves the fallback off).
+ */
+function webFallbackRoot(liveRoot: string, dir: string): string | undefined {
+  try {
+    const real = realpathSync(dir);
+    if (!statSync(real).isDirectory() || real === realpathSync(liveRoot)) return undefined;
+    return real;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Whether a request path is under the embeddable chat's reserved `/embed` prefix. */
 function isEmbedPath(path: string): boolean {

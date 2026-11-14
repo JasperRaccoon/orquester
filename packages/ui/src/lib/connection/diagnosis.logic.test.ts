@@ -20,6 +20,7 @@ const log = (patch: Partial<ConnectionLogState> = {}): ConnectionLogState => ({
   recent: [],
   serverProtocol: 1,
   serverBuild: "abc1234",
+  serverWebBuild: null,
   stoppingAt: null,
   connectedAt: NOW - 600_000,
   ws: {},
@@ -128,6 +129,24 @@ describe("presentConnectionDiagnosis", () => {
     const older = diagnose({ status: "connected", attempt: 0, clientProtocol: 2, log: log({ serverProtocol: 1 }) });
     assert.equal(older?.kind, "server-outdated");
     assert.equal(diagnose({ status: "connected", attempt: 0, log: log({ serverProtocol: null }) }), null, "an older daemon without a protocol");
+  });
+
+  it("offers a reload when the server that served this page now serves another web build", () => {
+    const served = (patch: Partial<ConnectionDiagnosisInput>) =>
+      diagnose({ status: "connected", attempt: 0, sameOrigin: true, clientBuild: "abc1234", ...patch });
+    const updated = served({ log: log({ serverBuild: "def567890abc", serverWebBuild: "def5678" }) });
+    assert.equal(updated?.kind, "app-updated");
+    assert.equal(updated?.action, "reload");
+    assert.equal(served({ log: log({ serverWebBuild: "abc1234def56" }) }), null, "the same commit, longer");
+    assert.equal(
+      served({ log: log({ serverBuild: "def567890abc", serverWebBuild: "abc1234" }) }),
+      null,
+      "the daemon moved on but still serves this page's build: a reload would bring the same page back"
+    );
+    assert.equal(served({ log: log({ serverBuild: "def567890abc", serverWebBuild: null }) }), null, "no served web build known");
+    assert.equal(served({ runtime: "desktop", log: log({ serverWebBuild: "def5678" }) }), null, "the desktop ships its own UI");
+    assert.equal(served({ sameOrigin: false, log: log({ serverWebBuild: "def5678" }) }), null, "another server's connection");
+    assert.equal(served({ clientBuild: "unknown", log: log({ serverWebBuild: "def5678" }) }), null);
   });
 
   it("warns when HTTP works but the WebSocket keeps closing", () => {

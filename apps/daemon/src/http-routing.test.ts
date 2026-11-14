@@ -9,7 +9,9 @@
  *   `command:<64>/<64>`, a plugin `plugin:<name>@<marketplace>`, percent-encoded)
  *   still matches its route;
  * - the embeddable chat's public `/embed/` files load from any origin without a
- *   bearer, cached by name, and a stale one is a JSON 404 rather than the SPA.
+ *   bearer, cached by name, and a stale one is a JSON 404 rather than the SPA;
+ * - a page loaded before a release switch still gets its hashed assets from the
+ *   previous release's build, and nothing else comes from there.
  */
 
 import assert from "node:assert/strict";
@@ -22,7 +24,7 @@ import { createVisualUrlSigner } from "./agent-chat/visual-urls.ts";
 import { SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 import { createServer } from "./index.ts";
 import { testAuthSessions } from "./auth/testing.ts";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { knowledgeRoutes } from "@orquester/api";
@@ -36,7 +38,7 @@ const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
 const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 
-function remoteApp(services: Record<string, unknown>, mode: "local" | "remote" = "remote", serveWeb?: string) {
+function remoteApp(services: Record<string, unknown>, mode: "local" | "remote" = "remote", serveWeb?: string, webFallback?: string) {
   const config = createDefaultDaemonConfig({ env: {} });
   config.transports.http.username = USERNAME;
   config.transports.http.passwordHash = PASSWORD_HASH;
@@ -48,7 +50,7 @@ function remoteApp(services: Record<string, unknown>, mode: "local" | "remote" =
     createDefaultClientConfig(`${root}/daemon.sock`),
     createWriteStream("/dev/null"),
     { authSessions: AUTH_SESSIONS, ...services } as unknown as CreateServerArgs[4],
-    { authRequired: mode === "remote", mode, serveWeb }
+    { authRequired: mode === "remote", mode, serveWeb, webFallback }
   );
 }
 
@@ -384,6 +386,74 @@ test("a missing embed file is a cross-origin JSON 404, not the SPA; other web pa
       assert.equal(spa.statusCode, 200, url);
       assert.match(spa.body, /<title>spa<\/title>/);
       assert.equal(spa.headers["access-control-allow-origin"], undefined);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+/** The previous release's build: its own index, service worker and chunks, one a symlink out of it. */
+async function previousWebDir(t: { after(fn: () => Promise<void>): void }): Promise<string> {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), "orq-web-prev-")));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, "assets"));
+  await mkdir(join(dir, "embed", "chunks"), { recursive: true });
+  await writeFile(join(dir, "index.html"), "<!doctype html><title>previous</title>");
+  await writeFile(join(dir, "sw.js"), "/* previous sw */");
+  await writeFile(join(dir, "secret.txt"), "previous secret");
+  await writeFile(join(dir, "assets", "Chat-Ab3_x9Zq.js"), "export const previous = 1;");
+  await writeFile(join(dir, "assets", "notes.txt"), "previous notes");
+  await symlink(join(dir, "secret.txt"), join(dir, "assets", "Leak-Zz9_8Yy7.js"));
+  await writeFile(join(dir, "embed", "chunks", "mermaid.0a1b2c3d.js"), "export const previous = 2;");
+  await writeFile(join(dir, "embed", "manifest.json"), JSON.stringify({ contract: 1, entry: "agent-chat.0a1b2c3d.js" }));
+  return dir;
+}
+
+test("a hashed asset the live build lacks comes from the previous build, with the live headers; nothing else does", async (t) => {
+  const live = await webDirWithEmbed(t);
+  const app = remoteApp({}, "remote", live, await previousWebDir(t));
+  await rm(join(live, "embed", "manifest.json"));
+  try {
+    const liveAsset = await app.inject({ method: "GET", url: "/assets/app.1a2b3c4d.js" });
+    const chunk = await app.inject({ method: "GET", url: "/assets/Chat-Ab3_x9Zq.js" });
+    assert.equal(chunk.statusCode, 200);
+    assert.equal(chunk.body, "export const previous = 1;");
+    assert.match(String(chunk.headers["content-type"]), /javascript/);
+    assert.equal(chunk.headers["cache-control"], liveAsset.headers["cache-control"]);
+
+    const embedChunk = await app.inject({ method: "GET", url: "/embed/chunks/mermaid.0a1b2c3d.js" });
+    assert.equal(embedChunk.statusCode, 200);
+    assert.equal(embedChunk.body, "export const previous = 2;");
+    assert.equal(embedChunk.headers["cache-control"], "public, max-age=31536000, immutable");
+    assert.equal(embedChunk.headers["access-control-allow-origin"], "*");
+
+    // The shell, the service worker and every unhashed file come from the live build or not at all.
+    for (const url of ["/", "/index.html", "/sw.js", "/workspace/project"]) {
+      const res = await app.inject({ method: "GET", url });
+      assert.doesNotMatch(res.body, /previous/, url);
+    }
+    for (const url of ["/embed/manifest.json", "/assets/notes.txt", "/assets/Leak-Zz9_8Yy7.js"]) {
+      const res = await app.inject({ method: "GET", url });
+      assert.equal(res.statusCode, 404, url);
+      assert.doesNotMatch(res.body, /previous/, url);
+    }
+    // Out of `assets/` by `..`: never the previous build's file (a path the router resolves to the root gets the SPA).
+    for (const url of ["/assets/../secret.txt", "/assets/%2e%2e/secret.txt", "/assets/..%2fsecret.txt", "/assets/%2e%2e/%2e%2e/etc/passwd"]) {
+      const res = await app.inject({ method: "GET", url });
+      assert.doesNotMatch(res.body, /previous|root:/, url);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("without a previous build, a missing hashed asset is a JSON 404, not the SPA", async (t) => {
+  const app = remoteApp({}, "remote", await webDirWithEmbed(t));
+  try {
+    for (const method of ["GET", "HEAD"] as const) {
+      const miss = await app.inject({ method, url: "/assets/Chat-Ab3_x9Zq.js" });
+      assert.equal(miss.statusCode, 404, method);
+      assert.match(String(miss.headers["content-type"]), /application\/json/);
     }
   } finally {
     await app.close();

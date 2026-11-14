@@ -18,7 +18,9 @@ export type ConnectionDiagnosisKind =
   /** The daemon speaks an older protocol than this app. */
   | "server-outdated"
   /** HTTP works, WebSockets do not. */
-  | "ws-blocked";
+  | "ws-blocked"
+  /** The server that served this web page now runs another build (an update): a reload loads it. */
+  | "app-updated";
 
 export type ConnectionDiagnosisAction = "retry" | "sign-in" | "reload";
 
@@ -83,6 +85,9 @@ function locate(input: ConnectionDiagnosisInput): ConnectionDiagnosisKind | null
     if (ws && ws.failures >= WS_BLOCKED_AFTER) {
       return "ws-blocked";
     }
+    if (servedAnotherBuild(input)) {
+      return "app-updated";
+    }
     return null;
   }
   const reconnecting = status === "connecting" && input.attempt > 0;
@@ -107,6 +112,22 @@ function locate(input: ConnectionDiagnosisInput): ConnectionDiagnosisKind | null
     return "restarting";
   }
   return failure.kind;
+}
+
+/**
+ * Whether the daemon that served this web page now serves another web build than the page's own, so
+ * a reload would load a different app. It compares the web build the daemon serves (its dist's
+ * `build-id`), not the daemon's own commit: a checkout committed or pulled without rebuilding its web
+ * serves the page's build still, and a reload would bring the same page back. Both are short commits,
+ * so one prefixing the other counts as a match. Only a page the daemon itself served counts: the
+ * desktop app ships its own UI and a web page on another server's connection was not loaded from it.
+ * An unknown side (an older daemon, a dist without `build-id`) counts as the same.
+ */
+function servedAnotherBuild(input: ConnectionDiagnosisInput): boolean {
+  const server = input.log.serverWebBuild;
+  const client = input.clientBuild;
+  if (input.runtime !== "web" || !input.sameOrigin || !server || !client || client === "unknown") return false;
+  return !server.startsWith(client) && !client.startsWith(server);
 }
 
 function hostOf(endpoint: string): string | null {
@@ -154,6 +175,8 @@ function headline(kind: ConnectionDiagnosisKind, input: ConnectionDiagnosisInput
       return `${server} runs an older Orquester than this app`;
     case "ws-blocked":
       return `Live terminals can't connect to ${server}`;
+    case "app-updated":
+      return "Orquester was updated";
     case "unknown":
       return input.connectionError ?? `Can't connect to ${server}`;
   }
@@ -250,6 +273,8 @@ function steps(kind: ConnectionDiagnosisKind, input: ConnectionDiagnosisInput): 
         "A proxy, firewall, or VPN between this device and the server is blocking WebSocket upgrades: allow them (Caddy's reverse_proxy does by default).",
         "Chats keep working; terminals and browser tabs need the WebSocket."
       ];
+    case "app-updated":
+      return ["Reload to load the new version. This page keeps working until you do."];
     case "unknown":
       return ["Retry. If it keeps failing, copy these diagnostics."];
   }
@@ -261,6 +286,8 @@ function action(kind: ConnectionDiagnosisKind, input: ConnectionDiagnosisInput):
       return "sign-in";
     case "client-outdated":
       return input.runtime === "web" ? "reload" : null;
+    case "app-updated":
+      return "reload";
     case "server-outdated":
     case "ws-blocked":
       return null;
@@ -293,6 +320,7 @@ export function presentConnectionDiagnosis(input: ConnectionDiagnosisInput): Con
   add("Server", redactUrl(input.endpoint));
   add("App build", input.clientBuild);
   add("Server build", log.serverBuild);
+  add("Served web build", log.serverWebBuild);
   add(
     "Protocol",
     `app ${input.clientProtocol}, server ${log.serverProtocol ?? "unknown"}`
@@ -361,7 +389,7 @@ export function connectionDiagnosticsText(report: DiagnosticsReportInput): strin
     `User agent: ${report.client.userAgent || "unknown"}`,
     `Network: ${input.online ? "online" : "offline"}`,
     `Status: ${input.status}${input.attempt > 0 ? ` (reconnect attempt ${input.attempt})` : ""}`,
-    `Server reports: protocol ${log.serverProtocol ?? "unknown"}, build ${log.serverBuild ?? "unknown"}`,
+    `Server reports: protocol ${log.serverProtocol ?? "unknown"}, build ${log.serverBuild ?? "unknown"}, web build ${log.serverWebBuild ?? "unknown"}`,
     `Last connected: ${log.connectedAt !== null ? iso(log.connectedAt) : "never"}`,
     `Restart announced: ${log.stoppingAt !== null ? iso(log.stoppingAt) : "no"}`,
     ""

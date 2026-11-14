@@ -11,8 +11,8 @@
 #   REQUEST_FILE   the daemon's request file; removed first (the path unit watches it with
 #                  PathExists=, and would start the update again while it exists). Content ignored.
 #   STATUS_FILE    the status file; written atomically (a temp file in its own directory + mv)
-#   UPDATE_SCRIPT  the remote-update.sh to run — a copy outside the checkout it rewrites
-#   REPO_DIR       default /opt/orquester
+#   UPDATE_SCRIPT  the remote-update.sh to run — a copy outside the release tree it switches
+#   REPO_DIR       default /opt/orquester (a symlink to the live release, or a plain checkout)
 #   BRANCH         default main
 # Everything is inside main(), so bash has read the whole script before anything runs.
 
@@ -29,9 +29,10 @@ main() {
   rm -f -- "$REQUEST_FILE"
 
   # The commit the daemon runs: the deploy's version stamp, which remote-update.sh writes only on
-  # its way to a restart. The checkout's HEAD can be ahead of the daemon (a build that failed after
-  # the reset leaves HEAD on the new commit and the old daemon running); it is the fallback for an
-  # install no deploy has stamped yet.
+  # its way to a restart. A plain checkout's HEAD can be ahead of the daemon (a build that failed
+  # after the reset leaves HEAD on the new commit and the old daemon running); it is the fallback for
+  # an install no deploy has stamped yet. Both are read through $repo_dir, so in the release layout
+  # they are the live release's (git follows the symlink and the worktree's .git file).
   from="$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' "$repo_dir/.orquester-version.json" 2>/dev/null | head -n1 || true)"
   [[ "$from" =~ ^[0-9a-f]{40}$ ]] || from="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || true)"
   [[ "$from" =~ ^[0-9a-f]{40}$ ]] && from="\"$from\"" || from=null

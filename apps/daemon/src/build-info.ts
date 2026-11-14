@@ -4,8 +4,12 @@
 // metadata, read as files (HEAD, loose ref, packed-refs; a linked worktree's `.git` file and
 // `commondir` followed) without spawning git; a tree without `.git` falls back to the stamp
 // `./deploy.sh` writes at the repository root (VERSION_STAMP_FILE). Anything unreadable is null.
+//
+// Also the build of the web app the daemon serves (`readWebBuild`), which can differ from the
+// daemon's commit: a checkout committed or pulled without rebuilding its web dist.
 
 import { readFileSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -109,4 +113,20 @@ export function daemonRepoRoot(): string | null {
 /** The running daemon's build info, from the checkout this module was loaded from. */
 export function daemonBuildInfo(): BuildInfo {
   return readBuildInfo(daemonRepoRoot());
+}
+
+/** Written by the web build (`packages/ui/vite/build-id.ts`, keep the name in step): the page's own build id. */
+export const WEB_BUILD_ID_FILE = "build-id";
+
+/**
+ * The build of the web app in `webDir` (its `build-id`), or null when there is none or it is not a
+ * short commit. Read per call, not cached: a dev checkout rebuilds its dist under a running daemon.
+ */
+export async function readWebBuild(webDir: string): Promise<string | null> {
+  try {
+    const build = (await readFile(join(webDir, WEB_BUILD_ID_FILE), "utf8")).trim();
+    return /^[0-9a-f]{4,40}$/.test(build) ? build : null;
+  } catch {
+    return null;
+  }
 }
