@@ -1340,8 +1340,9 @@ describe("a busy account switch keeps the queue", () => {
     );
     assert.equal(state().slice.errorBanner, null);
 
-    fake.push(ended(3));
+    // Its summary arrives: the next frame retries nothing while it stands.
     api.getState().actions.setAccountSwitchInFlight(true);
+    fake.push(ended(3));
     await settle();
     assert.equal(turns(fake).length, 1, "no retry into the fence");
 
@@ -1357,6 +1358,55 @@ describe("a busy account switch keeps the queue", () => {
       turns(fake)[0]?.body.commandId,
       "a new id: the refused one is never answered from a receipt"
     );
+    assert.deepEqual(state().slice.queue, []);
+  });
+
+  it("a refusal that arrives after the switch ended is retried at the next frame, not at once", async () => {
+    const { api, fake, state } = await store("L");
+    fake.push(running(1));
+    api.getState().actions.queueMessage(queued("one"));
+    // The summary said "switch over" before this refusal came back: nothing
+    // in flight will lift a fence, and a retry now could loop.
+    fake.fail(new AgentChatCommandError(409, "TURN_NOT_IDLE", "An account switch is in progress."), 1);
+    fake.push(ended(2));
+    await settle();
+    assert.equal(turns(fake).length, 1, "not retried on its own settle");
+    assert.deepEqual(state().slice.queue.map((message) => message.text), ["one"]);
+
+    fake.push(ended(3));
+    await settle();
+    assert.deepEqual(fake.posted.filter((post) => post.name === "turn").map((post) => post.body.input), ["one"]);
+    assert.deepEqual(state().slice.queue, []);
+  });
+
+  it("a message sent while a switch is in flight is queued, and goes once after it", async () => {
+    const { api, fake, state } = await store("T");
+    fake.push(ended(1));
+    api.getState().actions.setAccountSwitchInFlight(true);
+    await api.getState().actions.sendTurn({ text: "typed during the switch" });
+    await settle();
+    assert.deepEqual(turns(fake), [], "never posted into the fence");
+    assert.deepEqual(state().slice.queue.map((message) => message.text), ["typed during the switch"]);
+
+    api.getState().actions.setAccountSwitchInFlight(false);
+    await settle();
+    assert.deepEqual(turns(fake).map((attempt) => attempt.body.input), ["typed during the switch"]);
+    assert.deepEqual(state().slice.queue, []);
+  });
+
+  it("a send the fence refuses lands in the queue, not back in the draft with an error", async () => {
+    const { api, fake, state } = await store("R");
+    fake.push(ended(1));
+    fake.fail(new AgentChatCommandError(409, "TURN_NOT_IDLE", "An account switch is in progress."), 1);
+    await api.getState().actions.sendTurn({ text: "sent just before" });
+    await settle();
+    assert.equal(turns(fake).length, 1);
+    assert.deepEqual(state().slice.queue.map((message) => message.text), ["sent just before"]);
+    assert.equal(state().slice.errorBanner, null);
+
+    fake.push(ended(2));
+    await settle();
+    assert.deepEqual(fake.posted.filter((post) => post.name === "turn").map((post) => post.body.input), ["sent just before"]);
     assert.deepEqual(state().slice.queue, []);
   });
 });

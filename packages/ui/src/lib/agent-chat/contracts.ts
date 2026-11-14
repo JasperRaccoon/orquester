@@ -893,7 +893,8 @@ export interface AgentChatActions {
   /**
    * The tab summary says whether a busy account switch is in flight on this
    * chat (`SessionSummary.accountSwitch`). While it is, the queue does not
-   * flush: the daemon would refuse its turns. Client-local; idempotent.
+   * flush and {@link sendTurn} queues instead of posting: the daemon would
+   * refuse their turns. Client-local; idempotent.
    */
   setAccountSwitchInFlight(inFlight: boolean): void;
   /**

@@ -1146,19 +1146,25 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     /**
      * The busy account switch's fence on the queue (spec 2026-11-14 §3). While
      * a switch is in flight the daemon refuses every turn into the chat with
-     * `TURN_NOT_IDLE`, so the queue does not flush: not while this client's own
-     * `whileBusy` request is open, not while the tab summary reports a switch
-     * (`setAccountSwitchInFlight`), and not after a queued send met the fence
-     * before either had said so — until the summary or this client's request
-     * says the switch is over. Its messages stay queued, never handed back to
-     * the composer (that is a manual Stop's), and flush at the boundaries they
-     * always do once the continue turn runs.
+     * `TURN_NOT_IDLE`, so the queue does not flush — and a composer send is
+     * queued instead of posted — while this client's own `whileBusy` request
+     * is open or the tab summary reports a switch (`setAccountSwitchInFlight`).
+     * Its messages stay queued, never handed back to the composer (that is a
+     * manual Stop's), and flush at the boundaries they always do once the
+     * continue turn runs.
+     *
+     * A turn refused with `TURN_NOT_IDLE` all the same — the switch began
+     * before this client heard of it, or ended before the refusal arrived — is
+     * queued, and the queue waits for the thread's next frame
+     * (`retryAfterNextFrame`) rather than retrying at once, so a daemon that
+     * keeps refusing for another reason is asked again only at the next
+     * boundary, never in a loop.
      */
     let accountSwitchRequests = 0;
     let accountSwitchReported = false;
-    let accountSwitchRefused = false;
-    const queueFencedForAccountSwitch = (): boolean =>
-      accountSwitchRequests > 0 || accountSwitchReported || accountSwitchRefused;
+    let retryAfterNextFrame = false;
+    const accountSwitchInFlight = (): boolean => accountSwitchRequests > 0 || accountSwitchReported;
+    const queueFencedForAccountSwitch = (): boolean => accountSwitchInFlight() || retryAfterNextFrame;
     const isFenceRefusal = (error: unknown): boolean =>
       error instanceof AgentChatCommandError && error.code === TURN_NOT_IDLE;
 
@@ -1489,13 +1495,19 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       } catch (error) {
         if (!closed && isFenceRefusal(error)) {
           // A busy account switch's fence (spec 2026-11-14 §3): refused for
-          // the moment, never landed. Back at the front as it was, not held
-          // and with no banner, to go at the next boundary after the switch —
-          // under a new id, so the refused one is never answered from a
-          // receipt. The queue holds until the switch is over.
-          accountSwitchRefused = true;
+          // the moment, never landed. Back at the front, not held and with no
+          // banner, to go at the next boundary after the switch — under a new
+          // id, so the refused one is never answered from a receipt, and
+          // anchored to the newest tool call, so a running turn sends it at
+          // its next one. Not before the thread's next frame, either way.
+          retryAfterNextFrame = true;
           update((state) => {
-            const queue = requeueAtFront(state.queue, { ...message, commandId: newId() }, behind);
+            const requeued = {
+              ...message,
+              commandId: newId(),
+              queuedAfterToolActivityId: latestCompletedToolActivityId(state.timeline.activities)
+            };
+            const queue = requeueAtFront(state.queue, requeued, behind);
             const reducer = patchSlice(state.reducer, { queue: [...queue.messages] });
             return { ...state, queue, reducer, slice: reducer.slice };
           });
@@ -1859,8 +1871,32 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         timer.unref?.();
       });
 
+    /**
+     * A composer send a busy account switch keeps out (spec 2026-11-14 §3),
+     * queued as the composer would queue it: behind what already waits, under
+     * a new id. What only a direct send carries — a model pick, approvals to
+     * decline (the switch's stop settles those), a compaction first — stays
+     * with the thread as it is.
+     */
+    const queueRefusedSend = (input: Parameters<AgentChatActions["sendTurn"]>[0]): void => {
+      actions.queueMessage({
+        text: input.text,
+        attachments: input.attachments ?? [],
+        context: input.context ?? [],
+        interactionMode: input.interactionMode ?? get().slice.interactionMode,
+        queuedAfterToolActivityId: null,
+        holdUntilUserAction: false
+      });
+    };
+
     const actions: AgentChatActions = {
       async sendTurn(input) {
+        // A busy account switch in flight (spec 2026-11-14 §3) would refuse
+        // the turn: it waits in the queue instead, and goes after the switch.
+        if (accountSwitchInFlight()) {
+          queueRefusedSend(input);
+          return;
+        }
         const turn: OutboxTurn = {
           input: input.text,
           ...(input.attachments ? { attachments: input.attachments } : {}),
@@ -1885,8 +1921,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         });
         try {
           await sendAfterCompaction(input.compactFirst === true, () => command("compact", {}), () =>
-            command("turn", turn, commandId)
+            command("turn", turn, commandId, { quiet: (error) => !closed && isFenceRefusal(error) })
           );
+        } catch (error) {
+          // Posted just before the fence went up, or before this client heard
+          // of it: refused, never landed. Queued rather than given back to the
+          // draft with an error, and the queue waits for the next frame.
+          if (closed || !isFenceRefusal(error)) throw error;
+          retryAfterNextFrame = true;
+          queueRefusedSend(input);
         } finally {
           removeOutboxEntry(commandId);
         }
@@ -2086,8 +2129,6 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           );
         } finally {
           accountSwitchRequests -= 1;
-          // Over, either way: a fence a queued send met during it lifts too.
-          accountSwitchRefused = false;
           driveQueue();
         }
       },
@@ -2095,10 +2136,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       setAccountSwitchInFlight(inFlight) {
         if (inFlight === accountSwitchReported) return;
         accountSwitchReported = inFlight;
-        if (!inFlight) {
-          accountSwitchRefused = false;
-          driveQueue();
-        }
+        if (!inFlight) driveQueue();
       },
 
       async setProfile(input) {
@@ -2577,7 +2615,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       agentRows?.touch(touchedAgents);
       agentRows?.dropped(droppedAgentRows);
       syncAgentRows();
-      if (options.fromDevice !== true) driveQueue();
+      if (options.fromDevice !== true) {
+        // A turn refused for a busy switch is asked again from here on.
+        retryAfterNextFrame = false;
+        driveQueue();
+      }
     };
 
     /**
