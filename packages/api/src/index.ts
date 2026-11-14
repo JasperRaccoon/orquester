@@ -4,6 +4,7 @@ import type { KnowledgeSessionOwner } from "./knowledge.ts";
 import type {
   AgentAdapterId,
   AgentChatGoalSummary,
+  ChatBusySwitchState,
   BackgroundLiveness as AgentChatBackgroundLiveness,
   ChatLimitFailover,
   ChatUsageLimitState,
@@ -1740,6 +1741,13 @@ export interface SessionSummary {
    * user dismisses the notice. `null` when there is none (explicit, as `usageLimit`).
    */
   limitFailover?: ChatLimitFailover | null;
+  /**
+   * Agent-chat tabs only: a busy account switch in flight (`agent-chat/busy-switch.ts`), persisted
+   * before each step so a daemon restart finishes it. While set, the daemon refuses other turns
+   * into the chat with `TURN_NOT_IDLE`. `null` when there is none: cleared with an explicit
+   * `null` (a client merges summaries field-wise). Absent from an older daemon (= none).
+   */
+  accountSwitch?: ChatBusySwitchState | null;
   /**
    * Agent-chat tabs only: the prompts scheduled to be sent into this chat, in send order
    * (`agent-chat/scheduled-prompts.ts`). Published as `[]` once the last one went out or was
