@@ -281,6 +281,22 @@ describe("agent host server — readiness (§3.1, §8)", () => {
 });
 
 describe("agent host server — commands and reads (§6.2, §6.3)", () => {
+  it("the daemon's timeline notice appends one runtime.warning row, idempotent by commandId", async (t) => {
+    const h = await harness();
+    t.after(() => h.stop());
+    const threadId = await h.host.createThread();
+    const body = { commandId: "c-notice", summary: "Account switch failed after stopping the work", detail: "Why." };
+    const first = await h.call("POST", agentHostRoutes.notice(threadId), body);
+    const again = await h.call("POST", agentHostRoutes.notice(threadId), body);
+    assert.equal(first.status, 200);
+    assert.deepEqual(again.body, first.body);
+    const rows = (await h.host.store.readAll(threadId)).events
+      .filter((event) => event.type === "thread.activity-appended")
+      .map((event) => (event.payload as { activity: { activityKind: string; summary: string } }).activity)
+      .filter((activity) => activity.activityKind === "runtime.warning");
+    assert.deepEqual(rows.map((row) => row.summary), [body.summary]);
+  });
+
   it("routes §6.2 commands to their recorded state changes and answers `{seq}`", async (t) => {
     const h = await harness();
     t.after(() => h.stop());

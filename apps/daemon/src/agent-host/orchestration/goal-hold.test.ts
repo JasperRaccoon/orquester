@@ -1033,6 +1033,30 @@ describe("spec 2026-11-14 §4 — a busy account switch of a held goal", () => {
     await host.stop();
   });
 
+  it("the head read tells the daemon what the summary cannot: a running compaction, a goal the Stop pauses", async () => {
+    const { host } = codexHost();
+    const threadId = await continuingGoal(host, { running: false });
+    const head = await host.orchestrator.readThreadHead(threadId, {});
+    assert.equal(head.goalContinuesAcrossTurns, true);
+    assert.equal(head.compacting, undefined);
+    // Hold the compaction open inside the adapter call.
+    let releaseCompact: () => void = () => undefined;
+    const compactGate = new Promise<void>((resolve) => {
+      releaseCompact = resolve;
+    });
+    const originalCompact = host.adapter.compact.bind(host.adapter);
+    host.adapter.compact = async (id: string) => {
+      await compactGate;
+      return originalCompact(id);
+    };
+    await host.orchestrator.command(threadId, "compact", { commandId: cmd() });
+    assert.equal((await host.orchestrator.readThreadHead(threadId, {})).compacting, true);
+    releaseCompact();
+    await host.settle();
+    assert.equal((await host.orchestrator.readThreadHead(threadId, {})).compacting, undefined);
+    await host.stop();
+  });
+
   it("keeps a pending resume mark too", async () => {
     const { host: first } = codexHost();
     const threadId = await continuingGoal(first, { running: false });

@@ -6445,7 +6445,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       const { state } = runtime;
       // The snapshot's own pieces (`snapshotOf`) with no copy of the window: the head reads only
       // messages of `items`, which the read-time slimming leaves untouched.
-      return threadHeadOf(
+      const read = threadHeadOf(
         {
           // `requireHead` answers it with the head-only state applied, as `snapshotOf` does.
           head,
@@ -6457,6 +6457,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         },
         query
       );
+      // The live facts a busy account switch decides by (spec 2026-11-14 §3–§4), which no
+      // snapshot holds: a running compaction refuses it up front, and on an adapter that
+      // continues goals by itself the Stop pauses an active goal the switch must resume.
+      const compacting = runtime.compacting || runtime.queuedTurns.length > 0;
+      const goalContinuesAcrossTurns = options.adapters.get(head.adapter)?.capabilities.goals?.continuesAcrossTurns === true;
+      return {
+        ...read,
+        ...(compacting ? { compacting: true as const } : {}),
+        ...(goalContinuesAcrossTurns ? { goalContinuesAcrossTurns: true as const } : {})
+      };
     });
 
   const readThread = async (
