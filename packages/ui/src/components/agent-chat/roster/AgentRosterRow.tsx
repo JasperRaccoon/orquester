@@ -17,12 +17,13 @@
 import React from "react";
 import { Bot, Check, ChevronRight, Repeat, Target, Terminal } from "lucide-react";
 import type { RuntimeSubagent } from "@orquester/api/agent-chat";
-import { isTerminalSubagentStatus } from "../../../lib/agent-chat/roster.logic";
+import { isTerminalSubagentStatus, type TaskStopControl } from "../../../lib/agent-chat/roster.logic";
 import { cn } from "../../../lib/cn";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import type { ChatTone } from "../primitives/tone";
 import { agentActivityText, rosterRoleChip, rosterRowMetrics } from "./format";
 import { rosterRowTicks, rosterRowVisual, rosterStatusVisual } from "./roster-rows";
+import { TaskStopButton, taskStop, type TaskStop } from "./TaskStopButton";
 
 /**
  * The identity glyph: a bot for an agent, and for the two rows that drive work
@@ -51,13 +52,53 @@ export interface AgentRosterRowProps {
   /** This agent's timeline is the one open in the main area. */
   active?: boolean;
   onOpen: (agentId: string) => void;
+  /**
+   * The task's own Stop (`taskStopControl` of this row): `"hidden"` — or
+   * absent — shows none. `onStopTask` gets the row's id.
+   */
+  stopControl?: TaskStopControl;
+  onStopTask?: (taskId: string) => void;
+}
+
+/**
+ * A row and, while it can be stopped, its own Stop: beside the row's button
+ * and never inside it — a button in a button — pinned over the row's last
+ * line in the grid's right column (the row's own padding, that line's track
+ * height). The row keeps its grid and its height, so it lines up with every
+ * other row; its last line ends where the column starts while the Stop is
+ * there. The frame is there with or without a Stop: a row whose Stop comes
+ * and goes keeps its element, so it neither replays its entry nor drops focus.
+ */
+function RowWithStop({
+  label,
+  stop,
+  trackClassName,
+  children
+}: {
+  label: string;
+  stop: TaskStop | null;
+  trackClassName: string;
+  children: React.ReactElement;
+}): React.ReactElement {
+  return (
+    <div className="relative">
+      {children}
+      {stop ? (
+        <span className={cn("absolute bottom-1 right-1.5 flex items-center", trackClassName)}>
+          <TaskStopButton label={label} stop={stop} className="h-4" />
+        </span>
+      ) : null}
+    </div>
+  );
 }
 
 export function AgentRosterRow({
   agent,
   fading = false,
   active = false,
-  onOpen
+  onOpen,
+  stopControl = "hidden",
+  onStopTask
 }: AgentRosterRowProps): React.ReactElement {
   // A live loop stands `Scheduled` and a live goal `Active`: neither is an
   // agent working.
@@ -70,72 +111,75 @@ export function AgentRosterRow({
   const role = rosterRoleChip(agent);
   const metrics = rosterRowMetrics(agent);
   const Icon = rosterRowIcon(agent);
+  const stop = taskStop(stopControl, agent.id, onStopTask);
 
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(agent.id)}
-      aria-label={`${agent.title} — ${statusLabel}`}
-      data-agent-id={agent.id}
-      data-status={agent.status}
-      data-agent-kind={agent.agentKind}
-      className={cn(
-        // `ac-enter` is a one-shot on insertion: a row that updates in place
-        // keeps the same element, so a spawn animates and a status change does
-        // not. *T3: `AgentsPanel.tsx:4-5` — "Activity and completion update
-        // rows in place".*
-        "group ac-press ac-enter",
-        ROW_GRID,
-        "transition-opacity duration-300 motion-reduce:transition-none",
-        "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
-        "focus-visible:ring-inset focus-visible:ring-neutral-500",
-        active && "bg-neutral-800",
-        fading ? "pointer-events-none opacity-0" : isTerminalSubagentStatus(agent.status) && "opacity-70 hover:opacity-100"
-      )}
-    >
-      <span className="col-start-1 row-start-1 flex items-center">
-        <StatusDot tone={visuals.tone} size="xs" pulse={visuals.pulse} />
-      </span>
-
-      <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5">
-        <Icon size={13} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
-        <span className="min-w-0 truncate text-sm font-medium text-neutral-200">{agent.title}</span>
-        {role ? (
-          <span className="max-w-28 shrink-0 truncate rounded-sm border border-neutral-800 px-1 font-mono text-[10px] text-neutral-500">
-            {role}
-          </span>
-        ) : null}
-      </span>
-
-      <span className="col-start-3 row-start-1 flex items-center gap-1 text-right font-mono text-[11px] text-neutral-500">
-        <span className="inline-flex min-w-14 items-center justify-end gap-1">
-          <ElapsedTicker
-            startedAt={agent.startedAt}
-            endedAt={agent.completedAt}
-            live={rosterRowTicks(agent.status)}
-          />
-          {agent.status === "completed" ? (
-            <Check size={12} aria-hidden className="shrink-0 text-ok" />
-          ) : null}
-        </span>
-        {/* The slot is always 12px wide, so revealing the chevron on hover
-            cannot shift the elapsed readout beside it. */}
-        <span className="flex w-3 shrink-0 items-center justify-center">
-          <ChevronRight size={12} aria-hidden className="ac-reveal text-neutral-500" />
-        </span>
-      </span>
-
-      <span
+    <RowWithStop label={agent.title} stop={stop} trackClassName="h-4">
+      <button
+        type="button"
+        onClick={() => onOpen(agent.id)}
+        aria-label={`${agent.title} — ${statusLabel}`}
+        data-agent-id={agent.id}
+        data-status={agent.status}
+        data-agent-kind={agent.agentKind}
         className={cn(
-          ACTIVITY_LINE,
-          agent.status === "failed" ? "text-danger-300" : "text-neutral-500"
+          // `ac-enter` is a one-shot on insertion: a row that updates in place
+          // keeps the same element, so a spawn animates and a status change does
+          // not. *T3: `AgentsPanel.tsx:4-5` — "Activity and completion update
+          // rows in place".*
+          "group ac-press ac-enter",
+          ROW_GRID,
+          "transition-opacity duration-300 motion-reduce:transition-none",
+          "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
+          "focus-visible:ring-inset focus-visible:ring-neutral-500",
+          active && "bg-neutral-800",
+          fading ? "pointer-events-none opacity-0" : isTerminalSubagentStatus(agent.status) && "opacity-70 hover:opacity-100"
         )}
       >
-        {activity ?? statusLabel}
-      </span>
-      <span className={METRICS_LINE}>{metrics.join(" · ")}</span>
-      <span className="sr-only">{statusLabel}</span>
-    </button>
+        <span className="col-start-1 row-start-1 flex items-center">
+          <StatusDot tone={visuals.tone} size="xs" pulse={visuals.pulse} />
+        </span>
+
+        <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5">
+          <Icon size={13} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
+          <span className="min-w-0 truncate text-sm font-medium text-neutral-200">{agent.title}</span>
+          {role ? (
+            <span className="max-w-28 shrink-0 truncate rounded-sm border border-neutral-800 px-1 font-mono text-[10px] text-neutral-500">
+              {role}
+            </span>
+          ) : null}
+        </span>
+
+        <span className="col-start-3 row-start-1 flex items-center gap-1 text-right font-mono text-[11px] text-neutral-500">
+          <span className="inline-flex min-w-14 items-center justify-end gap-1">
+            <ElapsedTicker
+              startedAt={agent.startedAt}
+              endedAt={agent.completedAt}
+              live={rosterRowTicks(agent.status)}
+            />
+            {agent.status === "completed" ? (
+              <Check size={12} aria-hidden className="shrink-0 text-ok" />
+            ) : null}
+          </span>
+          {/* The slot is always 12px wide, so revealing the chevron on hover
+              cannot shift the elapsed readout beside it. */}
+          <span className="flex w-3 shrink-0 items-center justify-center">
+            <ChevronRight size={12} aria-hidden className="ac-reveal text-neutral-500" />
+          </span>
+        </span>
+
+        <span
+          className={cn(
+            ACTIVITY_LINE,
+            agent.status === "failed" ? "text-danger-300" : "text-neutral-500"
+          )}
+        >
+          {activity ?? statusLabel}
+        </span>
+        <span className={cn(METRICS_LINE, stop && "col-end-3")}>{metrics.join(" · ")}</span>
+        <span className="sr-only">{statusLabel}</span>
+      </button>
+    </RowWithStop>
   );
 }
 
@@ -159,75 +203,81 @@ export function BackgroundShellRow({
   agent,
   fading = false,
   active = false,
-  onOpen
+  onOpen,
+  stopControl = "hidden",
+  onStopTask
 }: AgentRosterRowProps): React.ReactElement {
   const visuals = rosterStatusVisual(agent.status);
   const activity = agentActivityText(agent) ?? visuals.label;
   const live = rosterRowTicks(agent.status);
   const exit = typeof agent.exitCode === "number" && !live ? agent.exitCode : null;
+  const stop = taskStop(stopControl, agent.id, onStopTask);
 
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(agent.id)}
-      aria-label={`${agent.title} — background shell, ${activity}`}
-      data-agent-id={agent.id}
-      data-status={agent.status}
-      data-agent-kind={agent.agentKind}
-      className={cn(
-        "group ac-press ac-enter",
-        SHELL_ROW_GRID,
-        "transition-opacity duration-300 motion-reduce:transition-none",
-        "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
-        "focus-visible:ring-inset focus-visible:ring-neutral-500",
-        active && "bg-neutral-800",
-        fading ? "pointer-events-none opacity-0" : isTerminalSubagentStatus(agent.status) && "opacity-70 hover:opacity-100"
-      )}
-    >
-      <span className="col-start-1 row-start-1 flex items-center">
-        <StatusDot tone={visuals.tone} size="xs" pulse={visuals.pulse} />
-      </span>
-
-      <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5">
-        <span
-          aria-hidden
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] bg-neutral-800 text-neutral-400"
-        >
-          <Terminal size={11} strokeWidth={2} />
-        </span>
-        <span className="min-w-0 truncate text-sm text-neutral-300">{agent.title}</span>
-      </span>
-
-      <span className="col-start-3 row-start-1 flex items-center gap-1 font-mono text-[11px] text-neutral-500">
-        <span className="inline-flex min-w-14 items-center justify-end gap-1.5">
-          {exit !== null ? (
-            <span
-              data-shell-exit={exit}
-              className={cn(
-                "rounded-sm px-1 text-[10px] leading-4",
-                exit === 0 ? "bg-ok-soft/40 text-ok" : "bg-danger-soft/40 text-danger-300"
-              )}
-            >
-              exit {exit}
-            </span>
-          ) : null}
-          <ElapsedTicker startedAt={agent.startedAt} endedAt={agent.completedAt} live={live} />
-        </span>
-        <span className="flex w-3 shrink-0 items-center justify-center">
-          <ChevronRight size={12} aria-hidden className="ac-reveal text-neutral-500" />
-        </span>
-      </span>
-
-      <span
+    <RowWithStop label={agent.title} stop={stop} trackClassName="h-[1.125rem]">
+      <button
+        type="button"
+        onClick={() => onOpen(agent.id)}
+        aria-label={`${agent.title} — background shell, ${activity}`}
+        data-agent-id={agent.id}
+        data-status={agent.status}
+        data-agent-kind={agent.agentKind}
         className={cn(
-          "col-start-2 col-end-4 row-start-2 block truncate font-mono text-[11px]",
-          agent.status === "failed" ? "text-danger-300" : "text-neutral-500"
+          "group ac-press ac-enter",
+          SHELL_ROW_GRID,
+          "transition-opacity duration-300 motion-reduce:transition-none",
+          "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
+          "focus-visible:ring-inset focus-visible:ring-neutral-500",
+          active && "bg-neutral-800",
+          fading ? "pointer-events-none opacity-0" : isTerminalSubagentStatus(agent.status) && "opacity-70 hover:opacity-100"
         )}
       >
-        {activity}
-      </span>
-      <span className="sr-only">{visuals.label}</span>
-    </button>
+        <span className="col-start-1 row-start-1 flex items-center">
+          <StatusDot tone={visuals.tone} size="xs" pulse={visuals.pulse} />
+        </span>
+
+        <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5">
+          <span
+            aria-hidden
+            className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] bg-neutral-800 text-neutral-400"
+          >
+            <Terminal size={11} strokeWidth={2} />
+          </span>
+          <span className="min-w-0 truncate text-sm text-neutral-300">{agent.title}</span>
+        </span>
+
+        <span className="col-start-3 row-start-1 flex items-center gap-1 font-mono text-[11px] text-neutral-500">
+          <span className="inline-flex min-w-14 items-center justify-end gap-1.5">
+            {exit !== null ? (
+              <span
+                data-shell-exit={exit}
+                className={cn(
+                  "rounded-sm px-1 text-[10px] leading-4",
+                  exit === 0 ? "bg-ok-soft/40 text-ok" : "bg-danger-soft/40 text-danger-300"
+                )}
+              >
+                exit {exit}
+              </span>
+            ) : null}
+            <ElapsedTicker startedAt={agent.startedAt} endedAt={agent.completedAt} live={live} />
+          </span>
+          <span className="flex w-3 shrink-0 items-center justify-center">
+            <ChevronRight size={12} aria-hidden className="ac-reveal text-neutral-500" />
+          </span>
+        </span>
+
+        <span
+          className={cn(
+            "col-start-2 col-end-4 row-start-2 block truncate font-mono text-[11px]",
+            agent.status === "failed" ? "text-danger-300" : "text-neutral-500",
+            stop && "col-end-3"
+          )}
+        >
+          {activity}
+        </span>
+        <span className="sr-only">{visuals.label}</span>
+      </button>
+    </RowWithStop>
   );
 }
 

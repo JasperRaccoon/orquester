@@ -309,6 +309,24 @@ describe("switching a thread's account (§3.4)", () => {
   });
 });
 
+describe("the daemon's timeline notice (spec 2026-11-14 §3)", () => {
+  it("appends one runtime.warning row, once per commandId", async () => {
+    const { host, threadId } = await idleThreadWithACursor();
+    const notice = { commandId: cmd(), summary: "Account switch failed after stopping the work", detail: "The host refused it." };
+    const first = await host.orchestrator.appendNotice(threadId, notice);
+    const again = await host.orchestrator.appendNotice(threadId, notice);
+    assert.equal(again.seq, first.seq);
+    const rows = (host.store.logs.get(threadId) ?? [])
+      .filter((event) => event.type === "thread.activity-appended")
+      .map((event) => (event.payload as { activity: { activityKind: string; summary: string; payload: { detail?: string } } }).activity)
+      .filter((activity) => activity.activityKind === "runtime.warning");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.summary, notice.summary);
+    assert.equal(rows[0]?.payload.detail, notice.detail);
+    await host.stop();
+  });
+});
+
 describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () => {
   const idle: IdentitySwitchState = {
     status: "idle",
@@ -329,6 +347,26 @@ describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () =>
       { ...idle, queuedTurnCount: 1 },
       { ...idle, compacting: true },
       { ...idle, backgroundLive: true }
+    ]) {
+      assert.ok(identitySwitchRefusal(state), `refused: ${JSON.stringify(state)}`);
+    }
+  });
+
+  it("a busy switch's own step skips only the goal refusals", () => {
+    const busy = { ...idle, busySwitch: true };
+    assert.equal(identitySwitchRefusal({ ...busy, goalContinuing: true }), null);
+    assert.equal(identitySwitchRefusal({ ...busy, goalHeldForUpdate: true, goalContinuing: true }), null);
+    // Held: skipped even while the pause's own update trails (the goal still reads active).
+    assert.equal(identitySwitchRefusal({ ...busy, goalHeldForUpdate: true, goalContinuing: true, goalRunning: true }), null);
+    for (const state of [
+      // A goal still going on (active, or just set going again) was not paused by a stop.
+      { ...busy, goalContinuing: true, goalRunning: true },
+      { ...busy, goalHeldForUpdate: true, compacting: true },
+      { ...busy, goalContinuing: true, activeTurnId: "turn-1" },
+      { ...busy, hasUnsettledTurn: true },
+      { ...busy, pendingRequestCount: 1 },
+      { ...busy, queuedTurnCount: 1 },
+      { ...busy, backgroundLive: true }
     ]) {
       assert.ok(identitySwitchRefusal(state), `refused: ${JSON.stringify(state)}`);
     }

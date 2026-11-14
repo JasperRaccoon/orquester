@@ -919,6 +919,14 @@ export type SessionStopCommandBody = AgentChatCommandBase;
  */
 export interface AccountCommandBody extends AgentChatCommandBase {
   accountId: string;
+  /**
+   * The user confirmed the busy-switch warning modal (`busy-switch.ts`): the daemon stops what
+   * runs (pausing a continuing goal first), waits for idle, switches, and sends the continue turn
+   * (or `/goal resume`). The route answers once the sequence ends. Absent: today's idle-only
+   * switch, refused by the host while the chat is busy. Ignored for an idle chat (it switches
+   * as without it).
+   */
+  whileBusy?: true;
 }
 
 /**

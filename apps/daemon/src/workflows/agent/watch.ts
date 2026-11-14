@@ -170,6 +170,8 @@ function isIdle(obs: Observation): boolean {
   if (s.latestTurn?.state === "running" || s.latestTurn?.state === "pending") return false;
   if (s.hasPendingApprovals || s.hasPendingUserInput || s.backgroundLiveness) return false;
   if (s.goal?.continuing === true) return false;
+  // A busy account switch fences the chat's turns until it ends (`agent-chat/busy-switch.ts`).
+  if (s.accountSwitch) return false;
   const head = snap.head.session;
   if (head.activeTurnId !== null || head.status === "running" || head.status === "starting") return false;
   const last = snap.turns.at(-1);

@@ -281,11 +281,36 @@ describe("agent host server — readiness (§3.1, §8)", () => {
 });
 
 describe("agent host server — commands and reads (§6.2, §6.3)", () => {
+  it("the daemon's timeline notice appends one runtime.warning row, idempotent by commandId", async (t) => {
+    const h = await harness();
+    t.after(() => h.stop());
+    const threadId = await h.host.createThread();
+    const body = { commandId: "c-notice", summary: "Account switch failed after stopping the work", detail: "Why." };
+    const first = await h.call("POST", agentHostRoutes.notice(threadId), body);
+    const again = await h.call("POST", agentHostRoutes.notice(threadId), body);
+    assert.equal(first.status, 200);
+    assert.deepEqual(again.body, first.body);
+    const rows = (await h.host.store.readAll(threadId)).events
+      .filter((event) => event.type === "thread.activity-appended")
+      .map((event) => (event.payload as { activity: { activityKind: string; summary: string } }).activity)
+      .filter((activity) => activity.activityKind === "runtime.warning");
+    assert.deepEqual(rows.map((row) => row.summary), [body.summary]);
+  });
+
   it("routes §6.2 commands to their recorded state changes and answers `{seq}`", async (t) => {
     const h = await harness();
     t.after(() => h.stop());
     const threadId = await h.host.createThread();
     const snapshot = async () => ((await h.call("GET", agentHostRoutes.read(threadId))).body as { thread: ThreadSnapshotPayload }).thread;
+
+    // A permission-mode change is refused while the thread is busy (`restartBlocker`), and this
+    // scripted adapter never ends the turn the interrupt below asks to stop: change it while idle.
+    const mode = await h.call("POST", agentHostRoutes.mode(threadId), {
+      commandId: "c-mode",
+      runtimeMode: "auto"
+    });
+    assert.equal(mode.status, 200);
+    assert.equal((await snapshot()).head.runtimeMode, "auto");
 
     const turn = await h.call("POST", agentHostRoutes.turn(threadId), {
       commandId: "c-turn",
@@ -304,13 +329,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     assert.ok((await h.host.store.readAll(threadId)).events.some((event) =>
       event.type === "thread.turn-interrupt-requested" && event.commandId === "c-int"
     ));
-
-    const mode = await h.call("POST", agentHostRoutes.mode(threadId), {
-      commandId: "c-mode",
-      runtimeMode: "auto"
-    });
-    assert.equal(mode.status, 200);
-    assert.equal((await snapshot()).head.runtimeMode, "auto");
 
     const stop = await h.call("POST", agentHostRoutes.sessionStop(threadId), {
       commandId: "c-stop"

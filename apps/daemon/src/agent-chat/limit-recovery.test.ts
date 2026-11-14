@@ -234,6 +234,18 @@ test("at the reset plus the margin the continue message goes out, under the idem
   assert.equal(h.chat.get("s1")?.usageLimit, null);
 });
 
+test("a busy account switch in flight defers the automatic resume instead of meeting its fence and disarming", async () => {
+  const h = harness();
+  await report(h, notice());
+  h.chat.setAccountSwitch("s1", { commandId: "sw-1", fromAccountId: "acc1", toAccountId: "acc2", startedAt: iso(T0), step: "settling", goal: null });
+  await advance(h, HOUR + USAGE_LIMIT_RESUME_MARGIN_MS);
+  assert.equal(h.api.turns().length, 0);
+  assert.equal(h.chat.get("s1")?.usageLimit?.autoResume, "armed", "still armed, for after the switch");
+  h.chat.setAccountSwitch("s1", null);
+  await advance(h, 30_000);
+  assert.equal(h.api.turns().length, 1);
+});
+
 test("a resume that hits the limit again re-arms with the new reset", async () => {
   const h = harness();
   await report(h, notice());

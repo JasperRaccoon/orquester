@@ -94,7 +94,9 @@ function isBusy(tab: SessionSummary): boolean {
     tab.chatSessionStatus === "starting" ||
     tab.hasPendingApprovals === true ||
     tab.hasPendingUserInput === true ||
-    tab.goal?.continuing === true
+    tab.goal?.continuing === true ||
+    // A busy account switch fences the chat's turns; its end is the idle edge that wakes prompts.
+    (tab.accountSwitch ?? null) !== null
   );
 }
 

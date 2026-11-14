@@ -294,7 +294,9 @@ function summaryBusy(s: SessionSummary): boolean {
     s.chatSessionStatus === "starting" ||
     s.latestTurn?.state === "running" ||
     s.latestTurn?.state === "pending" ||
-    s.goal?.continuing === true
+    s.goal?.continuing === true ||
+    // A busy account switch: the chat is being stopped and moved, and takes no turn until it ends.
+    (s.accountSwitch ?? null) !== null
   );
 }
 

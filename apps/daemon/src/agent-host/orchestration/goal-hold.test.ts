@@ -1012,6 +1012,87 @@ describe("goals §5.7 — a held goal's refusals never ask for the pause it has 
   });
 });
 
+describe("spec 2026-11-14 §4 — a busy account switch of a held goal", () => {
+  it("switches at once, keeps the hold for the next host, and still refuses what the stop cannot clear", async () => {
+    const { host } = codexHost();
+    const threadId = await continuingGoal(host);
+    assert.deepEqual(await host.orchestrator.holdContinuingGoals(), [threadId]);
+    // Its final turn still runs: the busy switch lifts the goal refusals only.
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true }),
+      (error: unknown) =>
+        isAgentChatCommandError(error) && error.message === "Wait for the agent to finish the current turn before switching accounts."
+    );
+    await completeTurn(host, threadId);
+    await host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true });
+    await host.settle();
+    assert.equal(host.store.heads.get(threadId)?.accountId, "acc2");
+    assert.equal(heldMark(host), true, "the hold stays on meta.json: the next host resumes the goal");
+    assert.equal(continuing(host, threadId), true);
+    assert.deepEqual(callsOf(host, "interruptTurn"), [], "nothing was stopped");
+    await host.stop();
+  });
+
+  it("the head read tells the daemon what the summary cannot: a running compaction, a goal the Stop pauses", async () => {
+    const { host } = codexHost();
+    const threadId = await continuingGoal(host, { running: false });
+    const head = await host.orchestrator.readThreadHead(threadId, {});
+    assert.equal(head.goalContinuesAcrossTurns, true);
+    assert.equal(head.compacting, undefined);
+    // Hold the compaction open inside the adapter call.
+    let releaseCompact: () => void = () => undefined;
+    const compactGate = new Promise<void>((resolve) => {
+      releaseCompact = resolve;
+    });
+    const originalCompact = host.adapter.compact.bind(host.adapter);
+    host.adapter.compact = async (id: string) => {
+      await compactGate;
+      return originalCompact(id);
+    };
+    await host.orchestrator.command(threadId, "compact", { commandId: cmd() });
+    assert.equal((await host.orchestrator.readThreadHead(threadId, {})).compacting, true);
+    releaseCompact();
+    await host.settle();
+    assert.equal((await host.orchestrator.readThreadHead(threadId, {})).compacting, undefined);
+    await host.stop();
+  });
+
+  it("a goal still going on — active, or just set going again — is refused even for a busy switch", async () => {
+    const { host, codex } = codexHost();
+    const threadId = await continuingGoal(host, { running: false });
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true }),
+      (error: unknown) => isAgentChatCommandError(error) && error.message === "Pause the goal before switching accounts."
+    );
+    await host.orchestrator.holdContinuingGoals();
+    // The lease runs out and the host sets the goal going again; Codex's own update trails.
+    codex.trailing.add("resume");
+    await clockFrom(host)(120_000);
+    assert.equal(heldMark(host), undefined);
+    assert.equal(continuing(host, threadId), true);
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true }),
+      (error: unknown) => isAgentChatCommandError(error) && error.message === "Pause the goal before switching accounts."
+    );
+    assert.equal(host.store.heads.get(threadId)?.accountId, "acc1");
+    await host.stop();
+  });
+
+  it("a goal whose resume is owed after a restart is going on: refused too, its mark kept", async () => {
+    const { host: first } = codexHost();
+    const threadId = await continuingGoal(first, { running: false });
+    await first.orchestrator.markThreadsForContinuation();
+    await first.stop();
+    const next = codexHost({ store: first.store, launchConfigs: first.launchConfigs });
+    await next.host.orchestrator.readThread(threadId);
+    assert.equal(continuing(next.host, threadId), true, "the resume is owed");
+    await assert.rejects(() => next.host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true }));
+    assert.equal(next.host.store.heads.get(threadId)?.accountId, "acc1");
+    assert.equal(next.host.store.heads.get(threadId)?.resumeGoalAfterRestart, true);
+    await next.host.stop();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The handover and the next host
 // ---------------------------------------------------------------------------

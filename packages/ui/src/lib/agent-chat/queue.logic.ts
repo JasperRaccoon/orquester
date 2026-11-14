@@ -117,6 +117,28 @@ export function holdAtFront(
   message: QueuedComposerMessage,
   behind?: ReadonlySet<string>
 ): QueueState {
+  return placeAtFront(state, { ...message, holdUntilUserAction: true }, behind);
+}
+
+/**
+ * Put a message back at the head, NOT held — for a send the host refused only
+ * for the moment: a busy account switch's fence answers `TURN_NOT_IDLE`
+ * (spec 2026-11-14 §3), and the message goes out at the next boundary after
+ * the switch, as if it had never left. Placed as {@link holdAtFront} places.
+ */
+export function requeueAtFront(
+  state: QueueState,
+  message: QueuedComposerMessage,
+  behind?: ReadonlySet<string>
+): QueueState {
+  return placeAtFront(state, { ...message, holdUntilUserAction: false }, behind);
+}
+
+function placeAtFront(
+  state: QueueState,
+  message: QueuedComposerMessage,
+  behind: ReadonlySet<string> | undefined
+): QueueState {
   const rest = state.messages.filter((entry) => entry.id !== message.id);
   let at = 0;
   if (behind !== undefined) {
@@ -129,7 +151,7 @@ export function holdAtFront(
   }
   return {
     ...state,
-    messages: [...rest.slice(0, at), { ...message, holdUntilUserAction: true }, ...rest.slice(at)]
+    messages: [...rest.slice(0, at), message, ...rest.slice(at)]
   };
 }
 

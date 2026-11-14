@@ -400,6 +400,28 @@ test("a profile switch resolves the profile, switches the host with it, THEN rec
   await f.cleanup();
 });
 
+test("while a busy account switch stands on the tab, a profile switch is refused before it reaches the host", async () => {
+  const f = await makeFixture();
+  const summary = await create(f);
+  f.service.chat.setAccountSwitch(summary.id, {
+    commandId: "sw-1",
+    fromAccountId: "acc-1",
+    toAccountId: "acc-2",
+    startedAt: new Date().toISOString(),
+    step: "settling",
+    goal: null
+  });
+  await assert.rejects(
+    f.service.switchProfile(summary.id, { commandId: "c1", profileId: "p2" }),
+    (e: unknown) =>
+      e instanceof ChatSessionError &&
+      e.code === "COMMAND_REJECTED" &&
+      e.message === "This chat is moving to another account. Switch the profile once the switch is done."
+  );
+  assert.equal(f.identities.length, 0);
+  await f.cleanup();
+});
+
 test("a profile switch is idempotent by commandId; a reused id with another profile conflicts; a refusal moves nothing", async () => {
   const f = await makeFixture();
   const summary = await create(f);

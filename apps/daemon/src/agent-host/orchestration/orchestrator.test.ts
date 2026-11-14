@@ -1164,6 +1164,33 @@ describe("orchestrator — session restart policy (§3.4)", () => {
     await host.stop();
   });
 
+  it("a session that asks for a fresh process gets it at the next idle send, cursor carried — never under a steer", async () => {
+    let wanted = false;
+    const host = createTestHost();
+    host.adapter.wantsSessionRestart = () => wanted;
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    // E.g. a per-task Stop reached a Claude subagent while the turn runs: a steer must not kill the turn.
+    wanted = true;
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "steer" });
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "startSession").length, 1, "a steer never restarts the session");
+
+    await host.orchestrator.ingestionSink(threadId, [
+      sinkEvent(host, threadId, `turn-end-${threadId}`, "thread.session-set", { session: { status: "ready", activeTurnId: null } })
+    ]);
+    await host.settle();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "resume them" });
+    await host.settle();
+    const kinds = host.adapter.calls.map((call) => call.kind);
+    assert.equal(kinds.filter((kind) => kind === "startSession").length, 2, "restarted once idle");
+    assert.equal(kinds.lastIndexOf("startSession") < kinds.lastIndexOf("sendTurn"), true, "before the turn is delivered");
+    assert.deepEqual(host.adapter.lastStart?.resumeCursor, { cursor: "turn-2" }, "the cursor the steer left");
+    wanted = false;
+    await host.stop();
+  });
+
   it("a mode change on a thread with no session starts nothing", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();

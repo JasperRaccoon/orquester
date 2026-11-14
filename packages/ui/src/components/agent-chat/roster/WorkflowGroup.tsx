@@ -38,6 +38,7 @@ import { formatSubagentTokenCount } from "./format";
 import { rosterRowTicks, rosterStatusVisual } from "./roster-rows";
 import { workflowGroupSummary } from "./roster-summary";
 import { AgentRosterRow } from "./AgentRosterRow";
+import { TaskStopButton, taskStop, type TaskStop } from "./TaskStopButton";
 
 type Phase = AgentPanelWorkflowGroup["phases"][number];
 
@@ -47,41 +48,6 @@ function workflowIsLive(group: AgentPanelWorkflowGroup): boolean {
 
 function workflowLabel(workflow: RuntimeSubagent): string {
   return workflow.workflowName ?? workflow.title;
-}
-
-/** The run's own Stop: offered while the provider can stop it, pending until it settles. */
-interface WorkflowStop {
-  control: Exclude<TaskStopControl, "hidden">;
-  onStop: () => void;
-}
-
-function WorkflowStopButton({
-  label,
-  stop,
-  className
-}: {
-  label: string;
-  stop: WorkflowStop;
-  className?: string;
-}): React.ReactElement {
-  const stopping = stop.control === "stopping";
-  return (
-    <button
-      type="button"
-      disabled={stopping}
-      onClick={stop.onStop}
-      title={stopping ? `Stopping ${label}` : `Stop ${label} and all of its agents`}
-      className={cn(
-        "ac-press inline-flex h-5 shrink-0 items-center rounded px-1.5 font-mono text-[10px] font-medium normal-case tracking-normal",
-        "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100",
-        "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
-        "disabled:pointer-events-none disabled:opacity-50",
-        className
-      )}
-    >
-      {stopping ? "Stopping…" : "Stop"}
-    </button>
-  );
 }
 
 function PhaseRail({ group }: { group: AgentPanelWorkflowGroup }): React.ReactElement | null {
@@ -219,7 +185,7 @@ function ExpandedWorkflow({
   activeAgentId: string | null;
   onOpenAgent: (agentId: string) => void;
   onCollapse: () => void;
-  stop: WorkflowStop | null;
+  stop: TaskStop | null;
 }): React.ReactElement {
   const summary = workflowGroupSummary(group);
   const workflowActive = group.workflow.id === activeAgentId;
@@ -248,8 +214,9 @@ function ExpandedWorkflow({
           </span>
         ) : null}
         {stop ? (
-          <WorkflowStopButton
+          <TaskStopButton
             label={workflowLabel(group.workflow)}
+            title={`Stop ${workflowLabel(group.workflow)} and all of its agents`}
             stop={stop}
             className={cn(summary.agents === 0 && "ml-auto")}
           />
@@ -301,7 +268,7 @@ function CollapsedWorkflow({
 }: {
   group: AgentPanelWorkflowGroup;
   onExpand: () => void;
-  stop: WorkflowStop | null;
+  stop: TaskStop | null;
 }): React.ReactElement {
   const { agents, failed, totalTokens } = workflowGroupSummary(group);
   const { workflow } = group;
@@ -340,7 +307,13 @@ function CollapsedWorkflow({
         </span>
       </button>
       {/* Beside the expand button, never inside it: a button in a button. */}
-      {stop ? <WorkflowStopButton label={workflowLabel(workflow)} stop={stop} /> : null}
+      {stop ? (
+        <TaskStopButton
+          label={workflowLabel(workflow)}
+          title={`Stop ${workflowLabel(workflow)} and all of its agents`}
+          stop={stop}
+        />
+      ) : null}
     </section>
   );
 }
@@ -366,11 +339,7 @@ export function WorkflowGroup({
   onStopTask
 }: WorkflowGroupProps): React.ReactElement {
   const [open, setOpen] = React.useState(() => workflowIsLive(group));
-  const workflowId = group.workflow.id;
-  const stop: WorkflowStop | null =
-    stopControl === "hidden" || onStopTask === undefined
-      ? null
-      : { control: stopControl, onStop: () => onStopTask(workflowId) };
+  const stop = taskStop(stopControl, group.workflow.id, onStopTask);
   return open ? (
     <ExpandedWorkflow
       group={group}

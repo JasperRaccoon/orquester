@@ -596,6 +596,10 @@ export async function createClaudeAdapterWith(
       return sessions.get(threadId)?.isAlive === true;
     },
 
+    wantsSessionRestart(threadId) {
+      return sessions.get(threadId)?.wantsRestart === true;
+    },
+
     backgroundTaskLive(threadId, taskId) {
       const session = sessions.get(threadId);
       // The CLI that ran it is gone: so is every shell and agent it ran.

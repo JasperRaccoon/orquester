@@ -11,7 +11,9 @@ import type { AdapterGoalSupport,AgentGoal } from "@orquester/api/agent-chat";
 
 import {
 buildChatAccountOptions,
+busySwitchInFlight,
 canSwitchChatAccount,
+chatAccountSwitchGate,
 chatAccountSelectionId,
 chatAccountSwitchRefusal,
 chatAccountSwitchSupported,
@@ -106,6 +108,77 @@ describe("the idle gate", () => {
         false,
         `closed for ${JSON.stringify(patch)}`
       );
+    }
+  });
+});
+
+describe("the account chip while the chat is busy (spec 2026-11-14 §3–§4)", () => {
+  it("switches at once when idle, and offers the stop-and-switch for what a stop clears", () => {
+    assert.deepEqual(chatAccountSwitchGate(idle), { kind: "idle" });
+    const stoppable: Array<Partial<ChatAccountSwitchState>> = [
+      { isTurnActive: true },
+      { hasPendingRequest: true },
+      { queuedCount: 2 },
+      { backgroundLive: true },
+      { goalContinuing: true }
+    ];
+    for (const patch of stoppable) {
+      const state = { ...idle, ...patch };
+      assert.equal(chatAccountSwitchGate(state).kind, "busy", JSON.stringify(patch));
+      assert.equal(canSwitchChatAccount(state), false, `the profile chip stays closed for ${JSON.stringify(patch)}`);
+    }
+  });
+
+  it("names the goal the daemon will handle, a held goal before a continuing one", () => {
+    assert.deepEqual(chatAccountSwitchGate({ ...idle, isTurnActive: true }), { kind: "busy", goal: null });
+    assert.deepEqual(chatAccountSwitchGate({ ...idle, goalContinuing: true }), { kind: "busy", goal: "continuing" });
+    // A held goal reads continuing as well (`isGoalContinuing`); the hold is what the daemon acts on.
+    assert.deepEqual(
+      chatAccountSwitchGate({ ...idle, goalContinuing: true, goalHeldForUpdate: true }),
+      { kind: "busy", goal: "held" }
+    );
+  });
+
+  it("stays refused for what the host refuses even with whileBusy, busy or not", () => {
+    for (const busy of [{}, { isTurnActive: true }, { goalContinuing: true }]) {
+      const compacting = chatAccountSwitchGate({ ...idle, ...busy, compacting: true });
+      assert.equal(compacting.kind, "refused");
+      assert.equal(
+        compacting.kind === "refused" ? compacting.reason : null,
+        chatAccountSwitchRefusal({ ...idle, compacting: true }),
+        "a compaction is named in the host's words"
+      );
+      assert.deepEqual(chatAccountSwitchGate({ ...idle, ...busy, sessionStarting: true }), {
+        kind: "refused",
+        reason: null
+      });
+    }
+    for (const patch of [{ reverting: true }, { connection: "connecting" }, { isSending: true }]) {
+      assert.equal(chatAccountSwitchGate({ ...idle, isTurnActive: true, ...patch }).kind, "refused", JSON.stringify(patch));
+    }
+    assert.equal(canSwitchChatAccount({ ...idle, sessionStarting: true }), false);
+  });
+
+  it("a busy switch in flight closes both chips", () => {
+    for (const busy of [{}, { isTurnActive: true }, { compacting: true }]) {
+      assert.deepEqual(chatAccountSwitchGate({ ...idle, ...busy, busySwitchInFlight: true }), { kind: "switching" });
+    }
+    assert.equal(canSwitchChatAccount({ ...idle, busySwitchInFlight: true }), false);
+  });
+
+  it("reads the summary's accountSwitch field-wise", () => {
+    const record = {
+      commandId: "c1",
+      fromAccountId: "",
+      toAccountId: "cla-2",
+      startedAt: "2026-11-14T00:00:00.000Z",
+      step: "settling",
+      goal: null
+    };
+    assert.deepEqual(busySwitchInFlight(record), record);
+    assert.equal(busySwitchInFlight({ ...record, goal: "sideways" })?.goal, null, "an unknown goal is none");
+    for (const malformed of [null, undefined, "x", [], { ...record, step: "flying" }, { ...record, toAccountId: 7 }]) {
+      assert.equal(busySwitchInFlight(malformed), null, JSON.stringify(malformed));
     }
   });
 });

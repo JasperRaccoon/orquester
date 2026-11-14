@@ -1946,6 +1946,30 @@ export const chatLimitFailoverRecordSchema = z
 export type ChatLimitFailoverRecord = z.infer<typeof chatLimitFailoverRecordSchema>;
 
 /**
+ * A busy account switch in flight on the chat. Mirrors `ChatBusySwitchState` in `@orquester/api`
+ * (`agent-chat/busy-switch.ts`): persisted before each step, so a restarted daemon finishes it,
+ * and the fence that refuses other turns while it stands. Tolerant: an unknown goal reads as none,
+ * unknown fields are kept (`passthrough`), and a block without its identity, target, start or step
+ * is dropped — never the record.
+ */
+export const chatBusySwitchRecordSchema = z
+  .object({
+    commandId: z.string().min(1).max(200),
+    fromAccountId: z.string().max(200).catch(""),
+    toAccountId: z.string().max(200),
+    startedAt: z.string().max(64).refine((value) => Number.isFinite(Date.parse(value))),
+    step: z.enum(["stopping", "settling", "switching", "continuing"]),
+    goal: z.enum(["continuing", "held"]).nullable().catch(null),
+    /**
+     * The daemon's private part of every command id the switch derives (never published on the
+     * summary), so no client can post under one of them. Absent on a record that predates it.
+     */
+    nonce: z.string().min(1).max(200).optional().catch(undefined)
+  })
+  .passthrough();
+export type ChatBusySwitchRecord = z.infer<typeof chatBusySwitchRecordSchema>;
+
+/**
  * A prompt scheduled to be sent into the chat. Mirrors `ScheduledPrompt` in `@orquester/api`
  * (`agent-chat/scheduled-prompts.ts`). The turn's nested parts (attachments, chips, model) were
  * checked by the daemon when the prompt was scheduled and are kept as written; unknown fields are
@@ -2028,6 +2052,11 @@ export const sessionChatRecordSchema = z.object({
   usageLimit: chatUsageLimitRecordSchema.optional().catch(undefined),
   /** The "switched account after a usage limit" notice, until dismissed. */
   limitFailover: chatLimitFailoverRecordSchema.optional().catch(undefined),
+  /**
+   * A busy account switch in flight (`chatBusySwitchRecordSchema`), so a restart finishes or
+   * abandons it. One that does not read is dropped (no switch, no fence).
+   */
+  accountSwitch: chatBusySwitchRecordSchema.optional().catch(undefined),
   /**
    * Prompts scheduled to be sent into the chat (`scheduledPromptRecordSchema`), in send order, so
    * a restart re-arms them. A list that does not read at all is none; a bad record is dropped alone.

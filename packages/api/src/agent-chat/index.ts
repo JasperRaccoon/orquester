@@ -50,4 +50,5 @@ export * from "./thread-tools.ts";
 export * from "./turn-state.ts";
 export * from "./turns.ts";
 export * from "./usage-limit.ts";
+export * from "./busy-switch.ts";
 export * from "./utf8.ts";
