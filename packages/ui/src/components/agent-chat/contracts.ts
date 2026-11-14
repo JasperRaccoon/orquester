@@ -268,18 +268,18 @@ export interface ChatComposerProps {
   /**
    * The §3.4 account picker. Omitted (or empty) keeps the chip a label —
    * an OpenCode thread runs under its server's identity and has nothing to
-   * pick. `accountSwitchEnabled` is the idle gate (`canSwitchChatAccount`);
-   * the daemon is authoritative and refuses anything else with a 409.
+   * pick. `accountSwitchEnabled` is open for an idle chat and for a busy one
+   * a stop can clear (`chatAccountSwitchGate`; the view turns a busy pick into
+   * the warning modal); the daemon is authoritative and refuses anything else
+   * with a 409.
    */
   accountOptions?: readonly ChatAccountOption[] | undefined;
   accountId?: string | undefined;
   accountSwitchEnabled?: boolean | undefined;
   /**
-   * The reason the picker is closed, in the host's own order and words
-   * (`chatAccountSwitchRefusal`): a running compaction, else a goal held for
-   * an Orquester update, which the user's `/goal pause` takes back (goals
-   * §5.7), else a continuing goal, which only a pause ends (§5.5). Absent ⇒
-   * the chip's own "available when idle".
+   * The reason the picker is closed (`chatAccountSwitchGate`): a running
+   * compaction, in the host's words, or the busy switch in flight
+   * ("Switching to …"). Absent ⇒ the chip's own "available when idle".
    */
   accountSwitchRefusal?: string | null | undefined;
   /**

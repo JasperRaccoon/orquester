@@ -10,9 +10,11 @@ import type { ForkSessionRequest } from "@orquester/api";
 import { shortAccountLabel } from "../../lib/account-label";
 import {
   buildChatAccountOptions,
+  busySwitchInFlight,
   canSwitchChatAccount,
   chatAccountLabel,
   chatAccountSelectionId,
+  chatAccountSwitchGate,
   chatAccountSwitchRefusal,
   chatAccountSwitchSupported,
   isGoalContinuing
@@ -135,6 +137,7 @@ import { ChatTimeline } from "./timeline/ChatTimeline";
 import type { TimelineForkInput } from "./timeline/context";
 import { ThreadLineageBar, type LineageNotice } from "./ThreadLineageBar";
 import { ContinueInAgentDialog, type ContinueHandoffPreview } from "./ContinueInAgentDialog";
+import { BusyAccountSwitchDialog, type BusyAccountSwitchWork } from "./BusyAccountSwitchDialog";
 import {
   continueHandoffBudget,
   continueHandoffPreview,
@@ -374,6 +377,19 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
   const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
   const setPreferredProfile = useAppStore((s) => s.setPreferredProfile);
+  // Spec 2026-11-14 §3: a pick on the account chip while the chat works opens
+  // the warning (`busySwitchDialog`) instead of switching. Whether it works is
+  // read off the gate below, at the pick, through this ref — the composer's
+  // actions stay one memoised object.
+  const accountPickOpensWarningRef = React.useRef(false);
+  const [busySwitchDialog, setBusySwitchDialog] = React.useState<{
+    accountId: string;
+    error: string | null;
+    /** What the dialog said when the user confirmed: kept while the stop changes it. */
+    confirmed?: { work: BusyAccountSwitchWork; goal: "continuing" | "held" | null };
+  } | null>(null);
+  /** The account a confirmed busy switch is moving to, while its request is open. */
+  const [busySwitchRequest, setBusySwitchRequest] = React.useState<string | null>(null);
   // What the composer's pickers change becomes this device's preference for
   // the agent, so the next chat opens the same way (model, effort, thinking,
   // fast mode, permission mode). The thread itself still gets the command.
@@ -389,6 +405,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       // preference for the agent, exactly as the model and mode picks do — but
       // only once the switch was accepted.
       setAccount: async (input: Parameters<typeof actions.setAccount>[0]) => {
+        if (accountPickOpensWarningRef.current && input.whileBusy !== true) {
+          setBusySwitchDialog({ accountId: input.accountId, error: null });
+          return;
+        }
         await actions.setAccount(input);
         setPreferredAccount(session.refId, input.accountId);
       },
@@ -1149,6 +1169,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     summaryGoal: session.goal,
     goalHeldForHandover: slice.head?.goalHeldForHandover === true
   });
+  // Spec 2026-11-14 §3: the daemon's busy switch, read field-wise off the tab
+  // summary. The thread's queue holds while it stands (the daemon refuses its
+  // turns), told here because the store does not see summaries.
+  const inFlightSwitch = busySwitchInFlight(session.accountSwitch);
+  const switchReported = inFlightSwitch !== null;
+  React.useEffect(() => {
+    actions.setAccountSwitchInFlight(switchReported);
+  }, [actions, switchReported]);
   // Goals §5.5: a goal the provider keeps working on by itself (Codex) holds
   // the switch — its next turn would start under the old account and die on
   // the restart — and the chip says to pause it rather than to wait. Only
@@ -1179,10 +1207,64 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     goalHeldForUpdate,
     // The host refuses a switch for a running compaction first (and the chip
     // then names it, as the host would).
-    compacting: status.isCompacting
+    compacting: status.isCompacting,
+    // The host refuses a starting session, busy switch or not.
+    sessionStarting: slice.sessionStatus === "starting",
+    // Spec 2026-11-14 §3: a busy switch in flight closes both chips — the
+    // daemon's, from the tab summary, or this client's request still open.
+    busySwitchInFlight: inFlightSwitch !== null || busySwitchRequest !== null
   };
-  const accountSwitchEnabled = !paintOnly && canSwitchChatAccount(accountSwitchState);
-  const accountSwitchRefusal = paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState);
+  // The account chip: idle switches at once, busy opens the warning, a busy
+  // switch in flight reads "Switching…", and what the host refuses even with
+  // `whileBusy` keeps today's closed chip and words.
+  const accountGate = paintOnly
+    ? ({ kind: "refused", reason: null } as const)
+    : chatAccountSwitchGate(accountSwitchState);
+  accountPickOpensWarningRef.current = accountGate.kind === "busy";
+  const accountSwitchEnabled = accountGate.kind === "idle" || accountGate.kind === "busy";
+  const switchingToAccountId = inFlightSwitch?.toAccountId ?? busySwitchRequest;
+  const accountLabelFor = (accountId: string | undefined): string =>
+    chatAccountLabel({ accountId, accounts: agentAccounts?.accounts, shortLabel: shortAccountLabel });
+  const accountSwitchRefusal =
+    accountGate.kind === "refused"
+      ? accountGate.reason
+      : accountGate.kind === "switching" && switchingToAccountId !== null
+        ? `Switching to ${accountLabelFor(switchingToAccountId)}…`
+        : null;
+  const accountChipLabel =
+    accountLabel !== null && accountGate.kind === "switching" ? "Switching…" : accountLabel;
+  // The modal reads the chat live while it is up; it says what a stop ends.
+  const busySwitchWork: BusyAccountSwitchWork = {
+    turnActive,
+    liveAgents: rosterCounts.liveAgents,
+    liveShells: rosterCounts.liveShells,
+    pendingApprovals: pending.approvals.length,
+    pendingQuestions: pending.userInputs.length,
+    queuedCount: slice.queue.length
+  };
+  const busySwitchGoal = accountGate.kind === "busy" ? accountGate.goal : null;
+  const closeBusySwitchDialog = React.useCallback(() => setBusySwitchDialog(null), []);
+  const confirmBusySwitch = (): void => {
+    if (busySwitchDialog === null || busySwitchRequest !== null) return;
+    const { accountId } = busySwitchDialog;
+    const confirmed = { work: busySwitchWork, goal: busySwitchGoal };
+    setBusySwitchDialog({ accountId, error: null, confirmed });
+    setBusySwitchRequest(accountId);
+    composerActions.setAccount({ accountId, whileBusy: true }).then(
+      () => {
+        setBusySwitchRequest(null);
+        setBusySwitchDialog((current) => (current?.accountId === accountId ? null : current));
+      },
+      (error: unknown) => {
+        setBusySwitchRequest(null);
+        // Said in the dialog while it is up; the thread's banner says it too.
+        const text = error instanceof Error ? error.message : "Could not switch the account.";
+        setBusySwitchDialog((current) =>
+          current?.accountId === accountId ? { accountId, error: text, confirmed } : current
+        );
+      }
+    );
+  };
 
   // The Agent Profile chip (agent profiles §5.3): the head says which profile
   // the thread runs with; switching restarts the agent, so it shares the
@@ -1192,6 +1274,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const profileAgent = isSessionProfileAgentId(providerAdapter)
     ? providerAdapter
     : agentForRefId(session.refId, [], REGISTRY.agents as readonly RegistryEntryDef[]);
+  // Busy switches are the account chip's only (spec 2026-11-14, non-goals).
+  const profileSwitchEnabled = !paintOnly && canSwitchChatAccount(accountSwitchState);
   const profileRefusal = paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState, "profiles");
   const profileSelectedId = slice.head?.profileId ?? null;
   const profileChip = React.useMemo(
@@ -1202,10 +1286,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             agent: profileAgent,
             profiles: profileList.profiles,
             selectedId: profileSelectedId,
-            canSwitch: accountSwitchEnabled,
+            canSwitch: profileSwitchEnabled,
             disabledReason: profileRefusal
           },
-    [profileAgent, profileList.profiles, profileSelectedId, accountSwitchEnabled, profileRefusal]
+    [profileAgent, profileList.profiles, profileSelectedId, profileSwitchEnabled, profileRefusal]
   );
 
   // --- the goal chip (goals §8.2) -------------------------------------------
@@ -1607,7 +1691,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 runtimeMode={slice.head?.runtimeMode ?? DEFAULT_RUNTIME_MODE}
                 interactionMode={slice.interactionMode}
                 showPlanModeToggle={provider?.capabilities?.showPlanModeToggle === true}
-                accountLabel={accountLabel}
+                accountLabel={accountChipLabel}
                 accountOptions={accountOptions}
                 accountId={chatAccountSelectionId(threadAccountId)}
                 accountSwitchEnabled={accountSwitchEnabled}
@@ -1703,6 +1787,16 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         </div>
       </Modal>
       <TurnDiffModal request={turnDiff} onClose={closeTurnDiff} />
+      <BusyAccountSwitchDialog
+        open={busySwitchDialog !== null && !paintOnly}
+        accountLabel={accountLabelFor(busySwitchDialog?.accountId)}
+        work={busySwitchDialog?.confirmed ? busySwitchDialog.confirmed.work : busySwitchWork}
+        goal={busySwitchDialog?.confirmed ? busySwitchDialog.confirmed.goal : busySwitchGoal}
+        running={busySwitchRequest !== null}
+        error={busySwitchDialog?.error ?? null}
+        onConfirm={confirmBusySwitch}
+        onClose={closeBusySwitchDialog}
+      />
       <ContinueInAgentDialog
         open={continueFrom !== null && !paintOnly}
         onClose={() => setContinueFrom(null)}

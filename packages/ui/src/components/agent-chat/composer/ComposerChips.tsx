@@ -422,12 +422,11 @@ export interface AccountChipProps {
   options?: readonly ChatAccountOption[];
   /** The id currently selected; matched against `options`. */
   selectedId?: string;
-  /** False while a turn, a request, a queue or a revert is in flight. */
+  /** False while what even a busy switch cannot clear is in flight (`chatAccountSwitchGate`). */
   canSwitch?: boolean;
   /**
-   * Why a closed chip is closed, in the host's words when it names one: a
-   * running compaction, a goal held for an Orquester update (goals §5.7), or
-   * a continuing goal (§5.5). Absent ⇒ the chip's own "available when idle".
+   * Why a closed chip is closed: a running compaction in the host's words, or
+   * a busy switch in flight. Absent ⇒ the chip's own "available when idle".
    */
   disabledReason?: string | null;
   onChange?: (accountId: string) => void;
@@ -442,9 +441,10 @@ const ACCOUNT_BUSY_TITLE = "Available when the agent is idle";
 /**
  * The account chip.
  *
- * It is a **picker** (§3.4's account switch), gated on the thread being idle:
- * the switch is applied on the next message by restarting the provider child,
- * which is only safe when nothing is in flight. It carries a
+ * It is a **picker** (§3.4's account switch): the switch is applied on the
+ * next message by restarting the provider child. On a busy chat the pick goes
+ * through the view's warning modal, which has the daemon stop the work first
+ * (spec 2026-11-14 §3). It carries a
  * `data-composer-shortcut` token so the one keybinding handler can address it,
  * but deliberately **no chord** (§7.4).
  *
