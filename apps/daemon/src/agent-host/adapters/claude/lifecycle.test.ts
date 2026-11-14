@@ -1365,6 +1365,156 @@ describe("claude adapter — stopping one task", () => {
   });
 });
 
+describe("claude adapter — stopped subagents stay resumable (spec 2026-11-14 §2)", () => {
+  const SESSION = "0a8aa749-8f08-45c1-bdc3-61483e589092";
+  const META = {
+    agentType: "general-purpose",
+    isBuiltIn: true,
+    description: "spike sleeper",
+    toolUseId: "toolu_01",
+    spawnDepth: 1,
+    stoppedByUser: true,
+    pickedEffortModel: "claude-haiku-5-5"
+  };
+
+  /** An account home holding SESSION's transcript, and its `subagents/` files when given. */
+  async function accountHome(subagents?: Record<string, string>): Promise<{ home: string; subagentsDir: string }> {
+    const home = await mkdtemp(nodePath.join(tmpdir(), "orq-claude-stop-"));
+    profileRoots.push(home);
+    const projectDir = nodePath.join(home, "projects", "-work-project");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(nodePath.join(projectDir, `${SESSION}.jsonl`), "", "utf8");
+    const subagentsDir = nodePath.join(projectDir, SESSION, "subagents");
+    if (subagents !== undefined) {
+      await mkdir(subagentsDir, { recursive: true });
+      for (const [name, text] of Object.entries(subagents)) {
+        await writeFile(nodePath.join(subagentsDir, name), text, { mode: 0o640 });
+      }
+    }
+    return { home, subagentsDir };
+  }
+
+  function resumingStart(home: string) {
+    return {
+      ...START,
+      home: { ...START.home, path: home },
+      resumeCursor: resumeCursorFor("claude", START.threadId, SESSION)
+    };
+  }
+
+  function stopMarkWarnings(events: readonly RuntimeEvent[]): string[] {
+    return events.flatMap((event) =>
+      event.type === "runtime.warning" && event.payload.message.includes("stop mark") ? [event.payload.message] : []
+    );
+  }
+
+  it("a start that resumes removes stoppedByUser from the session's subagent meta files, and only that key", async () => {
+    const { home, subagentsDir } = await accountHome({
+      "agent-a43ea987758c0b23e.meta.json": JSON.stringify(META),
+      "agent-b11ea987758c0b23e.meta.json": JSON.stringify({ ...META, stoppedByUser: undefined, description: "never stopped" })
+    });
+    const untouchedBefore = await fs.stat(nodePath.join(subagentsDir, "agent-b11ea987758c0b23e.meta.json"));
+    const harness = await makeHarness();
+    await harness.adapter.startSession(resumingStart(home));
+
+    assert.equal(harness.queryOptions.at(-1)?.resume, SESSION);
+    const cleared = nodePath.join(subagentsDir, "agent-a43ea987758c0b23e.meta.json");
+    const { stoppedByUser: _gone, ...kept } = META;
+    assert.equal(await fs.readFile(cleared, "utf8"), JSON.stringify(kept), "every other key kept, in order");
+    assert.equal((await fs.stat(cleared)).mode & 0o777, 0o640, "the file keeps its mode");
+    const untouched = await fs.stat(nodePath.join(subagentsDir, "agent-b11ea987758c0b23e.meta.json"));
+    assert.equal(untouched.mtimeMs, untouchedBefore.mtimeMs, "a file without the mark is not rewritten");
+    assert.deepEqual((await fs.readdir(subagentsDir)).sort(), [
+      "agent-a43ea987758c0b23e.meta.json",
+      "agent-b11ea987758c0b23e.meta.json"
+    ]);
+    await harness.drain();
+    assert.deepEqual(stopMarkWarnings(harness.events), []);
+  });
+
+  it("a meta file it cannot parse is left untouched and named in a warning; a session with no subagents starts as usual", async () => {
+    const broken = '{"agentType":"general-purpose","stoppedByUser":tru';
+    const { home, subagentsDir } = await accountHome({ "agent-c22ea987758c0b23e.meta.json": broken });
+    const harness = await makeHarness();
+    await harness.adapter.startSession(resumingStart(home));
+    await harness.drain();
+    const warnings = stopMarkWarnings(harness.events);
+    assert.equal(warnings.length, 1, "one warning row");
+    assert.match(warnings[0]!, /agent-c22ea987758c0b23e\.meta\.json/);
+    assert.equal(await fs.readFile(nodePath.join(subagentsDir, "agent-c22ea987758c0b23e.meta.json"), "utf8"), broken);
+
+    const bare = await accountHome();
+    const second = await makeHarness();
+    await second.adapter.startSession(resumingStart(bare.home));
+    assert.equal(second.adapter.hasSession(START.threadId), true);
+    await second.drain();
+    assert.deepEqual(stopMarkWarnings(second.events), []);
+  });
+
+  it("a per-task stop of a subagent asks for a restart once nothing runs; a shell's stop never does", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    const turn = async (input: string): Promise<void> => {
+      await harness.adapter.sendTurn({ threadId: START.threadId, input, attachments: [], interactionMode: "default" });
+      await peer.nextTurn();
+    };
+    const taskStarted = (taskId: string, taskType: string): void =>
+      peer.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: taskId,
+        description: taskId,
+        task_type: taskType,
+        session_id: "sess-1",
+        uuid: `u-start-${taskId}`
+      } as unknown as SDKMessage);
+    const taskEnded = (taskId: string, status: "stopped" | "completed"): void =>
+      peer.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: taskId,
+        status,
+        summary: status,
+        output_file: "",
+        session_id: "sess-1",
+        uuid: `u-note-${taskId}`
+      } as unknown as SDKMessage);
+    const wants = (): boolean => harness.adapter.wantsSessionRestart?.(START.threadId) === true;
+
+    // A shell's stop: its mark means nothing, so nothing asks for a restart.
+    await turn("run a shell");
+    taskStarted("bgrthugru", "local_bash");
+    await harness.waitFor("task.started");
+    await harness.adapter.stopTask!(START.threadId, "bgrthugru");
+    taskEnded("bgrthugru", "stopped");
+    await harness.waitFor("task.completed");
+    let seen = harness.events.length;
+    peer.emit(successResult());
+    await harness.waitFor("turn.completed", seen);
+    assert.equal(wants(), false, "a stopped shell never restarts the CLI");
+
+    // A subagent's stop, while a turn and a shell still run: the ask waits for both.
+    seen = harness.events.length;
+    await turn("run a subagent and a shell");
+    taskStarted("a43ea987758c0b23e", "local_agent");
+    taskStarted("bgrtother", "local_bash");
+    await harness.waitFor("task.started", seen);
+    await harness.adapter.stopTask!(START.threadId, "a43ea987758c0b23e");
+    assert.equal(wants(), false, "the turn still runs");
+    taskEnded("a43ea987758c0b23e", "stopped");
+    await harness.waitFor("task.completed", seen);
+    seen = harness.events.length;
+    peer.emit(successResult());
+    await harness.waitFor("turn.completed", seen);
+    assert.equal(wants(), false, "the shell still runs: a restart would kill it");
+    seen = harness.events.length;
+    taskEnded("bgrtother", "completed");
+    await harness.waitFor("task.completed", seen);
+    assert.equal(wants(), true, "nothing runs: the next send restarts the CLI first");
+  });
+});
+
 describe("claude adapter — the session's own catalog (Agent Profiles composer)", () => {
   it("answers the commands the session's handshake reported, not the probe's; null without a live session", async () => {
     const harness = await makeHarness({
