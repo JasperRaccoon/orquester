@@ -161,6 +161,7 @@ import {
   type HostThreadCatalogResponse,
   type HostThreadProfile,
   type SetThreadIdentityRequest,
+  type AppendThreadNoticeRequest,
   type SetThreadIdentityResponse
 } from "../host-protocol.ts";
 import type {
@@ -848,6 +849,12 @@ export interface Orchestrator {
    * carries the resume cursor.
    */
   setIdentity(threadId: string, request: SetThreadIdentityRequest): Promise<SetThreadIdentityResponse>;
+  /**
+   * `POST /threads/:id/notice`: one `runtime.warning` row the daemon writes on the thread's
+   * timeline (a busy account switch that failed after stopping the work). Receipt-tracked by
+   * `commandId` on the thread's command queue; starts nothing.
+   */
+  appendNotice(threadId: string, request: AppendThreadNoticeRequest): Promise<{ seq: number }>;
   deleteThread(threadId: string): Promise<void>;
 
   command(
@@ -5498,7 +5505,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // the refusal names the hold, and the user's own `/goal pause` that
       // takes it back. One the host has just set going again
       // ({@link goalJustResumed}) is not held: it gets the pause advice.
-      goalHeldForUpdate: goalHeld(runtime, adapter)
+      goalHeldForUpdate: goalHeld(runtime, adapter),
+      // Spec 2026-11-14 §3–§4: the daemon's busy switch stopped the work (pausing a continuing
+      // goal) or found a held goal, whose marks this switch leaves on the head.
+      busySwitch: request.busySwitch === true
     }, accountChanged ? "accounts" : "profiles");
     if (refusal !== null) {
       throw commandRejected(refusal);
@@ -5655,6 +5665,52 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           }
           throw error;
         }
+      });
+    });
+
+  const appendNotice = async (
+    threadId: string,
+    request: AppendThreadNoticeRequest
+  ): Promise<{ seq: number }> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      return runtime.commands.run(async () => {
+        const body = requireBody(request);
+        const commandId = requireCommandId(body);
+        const receipt = await store.getReceipt(commandId);
+        if (receipt) {
+          if (receipt.threadId !== threadId) {
+            throw new AgentChatCommandError(
+              "COMMAND_ID_CONFLICT",
+              `commandId '${commandId}' is already recorded against another thread.`,
+              { threadId: receipt.threadId }
+            );
+          }
+          return { seq: receipt.seq };
+        }
+        requireHead(runtime);
+        const summary = typeof request.summary === "string" ? request.summary.trim() : "";
+        if (summary.length === 0) throw invalidCommand("summary is required.");
+        const detail = typeof request.detail === "string" && request.detail.trim().length > 0 ? request.detail.trim() : undefined;
+        const occurredAt = clock.nowIso();
+        const activity = makeActivity({
+          id: ids.eventId(),
+          tone: "info",
+          activityKind: "runtime.warning",
+          summary: summary.slice(0, 200),
+          payload: {
+            message: summary.slice(0, 2_000),
+            ...(detail !== undefined ? { detail: detail.slice(0, 4_000) } : {})
+          },
+          turnId: null,
+          createdAt: occurredAt
+        });
+        const result = await commit(
+          runtime,
+          [buildEvent(runtime.id, "thread.activity-appended", { activity }, { occurredAt })],
+          { commandId, status: "accepted" }
+        );
+        return { seq: result.seq };
       });
     });
 
@@ -9519,6 +9575,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     forkThread,
     updateThread,
     setIdentity,
+    appendNotice,
     deleteThread,
     command,
     readThread,

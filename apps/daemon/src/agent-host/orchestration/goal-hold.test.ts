@@ -1012,6 +1012,43 @@ describe("goals §5.7 — a held goal's refusals never ask for the pause it has 
   });
 });
 
+describe("spec 2026-11-14 §4 — a busy account switch of a held goal", () => {
+  it("switches at once, keeps the hold for the next host, and still refuses what the stop cannot clear", async () => {
+    const { host } = codexHost();
+    const threadId = await continuingGoal(host);
+    assert.deepEqual(await host.orchestrator.holdContinuingGoals(), [threadId]);
+    // Its final turn still runs: the busy switch lifts the goal refusals only.
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true }),
+      (error: unknown) =>
+        isAgentChatCommandError(error) && error.message === "Wait for the agent to finish the current turn before switching accounts."
+    );
+    await completeTurn(host, threadId);
+    await host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true });
+    await host.settle();
+    assert.equal(host.store.heads.get(threadId)?.accountId, "acc2");
+    assert.equal(heldMark(host), true, "the hold stays on meta.json: the next host resumes the goal");
+    assert.equal(continuing(host, threadId), true);
+    assert.deepEqual(callsOf(host, "interruptTurn"), [], "nothing was stopped");
+    await host.stop();
+  });
+
+  it("keeps a pending resume mark too", async () => {
+    const { host: first } = codexHost();
+    const threadId = await continuingGoal(first, { running: false });
+    await first.orchestrator.markThreadsForContinuation();
+    await first.stop();
+    const next = codexHost({ store: first.store, launchConfigs: first.launchConfigs });
+    await next.host.orchestrator.readThread(threadId);
+    assert.equal(continuing(next.host, threadId), true, "the resume is owed");
+    await assert.rejects(() => next.host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2 }));
+    await next.host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2, busySwitch: true });
+    assert.equal(next.host.store.heads.get(threadId)?.accountId, "acc2");
+    assert.equal(next.host.store.heads.get(threadId)?.resumeGoalAfterRestart, true);
+    await next.host.stop();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The handover and the next host
 // ---------------------------------------------------------------------------
