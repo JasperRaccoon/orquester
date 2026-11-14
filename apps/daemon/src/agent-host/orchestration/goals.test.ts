@@ -467,6 +467,8 @@ describe("goals §5.3 — every session start carries the fold's goal", () => {
       goal: { objective: "ship it", status: "active", rounds: 2, lastCheck: "tests still fail" },
       change: "checked"
     });
+    // A permission-mode change is refused while the turn runs (`restartBlocker`): end it first.
+    await completeTurn(host, threadId);
     // A restart for another reason (§3.4): the goal is known, not carried.
     await host.orchestrator.command(threadId, "mode", {
       commandId: cmd(),

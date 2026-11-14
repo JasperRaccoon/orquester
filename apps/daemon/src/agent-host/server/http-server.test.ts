@@ -303,6 +303,15 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     const threadId = await h.host.createThread();
     const snapshot = async () => ((await h.call("GET", agentHostRoutes.read(threadId))).body as { thread: ThreadSnapshotPayload }).thread;
 
+    // A permission-mode change is refused while the thread is busy (`restartBlocker`), and this
+    // scripted adapter never ends the turn the interrupt below asks to stop: change it while idle.
+    const mode = await h.call("POST", agentHostRoutes.mode(threadId), {
+      commandId: "c-mode",
+      runtimeMode: "auto"
+    });
+    assert.equal(mode.status, 200);
+    assert.equal((await snapshot()).head.runtimeMode, "auto");
+
     const turn = await h.call("POST", agentHostRoutes.turn(threadId), {
       commandId: "c-turn",
       input: "hello"
@@ -320,13 +329,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     assert.ok((await h.host.store.readAll(threadId)).events.some((event) =>
       event.type === "thread.turn-interrupt-requested" && event.commandId === "c-int"
     ));
-
-    const mode = await h.call("POST", agentHostRoutes.mode(threadId), {
-      commandId: "c-mode",
-      runtimeMode: "auto"
-    });
-    assert.equal(mode.status, 200);
-    assert.equal((await snapshot()).head.runtimeMode, "auto");
 
     const stop = await h.call("POST", agentHostRoutes.sessionStop(threadId), {
       commandId: "c-stop"
