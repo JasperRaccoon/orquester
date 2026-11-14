@@ -14,6 +14,8 @@ import { SYSTEM_ACCOUNT_ID, type AgentAccount } from "@orquester/api";
 import type {
   AdapterGoalSupport,
   AgentGoal,
+  ChatBusySwitchState,
+  ChatBusySwitchStep,
   ThreadSessionStatus
 } from "@orquester/api/agent-chat";
 
@@ -112,6 +114,21 @@ export interface ChatAccountSwitchState {
    * *Added with agent goals (fix round 2); additive.*
    */
   compacting?: boolean;
+  /**
+   * The provider session is `starting` (the head's session status). The host
+   * refuses a switch then, busy switch or not. Absent reads as no.
+   *
+   * *Added with the busy switch; additive.*
+   */
+  sessionStarting?: boolean;
+  /**
+   * A busy switch is in flight on this chat: the tab summary's
+   * `accountSwitch`, or this client's own `whileBusy` request still open.
+   * Nothing else switches meanwhile. Absent reads as no.
+   *
+   * *Added with the busy switch; additive.*
+   */
+  busySwitchInFlight?: boolean;
 }
 
 /**
@@ -228,9 +245,88 @@ export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
     !state.isSending &&
     state.goalContinuing !== true &&
     state.goalHeldForUpdate !== true &&
-    state.compacting !== true
+    state.compacting !== true &&
+    state.sessionStarting !== true &&
+    state.busySwitchInFlight !== true
   );
 }
+
+/**
+ * What the account chip does with a pick (spec 2026-11-14 §3–§4):
+ * - `idle`: switch at once, as {@link canSwitchChatAccount} always has;
+ * - `busy`: the chat works, but a stop can clear what it does — a running or
+ *   unsettled turn, live background work, an open approval or question,
+ *   queued messages, a continuing goal or one held for an update. A pick opens
+ *   the warning modal, and its confirm posts the account route with
+ *   `whileBusy: true`. `goal` names the goal the daemon will handle (§4);
+ * - `switching`: a busy switch is in flight; the chip is closed and says so;
+ * - `refused`: what the host refuses even with `whileBusy` — a running
+ *   compaction (named, in the host's words), a starting session — and what
+ *   this client cannot vouch for yet: a revert, a stream not synchronized, a
+ *   send still on its way. `reason` is the host's words when it has some,
+ *   `null` where the chip's own "available when the agent is idle" is the
+ *   truth.
+ *
+ * The Agent Profile chip keeps the idle-only gate ({@link canSwitchChatAccount},
+ * {@link chatAccountSwitchRefusal}).
+ */
+export type ChatAccountSwitchGate =
+  | { kind: "idle" }
+  | { kind: "busy"; goal: "continuing" | "held" | null }
+  | { kind: "switching" }
+  | { kind: "refused"; reason: string | null };
+
+export function chatAccountSwitchGate(state: ChatAccountSwitchState): ChatAccountSwitchGate {
+  if (state.busySwitchInFlight === true) return { kind: "switching" };
+  if (state.compacting === true) return { kind: "refused", reason: COMPACTION_SWITCH_REFUSAL };
+  if (
+    state.reverting ||
+    state.connection !== "synchronized" ||
+    state.isSending ||
+    state.sessionStarting === true
+  ) {
+    return { kind: "refused", reason: null };
+  }
+  if (canSwitchChatAccount(state)) return { kind: "idle" };
+  return {
+    kind: "busy",
+    goal: state.goalHeldForUpdate === true ? "held" : state.goalContinuing === true ? "continuing" : null
+  };
+}
+
+/**
+ * `SessionSummary.accountSwitch`, read field-wise: wire data from a daemon of
+ * any version. A record without the fields the chip reads is no switch.
+ */
+export function busySwitchInFlight(value: unknown): ChatBusySwitchState | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const { commandId, fromAccountId, toAccountId, startedAt, step, goal } = record;
+  if (
+    typeof commandId !== "string" ||
+    typeof fromAccountId !== "string" ||
+    typeof toAccountId !== "string" ||
+    typeof startedAt !== "string" ||
+    !BUSY_SWITCH_STEPS.has(step as ChatBusySwitchStep)
+  ) {
+    return null;
+  }
+  return {
+    commandId,
+    fromAccountId,
+    toAccountId,
+    startedAt,
+    step: step as ChatBusySwitchStep,
+    goal: goal === "continuing" || goal === "held" ? goal : null
+  };
+}
+
+const BUSY_SWITCH_STEPS: ReadonlySet<ChatBusySwitchStep> = new Set([
+  "stopping",
+  "settling",
+  "switching",
+  "continuing"
+]);
 
 /**
  * The reason the chip names, in the host's own order and words
