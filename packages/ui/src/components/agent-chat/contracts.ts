@@ -414,9 +414,11 @@ export interface AgentRosterProps {
   collapsed?: boolean;
   onCollapsedChange?: (collapsed: boolean) => void;
   /**
-   * The provider can stop one task (`supportsTaskStop`): a live workflow run
-   * then offers its own Stop (`taskStopControl`). Absent means no such Stop —
-   * the liveness banner's, for the whole fleet, stays the only one.
+   * The provider can stop one task (`supportsTaskStop`): a live workflow run,
+   * subagent (nested ones included) or background shell then offers its own
+   * Stop (`taskStopControl`); a workflow's agents, loops and goals never do.
+   * Absent means no such Stop — the liveness banner's, for the whole fleet,
+   * stays the only one.
    */
   canStopTasks?: boolean;
   /** Roster ids a `/task/stop` is in flight for; their Stop reads "Stopping…". */

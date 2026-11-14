@@ -232,6 +232,8 @@ export function AgentRoster({
             fading={row.fading}
             active={row.agent.id === activeAgentId}
             onOpen={onOpenAgent}
+            stopControl={taskStopControl(agents, row.agent.id, { canStopTasks, stoppingTaskIds })}
+            onStopTask={onStopTask}
           />
         ))}
 
@@ -278,6 +280,8 @@ export function AgentRoster({
             fading={row.fading}
             active={row.agent.id === activeAgentId}
             onOpen={onOpenAgent}
+            stopControl={taskStopControl(agents, row.agent.id, { canStopTasks, stoppingTaskIds })}
+            onStopTask={onStopTask}
           />
         ))}
       </div>
