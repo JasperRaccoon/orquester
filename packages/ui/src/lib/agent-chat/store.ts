@@ -34,6 +34,7 @@ import {
   messageStreamingContext,
   repairsReEmittedAssistantCopies,
   THREAD_HISTORY_DEFAULT_TURNS,
+  TURN_NOT_IDLE,
   type AgentChatCommandBodies,
   type AgentChatCommandName,
   type ApprovalDecision,
@@ -139,6 +140,7 @@ import {
   latestCompletedToolActivityId,
   nextDueQueuedMessage,
   removeQueued,
+  requeueAtFront,
   takeQueued,
   type QueuePhase,
   type QueueState
@@ -891,6 +893,14 @@ function samePlan(left: ActivePlanState | null, right: ActivePlanState | null): 
  */
 const COMMAND_ATTEMPT_TIMEOUT_MS = 25_000;
 
+/**
+ * One attempt of a busy account switch (`whileBusy`, spec 2026-11-14 §3): the
+ * daemon answers only once it has stopped the work, waited for the thread to
+ * settle (up to a minute, as limit recovery waits), switched and sent the
+ * continue turn. An attempt past this is retried under the same `commandId`.
+ */
+const BUSY_SWITCH_ATTEMPT_TIMEOUT_MS = 180_000;
+
 const COMMAND_TIMED_OUT = "The agent host did not answer in time.";
 
 /** The empty `stoppingTaskIds`: one shared value, so an idle thread's roster view never re-renders on it. */
@@ -959,13 +969,16 @@ function firstHoldReason(messages: readonly QueuedComposerMessage[]): string | n
  * (status 0, retryable). Raced rather than left to the signal alone, so a
  * transport that ignores the abort is bounded too.
  */
-function attemptCommand(run: (signal: AbortSignal) => Promise<unknown>): Promise<unknown> {
+function attemptCommand(
+  run: (signal: AbortSignal) => Promise<unknown>,
+  timeoutMs = COMMAND_ATTEMPT_TIMEOUT_MS
+): Promise<unknown> {
   const controller = new AbortController();
   return new Promise<unknown>((resolve, reject) => {
     const timer = setTimeout(() => {
       controller.abort();
       reject(new AgentChatCommandError(0, "HOST_UNAVAILABLE", COMMAND_TIMED_OUT));
-    }, COMMAND_ATTEMPT_TIMEOUT_MS);
+    }, timeoutMs);
     timer.unref?.();
     // Whichever settles first wins; the other is a no-op on a settled promise.
     try {
@@ -1120,14 +1133,34 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     const command = async <TName extends AgentChatCommandName>(
       name: TName,
       body: Omit<AgentChatCommandBodies[TName], "commandId">,
-      commandId = newId()
+      commandId = newId(),
+      options: { quiet?: (error: unknown) => boolean } = {}
     ): Promise<void> => {
       const payload = { ...body, commandId } as AgentChatCommandBodies[TName];
       await withCommandRetries(
         (signal) => transport.command(sessionId, name, payload, signal),
-        { outlivesGeneration: RETRIED_PAST_TEARDOWN.has(name) }
+        { outlivesGeneration: RETRIED_PAST_TEARDOWN.has(name), ...options }
       );
     };
+
+    /**
+     * The busy account switch's fence on the queue (spec 2026-11-14 §3). While
+     * a switch is in flight the daemon refuses every turn into the chat with
+     * `TURN_NOT_IDLE`, so the queue does not flush: not while this client's own
+     * `whileBusy` request is open, not while the tab summary reports a switch
+     * (`setAccountSwitchInFlight`), and not after a queued send met the fence
+     * before either had said so — until the summary or this client's request
+     * says the switch is over. Its messages stay queued, never handed back to
+     * the composer (that is a manual Stop's), and flush at the boundaries they
+     * always do once the continue turn runs.
+     */
+    let accountSwitchRequests = 0;
+    let accountSwitchReported = false;
+    let accountSwitchRefused = false;
+    const queueFencedForAccountSwitch = (): boolean =>
+      accountSwitchRequests > 0 || accountSwitchReported || accountSwitchRefused;
+    const isFenceRefusal = (error: unknown): boolean =>
+      error instanceof AgentChatCommandError && error.code === TURN_NOT_IDLE;
 
     /**
      * The retry + error-banner half of {@link command}, shared with the §3.4
@@ -1138,11 +1171,17 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      */
     const withCommandRetries = async (
       run: (signal: AbortSignal) => Promise<unknown>,
-      options: { outlivesGeneration?: boolean } = {}
+      options: {
+        outlivesGeneration?: boolean;
+        /** Bounds each attempt instead of {@link COMMAND_ATTEMPT_TIMEOUT_MS}. */
+        attemptTimeoutMs?: number;
+        /** A failure the caller handles itself: no banner for it. */
+        quiet?: (error: unknown) => boolean;
+      } = {}
     ): Promise<void> => {
       for (let attempt = 0; ; attempt += 1) {
         try {
-          await attemptCommand(run);
+          await attemptCommand(run, options.attemptTimeoutMs);
           return;
         } catch (error) {
           // §6.6: an in-flight command whose response was lost is retried with
@@ -1164,7 +1203,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           }
           const message = errorMessage(error);
           // A banner the user already closed for this thread stays closed.
-          if (!dismissedErrorBanners.has(`${sessionId}\u0000${message}`)) {
+          if (options.quiet?.(error) !== true && !dismissedErrorBanners.has(`${sessionId}\u0000${message}`)) {
             setSlice({ errorBanner: message });
           }
           throw error;
@@ -1443,11 +1482,26 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
             context: message.context,
             interactionMode: message.interactionMode
           },
-          message.commandId
+          message.commandId,
+          { quiet: (error) => !closed && isFenceRefusal(error) }
         );
         removeOutboxEntry(message.commandId);
       } catch (error) {
-        holdFailedQueued(message, describe(errorMessage(error)), behind);
+        if (!closed && isFenceRefusal(error)) {
+          // A busy account switch's fence (spec 2026-11-14 §3): refused for
+          // the moment, never landed. Back at the front as it was, not held
+          // and with no banner, to go at the next boundary after the switch —
+          // under a new id, so the refused one is never answered from a
+          // receipt. The queue holds until the switch is over.
+          accountSwitchRefused = true;
+          update((state) => {
+            const queue = requeueAtFront(state.queue, { ...message, commandId: newId() }, behind);
+            const reducer = patchSlice(state.reducer, { queue: [...queue.messages] });
+            return { ...state, queue, reducer, slice: reducer.slice };
+          });
+        } else {
+          holdFailedQueued(message, describe(errorMessage(error)), behind);
+        }
         removeOutboxEntry(message.commandId);
         throw error;
       } finally {
@@ -2009,9 +2063,42 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         // the tab's as `session.updated`, so a refusal leaves the chip exactly
         // where it was.
         const commandId = newId();
-        await withCommandRetries((signal) =>
-          transport.switchAccount(sessionId, { commandId, accountId: input.accountId }, signal)
-        );
+        if (input.whileBusy !== true) {
+          await withCommandRetries((signal) =>
+            transport.switchAccount(sessionId, { commandId, accountId: input.accountId }, signal)
+          );
+          return;
+        }
+        // The busy switch (spec 2026-11-14 §3): the daemon stops the work,
+        // settles, switches and continues before it answers. The queue is
+        // fenced meanwhile and NOT drained to the composer, as a manual Stop
+        // does: its messages go after the continue turn.
+        accountSwitchRequests += 1;
+        try {
+          await withCommandRetries(
+            (signal) =>
+              transport.switchAccount(
+                sessionId,
+                { commandId, accountId: input.accountId, whileBusy: true },
+                signal
+              ),
+            { attemptTimeoutMs: BUSY_SWITCH_ATTEMPT_TIMEOUT_MS }
+          );
+        } finally {
+          accountSwitchRequests -= 1;
+          // Over, either way: a fence a queued send met during it lifts too.
+          accountSwitchRefused = false;
+          driveQueue();
+        }
+      },
+
+      setAccountSwitchInFlight(inFlight) {
+        if (inFlight === accountSwitchReported) return;
+        accountSwitchReported = inFlight;
+        if (!inFlight) {
+          accountSwitchRefused = false;
+          driveQueue();
+        }
       },
 
       async setProfile(input) {
@@ -2564,7 +2651,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * the same pending-request gates.*
      */
     const driveQueue = (): void => {
-      if (closed || isQueuedSendInFlight(sessionId)) {
+      if (closed || isQueuedSendInFlight(sessionId) || queueFencedForAccountSwitch()) {
         return;
       }
       const state = get();

@@ -881,10 +881,21 @@ export interface AgentChatActions {
   /**
    * `POST /api/sessions/:id/account` — §3.4's account switch, applied on the
    * next message. `accountId` is a managed account of the thread's family or
-   * `SYSTEM_ACCOUNT_ID`. Offered only while the thread is idle
-   * (`canSwitchChatAccount`); the daemon refuses anything else with a 409.
+   * `SYSTEM_ACCOUNT_ID`. Without `whileBusy`, offered only while the thread is
+   * idle (`canSwitchChatAccount`); the daemon refuses anything else with a 409.
+   *
+   * `whileBusy` (spec 2026-11-14 §3, set only by the warning modal's confirm):
+   * the daemon stops the work, switches and sends the continue turn, and the
+   * promise settles when that sequence ends. The queue is fenced meanwhile and
+   * kept, never drained to the composer.
    */
-  setAccount(input: { accountId: string }): Promise<void>;
+  setAccount(input: { accountId: string; whileBusy?: boolean }): Promise<void>;
+  /**
+   * The tab summary says whether a busy account switch is in flight on this
+   * chat (`SessionSummary.accountSwitch`). While it is, the queue does not
+   * flush: the daemon would refuse its turns. Client-local; idempotent.
+   */
+  setAccountSwitchInFlight(inFlight: boolean): void;
   /**
    * `POST /api/sessions/:id/profile` — the Agent Profile switch (agent profiles spec §5.3):
    * restarts the agent with the profile (`null` = Global) and keeps the conversation. Same

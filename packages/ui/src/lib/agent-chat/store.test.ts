@@ -1261,3 +1261,102 @@ describe("stopping one task (/task/stop)", () => {
     assert.deepEqual(state().stoppingTaskIds, []);
   });
 });
+
+/**
+ * Switching accounts while the chat works (spec 2026-11-14 §3): the daemon
+ * stops the work, switches and continues, refusing every other turn with
+ * `TURN_NOT_IDLE` meanwhile. The user's queued messages stay queued through
+ * it and go out once, after it — never drained to the composer, never dropped.
+ */
+describe("a busy account switch keeps the queue", () => {
+  const queued = (text: string) => ({
+    text,
+    attachments: [],
+    context: [],
+    interactionMode: "default" as const,
+    queuedAfterToolActivityId: null,
+    holdUntilUserAction: false
+  });
+  const running = (seq: number): AgentChatStreamFrame => ({
+    kind: "snapshot",
+    thread: snapshot({ seq, head: head({ session: { status: "running", activeTurnId: "t1" } }) })
+  });
+  const ended = (seq: number): AgentChatStreamFrame => ({
+    kind: "snapshot",
+    thread: snapshot({ seq, head: head({ session: { status: "ready", activeTurnId: null } }) })
+  });
+  const turns = (fake: ReturnType<typeof fakeTransport>) =>
+    fake.attempts.filter((attempt) => attempt.name === "turn");
+
+  it("the confirming client sends nothing while its switch runs, and the queue once after it", async () => {
+    const fake = fakeTransport();
+    let answerSwitch: () => void = () => {};
+    fake.transport.switchAccount = async (_sessionId, body) => {
+      fake.attempts.push({ name: "account", body: body as unknown as Record<string, unknown> });
+      await new Promise<void>((resolve) => {
+        answerSwitch = resolve;
+      });
+      return { seq: 1 };
+    };
+    const api = createThreadStore("B", { transport: fake.transport });
+    await flush();
+    fake.push(running(1));
+    api.getState().actions.queueMessage(queued("after the switch"));
+
+    const switching = api.getState().actions.setAccount({ accountId: "acc-2", whileBusy: true });
+    await settle();
+    assert.equal(fake.attempts[0]?.body.whileBusy, true);
+    // The daemon's stop ends the turn: the queue would be due now.
+    fake.push(ended(2));
+    await settle();
+    assert.deepEqual(turns(fake), [], "nothing flushes into the fence");
+    assert.deepEqual(api.getState().slice.queue.map((message) => message.text), ["after the switch"]);
+    assert.equal(api.getState().draft.text, "", "not handed back to the composer, as a manual Stop would");
+
+    answerSwitch();
+    await switching;
+    await settle();
+    assert.deepEqual(turns(fake).map((attempt) => attempt.body.input), ["after the switch"]);
+    assert.deepEqual(api.getState().slice.queue, []);
+  });
+
+  it("a queued send the fence refuses stays queued, unheld, and goes once the switch is over", async () => {
+    const { api, fake, state } = await store("F");
+    fake.push(running(1));
+    api.getState().actions.queueMessage(queued("one"));
+    api.getState().actions.queueMessage(queued("two"));
+    // Another client's switch: this one hears of it only by the refusal.
+    fake.fail(new AgentChatCommandError(409, "TURN_NOT_IDLE", "An account switch is in progress."), 1);
+    fake.push(ended(2));
+    await settle();
+    assert.equal(turns(fake).length, 1);
+    assert.deepEqual(
+      state().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["one", false],
+        ["two", false]
+      ],
+      "back at the front, in order, waiting for no one"
+    );
+    assert.equal(state().slice.errorBanner, null);
+
+    fake.push(ended(3));
+    api.getState().actions.setAccountSwitchInFlight(true);
+    await settle();
+    assert.equal(turns(fake).length, 1, "no retry into the fence");
+
+    api.getState().actions.setAccountSwitchInFlight(false);
+    await settle();
+    // Idle again: the queue drains one message at a time, each once, in order.
+    assert.deepEqual(
+      fake.posted.filter((post) => post.name === "turn").map((post) => post.body.input),
+      ["one", "two"]
+    );
+    assert.notEqual(
+      turns(fake)[1]?.body.commandId,
+      turns(fake)[0]?.body.commandId,
+      "a new id: the refused one is never answered from a receipt"
+    );
+    assert.deepEqual(state().slice.queue, []);
+  });
+});
