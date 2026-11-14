@@ -140,13 +140,19 @@ else
   release_dir="$RELEASES/${sha:0:12}"
   live_dir=""
   if [ -L "$LIVE" ]; then live_dir="$(readlink -f "$LIVE")"; fi
-  if [ "$(cat "$release_dir/$MARKER" 2>/dev/null || true)" = "$sha" ]; then
+  # Complete: marked so, and the tree is still that commit with no tracked file changed (an in-place
+  # reset — by an updater from before releases, say — leaves the old commit's marker behind).
+  if [ "$(cat "$release_dir/$MARKER" 2>/dev/null || true)" = "$sha" ] \
+     && [ "$(git -C "$release_dir" rev-parse HEAD 2>/dev/null || true)" = "$sha" ] \
+     && git -C "$release_dir" diff --quiet HEAD -- 2>/dev/null; then
     log "release ${sha:0:12} is already built — not rebuilding it"
     need_build=0
   elif [ "$(readlink -f "$release_dir")" = "$live_dir" ]; then
-    # Live but not marked complete (a rebuild of it was interrupted): rebuilt in place, as
-    # provision always did — never deleted under the daemon that may run from it.
-    log "release ${sha:0:12} is live but not marked complete — rebuilding it in place"
+    # Live but not a complete build of $sha (a rebuild of it was interrupted, or its tree was reset
+    # in place): rebuilt in place at $sha, as provision always did — never deleted under the daemon
+    # that may run from it.
+    log "release ${sha:0:12} is live but not a complete build of it — rebuilding it in place"
+    git -C "$release_dir" reset --hard -q "$sha"
   else
     # A leftover of an interrupted run: start that release over from a clean worktree.
     if [ -e "$release_dir" ]; then

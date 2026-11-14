@@ -5,6 +5,7 @@
 #   bash deploy/lib/warm-release.sh <release-dir>
 #
 # remote-update.sh runs it as root from inside the new release; a non-zero exit is a warning only.
+# Exits 124 when WARM_TIMEOUT stopped the warm-up, 1 on any other failure.
 # It loads (never runs) the module graphs of the daemon and the agent host through tsx as the
 # daemon user, with the unit's TMPDIR and node, from the release's real path: tsx keys each cache
 # entry on the file's absolute path, its source, the node version, the tsconfig found from cwd and
@@ -15,7 +16,8 @@
 #   DAEMON_USER     the unit's User=                 (orquester)
 #   DAEMON_TMPDIR   the unit's TMPDIR                (/var/lib/orquester/tmp)
 #   NODE_BIN        the unit's node                  (/usr/bin/node, else node on PATH)
-#   WARM_TIMEOUT    seconds before giving up         (300)
+#   WARM_TIMEOUT    seconds before giving up         (600; remote-update.sh passes on the
+#                                                     operator's value, or none: this is the default)
 # Run as root, or directly as DAEMON_USER (manual runs and tests: DAEMON_USER=$(id -un)).
 set -euo pipefail
 
@@ -25,7 +27,7 @@ fail() { printf '[warm-release] ERROR: %s\n' "$*" >&2; exit 1; }
 release="$(cd "$1" 2>/dev/null && pwd -P)" || fail "no release directory at $1"
 user="${DAEMON_USER:-orquester}"
 tmp="${DAEMON_TMPDIR:-/var/lib/orquester/tmp}"
-timeout_s="${WARM_TIMEOUT:-300}"
+timeout_s="${WARM_TIMEOUT:-600}"
 if [ -n "${NODE_BIN:-}" ]; then
   node="$NODE_BIN"
 elif [ -x /usr/bin/node ]; then
@@ -60,5 +62,8 @@ status=0
   TMPDIR="$tmp" \
   "$node" --import tsx "$helper" "${entries[@]}" || status=$?
 [ "$status" -eq 0 ] && exit 0
-[ "$status" -eq 124 ] && fail "timed out after ${timeout_s}s"
+if [ "$status" -eq 124 ]; then
+  printf '[warm-release] ERROR: timed out after %ss\n' "$timeout_s" >&2
+  exit 124
+fi
 fail "warming $release failed (exit $status)"

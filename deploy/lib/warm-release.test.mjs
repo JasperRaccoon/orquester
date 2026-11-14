@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,10 +28,10 @@ function write(path, text) {
   writeFileSync(join(release, path), text);
 }
 
-function warm(dir = release) {
+function warm(dir = release, env = {}) {
   return spawnSync("bash", [SCRIPT, dir], {
     encoding: "utf8",
-    env: { ...process.env, DAEMON_USER: userInfo().username, DAEMON_TMPDIR: daemonTmp }
+    env: { ...process.env, DAEMON_USER: userInfo().username, DAEMON_TMPDIR: daemonTmp, ...env }
   });
 }
 
@@ -82,4 +82,16 @@ test("fails when the graph does not load", () => {
   const result = warm();
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /missing\.ts/);
+});
+
+test("a warm-up stopped by its WARM_TIMEOUT exits 124 and says so", () => {
+  // A `timeout` that records its limit and reports having stopped the command, as timeout(1) does.
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "timeout"), `#!/usr/bin/env bash\necho "$1" > ${JSON.stringify(join(root, "limit"))}\nexit 124\n`);
+  chmodSync(join(bin, "timeout"), 0o755);
+  const result = warm(release, { PATH: `${bin}:${process.env.PATH}`, WARM_TIMEOUT: "7" });
+  assert.equal(result.status, 124, result.stderr);
+  assert.equal(readFileSync(join(root, "limit"), "utf8").trim(), "7");
+  assert.match(result.stderr, /timed out after 7s/);
 });
