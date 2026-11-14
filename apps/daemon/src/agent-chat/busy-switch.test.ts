@@ -304,6 +304,22 @@ test("a running compaction refuses the switch before anything is stopped or pers
   assert.deepEqual(h.notices, []);
 });
 
+test("a goal an Orquester restart still owes its resume refuses the switch before anything is stopped", async () => {
+  const h = harness({ refId: "codex", fields: RUNNING });
+  h.api.head = {
+    head: { session: { status: "running", activeTurnId: null }, resumeGoalAfterRestart: true },
+    goal: { objective: "ship it", status: "active" },
+    goalContinuesAcrossTurns: true
+  };
+  await assert.rejects(h.busy.run("s1", { commandId: "sw-1", accountId: "acc2" }), {
+    message: "The goal is resuming after an Orquester update. Switch accounts once it is running again.",
+    code: "COMMAND_REJECTED"
+  });
+  assert.deepEqual(h.api.interrupts(), []);
+  assert.deepEqual(h.switches, []);
+  assert.equal(h.chat.get("s1")?.accountSwitch, undefined, "no fence was ever set");
+});
+
 test("a goal held for an update is not stopped: the switch applies at once and nothing is sent", async () => {
   const h = harness({ refId: "codex", fields: { ...IDLE, goal: { objective: "ship it", status: "paused", continuing: true } } });
   h.api.head = {

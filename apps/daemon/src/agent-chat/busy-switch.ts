@@ -71,6 +71,8 @@ const GOAL_RESUME_COMMAND = "/goal resume";
 
 /** The host's own refusal for a running compaction (`identitySwitchRefusal`), which a busy switch keeps. */
 const COMPACTION_REFUSAL = "Wait for the context compaction to finish before switching accounts.";
+const GOAL_RESUME_OWED_REFUSAL =
+  "The goal is resuming after an Orquester update. Switch accounts once it is running again.";
 
 /** The words the `/turn` fence refuses with. */
 export const BUSY_SWITCH_FENCE_MESSAGE = "This chat is moving to another account. Send the message again once the switch is done.";
@@ -421,6 +423,12 @@ export class ChatBusySwitch {
     const tab = this.opts.chat.get(id);
     if (!tab) throw new BusySwitchError("No chat session with that id.", "THREAD_NOT_FOUND");
     const goal = goalToHandle(tab, head);
+    // A goal an Orquester restart still owes its resume (`resumeGoalAfterRestart`) has no session to
+    // stop and pause, and the host refuses its switch until the resume ran: say so now rather than
+    // stopping what else runs and timing out.
+    if (head.head.resumeGoalAfterRestart === true && goal !== "held") {
+      throw new BusySwitchError(GOAL_RESUME_OWED_REFUSAL, "COMMAND_REJECTED");
+    }
     // It went idle while the head was read: today's switch, nothing stopped, nothing sent.
     if (goal === null && idleForSwitch(tab, null)) {
       return this.opts.switchAccount(id, { commandId: input.commandId, accountId: input.accountId });
