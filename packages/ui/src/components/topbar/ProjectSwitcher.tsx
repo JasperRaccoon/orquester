@@ -3,8 +3,12 @@ import { Box, Check, ChevronDown } from "lucide-react";
 import { AdaptiveMenu, DropdownEmpty, DropdownItem, DropdownLabel } from "../ui";
 import { useAppStore } from "../../store/app";
 
-/** Titlebar dropdown showing the active project and switching between siblings. */
-export const ProjectSwitcher: React.FC = () => {
+/**
+ * Titlebar dropdown showing the active project and switching between siblings.
+ * `shrink` lets the name truncate to the space left in a crowded row (the
+ * phone header) instead of pushing the controls after it off screen.
+ */
+export const ProjectSwitcher: React.FC<{ shrink?: boolean }> = ({ shrink = false }) => {
   const currentWorkspace = useAppStore((s) => s.currentWorkspace);
   const currentProject = useAppStore((s) => s.currentProject);
   const projects = useAppStore((s) => s.projects);
@@ -17,15 +21,15 @@ export const ProjectSwitcher: React.FC = () => {
   const visibleProjects = projects.filter((p) => !p.isArchived);
 
   const trigger = (
-    <span className="flex h-7 items-center gap-1.5 rounded-md px-2 text-sm font-medium text-neutral-100 hover:bg-neutral-800">
-      <Box size={14} className="text-neutral-500" />
+    <span className="flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-sm font-medium text-neutral-100 hover:bg-neutral-800">
+      <Box size={14} className="shrink-0 text-neutral-500" />
       <span className="max-w-[200px] truncate">{currentProject?.name ?? "No project"}</span>
-      <ChevronDown size={13} className="text-neutral-500" />
+      <ChevronDown size={13} className="shrink-0 text-neutral-500" />
     </span>
   );
 
   return (
-    <AdaptiveMenu title="Projects" trigger={trigger} width="w-64">
+    <AdaptiveMenu title="Projects" trigger={trigger} width="w-64" triggerClassName={shrink ? "min-w-0" : undefined}>
       <DropdownLabel>{currentProject?.workspace ?? currentWorkspace ?? "Workspace"}</DropdownLabel>
       {projectsLoading && <DropdownEmpty>Loading…</DropdownEmpty>}
       {!projectsLoading && visibleProjects.length === 0 && (

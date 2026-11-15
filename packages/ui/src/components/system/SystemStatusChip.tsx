@@ -1,6 +1,6 @@
 import React from "react";
 import { ChevronRight, Cpu, ExternalLink, Folder, MemoryStick } from "lucide-react";
-import { useMediaQuery } from "../../hooks";
+import { useIsDesktop } from "../../hooks";
 import { useAppStore } from "../../store/app";
 import { AdaptiveMenu, DropdownContext } from "../ui";
 import { gaugeClass } from "../topbar/usage-format";
@@ -68,24 +68,22 @@ const PopoverFooter: React.FC<{ path: string }> = ({ path }) => {
  * Sidebar-footer host chip: CPU% and memory% of the machine the daemon runs
  * on, with the full resource breakdown in a popover.
  *
- * Hidden entirely below `sm` — the mobile drawer stays mounted off-canvas, so
- * showing it there would poll while invisible, and Settings → Host status is the
- * phone-side surface for this. Hidden too when the host can't report
- * (`supported: false`, i.e. anything but Linux) or when nothing has been read
- * yet, following the UsageWidget convention of staying out of the chrome
- * rather than showing a placeholder.
+ * It sits in the desktop sidebar and in the phone drawer's footer. The drawer
+ * stays mounted off-canvas, so on a phone it polls only while the drawer is
+ * open. Hidden when the host can't report (`supported: false`, i.e. anything
+ * but Linux) or when nothing has been read yet, following the UsageWidget
+ * convention of staying out of the chrome rather than showing a placeholder.
  */
 export const SystemStatusChip: React.FC = () => {
-  // Not `useIsDesktop()`: the chip fits the wide-phone/tablet header too, and
-  // only the genuinely narrow layout has to give it up.
-  const roomForChip = useMediaQuery("(min-width: 640px)");
-  const active = useSystemPollEnabled(roomForChip);
+  const isDesktop = useIsDesktop();
+  const drawerOpen = useAppStore((s) => s.sidebarDrawerOpen);
+  const active = useSystemPollEnabled(isDesktop || drawerOpen);
   const { data } = useSystemResources(active);
-  // Collected by the chip, which stays mounted, so the popover opens onto two
-  // minutes of history instead of an empty chart.
+  // Collected by the chip, which stays mounted, so the popover opens onto the
+  // history read so far instead of an empty chart.
   const history = useResourceHistory(data);
 
-  if (!roomForChip || !data || !data.supported) {
+  if (!data || !data.supported) {
     return null;
   }
 

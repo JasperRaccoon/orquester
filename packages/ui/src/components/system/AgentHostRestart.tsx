@@ -104,7 +104,9 @@ export const AgentHostRestart: React.FC<{ live: boolean }> = ({ live }) => {
                 return (
                   <li key={`${blocker.kind}:${blocker.taskId ?? index}`} className="flex flex-wrap items-center gap-2">
                     <span className="text-neutral-400">{blockerKindLabel(blocker)}</span>
-                    {name !== null && blocker.kind !== "turn" && <span className="text-neutral-200">{name}</span>}
+                    {name !== null && blocker.kind !== "turn" && (
+                      <span className="min-w-0 text-neutral-200 [overflow-wrap:anywhere]">{name}</span>
+                    )}
                     {age !== null && <span className="tabular-nums text-neutral-500">{formatDuration(age)}</span>}
                     {blocker.command !== undefined && blocker.command !== name && (
                       <code className="max-w-full truncate rounded bg-neutral-950 px-1.5 py-0.5 text-[11px] text-neutral-400">

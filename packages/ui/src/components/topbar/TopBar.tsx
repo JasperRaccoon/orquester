@@ -94,13 +94,13 @@ export const TopBar: React.FC = () => {
           {serverHeader ? (
             serverHeader
           ) : ctx?.kind === "project" ? (
-            <ProjectSwitcher />
+            <ProjectSwitcher shrink />
           ) : (
             <span className="px-1 text-sm text-neutral-500">Select a project</span>
           )}
           <div className="flex-1" />
           <CommandPaletteButton />
-          <div className="app-no-drag">
+          <div className="app-no-drag shrink-0">
             <UsageWidget />
           </div>
           <SettingsButton />
