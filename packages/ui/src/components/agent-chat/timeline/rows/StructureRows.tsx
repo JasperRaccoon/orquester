@@ -218,7 +218,8 @@ export const WorkingRow = React.memo(function WorkingRow({
       live
       progress={compacting}
       icon={compacting ? <Minimize2 size={14} strokeWidth={1.8} aria-hidden /> : undefined}
-      label={compacting ? COMPACTING_LABEL : row.createdAt === null ? "Working…" : "Working for"}
+      // The indicator writes "for <elapsed>" beside the label itself.
+      label={compacting ? COMPACTING_LABEL : row.createdAt === null ? "Working…" : "Working"}
       startedAt={compacting ? undefined : row.createdAt}
     />
   );
