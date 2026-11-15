@@ -17,29 +17,96 @@ export function contentDisposition(name: string): string {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
+/** Inclusive byte offsets of a file to send. */
+export interface ByteRange {
+  start: number;
+  end: number;
+}
+
 /**
- * Stream a file's bytes as an attachment. The handler MUST `return` the result,
- * NOT `void reply.send(stream); return;`: in an async handler a stream send is
+ * The single byte range a `Range` header asks of a file of `size` bytes:
+ * null to send the whole file (no header, a syntax this doesn't serve — e.g.
+ * several ranges — or an empty file), "unsatisfiable" for a range wholly past
+ * the end (RFC 9110 §14.1.2: `bytes=a-b`, `bytes=a-`, `bytes=-n`).
+ */
+function requestedRange(header: string | undefined, size: number): ByteRange | null | "unsatisfiable" {
+  if (header === undefined || size === 0) return null;
+  const match = /^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/i.exec(header);
+  if (!match || (match[1] === "" && match[2] === "")) return null;
+  if (match[1] === "") {
+    const suffix = Number(match[2]);
+    if (suffix === 0) return "unsatisfiable";
+    return { start: Math.max(0, size - suffix), end: size - 1 };
+  }
+  const start = Number(match[1]);
+  const end = match[2] === "" ? size - 1 : Number(match[2]);
+  if (match[2] !== "" && end < start) return null;
+  if (start >= size) return "unsatisfiable";
+  return { start, end: Math.min(end, size - 1) };
+}
+
+// Audio and video go out under their own type, so a player (Safari's in
+// particular) streams them from the download URL; everything else stays opaque.
+const MEDIA_TYPES: Record<string, string> = {
+  mp4: "video/mp4",
+  m4v: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
+  mkv: "video/x-matroska",
+  ogv: "video/ogg",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  oga: "audio/ogg",
+  opus: "audio/ogg",
+  m4a: "audio/mp4",
+  flac: "audio/flac",
+  aac: "audio/aac"
+};
+
+function downloadType(name: string): string {
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+  return Object.prototype.hasOwnProperty.call(MEDIA_TYPES, ext) ? MEDIA_TYPES[ext]! : "application/octet-stream";
+}
+
+/**
+ * Stream a file's bytes as an attachment — the whole file, or the one byte
+ * range `rangeHeader` asks for (206), so a media player can stream and seek
+ * without fetching the whole file. The handler MUST `return` the result, NOT
+ * `void reply.send(stream); return;`: in an async handler a stream send is
  * still piping when the function resolves to `undefined`, so Fastify sends that
  * `undefined` and clobbers the stream — content-length:0, empty body. Returning
  * the reply tells Fastify the response is taken. `size` (from the stat) gives
  * the browser a progress bar and bounds the body: `open` is asked for exactly
- * bytes 0..size-1 (not called for an empty file), so a file that grew since the
+ * the bytes sent (not called for an empty file), so a file that grew since the
  * stat — or one whose stat size is 0 but reads non-empty — never sends more bytes
  * than the Content-Length promised (which would desync a keep-alive connection).
+ * `open` runs before any header is set, so a caller can answer its failure with
+ * its own error.
  */
-export function sendFileDownload(
+export async function sendFileDownload(
   reply: FastifyReply,
+  rangeHeader: string | undefined,
   name: string,
   size: number,
-  open: (range: { start: number; end: number }) => Readable
-): FastifyReply {
+  open: (range: ByteRange) => Readable | Promise<Readable>
+): Promise<FastifyReply> {
+  const range = requestedRange(rangeHeader, size);
+  if (range === "unsatisfiable") {
+    return reply.code(416).header("Content-Range", `bytes */${size}`).header("Accept-Ranges", "bytes").send();
+  }
+  const sent = range ?? { start: 0, end: size - 1 };
+  const length = sent.end - sent.start + 1;
+  const body = length > 0 ? await open(sent) : Buffer.alloc(0);
+  if (range) reply.code(206).header("Content-Range", `bytes ${range.start}-${range.end}/${size}`);
   return reply
+    .header("Accept-Ranges", "bytes")
     .header("Content-Disposition", contentDisposition(name))
-    .header("Content-Length", String(size))
+    .header("Content-Length", String(length))
     .header("X-Content-Type-Options", "nosniff")
-    .type("application/octet-stream")
-    .send(size > 0 ? open({ start: 0, end: size - 1 }) : Buffer.alloc(0));
+    .type(downloadType(name))
+    .send(body);
 }
 
 /**

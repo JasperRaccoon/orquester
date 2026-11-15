@@ -208,6 +208,25 @@ test("download streams a file, zips a folder, and refuses secrets", async (t) =>
   assert.ok(names.includes("nested/a.txt"), names.join(","));
 });
 
+test("a file download serves the byte range a media player asks for", async (t) => {
+  const h = await harness(t);
+  const url = `${storageRoutes.download}?path=${encodeURIComponent(join(h.root, "data", "foo", "b.bin"))}`;
+  const ranged = (range: string) => h.inject({ method: "GET", url, headers: { range } });
+
+  const middle = await ranged("bytes=1-2");
+  assert.equal(middle.statusCode, 206);
+  assert.equal(middle.headers["content-range"], "bytes 1-2/4");
+  assert.deepEqual([...middle.rawPayload], [1, 2]);
+
+  const tail = await ranged("bytes=-1");
+  assert.equal(tail.statusCode, 206);
+  assert.deepEqual([...tail.rawPayload], [250]);
+
+  const past = await ranged("bytes=4-");
+  assert.equal(past.statusCode, 416);
+  assert.equal(past.headers["content-range"], "bytes */4");
+});
+
 test("a file download never sends more bytes than its stat size promised", async (t) => {
   const h = await harness(t);
   // procfs files stat as size 0 but read non-empty: the extreme of a file that grew after its stat.

@@ -372,7 +372,7 @@ const daemonId = randomUUID();
  * Hard ceiling on a single /api/fs/raw read: the in-memory + in-app download
  * limit for binary preview. See docs/superpowers/specs/2026-06-24-file-preview-design.md.
  */
-const RAW_MAX_BYTES = 50 * 1024 * 1024;
+const RAW_MAX_BYTES = 100 * 1024 * 1024;
 
 /** Filesystem locations resolved (variables expanded) for this run. */
 interface ResolvedPaths {
@@ -3640,7 +3640,7 @@ export function createServer(
   });
 
   // Download a file (streamed, uncapped) or a folder (zipped on the fly via a
-  // host tool, streamed). Distinct from /api/fs/raw, which is the 50 MB-capped,
+  // host tool, streamed). Distinct from /api/fs/raw, which is the 100 MB-capped,
   // in-memory inline-preview route. Auth: this route also accepts ?token= (see
   // the onRequest hook) so a native <a download> works without a header.
   app.get<{ Querystring: { path?: string; p?: string } }>("/api/fs/download", async (request, reply) => {
@@ -3676,7 +3676,7 @@ export function createServer(
     // File: stream the bytes as-is. createReadStream (not readFile) means no
     // memory cap. MUST be returned (see sendFileDownload).
     if (info.isFile()) {
-      return sendFileDownload(reply, name, info.size, (range) => createReadStream(safe, range));
+      return sendFileDownload(reply, request.headers.range, name, info.size, (range) => createReadStream(safe, range));
     }
 
     // Directory: spawn a zip tool and stream its stdout.
