@@ -14,13 +14,13 @@ export interface FileKindInfo {
 
 /** Mirror of the daemon's RAW_MAX_BYTES: the in-app download limit and absolute
  *  read cap. Files larger than this are neither previewed nor downloaded in-app. */
-export const DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+export const DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
 
 /** Per-kind inline-preview cap. Video gets the full ceiling; everything else is
  *  capped lower to bound renderer memory. A renderable file above its cap (but
  *  <= DOWNLOAD_MAX_BYTES) falls back to the download card. */
 export const PREVIEW_CAP_BY_KIND: Record<FileKind, number> = {
-  video: 50 * 1024 * 1024,
+  video: DOWNLOAD_MAX_BYTES,
   image: 25 * 1024 * 1024,
   pdf: 25 * 1024 * 1024,
   audio: 25 * 1024 * 1024,

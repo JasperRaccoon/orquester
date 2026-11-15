@@ -40,6 +40,7 @@ import type {
 import { MAX_UPLOAD_BYTES } from "@orquester/api";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 
+import { contentDisposition, sendFileDownload } from "../../../download.ts";
 import { fsPathFromQuery } from "../../../fs-path-query.ts";
 import { ParquetRequestError, readParquetWindow } from "../../../parquet.ts";
 import { FsSearchError } from "../../../search.ts";
@@ -96,12 +97,6 @@ const queryOf = (request: FastifyRequest): Query => (request.query ?? {}) as Que
 const bodyOf = <T>(request: FastifyRequest): Partial<T> => (request.body ?? {}) as Partial<T>;
 const queryPath = (request: FastifyRequest): string | undefined =>
   fsPathFromQuery(queryOf(request) as { path?: string; p?: string });
-
-/** Same as `index.ts`: an `attachment` disposition with an ASCII fallback and the RFC 5987 UTF-8 name. */
-function contentDisposition(name: string): string {
-  const ascii = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
-}
 
 /** A box error message with box paths spelled as host paths (Windows boxes). */
 function hostMessage(fs: BoxProjectFs, message: string): string {
@@ -394,20 +389,14 @@ function routes(deps: BoxFsRoutingDeps): Record<string, BoxRoute> {
           // The response closing (done, or the client gone) ends the box read; after a full transfer it is a no-op.
           const abort = new AbortController();
           reply.raw.on("close", () => abort.abort());
-          let stream;
           try {
-            // Bounded by the size just sent as Content-Length: a file grown since is cut there, and a box sending more fails the read.
-            stream = await fs.readStream(safe, { length: info.size, signal: abort.signal });
+            // Bounded by the range sent as Content-Length: a file grown since is cut there, and a box sending more fails the read.
+            await sendFileDownload(reply, request.headers.range, name, info.size, (range) =>
+              fs.readStream(safe, { offset: range.start, length: range.end - range.start + 1, signal: abort.signal })
+            );
           } catch (error) {
             await sendError(reply, error, "Cannot read file.", fs);
-            return;
           }
-          await reply
-            .header("Content-Disposition", contentDisposition(name))
-            .header("Content-Length", String(info.size))
-            .header("X-Content-Type-Options", "nosniff")
-            .type("application/octet-stream")
-            .send(stream);
           return;
         }
 
