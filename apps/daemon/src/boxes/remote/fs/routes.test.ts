@@ -183,9 +183,9 @@ test("GET /api/fs/raw returns the bytes and refuses a file over the preview cap"
   assert.equal(res.headers["content-type"], "application/octet-stream");
   assert.deepEqual(res.rawPayload, bytes);
 
-  // A sparse 51 MB file: refused from its size alone.
+  // A sparse 101 MB file: refused from its size alone.
   const huge = await h.put("huge.bin", "");
-  await truncate(h.local("huge.bin"), 51 * 1024 * 1024);
+  await truncate(h.local("huge.bin"), 101 * 1024 * 1024);
   const tooLarge = await h.inject({ method: "GET", url: `/api/fs/raw?path=${q(huge)}` });
   assert.equal(tooLarge.statusCode, 413);
   assert.equal(tooLarge.json().code, "FS_TOO_LARGE");
@@ -399,6 +399,11 @@ test("GET /api/fs/download streams a file and zips a folder in the box", async (
   assert.equal(file.headers["content-length"], String(bytes.length));
   assert.match(String(file.headers["content-disposition"]), /filename="lib.bin"/);
   assert.deepEqual(file.rawPayload, bytes);
+
+  const ranged = await h.inject({ method: "GET", url: `/api/fs/download?path=${q(path)}`, headers: { range: "bytes=1000-1999" } });
+  assert.equal(ranged.statusCode, 206);
+  assert.equal(ranged.headers["content-range"], `bytes 1000-1999/${bytes.length}`);
+  assert.deepEqual(ranged.rawPayload, bytes.subarray(1000, 2000));
 
   const missing = await h.inject({ method: "GET", url: `/api/fs/download?path=${q(join(h.projectPath, "nope"))}` });
   assert.equal(missing.statusCode, 404);

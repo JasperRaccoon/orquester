@@ -138,9 +138,15 @@ export function registerStorageActionRoutes(app: FastifyInstance, deps: StorageA
             await handle.close();
             return fail(reply, 400, "STORAGE_ERROR", "The file changed while it was being opened.");
           }
-          // The helper reads no more than `opened.size` bytes and none at all for an empty file.
-          if (opened.size === 0) await handle.close();
-          return sendFileDownload(reply, name, opened.size, (range) => handle.createReadStream(range));
+          // The helper reads no more than `opened.size` bytes, and opens no stream for an
+          // empty file or a range past its end: the handle is closed here then.
+          let streamed = false;
+          const sent = await sendFileDownload(reply, request.headers.range, name, opened.size, (range) => {
+            streamed = true;
+            return handle.createReadStream(range);
+          });
+          if (!streamed) await handle.close();
+          return sent;
         } catch (error) {
           await handle.close().catch(() => undefined);
           throw error;

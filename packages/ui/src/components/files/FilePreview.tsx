@@ -100,11 +100,18 @@ export const FilePreview: React.FC<{
     );
   }
 
-  const overCeiling = size > DOWNLOAD_MAX_BYTES;
-  const overPreview = size > PREVIEW_CAP_BY_KIND[kind];
+  const isMedia = kind === "audio" || kind === "video";
+  // Over HTTP, audio and video play straight from the download URL: the player
+  // fetches byte ranges as it plays and seeks, so no size cap applies. The
+  // desktop socket has no such URL and keeps the in-memory path below.
+  const streamUrl = isMedia ? api.buildDownloadUrl(path) : null;
+  const overCeiling = !streamUrl && size > DOWNLOAD_MAX_BYTES;
+  const overPreview = !streamUrl && size > PREVIEW_CAP_BY_KIND[kind];
 
   let body: React.ReactNode;
-  if (overCeiling) {
+  if (isMedia && streamUrl) {
+    body = <MediaViewer kind={kind} src={streamUrl} />;
+  } else if (overCeiling) {
     body = (
       <BinaryCard path={path} name={name} size={size} mime={mime} downloadable={false} title="Too large to preview" fetchBytes={fetchBytes} />
     );
@@ -114,8 +121,8 @@ export const FilePreview: React.FC<{
     );
   } else if (kind === "image") {
     body = <ImageViewer path={path} mime={mime} fetchBytes={fetchBytes} />;
-  } else if (kind === "audio" || kind === "video") {
-    body = <MediaViewer path={path} mime={mime} kind={kind} fetchBytes={fetchBytes} />;
+  } else if (isMedia) {
+    body = <MediaViewer kind={kind} buffered={{ path, mime, fetchBytes }} />;
   } else if (kind === "archive") {
     body = (
       <ArchiveViewer path={path} name={name} size={size} mime={mime} fetchBytes={fetchBytes} previewable={archivePreview} />
