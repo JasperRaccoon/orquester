@@ -156,6 +156,19 @@ orquester-agent-chat {
 }
 ```
 
+The user's own messages sit in the one filled bubble of the timeline, painted with the neutrals. To give that bubble its own look without recolouring everything else, set the user-bubble variables (full CSS values):
+
+```css
+orquester-agent-chat {
+  --orq-user-bubble-bg: linear-gradient(135deg, #3b82f6, #2f6fed);
+  --orq-user-bubble-fg: #fff;
+  --orq-user-bubble-border: none;
+  --orq-user-bubble-radius: 18px 18px 4px 18px;
+}
+```
+
+Everything inside the bubble that has a colour of its own — the "Show full message" / "Show less" toggle and its focus ring, attachment names and sizes, skill chips, quoted passages with their border and links (underlined) — then takes tones of `--orq-user-bubble-fg` (85 % for secondary text, 40 % for lines, 16 % for chip washes). GitHub link pills, code and other rich markdown inside a quoted passage keep their own surfaces. The time and copy row under the bubble is outside it and keeps the page's colours.
+
 ## CSS variables
 
 Set these on the element or any ancestor; custom properties inherit through the shadow root. An unset variable keeps Orquester's value for the current `mode` and `scheme`. Every build publishes the same list in `/embed/variables.json`.
@@ -166,6 +179,11 @@ Set these on the element or any ancestor; custom properties inherit through the 
 - **OK**, RGB triples: `--orq-sem-ok-300`, `--orq-sem-ok-400`, `--orq-sem-ok-500`, `--orq-sem-ok-900`, `--orq-sem-ok-vivid`, `--orq-sem-ok-muted`, `--orq-sem-ok-70-muted`
 - **Info**, RGB triples: `--orq-sem-info-300`, `--orq-sem-info-400`, `--orq-sem-info-500`, `--orq-sem-info-900`
 - **Diff bands**, full colour values (`rgb(5 46 22 / 0.4)`): `--orq-diff-add-bg`, `--orq-diff-add-fg`, `--orq-diff-del-bg`, `--orq-diff-del-fg`
+- **User bubble**, full CSS values, read only by the bubble of the user's messages; unset, the bubble keeps its neutral fill (`--n-800`, text `--n-100`, no border, `1rem` corners):
+  - `--orq-user-bubble-bg` — its `background` (a colour or a gradient).
+  - `--orq-user-bubble-fg` — its text colour; the toggle, attachment names, chips, quotes and their links inside it derive their tones from it.
+  - `--orq-user-bubble-border` — its `border` shorthand (`1px solid #c7d7fb`, `none`).
+  - `--orq-user-bubble-radius` — its `border-radius`.
 - **Fonts**, full `font-family` values: `--orq-font-sans`, `--orq-font-mono`
 
 ## Licences

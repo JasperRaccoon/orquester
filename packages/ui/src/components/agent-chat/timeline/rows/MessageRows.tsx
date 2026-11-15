@@ -81,10 +81,14 @@ function AttachmentChips({ attachments }: { attachments: readonly AttachmentRef[
   return (
     <div className="mb-2 flex flex-col gap-1">
       {attachments.map((attachment) => (
-        <div key={attachment.id} className="flex min-w-0 items-center gap-1.5 text-xs text-neutral-400">
+        <div
+          key={attachment.id}
+          // In the user's bubble, the tone of a host's `--orq-user-bubble-fg` (`.ac-user-bubble`).
+          className="flex min-w-0 items-center gap-1.5 text-xs text-[color:var(--ac-ub-muted,rgb(var(--n-400)))]"
+        >
           <FileTypeIcon name={attachment.name} mimeType={attachment.mimeType} size={14} className="shrink-0" />
           <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
-          <span className="ac-tabular shrink-0 text-neutral-500">
+          <span className="ac-tabular shrink-0 text-[color:var(--ac-ub-muted,rgb(var(--n-500)))]">
             {formatBytes(attachment.sizeBytes)}
           </span>
         </div>
@@ -131,7 +135,12 @@ function MessageBodyText({ text }: { text: string }): React.ReactElement {
             // eslint-disable-next-line react/no-array-index-key
             key={index}
             title={`Skill: ${run.skill}`}
-            className="rounded border border-neutral-700 bg-neutral-900/60 px-1 font-mono text-[0.75rem] text-neutral-200"
+            className={cn(
+              "rounded border px-1 font-mono text-[0.75rem]",
+              // A host's `--orq-user-bubble-fg` tones (`.ac-user-bubble`); the neutral chip otherwise.
+              "border-[color:var(--ac-ub-line,rgb(var(--n-700)))] bg-[color:var(--ac-ub-wash,rgb(var(--n-900)/0.6))]",
+              "text-[color:var(--ac-ub-fg,rgb(var(--n-200)))]"
+            )}
           >
             {run.text}
           </span>
@@ -219,9 +228,13 @@ function QuotedBodyText({ text }: { text: string }): React.ReactElement {
           // eslint-disable-next-line react/no-array-index-key
           key={index}
           data-user-quote="true"
-          className="mb-2 whitespace-normal border-l-2 border-neutral-600 pl-3 last:mb-0"
+          className="mb-2 whitespace-normal border-l-2 border-[color:var(--ac-ub-line,rgb(var(--n-600)))] pl-3 last:mb-0"
         >
-          <ChatMarkdown text={quote} onOpenFile={onOpenFile} className="text-[13px] text-neutral-300" />
+          <ChatMarkdown
+            text={quote}
+            onOpenFile={onOpenFile}
+            className="text-[13px] text-[color:var(--ac-ub-muted,rgb(var(--n-300)))]"
+          />
         </blockquote>
       ))}
       {split.body.length > 0 ? <MessageBodyText text={split.body} /> : null}
@@ -270,7 +283,12 @@ function ClampedBubbleText({
         <button
           type="button"
           onClick={onShowFull ?? (() => setExpanded((value) => !value))}
-          className="mt-1.5 rounded text-xs text-neutral-400 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+          className={cn(
+            "mt-1.5 rounded text-xs focus:outline-none focus-visible:ring-1",
+            // In the user's bubble, the tones of a host's `--orq-user-bubble-fg` (`.ac-user-bubble`).
+            "text-[color:var(--ac-ub-muted,rgb(var(--n-400)))] hover:text-[color:var(--ac-ub-fg,rgb(var(--n-100)))]",
+            "focus-visible:ring-[color:var(--ac-ub-fg,rgb(var(--n-500)))]"
+          )}
         >
           {!clamped ? "Show less" : showLabel}
         </button>
@@ -416,7 +434,8 @@ export const UserMessageRow = React.memo(function UserMessageRow({
               {threadMessageCaption(fromThread)}
             </span>
           ) : null}
-          <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
+          {/* `.ac-user-bubble`: the neutral fill, or a host page's `--orq-user-bubble-*`. */}
+          <div className="ac-user-bubble relative max-w-[80%] p-3">
             {/* The chip alone says another chat sent it, even when its header is one this build no
                 longer reads (an agent's scheduled task from before scheduling was removed). */}
             <AuthorHeading>{fromThread || markedThread ? "Another chat" : fromOrquester ? "Orquester" : "You"}</AuthorHeading>

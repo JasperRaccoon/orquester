@@ -863,6 +863,36 @@
   background: rgb(var(--n-800));
 }
 
+/*
+ * `.ac-user-bubble` — the filled bubble of the user's messages.
+ *
+ * A page embedding the chat can restyle this bubble, and only it, through
+ * `--orq-user-bubble-bg`, `-fg`, `-border` and `-radius` (full CSS values;
+ * docs/embed-agent-chat.md). Each falls back to the neutral fill the bubble
+ * has always had, and the app never sets them, so unset means unchanged.
+ *
+ * What sits inside the bubble with a colour of its own (the "Show full
+ * message" toggle and its focus ring, attachment names, quoted passages and
+ * their links, skill chips) reads the `--ac-ub-*` tones below, each with
+ * today's colour as its fallback: `var(--ac-ub-muted, rgb(var(--n-400)))`.
+ * The tones are derived from `--orq-user-bubble-fg`, so while that is unset
+ * every tone is invalid (the guaranteed-invalid value) and each of those
+ * `var()`s takes its fallback; once a host sets it, they follow its colour.
+ */
+.ac-user-bubble {
+  background: var(--orq-user-bubble-bg, rgb(var(--n-800)));
+  color: var(--orq-user-bubble-fg, rgb(var(--n-100)));
+  border: var(--orq-user-bubble-border, 0 solid transparent);
+  border-radius: var(--orq-user-bubble-radius, 1rem);
+  --ac-ub-fg: var(--orq-user-bubble-fg);
+  --ac-ub-muted: color-mix(in srgb, var(--orq-user-bubble-fg) 85%, transparent);
+  --ac-ub-line: color-mix(in srgb, var(--orq-user-bubble-fg) 40%, transparent);
+  --ac-ub-wash: color-mix(in srgb, var(--orq-user-bubble-fg) 16%, transparent);
+  /* Links in quoted passages: underlined in the bubble's colour, since a
+     second hue rarely reads on a host's brand fill. */
+  --ac-ub-link-decoration: underline var(--orq-user-bubble-fg);
+}
+
 /* ===========================================================================
  * 8. Escape hatch
  * ======================================================================== */
