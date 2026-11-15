@@ -231,6 +231,20 @@ export interface BoxAgentConfig {
   heartbeatMs: number;
   /** Ports `orq-agent` should listen on in the box (127.0.0.1) and pipe to host targets (re-established on every connect). */
   forwards: BoxForwardSpec[];
+  /**
+   * The GitHub CLI login the host brokers for this box (decided again on every connect). `orq-agent`
+   * writes a `gh` config that holds no token and sends `gh`'s API requests to a local socket, and
+   * exports it as `GH_CONFIG_DIR` to the processes it starts; each connection to that socket is a
+   * `gh-api` channel. Absent: `orq-agent` removes that config and leaves `gh` in the box alone.
+   */
+  gh?: BoxGhConfig;
+}
+
+export interface BoxGhConfig {
+  /** The host `gh` is logged in to ("github.com"). */
+  host: string;
+  /** The account's login there, as `gh auth status` shows it. */
+  user: string;
 }
 
 export interface BoxForwardSpec {
@@ -449,6 +463,11 @@ export type BoxChannelSpec =
   | { kind: "tar-write"; path: string; compression?: "gzip" }
   /** Box → host: an SSH agent connection (OpenSSH agent protocol bytes); the daemon answers with host keys. */
   | { kind: "ssh-agent" }
+  /**
+   * Box → host: one connection of `gh` in the box (plain HTTP/1.1 requests for the GitHub API, see
+   * `BoxAgentConfig.gh`); the daemon forwards them to GitHub with the account's token, which stays on the host.
+   */
+  | { kind: "gh-api" }
   /** Box → host: a stdio MCP server bridged to the host (`orq-agent mcp-bridge <serverId>`). */
   | { kind: "mcp-bridge"; serverId: string };
 

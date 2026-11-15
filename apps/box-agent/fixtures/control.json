@@ -153,7 +153,11 @@
             "boxPort": 47999,
             "target": "session-tools"
           }
-        ]
+        ],
+        "gh": {
+          "host": "github.com",
+          "user": "octocat"
+        }
       }
     },
     {

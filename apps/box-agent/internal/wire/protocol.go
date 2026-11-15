@@ -108,10 +108,17 @@ type ForwardSpec struct {
 	Target  string `json:"target"`
 }
 
+// GhConfig is the GitHub CLI login the host brokers for this box.
+type GhConfig struct {
+	Host string `json:"host"`
+	User string `json:"user"`
+}
+
 type AgentConfig struct {
 	Paths       PathMap       `json:"paths"`
 	HeartbeatMs int           `json:"heartbeatMs"`
 	Forwards    []ForwardSpec `json:"forwards"`
+	Gh          *GhConfig     `json:"gh,omitempty"`
 }
 
 type Welcome struct {

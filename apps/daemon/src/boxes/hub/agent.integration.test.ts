@@ -9,18 +9,20 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createConnection, createServer, type AddressInfo, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
 import { after, before, describe, test } from "node:test";
 
-import type { BoxFsChangeEvent } from "@orquester/api";
+import type { BoxFsChangeEvent, BoxGhConfig } from "@orquester/api";
 import { boxSocketPath } from "@orquester/config";
 
 import { spawnBoxChild } from "../../agent-host/boxes/remote-child.ts";
 import { connectBoxRelay } from "../client/index.ts";
 import type { BoxConnection, BoxProcess } from "../contracts.ts";
+import { registerBoxGhApi } from "../remote/gh-api.ts";
 import type { BoxAgentBuilds } from "./builds.ts";
 import { createBoxHub, type BoxHubServer } from "./hub.ts";
 import { MemoryRecords, buildTestAgent, startCuttableProxy, startHubServer } from "./test-helpers.ts";
@@ -133,6 +135,8 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
   let dataDir: string;
   let work: string;
   let echo: { server: Server; port: number };
+  /** The `gh` login the hub welcomes the box with (read at every connect). */
+  let ghLogin: BoxGhConfig | null = { host: "github.com", user: "octocat" };
 
   before(async () => {
     root = await mkdtemp(join(tmpdir(), "orq-it-"));
@@ -143,7 +147,14 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     records = new MemoryRecords();
     records.add(BOX_ID);
     const builds: BoxAgentBuilds = { current: async () => ({ version: "it-1" }), resolve: async () => null };
-    hub = createBoxHub({ appdir: root, records, verifyGithubOidc: async () => ({ ok: false, message: "unused" }), daemonUrls: () => [], builds });
+    hub = createBoxHub({
+      appdir: root,
+      records,
+      verifyGithubOidc: async () => ({ ok: false, message: "unused" }),
+      daemonUrls: () => [],
+      builds,
+      ghLogin: async () => ghLogin
+    });
     const server = await startHubServer(hub);
     stopServer = async () => {
       await hub.close();
@@ -482,6 +493,53 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     const bridged = await run(connection.exec({ command: connection.sys.agentPath, args: ["mcp-bridge", "srv1"] }), "hello\n");
     assert.equal(bridged.code, 0);
     assert.equal(bridged.stdout, "srv1:HELLO\n");
+  });
+
+  test("gh in the box: a config without a token whose requests reach GitHub through the host, until the login is withdrawn", async (t) => {
+    if (!haveGo) return t.skip("Go toolchain not installed");
+    const seen: (string | undefined)[] = [];
+    const github = createHttpServer((req, res) => {
+      seen.push(req.headers.authorization);
+      res.end(JSON.stringify({ login: "octocat", path: req.url }));
+    });
+    github.listen(0, "127.0.0.1");
+    await once(github, "listening");
+    t.after(() => github.close());
+    registerBoxGhApi(hub, {
+      workspaceAccount: async () => ({ provider: "github", login: "octocat", token: "ghp_host" }),
+      origin: () => `http://127.0.0.1:${(github.address() as AddressInfo).port}`
+    });
+    await records.update(BOX_ID, (record) => {
+      record.purpose = "project";
+      record.project = { workspace: "acme", name: "app", path: work };
+    });
+
+    const dir = (await run(connection.exec({ command: "printenv", args: ["GH_CONFIG_DIR"] }))).stdout.trim();
+    assert.equal(dir, join(dataDir, "gh"));
+    const config = await readFile(join(dir, "config.yml"), "utf8");
+    const hosts = await readFile(join(dir, "hosts.yml"), "utf8");
+    assert.match(hosts, /^"github\.com":/);
+    assert.match(hosts, /user: "octocat"/);
+    assert.ok(!`${config}${hosts}`.includes("ghp_host"));
+    const socketPath = /^http_unix_socket: "(.+)"$/m.exec(config)?.[1];
+    assert.ok(socketPath, config);
+
+    // What gh does with that config: plain HTTP for api.github.com on the socket, with the token hosts.yml gave it.
+    const req = httpRequest({ socketPath, path: "/user", headers: { host: "api.github.com", authorization: "token held-by-the-orquester-host", connection: "close" } });
+    req.end();
+    const [res] = (await once(req, "response")) as [Readable & { statusCode?: number }];
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(JSON.parse((await readAll(res)).toString()), { login: "octocat", path: "/user" });
+    assert.deepEqual(seen, ["token ghp_host"]);
+
+    // The workspace lost its account: the next connect takes the config away again.
+    ghLogin = null;
+    const down = waitStatus(connection, false);
+    const up = down.then(() => waitStatus(connection, true));
+    proxy.cutAll();
+    await up;
+    assert.equal((await run(connection.exec({ command: "printenv", args: ["GH_CONFIG_DIR"] }))).code, 1);
+    await assert.rejects(stat(dir), { code: "ENOENT" });
   });
 
   test("token, git-credential and rpc subcommands round-trip through the control socket", async (t) => {

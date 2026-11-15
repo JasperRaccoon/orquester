@@ -228,8 +228,15 @@ agent signs nothing but an SSH user-authentication request for the git host's us
 `session-bind@openssh.com` against the git host's known host keys); HTTPS remotes are rewritten
 to SSH with `url.<ssh>.insteadOf`. `git.credential` always answers empty — no git hosting token
 ever reaches a box (security review, 2026-10-20). The workspace git identity
-(`user.name`, `user.email`) is written into the box's git config; it is not secret. My call:
-`gh` inside a box is not authenticated in this version (pushing, fetching and cloning work).
+(`user.name`, `user.email`) is written into the box's git config; it is not secret.
+
+**GitHub CLI.** `gh` in a project box works through the host as well, for a workspace whose GitHub
+account has a token: `orq-agent` writes a `gh` config with no token in it and exports it as
+`GH_CONFIG_DIR`; its `http_unix_socket` sends `gh`'s requests to `orq-agent`, which hands each
+connection to the host as a `gh-api` channel. The host forwards them to GitHub's API hosts with
+the account's token, and to the storage hosts the API redirects downloads to without it; nothing
+else is reachable through the channel. The token stays on the host. Windows boxes are not covered
+(`gh` dials a unix socket; `orq-agent`'s local endpoints there are named pipes).
 
 **Other secrets.** Provider API keys, the Tailscale OAuth client, the GitHub token, and Windows
 administrator passwords returned by providers live in a new host-only store (§12) and never
@@ -660,7 +667,7 @@ permission mode, including full access, because it spends money.
    approval card in the chat that made them, and lose to a host change of the same file.
 4. MCP servers run on the host by default, with a per-server "Run in box" switch.
 5. OpenCode in boxes supports API-key providers only.
-6. `gh` is not authenticated inside boxes.
+6. (Superseded by owner decision: `gh` inside a box is brokered by the host, §7.)
 7. The host project directory is an empty stub for box projects.
 8. Windows boxes map host paths to `C:\orq\…`.
 9. Archive leaves the box running, with a "still billing" note.

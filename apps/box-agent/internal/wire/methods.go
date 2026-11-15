@@ -87,6 +87,10 @@ type SSHAgentSpec struct {
 	Kind string `json:"kind"`
 }
 
+type GhAPISpec struct {
+	Kind string `json:"kind"`
+}
+
 type MCPBridgeSpec struct {
 	Kind     string `json:"kind"`
 	ServerID string `json:"serverId"`
@@ -104,6 +108,7 @@ var ChannelKinds = map[string]func() any{
 	"tar-read":   func() any { return &TarReadSpec{} },
 	"tar-write":  func() any { return &TarWriteSpec{} },
 	"ssh-agent":  func() any { return &SSHAgentSpec{} },
+	"gh-api":     func() any { return &GhAPISpec{} },
 	"mcp-bridge": func() any { return &MCPBridgeSpec{} },
 }
 

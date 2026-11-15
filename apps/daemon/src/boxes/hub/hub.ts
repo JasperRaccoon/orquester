@@ -22,6 +22,7 @@ import {
   type BoxAuth,
   type BoxBoxToHostMethods,
   type BoxChannelSpec,
+  type BoxGhConfig,
   type BoxHello,
   type BoxMethodName,
   type BoxReject,
@@ -76,6 +77,8 @@ export interface BoxHubDeps {
   heartbeatMs?: number;
   /** Per-box relay sockets (default true). */
   relay?: boolean;
+  /** The `gh` login the host brokers for a box (`welcome.config.gh`), asked at every connect; null or absent = none. */
+  ghLogin?: (context: BoxRequestContext) => Promise<BoxGhConfig | null>;
 }
 
 /** The hub plus what the routes need. */
@@ -393,6 +396,15 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
 
   const establish = async (socket: WebSocket, hello: BoxHello, auth: Extract<AuthResult, { ok: true }>, early: (Buffer | string)[], feed: { target: ((data: Buffer, binary: boolean) => void) | null }): Promise<void> => {
     const { boxId } = auth;
+    let gh: BoxGhConfig | null = null;
+    if (deps.ghLogin) {
+      try {
+        gh = await deps.ghLogin(context(boxId));
+      } catch (error) {
+        // Without it the box still works; only `gh` in it stays logged out.
+        logger.warn("box gh login not resolved", { boxId, error: (error as Error).message });
+      }
+    }
     // Authentication awaited (a GitHub OIDC check, a record write): the box
     // may have been revoked or destroyed meanwhile. Check again, synchronously
     // with linking it.
@@ -424,7 +436,7 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
       t: "welcome",
       boxId,
       ...(auth.credential ? { credential: auth.credential } : {}),
-      config: { paths, heartbeatMs, forwards: welcomed }
+      config: { paths, heartbeatMs, forwards: welcomed, ...(gh ? { gh } : {}) }
     };
     socket.send(JSON.stringify(welcome));
 
