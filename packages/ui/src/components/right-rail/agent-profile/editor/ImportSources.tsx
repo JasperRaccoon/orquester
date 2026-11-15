@@ -198,7 +198,7 @@ export const CandidateChecklist: React.FC<{
 };
 
 const NotesList: React.FC<{ notes: readonly string[] }> = ({ notes }) => (
-  <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11px] text-neutral-500">
+  <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11px] text-neutral-500 [overflow-wrap:anywhere]">
     {notes.map((note) => (
       <li key={note}>{note}</li>
     ))}

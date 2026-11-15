@@ -634,7 +634,7 @@ export const StorageView: React.FC = () => {
       ) : shown && mapProps ? (
         <>
           <nav aria-label="Folder path" className="flex min-w-0 items-center gap-2">
-            <ol className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5 font-mono text-xs">
+            <ol className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5 font-mono text-xs [overflow-wrap:anywhere]">
               {shown.ancestors.map((crumb) => (
                 <li key={crumb.path} className="flex items-center gap-1">
                   <button
@@ -644,7 +644,7 @@ export const StorageView: React.FC = () => {
                   >
                     {crumb.name}
                   </button>
-                  <ChevronRight size={12} className="text-neutral-600" />
+                  <ChevronRight size={12} className="shrink-0 text-neutral-600" />
                 </li>
               ))}
               <li aria-current="page" className="px-1 text-neutral-100">

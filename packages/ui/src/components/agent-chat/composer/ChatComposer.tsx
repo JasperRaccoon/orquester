@@ -2252,7 +2252,7 @@ function ChatComposerView({
           />
 
           {statusText ? (
-            <p className="pt-1 text-[11px] leading-snug text-warn-300" role="status">
+            <p className="pt-1 text-[11px] leading-snug text-warn-300 [overflow-wrap:anywhere]" role="status">
               {statusText}
             </p>
           ) : pendingWording ? (

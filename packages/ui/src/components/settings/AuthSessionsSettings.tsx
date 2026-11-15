@@ -180,7 +180,7 @@ export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ re
           </div>
           <p className="text-xs leading-relaxed text-neutral-500">
             For an MCP client, send it as <code className="text-neutral-400">Authorization: Bearer &lt;token&gt;</code> to{" "}
-            <code className="text-neutral-400">{mcpUrl}</code>, for example:
+            <code className="break-all text-neutral-400">{mcpUrl}</code>, for example:
           </p>
           <pre className="overflow-x-auto rounded-md bg-neutral-950 px-2.5 py-1.5 font-mono text-[11px] text-neutral-300">
             claude mcp add --transport http --scope user orquester_remote {mcpUrl} --header "Authorization: Bearer &lt;token&gt;"

@@ -48,7 +48,7 @@ export const LoadOlderRow = React.memo(function LoadOlderRow({
         {loading ? "Loading older turns…" : "Load older turns"}
       </button>
       {error !== null && !loading ? (
-        <p role="alert" className="select-text px-2 text-center text-[11px] leading-relaxed text-danger">
+        <p role="alert" className="max-w-full select-text px-2 text-center text-[11px] leading-relaxed text-danger [overflow-wrap:anywhere]">
           {error}
         </p>
       ) : null}

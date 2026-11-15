@@ -70,7 +70,7 @@ export const CompactionRow = React.memo(function CompactionRow({
         </span>
       </div>
       {failed && row.detail ? (
-        <p className="select-text whitespace-pre-wrap px-1 pb-0.5 text-center leading-relaxed">
+        <p className="select-text whitespace-pre-wrap px-1 pb-0.5 text-center leading-relaxed [overflow-wrap:anywhere]">
           {row.detail}
         </p>
       ) : null}

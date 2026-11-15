@@ -345,7 +345,7 @@ export function AgentRoster({
               </span>
             </button>
           ) : null}
-          <span className="ml-auto flex items-center gap-2">
+          <span className="ml-auto flex shrink-0 items-center gap-2 whitespace-nowrap">
             {delegatePill ? (
               <span
                 data-delegate-pill="true"

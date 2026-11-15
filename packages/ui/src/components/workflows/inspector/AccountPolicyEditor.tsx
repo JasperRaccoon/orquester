@@ -282,7 +282,7 @@ const ScopedModels: React.FC<{
         <p className="text-[11px] leading-4 text-neutral-500">
           None picked: checked whatever model this choice runs. Picked: checked only when it runs one of them — and a used-up {label} window then stops
           those models even without a limit.
-          {value && !value.includes(entryModel) ? <span className="text-warn"> This choice runs “{entryModel}”, which isn't picked, so this limit is not checked.</span> : null}
+          {value && !value.includes(entryModel) ? <span className="text-warn [overflow-wrap:anywhere]"> This choice runs “{entryModel}”, which isn't picked, so this limit is not checked.</span> : null}
         </p>
       </Disclosure>
     </FieldAnchor>

@@ -830,7 +830,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         <Loader2 size={20} className="animate-spin text-neutral-500" />
         <span>Starting desktop…</span>
         {/* boxes: what a VM desktop is waiting on (its VM, the desktop packages' install). */}
-        {desktop.statusDetail && <span className="max-w-sm truncate text-xs text-neutral-500">{desktop.statusDetail}</span>}
+        {desktop.statusDetail && <span className="w-full max-w-sm truncate text-xs text-neutral-500">{desktop.statusDetail}</span>}
       </>
     );
   } else if (desktop.status === "stopped") {

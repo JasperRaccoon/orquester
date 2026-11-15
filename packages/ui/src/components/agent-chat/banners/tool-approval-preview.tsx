@@ -284,7 +284,7 @@ function PreviewSection({ section, open }: { section: ApprovalPreviewSection; op
           <span className="min-w-0 flex-1">
             <span className="block break-all font-mono text-neutral-200">{section.path}</span>
             <span className="block text-[11px] text-neutral-500">
-              {formatPreviewBytes(section.size)} · <span className="font-mono">sha256 {section.sha256}</span>
+              {formatPreviewBytes(section.size)} · <span className="break-all font-mono">sha256 {section.sha256}</span>
             </span>
           </span>
           {section.flag ? (

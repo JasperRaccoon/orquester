@@ -231,7 +231,7 @@ export const HelpTip: React.FC<{
           ignoreOutside={ignoreOutside}
           className="w-max max-w-[min(280px,calc(100vw-16px))]"
         >
-          <div className="space-y-1.5 overflow-y-auto px-3 py-2.5 text-[12px] leading-[18px] text-neutral-300">{children}</div>
+          <div className="space-y-1.5 overflow-y-auto px-3 py-2.5 text-[12px] leading-[18px] text-neutral-300 [overflow-wrap:anywhere]">{children}</div>
         </Popover>
       ) : null}
     </>
@@ -886,7 +886,7 @@ export function ChipGroup<T extends string>({
               onValues(options.map((candidate) => candidate.value).filter((candidate) => next.has(candidate)));
             }}
             className={cn(
-              "h-8 min-w-10 rounded-md px-2.5 text-[12px] font-medium transition-colors [.wf-touch_&]:h-10",
+              "h-8 min-w-10 max-w-full truncate rounded-md px-2.5 text-[12px] font-medium transition-colors [.wf-touch_&]:h-10",
               FOCUS_RING,
               on ? "bg-neutral-100 text-neutral-900" : "bg-neutral-900 text-neutral-400 ring-1 ring-inset ring-neutral-800 hover:text-neutral-100"
             )}
@@ -1054,7 +1054,7 @@ export const Section: React.FC<{
                 {title}
               </span>
               {summaryShown ? (
-                <span className="line-clamp-2 pl-[17px] text-[11.5px] font-normal leading-4 text-neutral-500">{summary}</span>
+                <span className="line-clamp-2 w-full min-w-0 pl-[17px] text-[11.5px] font-normal leading-4 text-neutral-500">{summary}</span>
               ) : null}
             </ViewButton>
           ) : (
@@ -1165,7 +1165,7 @@ export const Callout: React.FC<{
       />
       <div className="min-w-0 flex-1 space-y-1.5">
         {present(title) ? <div className="font-medium text-neutral-100">{title}</div> : null}
-        {present(children) ? <div>{children}</div> : null}
+        {present(children) ? <div className="[overflow-wrap:anywhere]">{children}</div> : null}
         {present(action) ? <div className="flex flex-wrap gap-1.5 pt-0.5">{action}</div> : null}
       </div>
     </div>

@@ -1775,7 +1775,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             {viewer?.error ? (
-              <p className="px-4 py-6 text-sm text-danger">{viewer.error}</p>
+              <p className="px-4 py-6 text-sm text-danger [overflow-wrap:anywhere]">{viewer.error}</p>
             ) : (
               <FullOutputPane
                 loading={viewer?.loading ?? false}

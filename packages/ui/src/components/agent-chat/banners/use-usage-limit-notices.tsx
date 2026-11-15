@@ -148,7 +148,7 @@ export function useUsageLimitNotices(input: {
               ) : null}
             </div>
             {error ? (
-              <p role="alert" className="text-[11px] text-danger">
+              <p role="alert" className="text-[11px] text-danger [overflow-wrap:anywhere]">
                 {error}
               </p>
             ) : null}

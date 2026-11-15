@@ -353,7 +353,7 @@ export const Banner: React.FC<{
     >
       <Icon size={14} aria-hidden className="mt-0.5 shrink-0" />
       <div className="min-w-0 flex-1">
-        {title ? <p className="font-medium">{title}</p> : null}
+        {title ? <p className="break-words font-medium">{title}</p> : null}
         {children ? <div className="break-words">{children}</div> : null}
         {actions ? <div className="mt-2 flex flex-wrap gap-2">{actions}</div> : null}
       </div>

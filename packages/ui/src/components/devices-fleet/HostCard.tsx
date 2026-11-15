@@ -113,7 +113,7 @@ export const HostCard: React.FC<HostCardProps> = ({ host, leaseCount, now, api }
         ) : null}
       </div>
 
-      {status.detail ? <p className={cn("mt-1 text-xs", status.tone === "danger" ? TONE_TEXT.danger : "text-neutral-500")}>{status.detail}</p> : null}
+      {status.detail ? <p className={cn("mt-1 text-xs [overflow-wrap:anywhere]", status.tone === "danger" ? TONE_TEXT.danger : "text-neutral-500")}>{status.detail}</p> : null}
 
       <div className="mt-3 grid grid-cols-3 gap-x-4 gap-y-2.5 sm:grid-cols-4">
         <Stat label="Devices" className="col-span-3 sm:col-span-1">

@@ -83,17 +83,17 @@ export const ServerSwitcher: React.FC = () => {
   };
 
   const trigger = (
-    <span className="flex w-full items-center gap-2 px-1 py-0.5 text-left">
+    <span className="flex w-full min-w-0 items-center gap-2 px-1 py-0.5 text-left">
       <span className={cn("h-2 w-2 shrink-0 rounded-full", STATUS_COLOR[status])} />
       <span className="flex-1 truncate text-xs text-neutral-300">{active?.name ?? "No server"}</span>
-      <Server size={13} className="text-neutral-600" />
+      <Server size={13} className="shrink-0 text-neutral-600" />
     </span>
   );
 
   return (
     <div className="flex items-center gap-1 border-t border-neutral-800 p-2">
       <div className="min-w-0 flex-1">
-        <AdaptiveMenu trigger={trigger} width="w-64" title="Servers">
+        <AdaptiveMenu trigger={trigger} width="w-64" title="Servers" triggerClassName="w-full">
           <DropdownLabel>Servers</DropdownLabel>
           {connections.map((connection) => (
             <div key={connection.id} className="group flex items-center">

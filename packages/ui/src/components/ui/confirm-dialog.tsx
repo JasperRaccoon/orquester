@@ -60,16 +60,16 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         <div className="mb-3 flex items-center gap-2">
           <span
             className={cn(
-              "flex h-8 w-8 items-center justify-center rounded-md",
+              "flex h-8 w-8 shrink-0 items-center justify-center rounded-md",
               danger ? "bg-danger-500/10 text-danger" : "bg-neutral-800 text-neutral-300"
             )}
           >
             <AlertTriangle size={16} />
           </span>
-          <p className="text-sm font-medium text-neutral-100">{title}</p>
+          <p className="min-w-0 text-sm font-medium text-neutral-100 [overflow-wrap:anywhere]">{title}</p>
         </div>
 
-        <div className="text-sm text-neutral-400">{message}</div>
+        <div className="text-sm text-neutral-400 [overflow-wrap:anywhere]">{message}</div>
 
         {confirmText && (
           <Input

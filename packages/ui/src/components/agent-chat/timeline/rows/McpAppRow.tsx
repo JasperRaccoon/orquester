@@ -27,7 +27,7 @@ export function McpAppRow({
       {McpAppFrame ? (
         <McpAppFrame sessionId={sessionId} itemId={row.itemId} app={row.mcpApp} readOnly={readOnly} />
       ) : (
-        <p className="text-xs text-neutral-500" data-mcp-app={row.mcpApp.tool}>
+        <p className="text-xs text-neutral-500 [overflow-wrap:anywhere]" data-mcp-app={row.mcpApp.tool}>
           {row.mcpApp.tool} · {row.mcpApp.server}
         </p>
       )}

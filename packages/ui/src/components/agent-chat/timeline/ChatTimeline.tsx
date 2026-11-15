@@ -848,7 +848,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
         <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-col px-3 pt-2 sm:px-5">
           <div className="pointer-events-auto mx-auto flex w-full max-w-3xl items-start gap-2 rounded-lg border border-danger-900/50 bg-danger-soft/40 px-2.5 py-1.5 text-xs text-danger-300 shadow-lg">
             <TriangleAlert size={12} strokeWidth={1.8} aria-hidden className="mt-0.5 shrink-0" />
-            <span className="line-clamp-3 min-w-0 flex-1" title={errorBanner}>
+            <span className="line-clamp-3 min-w-0 flex-1 [overflow-wrap:anywhere]" title={errorBanner}>
               {errorBanner}
             </span>
             <ChatIconButton size="micro" label="Dismiss" onClick={onDismissErrorBanner}>

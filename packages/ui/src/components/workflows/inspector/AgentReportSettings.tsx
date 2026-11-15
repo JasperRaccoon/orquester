@@ -415,7 +415,7 @@ export const AgentReportSection: React.FC<{ config: AgentBlockConfig }> = ({ con
       <FieldAnchor field="config.outputs" className="space-y-2">
         <div className="text-xs font-medium text-neutral-400">Outputs</div>
         {outputsMessages.error ? <p className="text-[11px] leading-4 text-danger">{outputsMessages.error}</p> : null}
-        {outputs.length === 0 ? <p className="text-[11px] leading-4 text-neutral-500">None. Read them later as nodes.{node.name}.output.outputs.&lt;name&gt;.</p> : null}
+        {outputs.length === 0 ? <p className="text-[11px] leading-4 text-neutral-500 [overflow-wrap:anywhere]">None. Read them later as nodes.{node.name}.output.outputs.&lt;name&gt;.</p> : null}
         {outputs.map((output, index) => (
           <OutputRow
             key={outputKeys.keys[index] ?? `extra-${index}`}

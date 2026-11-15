@@ -39,11 +39,11 @@ export const GuideItems: React.FC<{
   termLabel?: (term: string) => React.ReactNode;
   className?: string;
 }> = ({ items, termLabel, className }) => (
-  <div className={cn("grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1", className)}>
+  <div className={cn("grid grid-cols-[fit-content(50%)_minmax(0,1fr)] gap-x-3 gap-y-1", className)}>
     {items.map((item, index) =>
       item.term !== undefined ? (
         <React.Fragment key={index}>
-          <div className="whitespace-nowrap font-mono text-neutral-200">{termLabel ? termLabel(item.term) : item.term}</div>
+          <div className="font-mono text-neutral-200 [overflow-wrap:anywhere]">{termLabel ? termLabel(item.term) : item.term}</div>
           <div className="min-w-0 break-words">
             <GuideText text={item.text} />
           </div>

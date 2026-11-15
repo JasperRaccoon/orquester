@@ -142,7 +142,7 @@ function ToolsPanel({ sessionId, data }: { sessionId: string; data: ThreadAgentT
       </div>
 
       {error ? (
-        <p role="alert" className="text-[11px] text-danger-300">
+        <p role="alert" className="text-[11px] text-danger-300 [overflow-wrap:anywhere]">
           {error}
         </p>
       ) : null}

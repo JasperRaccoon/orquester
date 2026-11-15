@@ -80,7 +80,7 @@ export function useScheduledPromptNotices(input: {
             ) : null}
           </p>
           <p
-            className={cn("ac-tabular text-[11px]", prompt.state === "failed" ? "text-danger" : "text-neutral-400")}
+            className={cn("ac-tabular text-[11px] [overflow-wrap:anywhere]", prompt.state === "failed" ? "text-danger" : "text-neutral-400")}
             aria-live="polite"
           >
             {scheduledPromptStatus(prompt, at)}
@@ -131,7 +131,7 @@ export function useScheduledPromptNotices(input: {
           <div className="flex min-w-0 flex-col gap-1.5">
             <ul className="flex min-w-0 flex-col gap-1.5">{prompts.map(row)}</ul>
             {error ? (
-              <p role="alert" className="text-[11px] text-danger">
+              <p role="alert" className="text-[11px] text-danger [overflow-wrap:anywhere]">
                 {error}
               </p>
             ) : null}

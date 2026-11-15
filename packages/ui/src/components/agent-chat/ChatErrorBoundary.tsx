@@ -63,7 +63,7 @@ export class ChatErrorBoundary extends React.Component<ChatErrorBoundaryProps, {
         <TriangleAlert size={28} strokeWidth={1.25} className="text-danger" />
         <div className="space-y-1">
           <p className="text-sm font-medium text-neutral-200">This conversation failed to render</p>
-          <p className="max-w-md text-xs text-neutral-500">
+          <p className="max-w-md text-xs text-neutral-500 [overflow-wrap:anywhere]">
             The agent and its history are untouched — only this view stopped. {error.message}
           </p>
         </div>

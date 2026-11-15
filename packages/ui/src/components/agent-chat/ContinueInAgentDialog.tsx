@@ -392,7 +392,7 @@ function ContinueInAgentPanel({
             <span>{summary}</span>
           </div>
           {error !== null ? (
-            <p role="alert" className="text-xs text-danger-300">
+            <p role="alert" className="text-xs text-danger-300 [overflow-wrap:anywhere]">
               {error}
             </p>
           ) : null}

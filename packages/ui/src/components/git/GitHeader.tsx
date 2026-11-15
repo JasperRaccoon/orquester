@@ -90,10 +90,11 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
         title="Switch branch"
         align="left"
         width="w-64"
+        triggerClassName="min-w-0"
         trigger={
           <span
             className={cn(
-              "flex h-7 max-w-[14rem] items-center gap-1.5 rounded-md px-2 text-sm text-neutral-200",
+              "flex h-7 min-w-0 max-w-[14rem] items-center gap-1.5 rounded-md px-2 text-sm text-neutral-200",
               "transition-colors hover:bg-neutral-800 hover:text-neutral-100",
               isBusy && "pointer-events-none opacity-50"
             )}

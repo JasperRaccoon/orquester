@@ -372,7 +372,7 @@ const EntryDetailView: React.FC<{
         <Eyebrow>
           {entry.kind} · {LINK_STATE_TEXT[entry.linkState]}
         </Eyebrow>
-        <h2 className="text-base font-semibold leading-snug text-neutral-100">{entry.title || "Untitled"}</h2>
+        <h2 className="text-base font-semibold leading-snug text-neutral-100 [overflow-wrap:anywhere]">{entry.title || "Untitled"}</h2>
         {(byline || date) && <p className="text-xs text-neutral-400">{[byline, date].filter(Boolean).join(" · ")}</p>}
         <div className="flex flex-wrap gap-1 pt-0.5">
           <CollectionChips ids={entry.collections} collections={collections} />
@@ -511,7 +511,7 @@ const ConceptDetailView: React.FC<{
             {detail.entries.map((entry) => (
               <li key={entry.id} className="space-y-1.5 rounded-md border border-neutral-800 px-3 py-2">
                 <button type="button" className="block w-full text-left" onClick={() => onSelect({ kind: "entry", id: entry.id })}>
-                  <span className="block text-xs font-medium text-neutral-200 hover:underline">{entry.title || "Untitled"}</span>
+                  <span className="block text-xs font-medium text-neutral-200 [overflow-wrap:anywhere] hover:underline">{entry.title || "Untitled"}</span>
                   {entryByline(entry) && <span className="block text-[11px] text-neutral-500">{entryByline(entry)}</span>}
                 </button>
                 {entry.snippet && (

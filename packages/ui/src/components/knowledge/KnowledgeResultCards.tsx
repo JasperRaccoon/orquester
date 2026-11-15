@@ -92,7 +92,7 @@ export const EntryCard: React.FC<{
           selected ? "border-neutral-600 bg-neutral-900" : "border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900/60"
         )}
       >
-        <span className={cn("block text-[13px] font-medium leading-snug text-neutral-100", onLessLike ? "pr-7" : null)}>
+        <span className={cn("block text-[13px] font-medium leading-snug text-neutral-100 [overflow-wrap:anywhere]", onLessLike ? "pr-7" : null)}>
           <Highlighted text={title} terms={terms} />
         </span>
         {(byline || date) && <span className="block text-[11.5px] text-neutral-500">{[byline, date].filter(Boolean).join(" · ")}</span>}

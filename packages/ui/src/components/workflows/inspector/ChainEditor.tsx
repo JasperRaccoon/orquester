@@ -332,7 +332,7 @@ const ChainCard: React.FC<{
                 exactModel ? (
                   <>
                     {exactModel.name !== modelName(exactModel) ? `${exactModel.name} · ` : null}
-                    <code className="text-neutral-400">{exactModel.slug}</code>
+                    <code className="text-neutral-400 [overflow-wrap:anywhere]">{exactModel.slug}</code>
                     {exactModel.subProvider ? ` · via ${exactModel.subProvider}` : null}
                   </>
                 ) : models.length === 0 ? (

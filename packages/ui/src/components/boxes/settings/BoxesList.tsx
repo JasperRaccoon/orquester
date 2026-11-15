@@ -160,7 +160,7 @@ const BoxRow: React.FC<{
           )}
         </div>
       </div>
-      {box.stateReason && <p className="text-xs text-neutral-500">{box.stateReason}</p>}
+      {box.stateReason && <p className="text-xs text-neutral-500 [overflow-wrap:anywhere]">{box.stateReason}</p>}
       {box.state === "destroy-failed" && box.purpose === "project" && (
         <p className="text-xs text-danger">It may still be billing. Delete its project again to retry.</p>
       )}

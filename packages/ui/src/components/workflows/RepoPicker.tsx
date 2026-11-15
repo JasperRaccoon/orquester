@@ -116,6 +116,7 @@ export const RepoPicker: React.FC<RepoPickerProps> = ({
           <div className="text-xs text-neutral-400">{label}</div>
           <Dropdown
             width="w-[min(26rem,calc(100vw-2rem))]"
+            triggerClassName="max-w-full"
             trigger={
               <span
                 className={cn(

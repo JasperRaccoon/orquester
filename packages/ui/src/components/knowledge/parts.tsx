@@ -68,7 +68,7 @@ export const PHONE_CHIP = "max-md:min-h-8 max-md:px-3";
 export const ErrorLine: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className }) => (
   <p role="alert" className={cn("flex items-start gap-1.5 text-xs text-danger", className)}>
     <AlertTriangle size={13} className="mt-px shrink-0" />
-    <span className="min-w-0">{children}</span>
+    <span className="min-w-0 [overflow-wrap:anywhere]">{children}</span>
   </p>
 );
 

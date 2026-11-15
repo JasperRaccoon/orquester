@@ -150,7 +150,7 @@ export const WhiteboardView: React.FC<{ path: string; title: string; active: boo
     return (
       <Centered>
         <AlertTriangle size={16} className="text-warn" />
-        <span className="max-w-md text-center">Could not open {nameOf(path)}: {load.message}</span>
+        <span className="max-w-md text-center [overflow-wrap:anywhere]">Could not open {nameOf(path)}: {load.message}</span>
         <Button size="sm" variant="outline" onClick={() => void read(false)}>
           <RefreshCw size={13} /> Retry
         </Button>

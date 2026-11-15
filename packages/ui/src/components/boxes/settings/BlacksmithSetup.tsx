@@ -239,7 +239,7 @@ const BlacksmithChecklist: React.FC<{ setup: BlacksmithSetupResponse | null }> =
             {busy === "save" ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Retry
           </Button>
         ) : setup.repo ? (
-          <span className="font-mono text-[11px] text-neutral-400">{setup.repo}</span>
+          <span className="font-mono text-[11px] text-neutral-400 [overflow-wrap:anywhere]">{setup.repo}</span>
         ) : null;
       case "test":
         return step.state === "running" ? (
@@ -269,7 +269,7 @@ const BlacksmithChecklist: React.FC<{ setup: BlacksmithSetupResponse | null }> =
                   {(step.id === "repo" || step.id === "test") && <span className="text-neutral-500"> · automatic</span>}
                 </p>
                 {step.message && (
-                  <p className={cn("leading-relaxed", step.state === "failed" ? "text-danger" : "text-neutral-500")}>
+                  <p className={cn("leading-relaxed [overflow-wrap:anywhere]", step.state === "failed" ? "text-danger" : "text-neutral-500")}>
                     {step.message}
                   </p>
                 )}

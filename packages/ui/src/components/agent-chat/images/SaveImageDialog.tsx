@@ -77,7 +77,7 @@ export function SaveImageDialog(props: {
         {relativePath === null && value.trim() !== "" ? (
           <p className="mt-2 text-xs text-danger">Use a file path inside the project, like assets/image.png.</p>
         ) : null}
-        {error !== null ? <p className="mt-2 text-xs text-danger">{error}</p> : null}
+        {error !== null ? <p className="mt-2 text-xs text-danger [overflow-wrap:anywhere]">{error}</p> : null}
         <div className="mt-4 flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={props.onClose}>
             Cancel

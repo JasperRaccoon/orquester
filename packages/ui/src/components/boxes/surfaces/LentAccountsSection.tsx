@@ -89,7 +89,7 @@ const LentAccountRowView: React.FC<{
           End
         </button>
       ) : null}
-      {row.statusMessage ? <p className="basis-full break-words text-[11px] text-neutral-500">{row.statusMessage}</p> : null}
+      {row.statusMessage ? <p className="min-w-0 basis-full break-words text-[11px] text-neutral-500">{row.statusMessage}</p> : null}
     </li>
   );
 };

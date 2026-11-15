@@ -583,8 +583,8 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
     return (
       <div {...KEYBOARD_SURFACE_PROPS} className="flex h-full w-full flex-col items-center justify-center gap-3 bg-neutral-950 px-6 text-center">
         <AlertTriangle size={20} className="text-warn" />
-        <div className="text-sm text-neutral-200">{summary?.name ?? title}</div>
-        <p className="max-w-sm text-xs text-neutral-500">{state.loadError ?? "The workflow could not be opened."}</p>
+        <div className="max-w-full text-sm text-neutral-200 [overflow-wrap:anywhere]">{summary?.name ?? title}</div>
+        <p className="max-w-sm text-xs text-neutral-500 [overflow-wrap:anywhere]">{state.loadError ?? "The workflow could not be opened."}</p>
         <button
           type="button"
           onClick={() => void editor.load()}

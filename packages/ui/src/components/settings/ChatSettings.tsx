@@ -93,7 +93,7 @@ export const ChatSettings: React.FC = () => {
           <SettingRow
             label={
               <span className="inline-flex flex-wrap items-center gap-2">
-                <span>
+                <span className="min-w-0 [overflow-wrap:anywhere]">
                   In <span className="font-medium">{project.name}</span>
                 </span>
                 {projectOverride === undefined ? (

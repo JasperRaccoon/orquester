@@ -139,7 +139,7 @@ export const SettingRow: React.FC<{
         ) : (
           <p className="text-sm text-neutral-200">{label}</p>
         )}
-        {description && <div className="mt-0.5 text-xs leading-relaxed text-neutral-500">{description}</div>}
+        {description && <div className="mt-0.5 text-xs leading-relaxed text-neutral-500 [overflow-wrap:anywhere]">{description}</div>}
       </div>
     </div>
     {children !== undefined && children !== null && (
@@ -280,7 +280,7 @@ export const Notice: React.FC<{
     )}
   >
     <span className="mt-px shrink-0">{NOTICE_TONE[tone].icon}</span>
-    <div className="min-w-0 flex-1 space-y-0.5 leading-relaxed">
+    <div className="min-w-0 flex-1 space-y-0.5 leading-relaxed [overflow-wrap:anywhere]">
       {title && <p className="font-medium text-neutral-200">{title}</p>}
       {children}
     </div>

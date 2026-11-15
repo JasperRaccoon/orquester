@@ -35,7 +35,7 @@ export const BinaryCard: React.FC<BinaryCardProps> = ({ path, name, size, mime, 
       <FileQuestion size={32} className="text-neutral-600" />
       <div>
         <p className="text-sm text-neutral-300">{title}</p>
-        <p className="text-xs text-neutral-600">
+        <p className="text-xs text-neutral-600 [overflow-wrap:anywhere]">
           {name} · {fmtSize(size)}
         </p>
       </div>

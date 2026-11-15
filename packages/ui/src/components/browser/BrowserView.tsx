@@ -422,7 +422,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           </div>
         ) : (state?.status === "crashed" || state?.status === "error") && vmStartingText(browser) === null ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-neutral-400">
-            <span>{state.status === "crashed" ? "Browser crashed" : (browser.errorMessage ?? "Browser failed to start")}</span>
+            <span className="[overflow-wrap:anywhere]">{state.status === "crashed" ? "Browser crashed" : (browser.errorMessage ?? "Browser failed to start")}</span>
             <button type="button" onClick={() => navigate("reload")}
               className="rounded border border-neutral-700 px-3 py-1 text-xs hover:bg-neutral-800">
               Relaunch

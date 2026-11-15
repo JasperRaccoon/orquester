@@ -359,7 +359,7 @@ const KnowledgeSection: React.FC<{ ids: readonly string[]; onChange: (ids: strin
       </p>
       {list === null && collectionsError ? (
         <div className="flex items-center gap-2 text-[12px] text-danger">
-          <span className="min-w-0 flex-1">Could not read the collections: {knowledgeErrorText(collectionsError)}</span>
+          <span className="min-w-0 flex-1 break-words">Could not read the collections: {knowledgeErrorText(collectionsError)}</span>
           <Button type="button" size="sm" variant="outline" onClick={read}>
             Retry
           </Button>

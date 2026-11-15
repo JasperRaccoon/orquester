@@ -173,7 +173,7 @@ const DuplicateRow: React.FC<{
     <div className="space-y-1.5">
       <p className="flex items-start gap-1.5 text-xs text-neutral-200">
         <Copy size={13} aria-hidden className="mt-px shrink-0 text-warn" />
-        <span className="min-w-0">
+        <span className="min-w-0 [overflow-wrap:anywhere]">
           Looks like the same content as <span className="font-medium text-neutral-100">{title}</span>
           {percent !== null && <span className="text-neutral-400"> ({percent}%)</span>}
         </span>

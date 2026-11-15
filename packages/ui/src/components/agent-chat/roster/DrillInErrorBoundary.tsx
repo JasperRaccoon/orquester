@@ -58,7 +58,7 @@ export class DrillInErrorBoundary extends React.Component<DrillInErrorBoundaryPr
         <TriangleAlert size={28} strokeWidth={1.25} className="text-danger" />
         <div className="space-y-1">
           <p className="text-sm font-medium text-neutral-200">This agent&apos;s view failed to render</p>
-          <p className="max-w-md text-xs text-neutral-500">
+          <p className="max-w-md text-xs text-neutral-500 [overflow-wrap:anywhere]">
             The agent, its rows and the thread are untouched — only this view stopped. {error.message}
           </p>
         </div>

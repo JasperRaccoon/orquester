@@ -285,7 +285,7 @@ const PluginPicker: React.FC<{
       {plugins.value.length === 0 ? (
         <Banner tone="info">This marketplace lists no plugins.</Banner>
       ) : shown.length === 0 ? (
-        <p className="py-4 text-center text-xs text-neutral-500">No plugin matches "{query}".</p>
+        <p className="py-4 text-center text-xs text-neutral-500 [overflow-wrap:anywhere]">No plugin matches "{query}".</p>
       ) : (
         <ul
           role="radiogroup"

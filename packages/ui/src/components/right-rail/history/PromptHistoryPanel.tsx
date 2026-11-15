@@ -521,7 +521,7 @@ function PromptListEnd({
         {index.loadingOlder ? "Loading older prompts…" : "Load older prompts"}
       </button>
       {index.olderError !== null && !index.loadingOlder ? (
-        <p role="alert" className="px-2 text-center text-[11px] leading-4 text-danger">
+        <p role="alert" className="max-w-full px-2 text-center text-[11px] leading-4 text-danger [overflow-wrap:anywhere]">
           {index.olderError}
         </p>
       ) : null}

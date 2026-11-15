@@ -145,7 +145,7 @@ const LocationCard: React.FC<{
       </span>
       <span className="truncate">{title}</span>
     </span>
-    <span className="line-clamp-2 text-[11px] leading-snug text-neutral-500">{description}</span>
+    <span className="line-clamp-2 w-full min-w-0 text-[11px] leading-snug text-neutral-500">{description}</span>
   </button>
 );
 

@@ -157,8 +157,8 @@ export const RailEmptyState: React.FC<{
   action?: React.ReactNode;
 }> = ({ title, hint, action }) => (
   <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
-    <div className="text-[13px] text-neutral-300">{title}</div>
-    {hint ? <div className="text-xs leading-5 text-neutral-500">{hint}</div> : null}
+    <div className="max-w-full text-[13px] text-neutral-300 [overflow-wrap:anywhere]">{title}</div>
+    {hint ? <div className="max-w-full text-xs leading-5 text-neutral-500 [overflow-wrap:anywhere]">{hint}</div> : null}
     {action ?? null}
   </div>
 );

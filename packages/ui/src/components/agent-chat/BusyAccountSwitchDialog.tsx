@@ -108,7 +108,7 @@ export function BusyAccountSwitchDialog({
         </div>
 
         {error !== null ? (
-          <p role="alert" className="mt-3 text-xs text-danger">
+          <p role="alert" className="mt-3 text-xs text-danger [overflow-wrap:anywhere]">
             {error}
           </p>
         ) : null}

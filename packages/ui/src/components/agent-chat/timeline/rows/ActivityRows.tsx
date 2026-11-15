@@ -214,11 +214,11 @@ function QuestionAnswerHistory({
         return (
           <div key={questionId} className="space-y-1">
             {answer.questionTextById?.[questionId] ? (
-              <p className="whitespace-pre-wrap text-sm text-neutral-500">
+              <p className="whitespace-pre-wrap break-words text-sm text-neutral-500">
                 {answer.questionTextById[questionId]}
               </p>
             ) : null}
-            <p className="ms-3 whitespace-pre-wrap text-sm text-neutral-300">
+            <p className="ms-3 whitespace-pre-wrap break-words text-sm text-neutral-300">
               {typeof value === "string" ? value : JSON.stringify(value)}
             </p>
           </div>

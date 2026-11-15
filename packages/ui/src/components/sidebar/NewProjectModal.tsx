@@ -936,6 +936,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
                   <label className="text-xs text-neutral-400">Repository</label>
                   <Dropdown
                     width="w-[26rem]"
+                    triggerClassName="max-w-full"
                     trigger={
                       <span className="flex h-8 w-full max-w-[26rem] items-center justify-between rounded-md border border-neutral-700 bg-neutral-900 px-2.5 text-sm text-neutral-200">
                         <span className="truncate">{pickedRepoLabel}</span>

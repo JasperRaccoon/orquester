@@ -31,7 +31,7 @@ export const CloseSessionConfirm: React.FC = () => {
           desktopCloseMessage(desktop)
         ) : (
           <>
-            Close <span className="text-neutral-200">{sessionTitle ?? "this session"}</span>? This ends
+            Close <span className="text-neutral-200 [overflow-wrap:anywhere]">{sessionTitle ?? "this session"}</span>? This ends
             the running session and can’t be undone.
           </>
         )

@@ -612,7 +612,7 @@ const CommitRow: React.FC<{
             {commit.refs.map((ref) => (
               <span
                 key={ref}
-                className="rounded border border-neutral-700 bg-neutral-900 px-1 text-[10px] text-neutral-400"
+                className="min-w-0 rounded border border-neutral-700 bg-neutral-900 px-1 text-[10px] text-neutral-400 [overflow-wrap:anywhere]"
               >
                 {ref}
               </span>

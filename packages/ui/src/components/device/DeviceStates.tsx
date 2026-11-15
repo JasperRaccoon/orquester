@@ -193,7 +193,7 @@ export function DevicePicker(props: {
       {props.error ? (
         <div role="alert" className="mb-3 flex items-start gap-2 rounded-lg border border-danger-900/60 bg-danger-soft/25 px-3 py-2 text-[12px] text-neutral-200">
           <AlertTriangle size={14} aria-hidden className="mt-px shrink-0 text-danger" />
-          <span className="min-w-0 flex-1">{props.error}</span>
+          <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{props.error}</span>
         </div>
       ) : null}
       {empty ? (
@@ -331,7 +331,7 @@ export function DeviceBooting(props: {
       </div>
       {props.failed ? (
         <>
-          <p role="alert" className="mt-3 text-center text-[12px] leading-relaxed text-danger">
+          <p role="alert" className="mt-3 text-center text-[12px] leading-relaxed text-danger [overflow-wrap:anywhere]">
             {props.lease.error}
           </p>
           <div className="mt-3 flex justify-center gap-2">
@@ -370,7 +370,7 @@ export function DeviceGone(props: {
         {lost ? <AlertTriangle size={15} aria-hidden className="mt-px shrink-0 text-danger" /> : <WifiOff size={15} aria-hidden className="mt-px shrink-0 text-warn" />}
         <div className="min-w-0 text-[12px] leading-relaxed text-neutral-300">
           <p className="font-medium text-neutral-100">{lost ? "This device is gone" : "Can't reach this device's host"}</p>
-          <p className="text-neutral-400">
+          <p className="text-neutral-400 [overflow-wrap:anywhere]">
             {lost ? lostDeviceText(props.lease.error) : "The device keeps running; it comes back when the host does."}
           </p>
         </div>

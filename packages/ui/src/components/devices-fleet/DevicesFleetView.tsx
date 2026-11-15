@@ -72,7 +72,7 @@ const FleetError: React.FC<{ message: string; onRetry: () => void; retrying: boo
   <div className="mx-auto mt-12 flex max-w-md flex-col items-center px-6 text-center" role="alert" data-fleet-error="">
     <AlertTriangle size={20} aria-hidden className="text-warn" />
     <h2 className="mt-2 text-sm font-medium text-neutral-100">Couldn't load the devices</h2>
-    <p className="mt-1 text-xs text-neutral-400">{message}</p>
+    <p className="mt-1 text-xs text-neutral-400 [overflow-wrap:anywhere]">{message}</p>
     <Button variant="outline" size="sm" className="mt-4" onClick={onRetry} disabled={retrying}>
       {retrying ? <Loader2 size={13} aria-hidden className="animate-spin" /> : <RotateCw size={13} aria-hidden />}
       Try again
