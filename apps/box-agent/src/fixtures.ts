@@ -131,7 +131,12 @@ const controlFixture: ByT = {
       t: "welcome",
       boxId: "box1",
       credential: "Y3JlZA",
-      config: { paths: { kind: "identity" }, heartbeatMs: 15000, forwards: [{ boxPort: 47999, target: "session-tools" }] }
+      config: {
+        paths: { kind: "identity" },
+        heartbeatMs: 15000,
+        forwards: [{ boxPort: 47999, target: "session-tools" }],
+        gh: { host: "github.com", user: "octocat" }
+      }
     },
     { t: "welcome", boxId: "box1", config: { paths: { kind: "windows-prefix", prefix: "C:\\orq" }, heartbeatMs: 15000, forwards: [] } }
   ],
@@ -211,6 +216,7 @@ const channelsFixture: ByKind = {
   "tar-read": [{ kind: "tar-read", path: "/srv/p" }, { kind: "tar-read", path: "/srv/p", exclude: ["node_modules", "*.log"] }],
   "tar-write": [{ kind: "tar-write", path: "/srv/q" }, { kind: "tar-write", path: "/srv/q", compression: "gzip" }],
   "ssh-agent": [{ kind: "ssh-agent" }],
+  "gh-api": [{ kind: "gh-api" }],
   "mcp-bridge": [{ kind: "mcp-bridge", serverId: "github" }]
 };
 

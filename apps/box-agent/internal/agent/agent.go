@@ -230,6 +230,9 @@ type Agent struct {
 
 	sshSocket   string
 	controlPath string
+	ghSocket    string
+	ghMu        sync.Mutex
+	ghConfigDir string
 	statsPrev   cpuSample
 	client      *http.Client
 }
@@ -316,6 +319,15 @@ func (a *Agent) Run(ctx context.Context) (int, bool) {
 		a.log.Printf("ssh-agent socket unavailable: %v", err)
 	} else {
 		defer ssh.Close()
+	}
+	// gh dials `http_unix_socket` as a unix socket; orq-agent's local endpoints are named pipes on Windows.
+	if !isWindows {
+		gh, err := a.startGhAPI()
+		if err != nil {
+			a.log.Printf("gh socket unavailable: %v", err)
+		} else {
+			defer gh.Close()
+		}
 	}
 
 	attempt := 0
@@ -560,6 +572,7 @@ func (a *Agent) connectOnce(ctx context.Context) (bool, error) {
 			_ = conn.Close(websocket.StatusInternalError, "could not store credential")
 			return false, err
 		}
+		a.applyGh(m.Config.Gh)
 		link := newLink(a, conn, m.BoxID, m.Config)
 		a.setLink(link)
 		a.log.Printf("connected to the daemon as box %s", m.BoxID)

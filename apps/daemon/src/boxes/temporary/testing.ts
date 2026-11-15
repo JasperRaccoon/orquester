@@ -196,7 +196,7 @@ export class FakeForwardingHub implements Pick<BoxHub, "get" | "setForwards" | "
     return boxId === this.projectBoxId ? this.connection : undefined;
   }
 
-  handleChannel(kind: "host-tcp" | "ssh-agent" | "mcp-bridge", handler: BoxChannelHandler): void {
+  handleChannel(kind: "host-tcp" | "ssh-agent" | "gh-api" | "mcp-bridge", handler: BoxChannelHandler): void {
     if (kind === "host-tcp") this.handler = handler;
   }
 

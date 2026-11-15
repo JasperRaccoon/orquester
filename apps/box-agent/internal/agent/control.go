@@ -196,11 +196,21 @@ func readLine(r *bufio.Reader, limit int) ([]byte, error) {
 // with the host's keys (the private keys never enter the box).
 func (a *Agent) startSSHAgent() (io.Closer, error) {
 	path := localEndpoint(a.cfg.DataDir, "ssh-agent")
-	ln, err := listenLocal(path, a.work, false)
+	ln, err := a.listenChannel(path, wire.SSHAgentSpec{Kind: "ssh-agent"})
 	if err != nil {
 		return nil, err
 	}
 	a.sshSocket = path
+	return ln, nil
+}
+
+// listenChannel listens on a local endpoint and bridges every connection to
+// it to a channel of `spec`, opened to the daemon.
+func (a *Agent) listenChannel(path string, spec any) (io.Closer, error) {
+	ln, err := listenLocal(path, a.work, false)
+	if err != nil {
+		return nil, err
+	}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -215,7 +225,7 @@ func (a *Agent) startSSHAgent() (io.Closer, error) {
 					conn.Close()
 					return
 				}
-				ch, err := link.OpenChannel(ctx, wire.SSHAgentSpec{Kind: "ssh-agent"})
+				ch, err := link.OpenChannel(ctx, spec)
 				if err != nil {
 					conn.Close()
 					return

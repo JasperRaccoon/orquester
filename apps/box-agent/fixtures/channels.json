@@ -137,6 +137,11 @@
       "kind": "ssh-agent"
     }
   ],
+  "gh-api": [
+    {
+      "kind": "gh-api"
+    }
+  ],
   "mcp-bridge": [
     {
       "kind": "mcp-bridge",

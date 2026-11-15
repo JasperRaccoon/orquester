@@ -62,6 +62,7 @@ import { createBoxGitRouteResolver } from "./remote/exec/git.ts";
 import { registerBoxStatsRoute } from "./remote/exec/stats.ts";
 import { BoxAwareSessionManager, BoxTerminalManager, composeIndexContributors } from "./remote/exec/terminals.ts";
 import { AccountLends, hasActiveLend, registerAccountLendRoutes } from "./lends/index.ts";
+import { boxGhLogin, registerBoxGhApi, type BoxGhApiDeps } from "./remote/gh-api.ts";
 import { registerBoxGitAuth, workspaceAccountFromFiles } from "./remote/git-auth.ts";
 import { registerMcpBridge } from "./remote/mcp-bridge.ts";
 import { createDaemonBoxService, managedAgentHomes } from "./service/daemon-wiring.ts";
@@ -205,9 +206,12 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       return updated;
     }
   };
+  const workspaceAccount = workspaceAccountFromFiles({ accountsFile: deps.accountsFile, workspacesMetaFile: deps.workspacesMetaFile });
+  const ghApi: BoxGhApiDeps = { workspaceAccount, logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") } };
   const hub = createBoxHub({
     appdir: deps.baseDir,
     records,
+    ghLogin: (context) => boxGhLogin(context, ghApi),
     verifyGithubOidc,
     daemonUrls: () => {
       if (!service) return [];
@@ -505,10 +509,11 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       await accountLends.start();
       lends = accountLends;
       registerBoxGitAuth(hub, {
-        workspaceAccount: workspaceAccountFromFiles({ accountsFile: deps.accountsFile, workspacesMetaFile: deps.workspacesMetaFile }),
+        workspaceAccount,
         knownHosts: (host, port) => knownHostsForBox({ keysDir: deps.keysDir, home: deps.home, host, port }),
         logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
       });
+      registerBoxGhApi(hub, ghApi);
       registerMcpBridge(hub, {
         appdir: deps.baseDir,
         baseEnv: () => ({ PATH: deps.sessionPath(), HOME: deps.home }),

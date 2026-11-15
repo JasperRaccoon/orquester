@@ -14,6 +14,9 @@
  *   pinned host keys the box setup wrote to the box user's own git config. No
  *   env overrides that config (a `GIT_SSH_COMMAND` here would replace its
  *   pinned `core.sshCommand`).
+ * - `gh`: nothing is added either. `orq-agent` exports `GH_CONFIG_DIR` itself
+ *   while the host brokers a GitHub login for the box (`../gh-api.ts`); a
+ *   `GH_TOKEN` or `GH_CONFIG_DIR` here would take `gh` away from it.
  * - {@link boxToolingEnv}: a tooling plugin's per-target contribution
  *   (`BoxToolingProvisioner.contribution`), with PATH prepended to the box's
  *   own PATH and the `--require` files as the whole of `NODE_OPTIONS`.

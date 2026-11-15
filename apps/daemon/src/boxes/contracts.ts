@@ -153,7 +153,7 @@ export type BoxRequestHandler<K extends BoxMethodName<BoxBoxToHostMethods>> = (
 
 export type BoxRawRequestHandler = (context: BoxRequestContext, params: unknown, signal: AbortSignal) => Promise<unknown>;
 
-/** Handles a box-opened channel (`host-tcp`, `ssh-agent`, `mcp-bridge`). */
+/** Handles a box-opened channel (`host-tcp`, `ssh-agent`, `gh-api`, `mcp-bridge`). */
 export type BoxChannelHandler = (context: BoxRequestContext, spec: BoxChannelSpec, stream: Duplex) => void;
 
 /** One `forward.listen` sent by {@link BoxHub.setForwards}: `error` null = the box listens on `boxPort`. */
@@ -185,7 +185,7 @@ export interface BoxHub {
   setForwards(boxId: string, forwards: BoxAgentConfig["forwards"], options?: { relisten?: boolean }): Promise<BoxForwardOutcome[]>;
   handle<K extends BoxMethodName<BoxBoxToHostMethods>>(method: K, handler: BoxRequestHandler<K>): void;
   handleRaw(method: string, handler: BoxRawRequestHandler): void;
-  handleChannel(kind: "host-tcp" | "ssh-agent" | "mcp-bridge", handler: BoxChannelHandler): void;
+  handleChannel(kind: "host-tcp" | "ssh-agent" | "gh-api" | "mcp-bridge", handler: BoxChannelHandler): void;
   onConnectionChange(listener: (boxId: string, connected: boolean) => void): () => void;
 }
 

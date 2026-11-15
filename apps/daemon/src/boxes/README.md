@@ -20,7 +20,7 @@ Contracts: `packages/api/src/boxes.ts` (HTTP/UI), `packages/api/src/box-protocol
 | `boxes/lends/` | Lending managed accounts to a box (spec `2026-11-03-lend-accounts-to-boxes-design.md`): `service.ts` (records on `StoredBox.accountLends`, resolving names, preview, all-or-nothing install, every way a lend ends, cleanup on the box), `keeper.ts` (one lend's login kept current from the host), `routes.ts` (`accountLendRoutes`, both transports). |
 | `boxes/sync/` | `BoxConfigSync`, `BoxTranscriptSync`, the box → host approval queue and its routes. |
 | `boxes/tooling/` | `BoxToolingProvisioner`: per-target plugin tooling (Better TS Typecheck in boxes). |
-| `boxes/remote/` | Routing host features to a box: files, search, uploads/downloads, git runner, terminals, workflows, port forwards, secret files. |
+| `boxes/remote/` | Routing host features to a box: files, search, uploads/downloads, git runner, terminals, workflows, port forwards, secret files. Also what a box asks the host for: git over the restricted SSH agent (`git-auth.ts`) and the GitHub CLI's API requests, forwarded with the account's token (`gh-api.ts`). |
 | `agent-host/boxes/` | Agent CLIs in boxes: remote spawn, path mapping, auth wiring per CLI, MCP bridge. |
 | `mcp/tools/boxes.ts` | Temporary-box MCP tools and their approval card. |
 | `boxes/temporary/` | The box tools' daemon side: the `TemporaryBoxes` seam the service implements (`connect`ed in the daemon wiring), ownership per chat, exec and background jobs, streamed transfers, port forwards (for a box project's chat, listeners in its own box: `project-forwards.ts`, the hub's one `host-tcp` handler and owner of every box's forward list), the temporary-box routes, chat-close cleanup. |

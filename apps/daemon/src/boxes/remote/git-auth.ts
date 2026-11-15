@@ -30,6 +30,8 @@
  * Scope: a project box can use ONLY its own workspace's account. A temporary
  * box (no project) gets no git identity at all. Nothing here logs a key, a
  * credential request's fields or the data being signed.
+ *
+ * The GitHub CLI follows the same rule through its own channel: `gh-api.ts`.
  */
 
 import { createHmac, createPrivateKey, createPublicKey, sign as cryptoSign, verify as cryptoVerify, type KeyObject } from "node:crypto";
@@ -68,7 +70,7 @@ export interface BoxGitAuthDeps {
  * `workspaceAccount` over the daemon's own stores, read at every call (both are
  * small, and an account rebound or re-keyed in Settings applies at once).
  */
-export function workspaceAccountFromFiles(files: { accountsFile: string; workspacesMetaFile: string }): BoxGitAuthDeps["workspaceAccount"] {
+export function workspaceAccountFromFiles(files: { accountsFile: string; workspacesMetaFile: string }): (workspace: string) => Promise<Account | null> {
   return async (workspace) => {
     let accountId: string | undefined;
     try {
@@ -88,7 +90,7 @@ export function workspaceAccountFromFiles(files: { accountsFile: string; workspa
 }
 
 /** The account a box may authenticate as: its project's workspace account; none for a temporary box. */
-async function accountForBox(context: BoxRequestContext, deps: Pick<BoxGitAuthDeps, "workspaceAccount">): Promise<BoxGitAccount | null> {
+export async function accountForBox<A>(context: BoxRequestContext, deps: { workspaceAccount(workspace: string): Promise<A | null> }): Promise<A | null> {
   const project = context.record.project;
   if (context.record.purpose !== "project" || !project?.workspace) return null;
   return deps.workspaceAccount(project.workspace);

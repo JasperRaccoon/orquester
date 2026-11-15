@@ -53,7 +53,7 @@ func (a *Agent) handleOpen(l *Link, ch *Channel, raw json.RawMessage) {
 	case *wire.TarWriteSpec:
 		a.openTarWrite(ch, s)
 	default:
-		// host-tcp, ssh-agent and mcp-bridge are opened by the box, never by the daemon.
+		// host-tcp, ssh-agent, gh-api and mcp-bridge are opened by the box, never by the daemon.
 		ch.OpenFailed(rpcErr("UNKNOWN_CHANNEL", "the box does not accept "+kind+" channels"))
 	}
 }
@@ -103,8 +103,9 @@ func (a *Agent) buildStart(spec *wire.ExecSpec) (*startSpec, error) {
 	return &startSpec{path: path, args: argv, dir: dir, env: env, pty: spec.Pty, work: a.work}, nil
 }
 
-// processEnv: orq-agent's env (secrets removed) + ORQ_* + SSH_AUTH_SOCK, then
-// `unset` removed, then `extra` merged over it.
+// processEnv: orq-agent's env (secrets removed) + ORQ_* + SSH_AUTH_SOCK +
+// GH_CONFIG_DIR (while the host brokers a gh login), then `unset` removed,
+// then `extra` merged over it.
 func (a *Agent) processEnv(extra map[string]string, unset []string, pty *wire.PtySpec) []string {
 	env := newEnvMap(os.Environ())
 	for _, key := range secretEnv {
@@ -119,6 +120,9 @@ func (a *Agent) processEnv(extra map[string]string, unset []string, pty *wire.Pt
 	}
 	if a.sshSocket != "" {
 		env.set("SSH_AUTH_SOCK", a.sshSocket)
+	}
+	if dir := a.ghDir(); dir != "" {
+		env.set("GH_CONFIG_DIR", dir)
 	}
 	if a.work != nil {
 		env.set("HOME", a.work.home)
