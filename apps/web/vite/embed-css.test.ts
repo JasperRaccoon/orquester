@@ -41,15 +41,29 @@ describe("embedShadowCss", () => {
   });
 });
 
+describe("embedCssVariables", () => {
+  it("lists the themable variables, then the --orq-* the stylesheets read, then the fonts", () => {
+    assert.deepEqual(
+      embedCssVariables(
+        ":root { --n-50: 9 9 11; --git-added: red } [data-mode=\"light\"] { --n-50: 1 1 1; --diff-add-bg: red }",
+        ".bubble { color: var(--orq-user-bubble-fg, red); --tone: color-mix(in srgb, var(--orq-user-bubble-fg) 80%, transparent) }",
+        ".bubble { border: var( --orq-user-bubble-border , none) }"
+      ),
+      ["--orq-n-50", "--orq-diff-add-bg", "--orq-user-bubble-fg", "--orq-user-bubble-border", "--orq-font-sans", "--orq-font-mono"]
+    );
+  });
+});
+
 describe("the --orq-* contract", () => {
   const globals = readFileSync(new URL("../../../packages/ui/src/styles/globals.css", import.meta.url), "utf8");
+  const agentChat = readFileSync(new URL("../../../packages/ui/src/styles/agent-chat.css", import.meta.url), "utf8");
 
   it("is documented exactly in docs/embed-agent-chat.md", () => {
     const doc = readFileSync(new URL("../../../docs/embed-agent-chat.md", import.meta.url), "utf8");
     const section = /^## CSS variables\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(doc);
     assert.ok(section, "docs/embed-agent-chat.md has a \"## CSS variables\" section");
     const documented = [...section[1].matchAll(/`(--orq-[\w-]+)`/g)].map((match) => match[1]);
-    assert.deepEqual([...documented].sort(), [...embedCssVariables(globals)].sort());
+    assert.deepEqual([...documented].sort(), [...embedCssVariables(globals, agentChat)].sort());
     assert.equal(new Set(documented).size, documented.length, "no variable is listed twice");
   });
 

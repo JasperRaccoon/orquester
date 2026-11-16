@@ -89,16 +89,26 @@ export const embedShadowCss: PluginCreator<EmbedShadowCssOptions> = (options) =>
 };
 embedShadowCss.postcss = true;
 
+/** A `var(--orq-…)` the chat's own CSS reads: a host-only variable such as `--orq-user-bubble-bg`. */
+const HOST_READ = /var\(\s*(--orq-[\w-]+)/g;
+
 /**
- * The `--orq-*` variables a host can set, in `globals.css` order: one per themable
- * variable it declares, then the two font variables. This is the contract list
- * written to `dist/embed/variables.json` and documented in docs/embed-agent-chat.md.
+ * The `--orq-*` variables a host can set: one per themable variable `globals.css`
+ * declares (in its order), then every `--orq-*` the stylesheets read themselves
+ * (the user bubble's, in `agent-chat.css`), then the two font variables. This is
+ * the contract list written to `dist/embed/variables.json` and documented in
+ * docs/embed-agent-chat.md.
  */
-export function embedCssVariables(globalsCss: string): string[] {
+export function embedCssVariables(globalsCss: string, ...sheets: string[]): string[] {
   const names = new Set<string>();
   postcss.parse(globalsCss).walkDecls((decl) => {
     if (THEMABLE.test(decl.prop)) names.add(`--orq-${decl.prop.slice(2)}`);
   });
+  for (const css of [globalsCss, ...sheets]) {
+    postcss.parse(css).walkDecls((decl) => {
+      for (const match of decl.value.matchAll(HOST_READ)) names.add(match[1]);
+    });
+  }
   return [...names, ...FONT_VARIABLES];
 }
 

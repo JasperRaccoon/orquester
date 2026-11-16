@@ -218,8 +218,11 @@ function MarkdownAnchor({
   if (forge && text.trim().length > 0) {
     return <ForgeLinkPill link={forge}>{isUrlText(text, target) ? undefined : children}</ForgeLinkPill>;
   }
-  // Info-coloured, no underline at rest; hover draws a dotted one.
-  const linkClass = "text-info-300 underline-offset-2 hover:underline hover:decoration-dotted";
+  // Info-coloured, no underline at rest; hover draws a dotted one. In a quote inside the user's
+  // bubble restyled by a host (`--orq-user-bubble-fg`), the bubble's colour, underlined.
+  const linkClass =
+    "text-[color:var(--ac-ub-fg,rgb(var(--sem-info-300)))] [text-decoration:var(--ac-ub-link-decoration,none)] " +
+    "underline-offset-2 hover:underline hover:decoration-dotted";
   if (onOpenFile !== undefined && looksLikeWorkspacePath(target)) {
     // With no opener, a workspace path is not a link: there is nowhere to go.
     if (onOpenFile === null) return <span data-workspace-link-text={target}>{children}</span>;

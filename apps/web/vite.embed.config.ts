@@ -34,6 +34,8 @@ const path = (relative: string): string => fileURLToPath(new URL(relative, impor
 const REPO_ROOT = path("../../");
 const UI_ROOT = path("../../packages/ui/");
 const GLOBALS_CSS = readFileSync(path("../../packages/ui/src/styles/globals.css"), "utf8");
+/** Inlined by globals.css; the user bubble's `--orq-user-bubble-*` are read here. */
+const AGENT_CHAT_CSS = readFileSync(path("../../packages/ui/src/styles/agent-chat.css"), "utf8");
 
 /** What Tailwind scans for the embed's classes: the chat's components and the embed itself. */
 const TAILWIND_CONTENT = [
@@ -114,7 +116,7 @@ export default defineConfig({
       contract: EMBED_CONTRACT,
       element: EMBED_ELEMENT,
       build: BUILD,
-      variables: embedCssVariables(GLOBALS_CSS),
+      variables: embedCssVariables(GLOBALS_CSS, AGENT_CHAT_CSS),
       banner: "/*! Orquester agent-chat embed — MIT — see LICENSES.txt */"
     })
   ]
