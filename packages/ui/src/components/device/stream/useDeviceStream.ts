@@ -17,6 +17,7 @@ import { ServeSimInputSocket, type ServeSimButton } from "./serveSimInput.ts";
 import { ServeSimMjpegSession } from "./serveSimMjpeg.ts";
 import {
   DeviceStreamError,
+  type StreamUrl,
   type DeviceButton,
   type DeviceOrientation,
   type DevicePlatform,
@@ -46,6 +47,11 @@ export interface DeviceStreamUrls {
    * The WebSocket URLs carry their own token.
    */
   readonly headers?: Readonly<Record<string, string>>;
+  /**
+   * Query parameters added to every URL at each (re)connect, read when connecting: a direct
+   * route's current stream ticket. Renewing it never reconnects a live stream.
+   */
+  readonly query?: () => Readonly<Record<string, string>>;
 }
 
 export interface UseDeviceStreamOptions {
@@ -184,6 +190,8 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
     const onInputReady = (ready: boolean) => {
       if (open) setInputReady(ready);
     };
+    // A direct route's ticket is read at every connect, so a renewed one needs no reconnect.
+    const at = (url: string): StreamUrl => (latest.current.urls.query ? () => withQueryParams(url, { ...(latest.current.urls.query?.() ?? {}) }) : url);
     const common = { canvas, onFrame, onState, onWarning };
     const next: Channels = { video: null, emu: null, sim: null, throttle: null };
     setState("connecting");
@@ -193,31 +201,31 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
     if (platform === "android") {
       if (transport === "screenshots") {
         if (urls.screenshot) {
-          next.video = new ScreenshotPollSession({ ...common, ...auth, url: urls.screenshot, onVideoSize: onAndroidSize });
+          next.video = new ScreenshotPollSession({ ...common, ...auth, url: at(urls.screenshot), onVideoSize: onAndroidSize });
         } else {
           setState("error");
           setError(new DeviceStreamError("unsupported", "This browser can't decode the device's video stream.", true));
         }
         next.emu = new ServeEmuSession({
           ...common,
-          url: withQueryParams(urls.video, { video: "0", "frame-meta": null }),
+          url: at(withQueryParams(urls.video, { video: "0", "frame-meta": null })),
           video: false,
           onFrame: undefined,
           onState: undefined,
           onInputReady
         });
       } else {
-        next.emu = new ServeEmuSession({ ...common, url: urls.video, onVideoSize: onAndroidSize, onInputReady });
+        next.emu = new ServeEmuSession({ ...common, url: at(urls.video), onVideoSize: onAndroidSize, onInputReady });
         next.video = next.emu;
       }
     } else {
       next.video =
         transport === "serve-sim-h264"
-          ? new ServeSimH264Session({ ...common, ...auth, url: serveSimStreamUrl(urls.video, "stream.avcc") })
-          : new ServeSimMjpegSession({ ...common, ...auth, url: urls.mjpeg ?? serveSimStreamUrl(urls.video, "stream.mjpeg") });
+          ? new ServeSimH264Session({ ...common, ...auth, url: at(serveSimStreamUrl(urls.video, "stream.avcc")) })
+          : new ServeSimMjpegSession({ ...common, ...auth, url: at(urls.mjpeg ?? serveSimStreamUrl(urls.video, "stream.mjpeg")) });
       if (urls.input) {
         next.sim = new ServeSimInputSocket({
-          url: urls.input,
+          url: at(urls.input),
           onWarning,
           onReady: onInputReady,
           onScreenConfig: (config) => {

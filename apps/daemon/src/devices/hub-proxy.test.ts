@@ -295,3 +295,20 @@ test("WebSocket: off-list paths and devices not leased here are refused", async 
   await opened(ok);
   ok.terminate();
 });
+
+test("direct routes: the gate's open streams count with the proxied ones, and its input switches control only on a leased device", () => {
+  const calls: string[] = [];
+  const proxy = createHubProxy({
+    leaseOnDevice: (_hostId, device) => (device === "SIM-1" ? { id: "lease-1" } : null),
+    userInput: (_hostId, device) => calls.push(`input ${device}`),
+    viewerActive: (leaseId) => calls.push(`active ${leaseId}`),
+    viewersChanged: (_hostId, device, count) => calls.push(`viewers ${device} ${count}`),
+    logger: quiet
+  });
+  proxy.directViewers("box:mac", "SIM-1", 2);
+  proxy.directViewers("box:mac", "SIM-1", 2);
+  proxy.directViewers("box:mac", "SIM-1", 0);
+  proxy.directInput("box:mac", "SIM-1");
+  proxy.directInput("box:mac", "SIM-9");
+  assert.deepEqual(calls, ["active lease-1", "viewers SIM-1 2", "viewers SIM-1 0", "input SIM-1"]);
+});
