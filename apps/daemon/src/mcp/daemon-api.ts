@@ -23,6 +23,8 @@ import {
   type DeviceOpenPlan,
   type DeviceToolActionResult,
   type DeviceToolCloseInput,
+  type DeviceToolForwardInput,
+  type DeviceToolForwardResult,
   type DeviceToolInstallInput,
   type DeviceToolInstallResult,
   type DeviceToolList,
@@ -179,6 +181,8 @@ export interface DaemonApi {
   deviceInstall?(input: DeviceToolInstallInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolInstallResult>>;
   /** Release one of the chat's devices. */
   deviceClose?(input: DeviceToolCloseInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<{ lease: DeviceLeaseSummary }>>;
+  /** List, add or remove a port forward from one of the chat's devices to its project. */
+  deviceForward?(input: DeviceToolForwardInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolForwardResult>>;
 
   // Desktops (desktop agents spec 2026-11-10 §2.5): one desktop_action, answered as its route
   // (`desktopRoutes.actions`) answers, but abortable: the call going away ends a wait and stops a
@@ -441,6 +445,10 @@ export class InjectDaemonApi implements DaemonApi {
     return runDeviceTool(this.devices(), opts, (port, threadId) => port.toolClose(threadId, input));
   }
 
+  deviceForward(input: DeviceToolForwardInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolForwardResult>> {
+    return runDeviceTool(this.devices(), opts, (port, threadId) => port.toolForward(threadId, input));
+  }
+
   /**
    * The action route's own handler (`desktopRoutes.actions`: the manager's `runAction`, which
    * validates the body) with the call's signal, its refusals as that route sends them. Through the
@@ -506,6 +514,7 @@ export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): Daemo
       : {}),
     ...(api.deviceInstall ? { deviceInstall: (input: DeviceToolInstallInput, opts?: DeviceCallOptions) => api.deviceInstall!(input, { ...opts, principal }) } : {}),
     ...(api.deviceClose ? { deviceClose: (input: DeviceToolCloseInput, opts?: DeviceCallOptions) => api.deviceClose!(input, { ...opts, principal }) } : {}),
+    ...(api.deviceForward ? { deviceForward: (input: DeviceToolForwardInput, opts?: DeviceCallOptions) => api.deviceForward!(input, { ...opts, principal }) } : {}),
     // Desktops: the action acts for the bound principal too.
     ...(api.desktopAction
       ? { desktopAction: (desktopId: string, request: DesktopActionRequest, opts?: DaemonDesktopCallOptions) => api.desktopAction!(desktopId, request, { ...opts, principal }) }

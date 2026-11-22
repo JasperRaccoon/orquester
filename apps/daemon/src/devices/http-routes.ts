@@ -1,7 +1,8 @@
 /**
  * The devices HTTP routes (`deviceRoutes`, devices spec §8, §10): state, hosts, leases, the
  * controller, the action log, kept screenshots, settings and setup jobs, and (phase 2) host
- * drain, cache warms, the pool summary and lease thumbnails, and the hub proxy, on both transports
+ * drain, cache warms, the pool summary and lease thumbnails, a lease's port forwards (tailnet
+ * machines spec §4.6), and the hub proxy, on both transports
  * (the bearer hook gates remote HTTP like every other route; the desktop app reaches the proxy on
  * the unix socket through its loopback relay, `apps/desktop/src/device-relay.ts`).
  *
@@ -28,7 +29,9 @@ import {
   parseDeviceSetupRequest,
   parseDevicesSettingsPatch,
   parseDeviceUserActionRequest,
+  type AddDevicePortForwardRequest,
   type DeviceActionsResponse,
+  type DevicePortForwardsResponse,
   type DeviceCacheWarmResponse,
   type DeviceHostResponse,
   type DeviceHostsResponse,
@@ -69,6 +72,21 @@ export function hubSearch(url: string): string {
   params.delete("token");
   const rest = params.toString();
   return rest ? `?${rest}` : "";
+}
+
+/** The panel's own changes: an agent's (or external client's) principal is refused — agents change forwards with `device_forward_port`, for their own chat only. */
+function refuseAgents(request: FastifyRequest): void {
+  const principal = (request as FastifyRequest & { principal?: { kind: string } | null }).principal;
+  if (principal && principal.kind !== "user") throw new DeviceError("PERMISSION_DENIED", "Only a person changes port forwards here; agents use device_forward_port.");
+}
+
+/** The body of POST {@link deviceRoutes.forwards}: ports as whole numbers (the service checks their ranges). */
+function parseAddForwardRequest(value: unknown): { ok: true; value: AddDevicePortForwardRequest } | { ok: false; message: string } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return { ok: false, message: "The body must be a JSON object." };
+  const { devicePort, targetPort } = value as Record<string, unknown>;
+  if (typeof devicePort !== "number" || !Number.isInteger(devicePort)) return { ok: false, message: "`devicePort` must be a whole number." };
+  if (targetPort !== undefined && (typeof targetPort !== "number" || !Number.isInteger(targetPort))) return { ok: false, message: "`targetPort` must be a whole number." };
+  return { ok: true, value: { devicePort, ...(targetPort !== undefined ? { targetPort } : {}) } };
 }
 
 export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpRoutesDeps): void {
@@ -197,6 +215,32 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
         if (!reply.raw.writableFinished) abort.abort();
       });
       return service.userAction(request.params.leaseId, parsed.value, abort.signal);
+    })
+  );
+
+  // A lease's port forwards to its chat's project (Metro is added by itself when it runs).
+  app.get<Params<"leaseId">>(
+    `${deviceRoutes.leases}/:leaseId/forwards`,
+    withService((service, request: FastifyRequest<Params<"leaseId">>): DevicePortForwardsResponse => ({ forwards: service.leaseForwards(request.params.leaseId) }))
+  );
+
+  app.post<Params<"leaseId">>(
+    `${deviceRoutes.leases}/:leaseId/forwards`,
+    withService(async (service, request: FastifyRequest<Params<"leaseId">>): Promise<DevicePortForwardsResponse> => {
+      refuseAgents(request);
+      const parsed = parseAddForwardRequest(request.body);
+      if (!parsed.ok) throw new DeviceError("INVALID_ARGUMENT", parsed.message);
+      return { forwards: await service.addLeaseForward(request.params.leaseId, parsed.value) };
+    })
+  );
+
+  app.delete<Params<"leaseId" | "port">>(
+    `${deviceRoutes.leases}/:leaseId/forwards/:port`,
+    withService(async (service, request: FastifyRequest<Params<"leaseId" | "port">>): Promise<DevicePortForwardsResponse> => {
+      refuseAgents(request);
+      const port = Number(request.params.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new DeviceError("INVALID_ARGUMENT", "The port must be a whole number from 1 to 65535.");
+      return { forwards: await service.removeLeaseForward(request.params.leaseId, port) };
     })
   );
 

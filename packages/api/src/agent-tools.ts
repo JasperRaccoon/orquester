@@ -209,7 +209,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "devices",
     label: "Devices",
-    tools: [read("list_devices"), act("open_device"), act("device_action"), act("device_install"), act("close_device")]
+    tools: [read("list_devices"), act("open_device"), act("device_action"), act("device_install"), act("device_forward_port"), act("close_device")]
   },
   // GPT Image: advertised only while the plugin is on and a Codex account can make images
   // (`session-tools/manifest.ts`). No card: it cannot cost money.

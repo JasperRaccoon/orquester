@@ -31,6 +31,7 @@ import { createDeviceActionExecutor, type DeviceActionExecutor } from "./actions
 import { createAgentDeviceClient } from "./agent-device.ts";
 import type { DeviceHostFactory } from "./host.ts";
 import type { DeviceMachineAccess } from "./machine-access.ts";
+import { createDeviceForwardLink } from "./forwards.ts";
 import { createBoxHostFactory } from "./hosts/box-host.ts";
 import { createLocalAndroidHostFactory } from "./hosts/local-android.ts";
 import { createVphoneHostFactory } from "./hosts/vphone/factory.ts";
@@ -50,8 +51,8 @@ interface DaemonDevicesDeps {
   env: NodeJS.ProcessEnv;
   plugins: Pick<PluginsService, "isEnabled" | "events">;
   broadcaster: Pick<Broadcaster, "publish">;
-  /** The Ephemeral AI VMs wiring (Mac device hosts are boxes); null while unavailable. */
-  boxes: () => Pick<DaemonBoxes, "service" | "registry" | "hub"> | null;
+  /** The Ephemeral AI VMs wiring (Mac device hosts are boxes; device port forwards use its forward lists); null while unavailable. */
+  boxes: () => (Pick<DaemonBoxes, "service" | "registry" | "hub"> & Partial<Pick<DaemonBoxes, "projectForwards">>) | null;
   /** A chat's tab title, project root and existence (the agent chat's tab records). */
   threadTitle(threadId: string): string | null;
   threadProject(threadId: string): string | null;
@@ -149,6 +150,13 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
       threadProject: deps.threadProject,
       threadExists: deps.threadExists,
       machineAccess,
+      forwardLink: createDeviceForwardLink({
+        boxes: () => {
+          const boxes = deps.boxes();
+          return boxes?.projectForwards ? { registry: boxes.registry, hub: boxes.hub, projectForwards: boxes.projectForwards } : null;
+        },
+        threadProject: deps.threadProject
+      }),
       cacheWarmer: () => boxCacheWarmer(deps.boxes()),
       // The box records: the same spend the box host factory's approval reads.
       poolSpend: () => deviceHostSpend(deps.boxes()?.registry.list() ?? [], Date.now()),

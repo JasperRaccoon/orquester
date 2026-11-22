@@ -597,6 +597,7 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   open_device: "Opened a device",
   device_action: "Used a device",
   device_install: "Installed a build on a device",
+  device_forward_port: "Forwarded a port to a device",
   close_device: "Closed a device",
 
   // --- Legacy in-chat names (design 2026-10-14 §5, §6) ----------------------

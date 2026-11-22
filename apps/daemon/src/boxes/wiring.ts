@@ -147,6 +147,8 @@ export interface DaemonBoxes {
   builds: BoxAgentBuilds;
   /** Linux VM desktops: the desktop manager's `boxes` option. */
   desktops: BoxDesktops;
+  /** The one owner of each box's forward list (`host-tcp` channels): box projects' forwards, and devices' port forwards to a device host. */
+  projectForwards: ProjectBoxForwards;
   /** Wrap the host session manager so box projects' terminals run in their box. */
   wrapSessions(createHost: (indexContributor: SessionIndexContributor) => ISessionManager, chatIndex: SessionIndexContributor): ISessionManager;
   /** The git route of box projects (`new GitService({ route })`). */
@@ -434,6 +436,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     configSync,
     builds,
     desktops,
+    projectForwards,
     gitRoute,
     workflowSandbox: { registry, hub, tooling },
 

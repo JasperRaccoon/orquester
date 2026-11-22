@@ -225,7 +225,7 @@ test("GPT Image: generate_image and its instruction line only while images are a
 
 test("devices: the device tools and their instruction line only while devices are available", () => {
   const chat = catalogFor("chat");
-  const DEVICE_TOOLS = ["list_devices", "open_device", "device_action", "device_install", "close_device"];
+  const DEVICE_TOOLS = ["list_devices", "open_device", "device_action", "device_install", "device_forward_port", "close_device"];
   const off = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [] });
   const on = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [], devicesAvailable: true });
   const owned = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [], devicesAvailable: true });

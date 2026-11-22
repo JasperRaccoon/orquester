@@ -11,6 +11,7 @@ import type {
   DeviceHostSummary,
   DeviceLeaseSummary,
   DevicePlatform,
+  DevicePortForward,
   DeviceProfile
 } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
@@ -95,6 +96,21 @@ export interface DeviceToolCloseInput {
   shutdown?: boolean;
 }
 
+/** `device_forward_port`: one of this chat's device's port forwards to its project. */
+export interface DeviceToolForwardInput {
+  device?: string;
+  action: "list" | "add" | "remove";
+  /** The port on the device's `localhost` (add, remove). */
+  devicePort?: number;
+  /** The project's port (add; default: `devicePort`). */
+  targetPort?: number;
+}
+
+export interface DeviceToolForwardResult {
+  lease: DeviceLeaseSummary;
+  forwards: DevicePortForward[];
+}
+
 /** The device service's agent operations (implemented by `DeviceService`). They throw `DeviceError`s. */
 export interface DeviceToolsPort {
   toolList(threadId: string): DeviceToolList;
@@ -103,6 +119,7 @@ export interface DeviceToolsPort {
   toolAction(threadId: string, device: string | undefined, input: DeviceActionInput, signal: AbortSignal): Promise<DeviceToolActionResult>;
   toolInstall(threadId: string, input: DeviceToolInstallInput, signal: AbortSignal): Promise<DeviceToolInstallResult>;
   toolClose(threadId: string, input: DeviceToolCloseInput): Promise<{ lease: DeviceLeaseSummary }>;
+  toolForward(threadId: string, input: DeviceToolForwardInput): Promise<DeviceToolForwardResult>;
 }
 
 const UNWIRED: DeviceOutcome<never> = { ok: false, code: "DEVICES_DISABLED", message: "Device simulators are off. Ask the owner to turn the plugin on in Settings → Plugins." };

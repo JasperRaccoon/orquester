@@ -10,6 +10,8 @@
  * - the live-device reconcile: each host's `listDevices` on its changes and every
  *   {@link DEVICE_SWEEP_MS}; a ready lease whose device vanished is lost;
  * - the agent tools' operations ({@link DeviceToolsPort}, reached through `DaemonApi`);
+ * - port forwards from leased devices to their chat's project, Metro automatically (`forwards.ts`,
+ *   tailnet machines spec §4.6), closed with the lease;
  * - visibility (tailnet machines spec §4.4.5): with the machines registry's port, a host on a Hidden
  *   machine or one with "Device simulators" off is in no summary, no placement and no tool answer,
  *   and naming it reads like an unknown host (its factory drops it too: `hosts/box-host.ts`).
@@ -59,6 +61,7 @@ import {
   type DevicesSettingsPatch,
   type DevicesStateResponse,
   type DeviceSummary,
+  type DevicePortForward,
   type DeviceUserActionRequest,
   type DeviceUserActionResponse
 } from "@orquester/api";
@@ -92,6 +95,7 @@ import {
   withController
 } from "./leases.ts";
 import { choosePlacement, hostCap, type PlacementHost } from "./pool.ts";
+import { DeviceForwards, storedForwards, type DeviceForwardLink, type DeviceForwardTarget, type DeviceMachine } from "./forwards.ts";
 import { boxAllowsDevices, machineIdOfBox, type DeviceMachineAccess } from "./machine-access.ts";
 import { DeviceThumbnails, ThumbnailError } from "./thumbnails.ts";
 import { DevicePool, PoolRefusal, type DeviceCacheWarmer, type PoolAcquired, type PoolWaitHooks } from "./pool-actor.ts";
@@ -102,6 +106,8 @@ import type {
   DeviceOpenPlan,
   DeviceToolActionResult,
   DeviceToolCloseInput,
+  DeviceToolForwardInput,
+  DeviceToolForwardResult,
   DeviceToolInstallInput,
   DeviceToolInstallResult,
   DeviceToolList,
@@ -152,6 +158,8 @@ export interface DeviceServiceDeps {
   thumbnailFetch?: typeof fetch;
   /** The machines registry's policies: hosts on Hidden machines, or with "Device simulators" off, are never used (absent: every host is). */
   machineAccess?: DeviceMachineAccess | null;
+  /** How port forwards reach machines (absent: forwards are refused as unavailable). */
+  forwardLink?: DeviceForwardLink | null;
 }
 
 /** One running or finished setup job, with its promise. */
@@ -218,6 +226,7 @@ export class DeviceService implements DeviceToolsPort {
   /** The pool scheduler: queue, rentals, teardown, spend, drains, cache warms. */
   readonly pool: DevicePool;
   private readonly thumbnails: DeviceThumbnails;
+  private readonly forwards: DeviceForwards;
   /** Device reconciles in flight per host (one at a time; `again`: run once more after). */
   private readonly deviceChecks = new Map<string, { again: boolean; done: Promise<void> }>();
   /** `start` finished (host changes then reconcile devices). */
@@ -230,6 +239,7 @@ export class DeviceService implements DeviceToolsPort {
     this.logger = deps.logger ?? console;
     this.actionLog = new DeviceActionLog({ now: () => new Date(this.nowMs()) });
     this.thumbnails = new DeviceThumbnails({ now: () => this.nowMs(), ...(deps.thumbnailFetch ? { fetch: deps.thumbnailFetch } : {}) });
+    this.forwards = new DeviceForwards({ link: deps.forwardLink ?? null, logger: this.logger, changed: (leaseId, forwards) => this.saveForwards(leaseId, forwards) });
     this.pool = new DevicePool({
       store: deps.poolStore ?? new DevicePoolStore({ file: null, logger: this.logger }),
       hosts: this.hosts,
@@ -274,6 +284,8 @@ export class DeviceService implements DeviceToolsPort {
       await factory.start(ctx).catch((error) => this.logger.error(`[devices] the ${factory.kind} host factory failed to start`, errorText(error)));
     }
     await this.reconcile();
+    // Live leases' port forwards are made again once their hosts are ready.
+    for (const lease of this.leases) if (isLiveLease(lease)) this.forwards.restore(lease.id, storedForwards(lease));
     await this.pool.start();
     const access = this.deps.machineAccess;
     if (access) {
@@ -293,6 +305,7 @@ export class DeviceService implements DeviceToolsPort {
       this.deviceSweepTimer.unref?.();
     }
     this.running = true;
+    for (const host of this.hosts.list()) this.ensureForwards(host.id);
     this.publishHosts();
     this.events.emit("tools");
   }
@@ -316,6 +329,7 @@ export class DeviceService implements DeviceToolsPort {
       await factory.stop(options).catch((error) => this.logger.warn(`[devices] the ${factory.kind} host factory failed to stop`, errorText(error)));
     }
     this.hosts.clear();
+    await this.forwards.dispose();
     await this.flush();
     this.events.emit("tools");
   }
@@ -751,6 +765,8 @@ export class DeviceService implements DeviceToolsPort {
     const ready = leaseBooted(current, booted, this.iso());
     this.commit(ready);
     this.publishHosts();
+    // The chat's project runs Metro on another machine: the device reaches it on its own localhost.
+    void this.forwards.autoMetro(this.forwardTarget(ready, host));
     if (request.app) {
       // Best effort: the device is ready either way; a failed launch is noted for the agent.
       try {
@@ -973,6 +989,8 @@ export class DeviceService implements DeviceToolsPort {
     this.deps.publish(DEVICES_LEASE_CLOSED_EVENT, { leaseId, threadId: lease.threadId, reason });
     this.publishHosts();
     const host = this.hosts.get(lease.hostId);
+    // Its port forwards close (and their `adb reverse` rules go while the device is still there).
+    await this.forwards.close(lease.id, host && lease.deviceId !== null ? this.forwardTarget(lease, host) : null);
     if (host && lease.deviceId !== null) {
       // Its agent-device session ends first (Android gets its own keyboard back).
       await this.deps.actions.end?.({ host, lease }).catch(() => undefined);
@@ -1392,6 +1410,59 @@ export class DeviceService implements DeviceToolsPort {
     return { lease: this.lease(lease.id)!, appId: result.appId, summary: result.summary };
   }
 
+  /** `device_forward_port`: list, add or remove one of this chat's device's port forwards. */
+  async toolForward(threadId: string, input: DeviceToolForwardInput): Promise<DeviceToolForwardResult> {
+    this.assertAgentsAllowed();
+    const lease = resolveLeaseHandle(this.leases, threadId, input.device);
+    if (isDeviceError(lease)) throw lease;
+    const summary = this.summary(lease)!;
+    switch (input.action) {
+      case "list":
+        return { lease: summary, forwards: this.forwards.list(lease.id) };
+      case "add":
+        if (input.devicePort === undefined) throw new DeviceError("INVALID_ARGUMENT", "add needs `device_port`.");
+        return { lease: summary, forwards: await this.addLeaseForward(lease.id, { devicePort: input.devicePort, ...(input.targetPort !== undefined ? { targetPort: input.targetPort } : {}) }) };
+      case "remove":
+        if (input.devicePort === undefined) throw new DeviceError("INVALID_ARGUMENT", "remove needs `device_port`.");
+        return { lease: summary, forwards: await this.removeLeaseForward(lease.id, input.devicePort) };
+    }
+  }
+
+  /** A lease's port forwards now (`GET deviceRoutes.forwards`). */
+  leaseForwards(leaseId: string): DevicePortForward[] {
+    this.assertRunning();
+    this.requireLease(leaseId);
+    return this.forwards.list(leaseId);
+  }
+
+  /** Forward one more port of a ready lease's device to its chat's project (`POST deviceRoutes.forwards`, `device_forward_port`). */
+  async addLeaseForward(leaseId: string, request: { devicePort: number; targetPort?: number }): Promise<DevicePortForward[]> {
+    this.assertRunning();
+    const { lease, host } = this.forwardableLease(leaseId);
+    return this.forwards.add(this.forwardTarget(lease, host), { ...request, auto: false });
+  }
+
+  /** Stop one port forward (`DELETE deviceRoutes.forward`). */
+  async removeLeaseForward(leaseId: string, devicePort: number): Promise<DevicePortForward[]> {
+    this.assertRunning();
+    const lease = this.requireLease(leaseId);
+    const host = this.hosts.get(lease.hostId);
+    if (!host) {
+      await this.forwards.close(leaseId, null);
+      return [];
+    }
+    return this.forwards.remove(this.forwardTarget(lease, host), devicePort);
+  }
+
+  private forwardableLease(leaseId: string): { lease: StoredDeviceLease; host: DeviceHost } {
+    const lease = this.requireLease(leaseId);
+    if (!isLiveLease(lease)) throw new DeviceError(DEVICE_ERROR_CODES.DEVICE_LOST, "The device is gone.");
+    if (lease.state !== "ready" || lease.deviceId === null) throw new DeviceError("INVALID_ARGUMENT", "The device is not ready yet: forward ports once it has started.");
+    const host = this.hosts.get(lease.hostId);
+    if (!host) throw new DeviceError(DEVICE_ERROR_CODES.DEVICE_LOST, "Its host is gone.");
+    return { lease, host };
+  }
+
   async toolClose(threadId: string, input: DeviceToolCloseInput): Promise<{ lease: DeviceLeaseSummary }> {
     this.assertRunning();
     const lease = resolveLeaseHandle(this.leases, threadId, input.device);
@@ -1499,11 +1570,42 @@ export class DeviceService implements DeviceToolsPort {
     this.leases = this.leases.map((entry) => (entry.id === next.id ? next : entry));
   }
 
-  /** Swap, persist and publish. */
+  /** Swap, persist and publish. A lease that lost its device loses its port forwards too. */
   private commit(next: StoredDeviceLease): void {
     this.replace(next);
     void this.deps.leaseStore.persist();
     this.publishLease(next);
+    if (!isLiveLease(next)) void this.forwards.close(next.id, null);
+  }
+
+  /** The lease's wanted forwards, kept on its record (`device-leases.json`). */
+  private saveForwards(leaseId: string, forwards: readonly DevicePortForward[]): void {
+    const lease = this.leases.find((entry) => entry.id === leaseId);
+    if (!lease) return;
+    const { forwards: _previous, ...rest } = lease as StoredDeviceLease & { forwards?: unknown };
+    this.replace(forwards.length > 0 ? { ...rest, forwards: forwards.map((forward) => ({ ...forward })) } : rest);
+    void this.deps.leaseStore.persist();
+  }
+
+  /** The machine a host's devices run on; null for a host that takes no port forwards (a research VM). */
+  private deviceMachineOf(host: DeviceHost): DeviceMachine | null {
+    if (host.kind === "local") return { kind: "host" };
+    if (host.research?.()) return null;
+    const box = host.box?.() ?? null;
+    return box ? { kind: "box", boxId: box.boxId } : null;
+  }
+
+  private forwardTarget(lease: StoredDeviceLease, host: DeviceHost): DeviceForwardTarget {
+    return { lease, machine: this.deviceMachineOf(host), hostLabel: host.label, adb: (args) => host.run("adb", args, { timeoutMs: 30_000 }) };
+  }
+
+  /** A ready host's ready leases get their wanted forwards made again (after a restart, or a box that came back). */
+  private ensureForwards(hostId: string): void {
+    const host = this.hosts.get(hostId);
+    if (!host || host.state().status !== "ready") return;
+    for (const lease of this.leases) {
+      if (lease.hostId === hostId && lease.state === "ready" && lease.deviceId !== null) void this.forwards.ensure(this.forwardTarget(lease, host));
+    }
   }
 
   private setProgress(leaseId: string, step: string, label: string): void {
@@ -1539,6 +1641,7 @@ export class DeviceService implements DeviceToolsPort {
     if (change) {
       for (const lease of hostLeasesChanged(this.leases, hostId, change, "Its host is gone.")) this.commit(lease);
     }
+    if (this.running && change === "ready") this.ensureForwards(hostId);
     this.publishHosts();
   }
 

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { crc32, deflateSync } from "node:zlib";
 
-import type { DeviceActionInput, DeviceHostBoxInfo, DeviceHostKind, DeviceHostPoolInfo, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary, MachineCapability } from "@orquester/api";
+import type { DeviceActionInput, DeviceHostBoxInfo, DeviceHostKind, DeviceHostPoolInfo, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary, MachineCapability, MachineProblem } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
 import type { DeviceActionContext, DeviceActionExecutor, DeviceActionResult } from "./actions.ts";
@@ -31,6 +31,8 @@ export class FakeDeviceHost implements DeviceHost {
   researchNotice: string | null = null;
   /** Set: a box host (rented, or the owner's machine) on this box. */
   boxInfo: DeviceHostBoxInfo | null = null;
+  /** The environment problems it reports. */
+  problemList: MachineProblem[] = [];
   booted: DeviceBootRequest[] = [];
   released: { lease: StoredDeviceLease; shutdown: boolean }[] = [];
   ensured: (readonly string[] | undefined)[] = [];
@@ -84,6 +86,10 @@ export class FakeDeviceHost implements DeviceHost {
 
   box(): DeviceHostBoxInfo | null {
     return this.boxInfo;
+  }
+
+  problems(): MachineProblem[] {
+    return this.problemList;
   }
 
   readiness(): DeviceHostReadiness {

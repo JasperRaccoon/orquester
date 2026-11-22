@@ -1,8 +1,12 @@
 /**
  * Catalog family `devices` (devices spec §9): iOS simulators and Android emulators an agent chat
  * leases and drives — `list_devices`, `open_device`, `device_action`, `device_install`,
- * `close_device`. Chat-only (like the box tools); the daemon advertises them only while the
- * "Device simulators" plugin is on, agents may use devices and a platform is enabled.
+ * `device_forward_port`, `close_device`. Chat-only (like the box tools); the daemon advertises them
+ * only while the "Device simulators" plugin is on, agents may use devices and a platform is enabled.
+ *
+ * - **Hosts.** `list_devices` lists the hosts this chat may use (a Hidden machine, or one with
+ *   "Device simulators" off, is never mentioned); `open_device.host` names one of them, else
+ *   placement picks (the owner's machines before rented ones).
  *
  * - **Leases.** A chat holds up to 3 devices, each exclusively; the daemon resolves the `device`
  *   handle (its key `<hostId>/<deviceId>`, or the lease id) among the calling chat's own leases only.
@@ -11,6 +15,8 @@
  * - **Spend.** `open_device` raises a `devices` spend card only when it must rent a device host the
  *   owner's standing approval does not cover (its `scope` asks the daemon's pool for the plan; the
  *   card shows the host's $/h and the pool's caps, and pins what it rents: one card per host).
+ * - **Port forwards.** Metro (8081) is forwarded by itself when the project runs it on another
+ *   machine than the device; `device_forward_port` adds, lists and removes others.
  * - **Results** carry a `deviceRef` (`{device, leaseId?, screenshotId?, name?, action?, summary?}`)
  *   kept through slimming, so the chat row shows the device, its words ("Tapped “Search”") and a
  *   screenshot thumbnail after a reload, without the image in the transcript.
@@ -25,6 +31,7 @@ import {
   DEVICE_ACTION_KINDS,
   DEVICE_DIRECTIONS,
   DEVICE_LOGS_MAX_SECONDS,
+  DEVICE_METRO_PORT,
   DEVICE_PRESS_KEYS,
   DEVICE_PROFILES,
   DEVICE_TEXT_MAX_CHARS,
@@ -33,7 +40,10 @@ import {
   type ApprovalPreviewSection,
   type DeviceActionInput,
   type DeviceActionKind,
+  type DeviceCapacity,
+  type DeviceHostSummary,
   type DeviceLeaseSummary,
+  type DevicePortForward,
   type DeviceToolReference
 } from "@orquester/api";
 
@@ -145,19 +155,45 @@ function deviceQuickStart(platform: "ios" | "android", research = false): string
 // list_devices
 // ---------------------------------------------------------------------------
 
+const GB = 1024 ** 3;
+
+/** "24 CPUs, 61 GB free memory, 410 GB free disk, KVM": what a host's capacity was measured from. */
+function capacityBasis(capacity: DeviceCapacity): string | undefined {
+  const basis = capacity.basis;
+  if (!basis) return undefined;
+  const parts = [`${basis.cpus} CPUs`, `${Math.round(basis.freeMemBytes / GB)} GB free memory`];
+  if (basis.freeDiskBytes !== null) parts.push(`${Math.round(basis.freeDiskBytes / GB)} GB free disk`);
+  if (basis.accel) parts.push(basis.accel.toUpperCase());
+  return parts.join(", ");
+}
+
+/** Who a host belongs to, as agents read it. */
+function hostOwner(host: DeviceHostSummary): "this host" | "own machine" | "rented" {
+  return host.kind === "local" ? "this host" : host.kind === "byo" ? "own machine" : "rented";
+}
+
+function hostView(host: DeviceHostSummary): Record<string, unknown> {
+  const basis = capacityBasis(host.capacity);
+  return {
+    id: host.id,
+    machine: host.label,
+    ...(host.machineId ? { machine_id: host.machineId } : {}),
+    owner: hostOwner(host),
+    platforms: host.platforms,
+    status: host.status,
+    ...(host.statusDetail ? { detail: host.statusDetail } : {}),
+    capacity: `${host.capacity.used}/${host.capacity.total}`,
+    ...(basis ? { capacity_from: basis } : {}),
+    ...(host.research ? { research: true, ...(host.notice ? { notice: host.notice } : {}) } : {}),
+    ...(host.readiness.ready ? {} : { missing: host.readiness.checks.filter((check) => check.state !== "ok").map((check) => check.label) }),
+    ...(host.problems && host.problems.length > 0 ? { problems: host.problems.map((problem) => ({ problem: problem.message, ...(problem.fix ? { fix: problem.fix } : {}) })) } : {})
+  };
+}
+
 function listView(list: DeviceToolList): Record<string, unknown> {
   return {
     platforms: list.platforms.map((entry) => ({ platform: entry.platform, enabled: entry.enabled, ready: entry.ready, ...(entry.detail ? { detail: entry.detail } : {}) })),
-    hosts: list.hosts.map((host) => ({
-      id: host.id,
-      kind: host.kind,
-      label: host.label,
-      platforms: host.platforms,
-      status: host.status,
-      capacity: `${host.capacity.used}/${host.capacity.total}`,
-      ...(host.research ? { research: true, ...(host.notice ? { notice: host.notice } : {}) } : {}),
-      ...(host.readiness.ready ? {} : { missing: host.readiness.checks.filter((check) => check.state !== "ok").map((check) => check.label) })
-    })),
+    hosts: list.hosts.map(hostView),
     profiles: list.profiles.map((profile) => ({ id: profile.id, platform: profile.platform, name: profile.label, form: profile.formFactor, os: profile.os })),
     my_devices: list.mine.map(leaseView),
     busy: list.busy.map((entry) => ({ device: entry.key, platform: entry.platform, name: entry.name, ...(entry.chat ? { chat: entry.chat } : {}) }))
@@ -168,7 +204,7 @@ const listDevices = defineTool({
   name: "list_devices",
   title: "List devices",
   description:
-    "The device platforms (iOS, Android) and whether each is ready, the hosts that run devices (status, capacity, what is missing; a research host says so, with a notice, and opens only by name), the device profiles you can open, this chat's devices (`device` handles for the other device tools) and devices other chats hold (busy).",
+    "The device platforms (iOS, Android) and whether each is ready, the hosts you may run devices on (id, machine name, whether it is this host, one of the owner's machines or rented, platforms, status, capacity and what it was measured from, what is missing, environment problems with their fixes; a research host says so, with a notice, and opens only by name), the device profiles you can open, this chat's devices (`device` handles for the other device tools) and devices other chats hold (busy).",
   chatNote: "Call it before open_device, and to check on a device that was still starting.",
   input: {},
   audiences: ["chat"],
@@ -201,12 +237,17 @@ const openDevice = defineTool({
   name: "open_device",
   title: "Open a device",
   description:
-    "Lease an iOS simulator or Android emulator for this chat and wait until it has booted (Android: seconds; iOS may first rent a Mac host: minutes, and if the owner has not pre-approved renting, their approval on a card). Returns the device handle, name, OS, screen size and a quick start. If it is still starting after 9 minutes it answers state starting: check with list_devices. A chat holds up to 3 devices; each is yours alone until close_device or the chat closes.",
+    "Lease an iOS simulator or Android emulator for this chat and wait until it has booted (Android: seconds; iOS may first rent a Mac host: minutes, and if the owner has not pre-approved renting, their approval on a card). Without `host` it goes to a free host: the owner's own machines before rented ones. Returns the device handle, name, OS, screen size and a quick start. If it is still starting after 9 minutes it answers state starting: check with list_devices. A chat holds up to 3 devices; each is yours alone until close_device or the chat closes. When the device runs on another machine than this chat's project and the project runs Metro (8081), Metro is forwarded to the device by itself.",
   chatNote: "The device appears in the user's Device panel at once.",
   input: {
     platform: z.enum(["ios", "android"]),
     profile: z.enum(PROFILE_IDS).optional().describe("An enabled profile id from list_devices; default: iPhone 17 Pro / Pixel 9 when enabled, else the platform's first enabled profile."),
-    host: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/, "a host id").optional().describe("A ready research host's id from list_devices. Use one only when the user asks for it, and pass on its notice; other devices need no host."),
+    host: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/, "a host id")
+      .optional()
+      .describe("A host id from list_devices to run it there (a machine the user named); default: placement picks. A research host only when asked: pass on its notice."),
     app: APP_ID.optional().describe("Launch this installed app once booted."),
     fresh: z.boolean().optional().describe("A clean device, never a reused one.")
   },
@@ -397,6 +438,47 @@ const deviceAction = defineTool({
 });
 
 // ---------------------------------------------------------------------------
+// device_forward_port
+// ---------------------------------------------------------------------------
+
+const PORT = () => z.number().int().min(1).max(65_535);
+
+function forwardsView(forwards: readonly DevicePortForward[]): Record<string, unknown>[] {
+  return forwards.map((forward) => ({ device_port: forward.devicePort, project_port: forward.targetPort, ...(forward.auto ? { auto: true } : {}) }));
+}
+
+const deviceForwardPort = defineTool({
+  name: "device_forward_port",
+  title: "Forward a port to a device",
+  description: `Make a port of this chat's project reachable from one of its devices at localhost:<device_port> (an API on 3000, a second dev server), for the device's lifetime: add (device_port, project_port default the same), list, or remove (device_port). Metro (${DEVICE_METRO_PORT}) is forwarded by itself when the device runs on another machine than the project; an Android emulator also gets adb reverse. A device on the project's own machine reaches its ports without a forward (Android emulators at 10.0.2.2, or localhost once added here).`,
+  input: {
+    device: deviceHandle,
+    action: z.enum(["add", "list", "remove"]),
+    device_port: z.number().int().min(1024).max(65_535).optional().describe("The port the app on the device connects to (its localhost)."),
+    project_port: PORT().optional().describe("add: the project's port it reaches; default device_port.")
+  },
+  audiences: ["chat"],
+  toolset: "devices",
+  tier: (args) => (args.action === "list" ? "read" : "act"),
+  scope: async (args, ctx) => ownScope(ctx, "metadata", args.action !== "list"),
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    threadCaller(caller, "device_forward_port");
+    if (args.action !== "list" && args.device_port === undefined) throw new ToolError("INVALID_ARGUMENT", `${args.action} needs device_port.`);
+    const result = unwrap(
+      await method(api, "deviceForward")({
+        action: args.action,
+        ...(args.device !== undefined ? { device: args.device } : {}),
+        ...(args.device_port !== undefined ? { devicePort: args.device_port } : {}),
+        ...(args.project_port !== undefined ? { targetPort: args.project_port } : {})
+      })
+    );
+    return { device: result.lease.key ?? result.lease.id, forwards: forwardsView(result.forwards), deviceRef: deviceRef(result.lease) };
+  }
+});
+
+// ---------------------------------------------------------------------------
 // device_install / close_device
 // ---------------------------------------------------------------------------
 
@@ -460,4 +542,4 @@ const closeDevice = defineTool({
 });
 
 /** This family in the catalog (`../catalog/index.ts`). */
-export const devicesFamily: readonly AnyOrquesterTool[] = [listDevices, openDevice, deviceAction, deviceInstall, closeDevice];
+export const devicesFamily: readonly AnyOrquesterTool[] = [listDevices, openDevice, deviceAction, deviceInstall, deviceForwardPort, closeDevice];
