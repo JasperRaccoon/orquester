@@ -1,7 +1,8 @@
 /**
  * Settings → Server's two-step sign-in in a DOM, against a fake client over the remote transport:
  * turning it on goes password → setup → code → enable and shows the codes the daemon returned; an
- * expired pending setup starts over at the password.
+ * expired pending setup starts over at the password; and an API token is minted only with the
+ * owner's proof, a wrong code landing on the code field.
  */
 
 import assert from "node:assert/strict";
@@ -9,7 +10,7 @@ import { after, afterEach, before, beforeEach, describe, it, mock } from "node:t
 import { createElement, type FC } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import { authRoutes, type AuthSecondFactorStatusResponse } from "@orquester/api";
+import { authRoutes, type AuthSecondFactorProof, type AuthSecondFactorStatusResponse } from "@orquester/api";
 
 // Loaded once the DOM globals exist: React DOM reads them when it loads.
 let act: typeof import("react-dom/test-utils").act;
@@ -17,6 +18,7 @@ let createRoot: typeof import("react-dom/client").createRoot;
 let OrquesterProvider: typeof import("../../context/orquester-context").OrquesterProvider;
 let ApiError: typeof import("../../lib/api-client").ApiError;
 let SecondFactorSettings: typeof import("./SecondFactorSettings").SecondFactorSettings;
+let AuthSessionsSettings: typeof import("./AuthSessionsSettings").AuthSessionsSettings;
 
 let dom: JSDOM;
 const globals = [
@@ -50,6 +52,7 @@ before(async () => {
   ({ OrquesterProvider } = await import("../../context/orquester-context"));
   ({ ApiError } = await import("../../lib/api-client"));
   ({ SecondFactorSettings } = await import("./SecondFactorSettings"));
+  ({ AuthSessionsSettings } = await import("./AuthSessionsSettings"));
 });
 
 after(() => {
@@ -126,6 +129,8 @@ describe("two-step sign-in settings", () => {
       input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
     });
   };
+  const invalidProof = (field: "password" | "code") =>
+    new ApiError(403, "POST", authRoutes.tokens, undefined, { code: "INVALID_PROOF", field, message: "wrong" });
 
   it("turns it on with the password, then a code, and shows the recovery codes it returned", async () => {
     let status = OFF;
@@ -188,5 +193,39 @@ describe("two-step sign-in settings", () => {
       ["enable", "123456"],
       ["setup", "hunter22"]
     ]);
+  });
+
+  it("mints an API token remotely only with the password and a code, a wrong code marked on its field", async () => {
+    let attempts = 0;
+    await render(AuthSessionsSettings, { remoteAccessOn: true }, {
+      listAuthSessions: async () => ({ sessions: [] }),
+      secondFactorStatus: async () => ON,
+      createApiToken: async (label: string, proof: AuthSecondFactorProof) => {
+        calls.push(["token", { label, ...proof }]);
+        attempts += 1;
+        if (attempts === 1) throw invalidProof("code");
+        return {
+          token: "orq_secret_token",
+          session: { id: "t1", kind: "api", label, createdAt: "2026-11-22T10:00:00.000Z", lastUsedAt: null, expiresAt: null, current: false }
+        };
+      }
+    });
+
+    await click(button("API token"));
+    await type(doc().querySelector<HTMLInputElement>('input[aria-label="API token name"]'), "laptop");
+    await type(field("Password"), "hunter22");
+    await type(field("Authentication code"), "000000");
+    await click(button("Create"));
+
+    assert.equal(field("Authentication code")?.getAttribute("aria-invalid"), "true");
+    assert.equal(doc().querySelector('[data-testid="issued-token"]'), null);
+    await type(field("Authentication code"), "123456");
+    await click(button("Create"));
+
+    assert.deepEqual(calls, [
+      ["token", { label: "laptop", password: "hunter22", code: "000000" }],
+      ["token", { label: "laptop", password: "hunter22", code: "123456" }]
+    ]);
+    assert.equal(doc().querySelector('[data-testid="issued-token"]')?.textContent, "orq_secret_token");
   });
 });
