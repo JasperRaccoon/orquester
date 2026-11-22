@@ -41,7 +41,7 @@ describe("Android on an Apple Silicon Mac", () => {
       { cpus: 14, memTotal: 36 * GiB, memFree: 27725021184, disk: 482922216 * 1024, ffmpeg: "libx264", java: false, kvm: "direct" }
     );
     const gpu = usableHostGpu(probe.gpu);
-    assert.deepEqual(gpu, { kind: "apple", detail: "Apple M4 Max (Metal)" });
+    assert.deepEqual(gpu, { kind: "apple", detail: "Apple M4 Max (Metal)", env: {} });
     assert.deepEqual(boxGpuModes("byo", gpu, null, "37.3.10"), ["host", "swangle_indirect", "swiftshader_indirect"]);
     assert.deepEqual(boxGpuModes("byo", gpu, gpuSignature(gpu!, "37.3.10"), "37.3.10"), ["swangle_indirect", "swiftshader_indirect"]);
     // A newer emulator tries Metal again.

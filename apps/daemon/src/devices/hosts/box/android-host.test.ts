@@ -205,6 +205,31 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     await host.teardown();
   });
 
+  it("an own machine's -gpu host snapshot boots on the probed X display; when the renderer fails or the display goes, cold in software", async () => {
+    const h = await harness({ cacheGpu: "host", probeLines: ["nvidia=595.99.02", "nvidia_dev=1", "x_display=:0"] }, { provider: "byo", purpose: "machine" });
+    const host = h.make({ kind: "byo" });
+    await host.prepare(h.box.connection, signal());
+    const bootLease = async (id: string) => {
+      h.leases.push(lease(id));
+      await host.boot({ leaseId: id, profile, fresh: true }, signal());
+    };
+    await bootLease("on-gpu");
+    assert.match((await h.box.emulatorArgs())[0]!, /-gpu host .*-snapshot orq-golden/);
+    assert.deepEqual(await h.box.emulatorDisplays(), ["DISPLAY=:0"]);
+    // The renderer does not start (the emulator logs it, QEMU idles unbooted): no wait for the boot timeout.
+    await h.box.failRenderer();
+    await bootLease("renderer-failed");
+    assert.match((await h.box.emulatorArgs())[2]!, /-gpu swangle_indirect .*-no-snapshot-load -no-snapshot-save$/);
+    assert.deepEqual((await h.box.emulatorDisplays()).slice(1), ["DISPLAY=:0", "DISPLAY="]);
+    // Logged out: no display to render through, so no host attempt at all.
+    h.box.probeLines.splice(h.box.probeLines.indexOf("x_display=:0"), 1);
+    await host.refreshReadiness();
+    await bootLease("logged-out");
+    assert.equal((await h.box.emulatorArgs()).length, 4);
+    assert.match((await h.box.emulatorArgs())[3]!, /-gpu swangle_indirect .*-no-snapshot-load -no-snapshot-save$/);
+    await host.teardown();
+  });
+
   it("reattaches after a daemon restart: the same hub and token, the leased emulator kept, an orphan stopped", async () => {
     const h = await harness();
     const first = h.make();

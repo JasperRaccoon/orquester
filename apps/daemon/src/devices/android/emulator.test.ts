@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { allocateEmulatorPorts, consolePortCandidates, consolePortOf, emulatorArgs, grpcPortFor, kvmCommand, serialOf, signalLauncher, stopEmulator } from "./emulator.ts";
+import {
+  allocateEmulatorPorts,
+  consolePortCandidates,
+  consolePortOf,
+  emulatorArgs,
+  emulatorLogFailure,
+  grpcPortFor,
+  kvmCommand,
+  serialOf,
+  signalLauncher,
+  stopEmulator,
+  waitForBootCompleted
+} from "./emulator.ts";
 import { execFile, type ExecFn } from "./exec.ts";
 import type { DeviceExecutor } from "./executor.ts";
 
@@ -61,6 +73,28 @@ test("flags: a box lease boots its named snapshot with the snapshot's GPU mode, 
   const golden = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5554, grpcPort: 8554, golden: true, snapshot: "orq-golden" });
   assert.equal(golden.includes("-read-only"), false);
   assert.ok(golden.includes("-no-snapshot-load") && golden.includes("-no-snapshot-save"));
+});
+
+/** Emulator 37.3.10 `-gpu host -no-window` logs (paths shortened): without `DISPLAY` QEMU stays up and never boots; with it, it renders on the GPU. */
+const NO_DISPLAY_LOG = `INFO         | emuglConfig_init: vulkan_mode_selected:host gles_mode_selected:host
+INFO         | SharedLibrary::open for [libX11-xcb]
+GlxEnginegetDefaultDisplay: Failed to open display 0. DISPLAY: [(null)]
+ERROR        | Failed to get EGL display.
+ERROR        | Can't initialize RenderLib with parameters: width=720, height=1616 sRendererUsesSubWindow=1
+ERROR        | Could not start renderer! (Error: -2)
+ERROR        | Could not start renderer
+`;
+const DISPLAY_LOG = `INFO         | emuglConfig_init: vulkan_mode_selected:host gles_mode_selected:host
+INFO         | Graphics Adapter Android Emulator OpenGL ES Translator (NVIDIA GeForce RTX 3080 Ti/PCIe/SSE2)
+INFO         | Boot completed in 16012 ms
+`;
+
+test("boot wait: a renderer that did not start fails the boot at once, though QEMU lives on", async () => {
+  const getprop = (value: string): ExecFn => async () => ({ exitCode: 0, stdout: `${value}\n`, stderr: "" });
+  const wait = (log: string, booted: string) =>
+    waitForBootCompleted({ exec: getprop(booted), adb: "adb", env: {}, serial: "emulator-5554", alive: async () => true, failed: async () => emulatorLogFailure(log), signal: new AbortController().signal, timeoutMs: 0 });
+  await assert.rejects(wait(NO_DISPLAY_LOG, ""), { message: "the emulator could not start its renderer (GlxEnginegetDefaultDisplay: Failed to open display 0. DISPLAY: [(null)])" });
+  await wait(DISPLAY_LOG, "1");
 });
 
 /** A fake machine: process table, environments, and every signal sent. */
