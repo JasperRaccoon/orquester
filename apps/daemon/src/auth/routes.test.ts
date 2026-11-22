@@ -585,6 +585,21 @@ test("wrong codes spread over many IPs lock all code entry; the signed-in owner 
   assert.equal(factor.isEnabled(), false);
 });
 
+test("a completed sign-in clears the global wrong-code count, so scattered typos never add up to a lockout", async (t) => {
+  const { h, freshCode } = await factorHarness(t);
+  const typos = async (from: number) => {
+    for (let i = 0; i < 4; i += 1) {
+      const ip = `203.0.113.${from + i}`;
+      const challenge = await passwordStep(h, ip);
+      for (let j = 0; j < 4; j += 1) assert.equal((await codeStep(h, challenge, "000000", ip)).statusCode, 401);
+    }
+  };
+  await typos(10); // 16 wrong codes, under the global limit
+  assert.equal((await signIn(h, freshCode(), "192.0.2.10")).startsWith("orq_"), true);
+  await typos(20); // 16 more: 32 in all, but the sign-in in between reset the count
+  assert.equal((await signIn(h, freshCode(), "192.0.2.11")).startsWith("orq_"), true, "not globally locked");
+});
+
 test("an expired challenge, another IP's challenge and one from before a password change are refused", async (t) => {
   const { h, time, freshCode } = await factorHarness(t);
   const ip = "198.51.100.6";
