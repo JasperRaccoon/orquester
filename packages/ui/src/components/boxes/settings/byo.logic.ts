@@ -67,11 +67,6 @@ export function canRemoveMachine(box: BoxSummary): boolean {
   return box.purpose === "machine";
 }
 
-/** "Use for device simulators" can be switched on a paired machine of a kind that can host devices. */
-export function canHostDevices(box: BoxSummary): boolean {
-  return box.state !== "pairing";
-}
-
 /** What to tell the owner about where the pairing command runs. */
 export function pairingHint(kind: ByoMachineKind): string {
   return kind === "macos"

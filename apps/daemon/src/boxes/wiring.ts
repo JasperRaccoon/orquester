@@ -70,6 +70,7 @@ import { registerBoxGitAuth, workspaceAccountFromFiles } from "./remote/git-auth
 import { registerMcpBridge } from "./remote/mcp-bridge.ts";
 import { createDaemonBoxService, managedAgentHomes } from "./service/daemon-wiring.ts";
 import { registerBoxMcpRunInBoxRoutes } from "./service/mcp-run-in-box.ts";
+import { BoxError } from "./service/errors.ts";
 import type { BoxService } from "./service/index.ts";
 import { knownHostsForBox } from "./service/known-hosts.ts";
 import {
@@ -347,8 +348,13 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
 
   /** The box service as the temporary-box tools see it (`boxes/temporary/contract.ts`). */
   const temporaryBoxes: TemporaryBoxes = {
-    createTemporaryBox: (input) =>
-      boxes.startTemporaryBox({
+    createTemporaryBox: (input) => {
+      // Machines (tailnet machines spec §4.1): a chat borrows only an owner's machine it may run
+      // commands on; a Hidden one is refused exactly like an id that is no free machine (placement.ts).
+      if (input.provider === "byo" && input.size !== undefined && boxes.machineAccess()?.allowsBox(input.size, "commands") === false) {
+        return Promise.reject(new BoxError(409, "BOX_NOT_READY", "That machine of yours is in use or not connected right now."));
+      }
+      return boxes.startTemporaryBox({
         threadId: input.threadId,
         kind: input.kind,
         ...(input.provider !== undefined ? { provider: input.provider } : {}),
@@ -357,7 +363,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
         ...(input.image !== undefined ? { image: input.image } : {}),
         lifetimeMinutes: input.lifetimeMinutes,
         purposeNote: input.purposeNote
-      }),
+      });
+    },
     destroyBox: async (boxId, reason) => {
       if (registry.get(boxId)?.state === "destroyed") return;
       await boxes.destroyBox(boxId, reason);

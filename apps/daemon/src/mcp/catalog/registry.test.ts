@@ -99,7 +99,7 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const chatNames = new Set(chat.map((tool) => tool.name));
   for (const workflowOwned of [false, true]) {
     for (const knowledgeCollections of [[], ["SEO", "Ads"]]) {
-      assert.deepEqual(strays(composeOrquesterInstructions({ workflowOwned, knowledgeCollections, images: true }), chatNames, known), []);
+      assert.deepEqual(strays(composeOrquesterInstructions({ workflowOwned, knowledgeCollections, images: true, machines: true }), chatNames, known), []);
     }
   }
   assert.deepEqual(strays(KNOWLEDGE_WORKER_INSTRUCTIONS, chatNames, known), []);
