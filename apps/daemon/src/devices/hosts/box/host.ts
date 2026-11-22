@@ -88,6 +88,7 @@ import {
 } from "./remote.ts";
 import { macProblems, unreachableProblem } from "./problems.ts";
 import { SimPool, poolSimulatorName, profileOfPoolSimulator, type PoolSim } from "./sim-pool.ts";
+import { NO_LOAD, type MachineDeviceLoad } from "./shared-load.ts";
 import { simulatorCapacity } from "./simslim-capacity.ts";
 import {
   ORQ_SLIM_PROFILE_JSON,
@@ -178,6 +179,8 @@ export interface BoxDeviceHostDeps {
   destroyBox?(): Promise<void>;
   logger: Pick<Console, "info" | "warn" | "error">;
   fetch?: typeof fetch;
+  /** What the machine's other device host holds now (an Apple Silicon Mac's Android emulators, `shared-load.ts`); absent: nothing else runs there. */
+  siblingLoad?(): MachineDeviceLoad;
 }
 
 /** Pool simulators per profile on a rented host. */
@@ -313,12 +316,14 @@ export class BoxDeviceHost implements DeviceHost {
   capacity(): DeviceCapacity {
     const leased = this.deps.activeLeases().length;
     if (!this.platformEnabled()) return { used: leased, total: 0 };
+    const other = this.deps.siblingLoad?.();
     const { total } = simulatorCapacity({
       settingCap: this.deps.settings().ios.maxSimulatorsPerHost,
       hostBytes: this.hostBytes,
       slim: this.slim !== null,
       top: this.top,
-      leased
+      leased,
+      ...(other ? { otherBytes: other.bytes } : {})
     });
     const probe = this.probe;
     // What memory decides it from: the probe's numbers (simulators need no hypervisor of their own).
@@ -327,6 +332,19 @@ export class BoxDeviceHost implements DeviceHost {
         ? { cpus: probe.cpus, freeMemBytes: probe.memFreeBytes, freeDiskBytes: probe.diskFreeBytes, accel: probe.vm === false ? ("hvf" as const) : null, probedAt: this.probedAt }
         : null;
     return { used: leased, total, ...(basis ? { basis } : {}) };
+  }
+
+  /** What this host's simulators hold of the Mac now (its active leases × the per-simulator budget): the Mac's Android host counts it. */
+  deviceLoad(): MachineDeviceLoad {
+    const devices = this.deps.activeLeases().length;
+    if (devices === 0) return NO_LOAD;
+    const { perSimBytes } = simulatorCapacity({ settingCap: this.deps.settings().ios.maxSimulatorsPerHost, hostBytes: this.hostBytes, slim: this.slim !== null, top: this.top, leased: devices });
+    return { devices, bytes: devices * perSimBytes };
+  }
+
+  /** The machine's other device host changed what it holds: capacity may have changed. */
+  siblingChanged(): void {
+    this.emitChange();
   }
 
   /** An own Mac's environment problems, each with its fix: asleep or offline, Xcode's path, developer mode. */

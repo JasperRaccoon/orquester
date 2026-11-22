@@ -3,7 +3,8 @@
  * URL and SHA-256), the licences (`sdkmanager --licenses`, answered yes: the owner's Install click
  * is the acceptance), then `platform-tools`, `emulator` and the API 35 system image; and one AVD per
  * profile under `androidAvdDir` (`avdmanager create avd`, then the tuned `config.ini`). Files and
- * programs go through a {@link DeviceExecutor}: this machine by default, or a Linux box host's SDK.
+ * programs go through a {@link DeviceExecutor}: this machine by default, or a box host's SDK (Linux
+ * x86_64, or an Apple Silicon Mac: {@link CMDLINE_TOOLS_MAC_ARM64}, arm64-v8a images).
  */
 
 import { existsSync } from "node:fs";
@@ -23,6 +24,26 @@ export const CMDLINE_TOOLS: PinnedDownload & { revision: string } = {
   size: 181_833_628,
   revision: "22.0"
 };
+
+/**
+ * The same cmdline-tools build (15859902, rev 22.0) for Apple Silicon Macs: Google's
+ * `commandlinetools-mac_arm64` archive (repository2-3.xml lists its SHA-1
+ * c4e0dbc53f1a4ce04fc2b11d4e2c4675001a95af; this is the SHA-256 of that same file).
+ */
+export const CMDLINE_TOOLS_MAC_ARM64: PinnedDownload & { revision: string } = {
+  url: "https://dl.google.com/android/repository/commandlinetools-mac_arm64-15859902_latest.zip",
+  sha256: "835b62a26162b229b441d1f6d4680383815a270809eb33522c0d480fa5002c4e",
+  size: 156_083_281,
+  revision: "22.0"
+};
+
+/** The machine an SDK is installed for: `sdkmanager` picks the platform's emulator and platform-tools itself; cmdline-tools is ours to pick. */
+export type SdkHostPlatform = "linux-x64" | "darwin-arm64";
+
+/** The pinned cmdline-tools archive for `platform`. */
+export function cmdlineToolsFor(platform: SdkHostPlatform): PinnedDownload & { revision: string } {
+  return platform === "darwin-arm64" ? CMDLINE_TOOLS_MAC_ARM64 : CMDLINE_TOOLS;
+}
 
 export const SDK_PACKAGES = ["platform-tools", "emulator"] as const;
 
@@ -91,6 +112,8 @@ export interface SdkDeps {
   downloads: string;
   /** Where the SDK is (absent: this machine); `exec` and `download` must act there too. */
   executor?: DeviceExecutor;
+  /** The machine it is for (absent: Linux x86_64, {@link CMDLINE_TOOLS}). */
+  platform?: SdkHostPlatform;
 }
 
 /** Download, verify and unpack cmdline-tools into `<sdk>/cmdline-tools/latest`. */
@@ -98,8 +121,9 @@ export async function installCmdlineTools(paths: SdkPaths, deps: SdkDeps, signal
   const x = deps.executor ?? LOCAL_EXECUTOR;
   if (await packageInstalledOn(x, paths.sdk, "cmdline-tools")) return;
   await x.mkdir(paths.sdk);
-  const zip = join(deps.downloads, "commandlinetools-linux.zip");
-  await deps.download(CMDLINE_TOOLS, zip, {
+  const mac = deps.platform === "darwin-arm64";
+  const zip = join(deps.downloads, mac ? "commandlinetools-mac_arm64.zip" : "commandlinetools-linux.zip");
+  await deps.download(cmdlineToolsFor(deps.platform ?? "linux-x64"), zip, {
     signal,
     onProgress: (received, total) => onProgress(total ? Math.round((received / total) * 100) : null, `Downloading Android command-line tools (${Math.round(received / 1e6)} MB)`)
   });
@@ -109,7 +133,7 @@ export async function installCmdlineTools(paths: SdkPaths, deps: SdkDeps, signal
   try {
     const unzip = await deps.exec("unzip", ["-q", "-o", zip, "-d", staging], { env: deps.env, signal, timeoutMs: 5 * 60_000 });
     if (unzip.exitCode !== 0) {
-      throw new Error(unzip.exitCode === -1 ? "unzip is not installed on this machine (apt install unzip)." : `Unpacking the command-line tools failed: ${lastLine(unzip)}`);
+      throw new Error(unzip.exitCode === -1 ? `unzip is not installed on this machine${mac ? "" : " (apt install unzip)"}.` : `Unpacking the command-line tools failed: ${lastLine(unzip)}`);
     }
     const unpacked = join(staging, "cmdline-tools");
     if (!(await x.exists(join(unpacked, "bin", "sdkmanager")))) throw new Error("The command-line tools archive has no bin/sdkmanager.");

@@ -24,6 +24,13 @@
  * Leases: a read-only instance of the profile's AVD from `orq-golden` with that snapshot's GPU mode
  * (cold boot when the snapshot does not load), `sys.boot_completed`, then the lease boot settings;
  * `release` stops it (`adb emu kill` → signals, only to the verified process).
+ *
+ * An owner's Apple Silicon Mac (`os: "darwin"`, host `box:<boxId>:android` beside the Mac's iOS
+ * host): the same steps with the Mac's parts (`android-darwin.ts`, `android-executor-darwin.ts`):
+ * its own device root, `ps`/`netstat`/`vm_stat` and Node-detached processes instead of `/proc` and
+ * `setsid`, Hypervisor.framework instead of KVM, the macOS cmdline-tools and arm64-v8a images, the
+ * pinned ffmpeg and JRE when the Mac has none (no sudo), `-gpu host` first on its Metal GPU, and a
+ * capacity that counts what the Mac's iOS simulators hold.
  */
 
 import { randomUUID } from "node:crypto";
@@ -34,6 +41,7 @@ import type { Readable } from "node:stream";
 
 import {
   ANDROID_SYSTEM_IMAGE,
+  boxDeviceHostId,
   DEVICE_ERROR_CODES,
   DEVICE_PLATFORM_LABELS,
   deviceKey,
@@ -83,6 +91,9 @@ import {
 import type { DeviceToolchain } from "../../toolchain/index.ts";
 import { SCRCPY_SERVER, scrcpyJarPath } from "../../toolchain/npm-tools.ts";
 import { boxAgentDeviceConfigPath, removeAgentDeviceConfig } from "./agent-device-config.ts";
+import { installMacFfmpeg, installMacJre } from "../../toolchain/macos.ts";
+import { macAndroidBlocker, macAndroidCapacity, macAndroidCapacityBasis, macAndroidChecks, macAndroidRoot, macBaseEnv, macBasicsDetail, MAC_ANDROID_PROBE_SCRIPT, MAC_ANDROID_SYSTEM_IMAGE, type MacAndroidProbe, macProfile, macUncheckedChecks, parseMacAndroidProbe } from "./android-darwin.ts";
+import { boxDarwinExecutor } from "./android-executor-darwin.ts";
 import { boxExecutor } from "./android-executor.ts";
 import {
   ANDROID_PROBE_SCRIPT,
@@ -90,6 +101,7 @@ import {
   androidCapacityBasis,
   androidProbeProblems,
   BOX_GOLDEN_MARKER,
+  BOX_EMULATOR_BYTES,
   BOX_GOLDEN_SNAPSHOT,
   boxAndroidCapacity,
   boxGpuModes,
@@ -106,8 +118,10 @@ import {
   type BoxGoldenMarker,
   FFMPEG_INSTALL_SCRIPT,
   parseAndroidProbe,
+  profileAbi,
   screenOfConfig
 } from "./android-remote.ts";
+import { NO_LOAD, type MachineDeviceLoad } from "./shared-load.ts";
 import { unreachableProblem } from "./problems.ts";
 import { DEADLINE_MARGIN_MS } from "./host.ts";
 import { ensureLocalAgentDevice, localAgentDeviceEntry } from "./local-agent-device.ts";
@@ -154,6 +168,12 @@ export interface BoxAndroidHostDeps {
   /** Rented hosts: destroy the box. */
   destroyBox?(): Promise<void>;
   logger: Pick<Console, "info" | "warn" | "error">;
+  /** The machine's OS: `darwin` is an owner's Apple Silicon Mac (arm64-v8a, Hypervisor.framework); absent: Linux. */
+  os?: "linux" | "darwin";
+  /** Its host id (absent: `box:<boxId>`; a Mac's Android host is `box:<boxId>:android`). */
+  hostId?: string;
+  /** What the machine's other device host holds now (a Mac's iOS simulators); absent: nothing else runs there. */
+  siblingLoad?(): MachineDeviceLoad;
 }
 
 type Phase = "pending" | "preparing" | "ready" | "needs-setup" | "failed" | "stopped";
@@ -222,10 +242,26 @@ export class BoxAndroidHost implements DeviceHost {
   private disposed = false;
 
   constructor(private readonly deps: BoxAndroidHostDeps) {
-    this.id = `box:${deps.boxId}`;
+    this.id = deps.hostId ?? boxDeviceHostId(deps.boxId);
     this.kind = deps.kind;
     this.label = deps.label;
-    this.x = boxExecutor(() => this.link());
+    this.x = deps.os === "darwin" ? boxDarwinExecutor(() => this.link()) : boxExecutor(() => this.link());
+  }
+
+  /** An owner's Apple Silicon Mac (not Linux). */
+  private get mac(): boolean {
+    return this.deps.os === "darwin";
+  }
+
+  /** What this host's emulators hold of the machine now (its active leases, booting ones too): the Mac's iOS host counts it. */
+  deviceLoad(): MachineDeviceLoad {
+    const devices = Math.max(this.deps.activeLeases().length, this.leasedCount());
+    return { devices, bytes: devices * BOX_EMULATOR_BYTES };
+  }
+
+  /** The machine's other device host changed what it holds: capacity may have changed. */
+  siblingChanged(): void {
+    this.emitChange();
   }
 
   get boxId(): string {
@@ -285,12 +321,25 @@ export class BoxAndroidHost implements DeviceHost {
   capacity(): DeviceCapacity {
     const used = this.leasedCount();
     if (!this.deps.settings().android.enabled || !this.probe) return { used, total: 0 };
-    return { used, total: this.capacityTotal(), basis: androidCapacityBasis(this.probe, this.memAvailable, this.sampledAt ?? new Date(this.now()).toISOString()) };
+    const probedAt = this.sampledAt ?? new Date(this.now()).toISOString();
+    const basis = this.mac ? macAndroidCapacityBasis(this.probe as MacAndroidProbe, this.memAvailable, probedAt) : androidCapacityBasis(this.probe, this.memAvailable, probedAt);
+    return { used, total: this.capacityTotal(), basis };
   }
 
-  /** From the probe: CPUs, free memory, and on an own machine its free disk too (rented runners have room to spare). */
+  /** From the probe: CPUs, free memory, and on an own machine its free disk too (rented runners have room to spare); on a Mac what its simulators hold too. */
   private capacityTotal(): number {
     const running = [...this.emulators.values()].filter((record) => !record.golden).length;
+    if (this.mac) {
+      const probe = this.probe as MacAndroidProbe | null;
+      return macAndroidCapacity({
+        cpus: probe?.cpus ?? 1,
+        hostBytes: probe?.memTotalBytes ?? null,
+        memAvailableBytes: this.memAvailable,
+        freeDiskBytes: probe?.diskFreeBytes ?? null,
+        running,
+        ios: this.deps.siblingLoad?.() ?? NO_LOAD
+      });
+    }
     return boxAndroidCapacity({
       cpus: this.probe?.cpus ?? 1,
       memAvailableBytes: this.memAvailable,
@@ -303,14 +352,16 @@ export class BoxAndroidHost implements DeviceHost {
   problems(): MachineProblem[] {
     if (this.kind !== "byo") return [];
     const machine = this.machineName();
-    if (!this.deps.connection()?.connected && this.deps.record()?.state === "ready") return [unreachableProblem(machine, "linux")];
+    if (!this.deps.connection()?.connected && this.deps.record()?.state === "ready") return [unreachableProblem(machine, this.mac ? "macos" : "linux")];
+    // A Mac's environment problems (Xcode, developer mode) are its iOS host's; what stops Android there is a readiness check.
+    if (this.mac) return [];
     return this.probe ? androidProbeProblems(this.probe, machine) : [];
   }
 
   /** The machine's own name ("jasper"), for problem messages. */
   private machineName(): string {
     const name = this.deps.record()?.machineName;
-    return typeof name === "string" && name ? name : "Your Linux machine";
+    return typeof name === "string" && name ? name : this.mac ? "Your Mac" : "Your Linux machine";
   }
 
   box(): DeviceHostBoxInfo | null {
@@ -410,18 +461,19 @@ export class BoxAndroidHost implements DeviceHost {
   private async runPrepare(signal: AbortSignal): Promise<void> {
     this.setPhase("preparing", "Checking the host…");
     try {
-      this.step("kvm", "Checking the host", "running", 2);
+      const basics = this.mac ? "hvf" : "kvm";
+      this.step(basics, "Checking the host", "running", 2);
       const probe = await this.probeBox(signal);
       this.requireBasics(probe);
       const layout = this.layout();
-      this.step("kvm", "Checking the host", "done", 5, `Node ${probe.nodeVersion}, KVM ${probe.kvm.access === "sg" ? "through the kvm group" : "available"}, ${probe.cpus} CPUs`);
+      this.step(basics, "Checking the host", "done", 5, this.mac ? macBasicsDetail(probe as MacAndroidProbe) : `Node ${probe.nodeVersion}, KVM ${probe.kvm.access === "sg" ? "through the kvm group" : "available"}, ${probe.cpus} CPUs`);
       await this.x.mkdir(layout.devices, { mode: 0o700 });
       for (const dir of [layout.tmp, layout.home, layout.androidUser, layout.logs, layout.uploads, layout.hubState, layout.downloads, layout.npmCache, layout.agentDeviceState, layout.agentDeviceHome, layout.agentDeviceClaims]) await this.x.mkdir(dir);
       await this.x.mkdir(layout.runtime, { mode: 0o700 });
       await this.reattach();
       const finding: CacheFinding = { tools: true, sdk: true, golden: true };
 
-      if (probe.ffmpeg !== "libx264") await this.installFfmpeg(probe, signal);
+      if (probe.ffmpeg !== "libx264") await (this.mac ? this.installMacFfmpeg(probe, signal) : this.installFfmpeg(probe, signal));
 
       if (!this.toolsCurrent()) {
         finding.tools = false;
@@ -494,6 +546,11 @@ export class BoxAndroidHost implements DeviceHost {
 
   private requireBasics(probe: AndroidBoxProbe): void {
     const notReady = (message: string) => new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, message);
+    if (this.mac) {
+      const blocker = macAndroidBlocker(probe as MacAndroidProbe, this.label);
+      if (blocker) throw notReady(blocker);
+      return;
+    }
     if (probe.os !== "Linux") throw notReady(`${this.label} is not a Linux machine: Android emulators need Linux with KVM.`);
     if (this.deps.record()?.kvm === false || probe.kvm.access === "missing" || probe.kvm.access === "denied") {
       const reason = probe.kvm.access === "denied" ? probe.kvm.detail : "it has no usable /dev/kvm (hardware virtualization)";
@@ -505,10 +562,10 @@ export class BoxAndroidHost implements DeviceHost {
   }
 
   private async probeBox(signal?: AbortSignal): Promise<AndroidBoxProbe> {
-    const root = boxAndroidRoot({ provider: this.deps.record()?.provider ?? "byo", home: this.link().sys.home });
-    const result = await this.x.exec("/bin/sh", ["-c", ANDROID_PROBE_SCRIPT, "probe", root], { timeoutMs: this.timing.commandMs, ...(signal ? { signal } : {}) });
+    const root = this.mac ? macAndroidRoot(this.link().sys.home) : boxAndroidRoot({ provider: this.deps.record()?.provider ?? "byo", home: this.link().sys.home });
+    const result = await this.x.exec("/bin/sh", ["-c", this.mac ? MAC_ANDROID_PROBE_SCRIPT : ANDROID_PROBE_SCRIPT, "probe", root], { timeoutMs: this.timing.commandMs, ...(signal ? { signal } : {}) });
     if (result.exitCode !== 0) throw new Error(`the probe did not run: ${outputTail(result.stderr) || `exit ${result.exitCode}`}`);
-    const probe = parseAndroidProbe(result.stdout);
+    const probe = this.mac ? parseMacAndroidProbe(result.stdout) : parseAndroidProbe(result.stdout);
     const before = this.probe === null ? null : JSON.stringify(this.problems());
     this.probe = probe;
     this.sampledAt = new Date(this.now()).toISOString();
@@ -516,10 +573,69 @@ export class BoxAndroidHost implements DeviceHost {
     if (before !== null && before !== JSON.stringify(this.problems())) this.emitChange();
     if (!this.layoutValue && probe.nodePath) this.layoutValue = androidLayoutAt(root);
     if (this.layoutValue && probe.nodePath) {
-      this.env = buildAndroidEnv(this.layoutValue, boxBaseEnv(probe), { user: probe.user, nodePath: probe.nodePath, adbPort: adbServerPort(this.layoutValue.devices) });
+      this.buildEnv(probe);
       await this.readToolVersions();
     }
     return probe;
+  }
+
+  /** The tools' environment from the probe (the Mac's after installing its JRE again). */
+  private buildEnv(probe: AndroidBoxProbe): void {
+    const layout = this.layout();
+    this.env = buildAndroidEnv(layout, this.mac ? macBaseEnv(probe) : boxBaseEnv(probe), { user: probe.user, nodePath: probe.nodePath!, adbPort: adbServerPort(layout.devices) });
+  }
+
+  /** A Mac without ffmpeg with libx264 on its PATH: the pinned build, in the device root's `ffmpeg/bin` (first on the tools' PATH). */
+  private async installMacFfmpeg(probe: AndroidBoxProbe, signal: AbortSignal): Promise<void> {
+    const layout = this.layout();
+    this.working = "ffmpeg";
+    this.step("ffmpeg", "Installing ffmpeg", "running", 8);
+    this.setDetail("Installing ffmpeg…");
+    try {
+      await installMacFfmpeg({ executor: this.x, root: layout.devices, downloads: layout.downloads, env: this.env!, signal });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Installing ffmpeg on ${this.label} failed: ${errorText(error)}`);
+    }
+    probe.ffmpeg = "libx264";
+    (probe as MacAndroidProbe).ffmpegPath = posix.join(layout.devices, "ffmpeg", "bin", "ffmpeg");
+    this.step("ffmpeg", "Installing ffmpeg", "done", 12);
+  }
+
+  /**
+   * Java for the SDK tools: there already, or (a Mac) the pinned JRE installed into the device root
+   * now; a Linux machine without it needs the owner (`missing` names the step that needs it).
+   */
+  private async ensureJava(probe: AndroidBoxProbe, signal: AbortSignal, missing: string): Promise<void> {
+    if (probe.java) return;
+    if (!this.mac) throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, missing);
+    const layout = this.layout();
+    const previous = this.working;
+    this.working = "java";
+    this.step("java", "Installing Java", "running", 18);
+    this.setDetail("Installing Java for the Android SDK tools…");
+    let home: string;
+    try {
+      home = await installMacJre({ executor: this.x, root: layout.devices, downloads: layout.downloads, env: this.env!, signal });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Installing Java on ${this.label} failed: ${errorText(error)}`);
+    }
+    probe.java = true;
+    probe.javaHome = home;
+    this.buildEnv(probe);
+    this.step("java", "Installing Java", "done", 20);
+    this.working = previous;
+  }
+
+  /** The system image this host's AVDs use (arm64-v8a on a Mac). */
+  private systemImage(): string {
+    return this.mac ? MAC_ANDROID_SYSTEM_IMAGE : ANDROID_SYSTEM_IMAGE;
+  }
+
+  /** A profile as this host runs it (a Mac: its arm64-v8a image). */
+  private hostProfile(profile: DeviceProfile): DeviceProfile {
+    return this.mac ? macProfile(profile) : profile;
   }
 
   private async installFfmpeg(probe: AndroidBoxProbe, signal: AbortSignal): Promise<void> {
@@ -576,26 +692,27 @@ export class BoxAndroidHost implements DeviceHost {
   /** The SDK packages and system image; resolves whether everything was there already (the cache). */
   private async ensureSdk(probe: AndroidBoxProbe, signal: AbortSignal): Promise<boolean> {
     const layout = this.layout();
-    const ids = ["cmdline-tools", ...SDK_PACKAGES, ANDROID_SYSTEM_IMAGE];
+    const image = this.systemImage();
+    const ids = ["cmdline-tools", ...SDK_PACKAGES, image];
     const missing: string[] = [];
     for (const id of ids) if (!(await packageInstalledOn(this.x, layout.sdk, id))) missing.push(id);
     if (missing.length === 0) {
       this.step("android-sdk", "Android SDK", "skipped", 50, "Already installed");
       return true;
     }
-    if (!probe.java) throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `${this.label} needs Java 17 or newer for the Android SDK tools: install it there (sudo apt install openjdk-17-jre-headless), then try again.`);
-    if (missing.includes("cmdline-tools") && !probe.unzip) throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `${this.label} needs unzip for the Android SDK: install it there (sudo apt install unzip), then try again.`);
+    await this.ensureJava(probe, signal, `${this.label} needs Java 17 or newer for the Android SDK tools: install it there (sudo apt install openjdk-17-jre-headless), then try again.`);
+    if (missing.includes("cmdline-tools") && !probe.unzip) throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `${this.label} needs unzip for the Android SDK: install it there${this.mac ? "" : " (sudo apt install unzip)"}, then try again.`);
     this.working = "android-sdk";
     const label = "Installing the Android SDK and system image";
     this.setDetail(`${label}…`);
     const report = (percent: number | null, line: string) =>
       this.emitProgress({ step: "android-sdk", label, state: "running", logLine: line, ...(percent !== null ? { detail: `${percent} %` } : {}), percent: 20 + Math.round(((percent ?? 0) / 100) * 30) });
     this.step("android-sdk", label, "running", 20);
-    const deps: SdkDeps = { exec: this.x.exec, download: this.x.download, env: this.env!, downloads: layout.downloads, executor: this.x };
+    const deps: SdkDeps = { exec: this.x.exec, download: this.x.download, env: this.env!, downloads: layout.downloads, executor: this.x, ...(this.mac ? { platform: "darwin-arm64" as const } : {}) };
     const sdkSignal = AbortSignal.any([signal, AbortSignal.timeout(this.timing.sdkMs)]);
     await installCmdlineTools({ sdk: layout.sdk, avd: layout.avd }, deps, sdkSignal, report);
     await acceptLicenses({ sdk: layout.sdk, avd: layout.avd }, deps, sdkSignal);
-    await installSdkPackages({ sdk: layout.sdk, avd: layout.avd }, [...SDK_PACKAGES, ANDROID_SYSTEM_IMAGE], deps, sdkSignal, report);
+    await installSdkPackages({ sdk: layout.sdk, avd: layout.avd }, [...SDK_PACKAGES, image], deps, sdkSignal, report);
     this.step("android-sdk", label, "done", 50);
     return false;
   }
@@ -606,7 +723,7 @@ export class BoxAndroidHost implements DeviceHost {
     for (const profile of this.profiles()) {
       const state = await boxAvdState(this.x, layout.avd, profile);
       if (state === "cache" || state === "built" || (state === "outdated" && this.instancesOf(profile.id) > 0)) continue;
-      if (!probe.java) throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `${this.label} needs Java 17 or newer to create emulators: install it there, then try again.`);
+      await this.ensureJava(probe, signal, `${this.label} needs Java 17 or newer to create emulators: install it there, then try again.`);
       this.working = "avds";
       this.step("avds", `Creating the ${profile.label} emulator`, "running", 52);
       await this.queue.run(profile.id, () => createAvd({ sdk: layout.sdk, avd: layout.avd }, profile, { exec: this.x.exec, env: this.env!, executor: this.x }, signal));
@@ -678,7 +795,8 @@ export class BoxAndroidHost implements DeviceHost {
             onProgress
           );
           if (gpu === HOST_GPU_MODE) await this.rememberHostGpu(null);
-          const marker: BoxGoldenMarker = { snapshot: BOX_GOLDEN_SNAPSHOT, gpu, configHash: profileHash(profile), emulatorRevision: revision, createdAt: new Date(this.now()).toISOString() };
+          const abi = profileAbi(profile);
+          const marker: BoxGoldenMarker = { snapshot: BOX_GOLDEN_SNAPSHOT, gpu, configHash: profileHash(profile), emulatorRevision: revision, createdAt: new Date(this.now()).toISOString(), ...(abi !== "x86_64" ? { abi } : {}) };
           await this.x.writeText(posix.join(avdDir(layout.avd, profile.id), BOX_GOLDEN_MARKER), `${JSON.stringify(marker)}\n`);
           this.deps.logger.info(`[devices] golden ${profile.id} on ${this.id}: made with -gpu ${gpu}`);
           return { snapshot: BOX_GOLDEN_SNAPSHOT, gpu, source: "built" as const };
@@ -841,7 +959,7 @@ export class BoxAndroidHost implements DeviceHost {
 
   private async bootNow(request: DeviceBootRequest, signal: AbortSignal, onProgress?: (progress: DeviceHostProgress) => void): Promise<DeviceBootResult> {
     const progress = (step: string, label: string) => onProgress?.({ step, label, state: "running" });
-    const profile = request.profile;
+    const profile = this.hostProfile(request.profile);
     if (profile.platform !== "android") throw new DeviceError("INVALID_ARGUMENT", `${this.label} runs Android emulators: ${profile.label} is not one.`);
     this.requireReady();
     if (request.deviceId !== undefined) return this.attachExisting(request);
@@ -1114,7 +1232,7 @@ export class BoxAndroidHost implements DeviceHost {
   private profiles(): DeviceProfile[] {
     return this.deps.settings().android.profiles.flatMap((id) => {
       const profile = deviceProfile(id);
-      return profile && profile.platform === "android" ? [profile] : [];
+      return profile && profile.platform === "android" ? [this.hostProfile(profile)] : [];
     });
   }
 
@@ -1195,25 +1313,29 @@ export class BoxAndroidHost implements DeviceHost {
       nodeVersion: probe.nodeVersion ?? "none",
       ffmpeg: probe.ffmpeg,
       java: probe.java,
-      packages: { cmdlineTools: await installed("cmdline-tools"), platformTools: await installed("platform-tools"), emulator: await installed("emulator"), systemImage: await installed(ANDROID_SYSTEM_IMAGE) },
+      packages: { cmdlineTools: await installed("cmdline-tools"), platformTools: await installed("platform-tools"), emulator: await installed("emulator"), systemImage: await installed(this.systemImage()) },
       avds,
       tools: (["expo-device-hub", "agent-device"] as const).map((name) => ({
         name,
         version: DEVICE_TOOL_VERSIONS[name],
         installed: (name === "agent-device" ? this.toolVersions?.agent : this.toolVersions?.hub) === DEVICE_TOOL_VERSIONS[name]
-      }))
+      })),
+      ...(this.mac ? { systemImage: this.systemImage() } : {})
     };
     this.emitChange();
   }
 
   private checks(): DeviceReadinessCheck[] {
     const working = (check: DeviceReadinessCheck): DeviceReadinessCheck => (this.working && check.id.startsWith(this.working) ? { ...check, state: "working" } : check);
-    const base: DeviceReadinessCheck[] = this.readinessProbe
-      ? evaluateReadiness(this.readinessProbe).map((check) => ({ ...check, ...(check.fixActionId ? { fixActionId: FIX_ACTIONS.sdk } : {}) }))
-      : [
-          { id: "kvm", label: "Hardware virtualization (/dev/kvm)", state: "missing", detail: "Not checked yet" },
-          { id: "node", label: "Node.js 22 or newer", state: "missing", detail: "Not checked yet" }
-        ];
+    const evaluated = this.readinessProbe ? evaluateReadiness(this.readinessProbe) : null;
+    const base: DeviceReadinessCheck[] = evaluated
+      ? (this.mac && this.probe ? macAndroidChecks(evaluated, this.probe as MacAndroidProbe) : evaluated).map((check) => ({ ...check, ...(check.fixActionId ? { fixActionId: FIX_ACTIONS.sdk } : {}) }))
+      : this.mac
+        ? macUncheckedChecks()
+        : [
+            { id: "kvm", label: "Hardware virtualization (/dev/kvm)", state: "missing", detail: "Not checked yet" },
+            { id: "node", label: "Node.js 22 or newer", state: "missing", detail: "Not checked yet" }
+          ];
     const hubOk = this.hub?.status() === "running";
     const agentOk = this.agent?.configPath() != null;
     const helpers: DeviceReadinessCheck[] = [

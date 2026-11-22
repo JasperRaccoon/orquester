@@ -8,6 +8,7 @@
  * - Admission: `simslim top --json` now — what booted simulators really use (the owner's own ones on
  *   their Mac included) — leaves room for another budget.
  * - Settings → Devices `maxSimulatorsPerHost` caps both.
+ * - On a Mac that runs Android emulators too, what they are budgeted comes off both (`otherBytes`).
  *
  * Boots stay one at a time per host whatever this says (`BoxDeviceHost.oneBootAtATime`).
  *
@@ -42,6 +43,8 @@ export interface SimCapacityInput {
   top: SimslimTop | null;
   /** Leased simulators now (each booted, so counted in `top` too). */
   leased: number;
+  /** What the machine's other devices are budgeted (a Mac's Android emulators); absent: none. */
+  otherBytes?: number;
 }
 
 export interface SimCapacity {
@@ -70,7 +73,7 @@ export function simulatorCapacity(input: SimCapacityInput): SimCapacity {
   const perSimBytes = perSimulatorBytes(input.slim, input.top);
   const cap = Math.max(0, input.settingCap);
   if (input.hostBytes === null || !(input.hostBytes > 0)) return { total: cap, perSimBytes, byMemory: null, roomNow: null };
-  const usable = input.hostBytes - MAC_HOST_RESERVED_BYTES;
+  const usable = input.hostBytes - MAC_HOST_RESERVED_BYTES - Math.max(0, input.otherBytes ?? 0);
   const byMemory = Math.max(0, Math.floor(usable / perSimBytes));
   let roomNow: number | null = null;
   let total = Math.min(cap, byMemory);
