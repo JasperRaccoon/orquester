@@ -41,6 +41,8 @@ export const storedTailnetPreviewSchema = z
     threadId: z.string().min(1).nullable().default(null),
     /** For a box project: the port in the box the agent named (forwarded to `port` on the host). */
     projectPort: port.optional(),
+    /** `https://<host>.ts.net:<port>` as it was shared (listed while Tailscale is down). */
+    url: z.string().min(1).optional(),
     createdAt: z.string()
   })
   .passthrough();
