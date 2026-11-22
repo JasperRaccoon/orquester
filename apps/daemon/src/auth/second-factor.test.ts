@@ -111,6 +111,37 @@ test("the same code checked concurrently succeeds exactly once", async (t) => {
   assert.equal(recovery.filter(Boolean).length, 1);
 });
 
+test("a change whose write fails does not take effect: enabling stays off until a write succeeds", async (t) => {
+  const dir = join(await tempFile(t), "..");
+  const parent = join(dir, "daemon");
+  const file = join(parent, "auth-second-factor.json");
+  const time = clock();
+  const store = new SecondFactorStore({ file, now: time.now, logger: quiet });
+  await store.load();
+  // A regular file where the file's directory should be: every write fails until it goes.
+  const block = () => writeFile(parent, "");
+  const unblock = () => rm(parent, { recursive: true, force: true });
+  await block();
+  const secret = generateTotpSecret();
+  const code = authenticatorCode(secret, time.now());
+  await assert.rejects(store.enable(secret, code));
+  assert.equal(store.isEnabled(), false, "not on with recovery codes nobody saw, nor off on disk only");
+
+  await unblock();
+  const codes = await store.enable(secret, code);
+  assert.ok(Array.isArray(codes));
+  const reloaded = new SecondFactorStore({ file, logger: quiet });
+  await reloaded.load();
+  assert.equal(reloaded.isEnabled(), true);
+
+  await unblock();
+  await block();
+  await assert.rejects(store.disable());
+  assert.equal(store.isEnabled(), true);
+  await assert.rejects(store.verify(codes[0]!));
+  assert.equal(await store.verify(codes[0]!), false, "a code whose use could not be written stays refused");
+});
+
 test("unknown fields survive changes; disabling drops the secret and codes", async (t) => {
   const { file, store } = await enabled(t);
   const onDisk = JSON.parse(await readFile(file, "utf8"));
