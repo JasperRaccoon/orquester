@@ -585,6 +585,24 @@ test("wrong codes spread over many IPs lock all code entry; the signed-in owner 
   assert.equal(factor.isEnabled(), false);
 });
 
+test("wrong sign-in codes from the owner's own IP do not lock the signed-in owner out of turning the factor off", async (t) => {
+  const { h, factor, freshCode } = await factorHarness(t);
+  const shared = "198.51.100.20";
+  const owner = await signIn(h, freshCode(), shared);
+  const challenge = await passwordStep(h, shared);
+  for (let i = 0; i < 5; i += 1) assert.equal((await codeStep(h, challenge, "000000", shared)).statusCode, 401);
+  assert.equal((await codeStep(h, await passwordStep(h, shared), freshCode(), shared)).statusCode, 429, "the IP's sign-in code entry is locked");
+  const disabled = await h.remote.inject({
+    method: "POST",
+    url: authRoutes.secondFactorDisable,
+    remoteAddress: shared,
+    headers: bearer(owner),
+    payload: { password: PASSWORD, code: freshCode() }
+  });
+  assert.equal(disabled.statusCode, 204);
+  assert.equal(factor.isEnabled(), false);
+});
+
 test("a completed sign-in clears the global wrong-code count, so scattered typos never add up to a lockout", async (t) => {
   const { h, freshCode } = await factorHarness(t);
   const typos = async (from: number) => {
