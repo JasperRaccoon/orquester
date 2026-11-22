@@ -12,7 +12,9 @@
  * - **PowerShell:** every script is constant text run with `-EncodedCommand` (UTF-16LE base64) and
  *   `-ExecutionPolicy Bypass`; values reach it as `ORQ_*` environment variables, never spliced into
  *   the script, so no quoting or codepage can change what runs. Each prints one JSON line with every
- *   character above `~` escaped as `\uXXXX` (the console's codepage cannot garble it).
+ *   character above `~` escaped as `\uXXXX` (the console's codepage cannot garble it), through the
+ *   pipeline (`Write-Output`), and runs off its end: on the mini PC, scripts whose output went to a
+ *   pipe hung in `exit` after CIM queries, so outcomes are in the JSON, not in the exit code.
  * - **GPU:** the modes a golden snapshot tries, in order: `-gpu host` (the GPU's OpenGL driver) in
  *   the interactive desktop session through orq-agent's desktop-session helper — only while the box
  *   advertises `desktop-session` —, `-gpu angle_indirect` (Direct3D 11 through ANGLE) from the
