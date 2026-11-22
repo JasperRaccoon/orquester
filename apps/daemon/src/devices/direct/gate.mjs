@@ -6,7 +6,9 @@
  * as a detached `orq-agent` process (`machine-gate.ts`).
  *
  * - Listens on `0.0.0.0:<port>` (the LAN route; `tailscale serve` on the machine proxies its HTTPS
- *   name to `127.0.0.1:<port>`, the tailnet route), and writes `{pid, port, version, boot}` to its
+ *   name to `127.0.0.1:<port>`, the tailnet route) — on macOS on `127.0.0.1` only, with no LAN route:
+ *   a non-loopback listener there makes the application firewall ask the owner on screen, and a Mac
+ *   travels onto networks that are not the owner's — and writes `{pid, port, version, boot}` to its
  *   0600 state file once listening.
  * - `GET /.well-known/orquester/device-host`: the public identity `{hostId, machineId}` (no auth,
  *   no secret, `Access-Control-Allow-Origin: *`), which the viewer checks before sending a ticket.
@@ -592,7 +594,7 @@ function readConfig(path) {
   return { ...value, secret };
 }
 
-async function listen(server, port) {
+async function listen(server, port, host) {
   await new Promise((resolve, reject) => {
     const onError = (error) => {
       server.off("listening", onListening);
@@ -604,7 +606,7 @@ async function listen(server, port) {
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(port, "0.0.0.0");
+    server.listen(port, host);
   });
 }
 
@@ -618,7 +620,11 @@ async function main(configPath) {
     return cache.value;
   };
   let stopping = false;
+  // macOS: loopback only (the tailnet route through `tailscale serve`), no LAN route.
+  const loopbackOnly = process.platform === "darwin";
+  const bindHost = loopbackOnly ? "127.0.0.1" : "0.0.0.0";
   const gate = createStreamGate({
+    ...(loopbackOnly ? { lan: () => [] } : {}),
     hostId: config.hostId,
     machineId: config.machineId,
     secret: config.secret,
@@ -648,10 +654,10 @@ async function main(configPath) {
   process.once("SIGTERM", () => shutdown(0));
   process.once("SIGINT", () => shutdown(0));
   try {
-    await listen(gate.server, config.port);
+    await listen(gate.server, config.port, bindHost);
   } catch (error) {
     if (config.port === 0 || error?.code !== "EADDRINUSE") throw error;
-    await listen(gate.server, 0);
+    await listen(gate.server, 0, bindHost);
   }
   const port = gate.server.address().port;
   writePrivate(config.statePath, `${JSON.stringify({ pid: process.pid, port, version: config.version ?? null, boot: gate.boot })}\n`);
