@@ -53,7 +53,7 @@ import type { BoxConnection, BoxHostForward } from "../../../boxes/contracts.ts"
 import { DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
 import { AgentDeviceDaemon } from "../../android/agent-device-daemon.ts";
 import { avdHardware, avdName } from "../../android/avd-config.ts";
-import { allocateEmulatorPorts, findQemuPid, serialOf, signalLauncher, spawnEmulator, stopEmulator, verifyEmulator, waitForBootCompleted, type EmulatorLaunch } from "../../android/emulator.ts";
+import { allocateEmulatorPorts, emulatorLogFailure, findQemuPid, readEmulatorLog, serialOf, signalLauncher, spawnEmulator, stopEmulator, verifyEmulator, waitForBootCompleted, type EmulatorLaunch } from "../../android/emulator.ts";
 import { adbServerPort, androidLayoutAt, appdirMarker, type AndroidLayout } from "../../android/env.ts";
 import { lastLine } from "../../android/exec.ts";
 import type { DeviceExecutor } from "../../android/executor.ts";
@@ -641,7 +641,7 @@ export class BoxWindowsAndroidHost implements DeviceHost {
     const dump = await this.x.exec(adbPath(this.layout().sdk), ["-s", serial, "shell", "dumpsys SurfaceFlinger"], { env: this.env!, signal, timeoutMs: 30_000 });
     // The emulator's stdout and stderr logs (Start-Process keeps them apart).
     const logPath = this.emulators.get(serial)?.logPath;
-    const log = logPath ? `${(await this.x.readText(logPath)) ?? ""}\n${(await this.x.readText(`${logPath}.err`)) ?? ""}` : "";
+    const log = logPath ? await readEmulatorLog(this.x, logPath) : "";
     if (windowsRendersInSoftware(dump.exitCode === 0 ? dump.stdout : "", log) === true) throw new Error(`-gpu ${gpu} rendered in software (the emulator did not reach this GPU)`);
   }
 
@@ -825,6 +825,7 @@ export class BoxWindowsAndroidHost implements DeviceHost {
     let pgid: number | null = null;
     try {
       await this.x.remove(logPath);
+      await this.x.remove(`${logPath}.err`);
       pgid = (await spawnEmulator({ sdk: layout.sdk, env, kvm: "direct", launch: { avd: avdName(profile.id), consolePort: ports.consolePort, grpcPort: ports.grpcPort, ...launch }, logPath, executor: this.x })).pgid;
       let pid: number | null = null;
       for (let tries = 0; tries < 100 && pid === null; tries++) {
@@ -857,7 +858,17 @@ export class BoxWindowsAndroidHost implements DeviceHost {
       progress("wait-boot", `Waiting for ${profile.label} to boot`);
       const qemu = pid;
       const identity = startTicks ?? null;
-      await waitForBootCompleted({ exec: this.x.exec, adb: adbPath(layout.sdk), env, serial, alive: async () => (await verifyEmulator(this.x, qemu, marker, identity)) !== null, signal, timeoutMs: TIMING.bootMs, pollMs: 1_000 });
+      await waitForBootCompleted({
+        exec: this.x.exec,
+        adb: adbPath(layout.sdk),
+        env,
+        serial,
+        alive: async () => (await verifyEmulator(this.x, qemu, marker, identity)) !== null,
+        failed: async () => emulatorLogFailure(await readEmulatorLog(this.x, logPath)),
+        signal,
+        timeoutMs: TIMING.bootMs,
+        pollMs: 1_000
+      });
       await this.x.exec(adbPath(layout.sdk), ["-s", serial, "shell", LEASE_BOOT_SCRIPT], { env, timeoutMs: 30_000 });
       return record;
     } catch (error) {
