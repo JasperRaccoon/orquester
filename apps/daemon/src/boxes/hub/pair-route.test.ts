@@ -27,7 +27,7 @@ test("a live code answers the script, uncached; the code and the client reach th
   const server = await app(t, {
     pairingScript: async (code, client): Promise<PairingScriptOutcome> => {
       seen.push([code, client]);
-      return { ok: true, script: "#!/bin/sh\necho paired\n" };
+      return { ok: true, script: "#!/bin/sh\necho paired\n", contentType: "text/x-shellscript" };
     }
   });
   const code = "abcdefghijklmnopqrstuvwx";

@@ -68,6 +68,17 @@ type startSpec struct {
 	env  []string
 	pty  *wire.PtySpec
 	work *workUser
+	// remote starts the process elsewhere instead (the desktop session, desktop_exec.go); the
+	// fields above other than pty are then unused.
+	remote func() (process, error)
+}
+
+// launch starts the process the spec describes.
+func (s *startSpec) launch() (process, error) {
+	if s.remote != nil {
+		return s.remote()
+	}
+	return startProcess(s)
 }
 
 func (a *Agent) buildStart(spec *wire.ExecSpec) (*startSpec, error) {
@@ -79,34 +90,38 @@ func (a *Agent) buildStart(spec *wire.ExecSpec) (*startSpec, error) {
 		return nil, rpcErr("BAD_REQUEST", "command is required")
 	}
 	if spec.Session != "" {
-		// This build has no desktop-session helper (it does not list CapabilityDesktopSession).
-		return nil, rpcErr("NO_DESKTOP_SESSION", "this orq-agent cannot run commands in the desktop session")
+		return a.desktopStart(spec, shell)
 	}
 	env := a.processEnv(spec.Env, spec.EnvUnset, spec.Pty)
+	return resolveStart(spec.Command, spec.Args, shell, spec.Cwd, env, spec.Pty, a.work)
+}
+
+// resolveStart turns a command into a launch: argv (a shell for shell mode), the executable
+// found on the process's own PATH, and the working directory checked.
+func resolveStart(command string, args []string, shell bool, cwd string, env []string, pty *wire.PtySpec, work *workUser) (*startSpec, error) {
 	var argv []string
 	switch {
 	case shell && isWindows:
-		argv = []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", spec.Command}
+		argv = []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command}
 	case shell:
-		argv = []string{"/bin/sh", "-c", spec.Command}
+		argv = []string{"/bin/sh", "-c", command}
 	default:
-		argv = append([]string{spec.Command}, spec.Args...)
+		argv = append([]string{command}, args...)
 	}
 	path, err := lookPath(argv[0], envLookup(env, "PATH"), envLookup(env, "PATHEXT"))
 	if err != nil {
 		return nil, err
 	}
-	dir := spec.Cwd
-	if dir != "" {
-		info, err := os.Stat(dir)
+	if cwd != "" {
+		info, err := os.Stat(cwd)
 		if err != nil {
 			return nil, err
 		}
 		if !info.IsDir() {
-			return nil, rpcErr("ENOTDIR", "cwd is not a directory: "+dir)
+			return nil, rpcErr("ENOTDIR", "cwd is not a directory: "+cwd)
 		}
 	}
-	return &startSpec{path: path, args: argv, dir: dir, env: env, pty: spec.Pty, work: a.work}, nil
+	return &startSpec{path: path, args: argv, dir: cwd, env: env, pty: pty, work: work}, nil
 }
 
 // processEnv: orq-agent's env (secrets removed) + ORQ_* + SSH_AUTH_SOCK +
@@ -412,7 +427,7 @@ func (a *Agent) openExec(ch *Channel, spec *wire.ExecSpec) {
 		a.openDetached(ch, spec, start)
 		return
 	}
-	proc, err := startProcess(start)
+	proc, err := start.launch()
 	if err != nil {
 		ch.OpenFailed(err)
 		return
@@ -487,7 +502,7 @@ func (a *Agent) openDetached(ch *Channel, spec *wire.ExecSpec, start *startSpec)
 			return
 		}
 	}
-	proc, err := startProcess(start)
+	proc, err := start.launch()
 	if err != nil {
 		ch.OpenFailed(err)
 		return

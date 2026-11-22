@@ -5,6 +5,11 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -77,8 +82,47 @@ func installWindowsService(cfg Config) error {
 	return s.Start()
 }
 
-// uninstallWindowsService deletes and stops the service; none installed is not an error.
-func uninstallWindowsService() error {
+// uninstallWindowsService removes the desktop-session helper's task (desktop_windows.go), then
+// deletes and stops the service; none installed is not an error.
+func uninstallWindowsService(dataDir string) error {
+	helperErr := removeDesktopHelper(dataDir, func(string, ...any) {})
+	if err := deleteWindowsService(); err != nil {
+		return errors.Join(helperErr, err)
+	}
+	return helperErr
+}
+
+// removeDataDirAfterExit deletes the data dir, orq-agent.exe in it, once this process exited (a
+// running executable cannot be deleted): a hidden PowerShell waits for this pid, then removes the
+// directory, and its parent when that is left empty (C:\orq). Only a data dir holding this very
+// executable is removed (the layout the pairing bootstrap installs).
+func removeDataDirAfterExit(dataDir string) error {
+	exe, err := executablePath()
+	if err != nil {
+		return err
+	}
+	dir, err := filepath.Abs(dataDir)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(filepath.Dir(exe), dir) || filepath.Dir(dir) == dir {
+		return nil
+	}
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	script := fmt.Sprintf(`& { $d = %s; Wait-Process -Id %d -Timeout 120 -ErrorAction SilentlyContinue; `+
+		`for ($i = 0; $i -lt 10 -and (Test-Path -LiteralPath $d); $i++) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath $d) { Start-Sleep -Seconds 2 } }; `+
+		`$p = Split-Path -Parent $d; if ($p -and -not (Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } }`,
+		quote(dir), os.Getpid())
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+	}
+	return cmd.Start()
+}
+
+// deleteWindowsService deletes and stops the service; none installed is not an error.
+func deleteWindowsService() error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connecting to the service manager: %w", err)

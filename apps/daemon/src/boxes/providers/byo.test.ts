@@ -24,11 +24,11 @@ function machine(id: string, extra: Partial<StoredBox> = {}): StoredBox {
   };
 }
 
-test("byo: free Linux and macOS machines, no credentials, no lifetime cap, never creates or lists anything", async (t) => {
+test("byo: free Linux, macOS and Windows machines, no credentials, no lifetime cap, never creates or lists anything", async (t) => {
   t.mock.method(globalThis, "fetch", () => assert.fail("no network call"));
   const options = { signal: new AbortController().signal };
   assert.equal(byoAdapter.id, "byo");
-  assert.deepEqual([...byoAdapter.kinds], ["linux", "macos"]);
+  assert.deepEqual([...byoAdapter.kinds], ["linux", "macos", "windows"]);
   assert.deepEqual(byoAdapter.credentialFields, []);
   assert.equal(byoAdapter.maxLifetimeMinutes, null);
   assert.deepEqual(await byoAdapter.validate({}, options), { ok: true });

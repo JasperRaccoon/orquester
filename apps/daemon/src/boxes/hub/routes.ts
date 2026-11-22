@@ -10,7 +10,8 @@
  * - `boxRoutes.bootstrapScript(variant)` — the second stage of a staged bootstrap
  *   (`bootstrap.ts`), authenticated exactly like the downloads. Generic per variant
  *   and secret-free; box auth keeps the route from being an open endpoint.
- * - `boxRoutes.pair(code)` — a bring-your-own machine's pairing script. Its one-time code is
+ * - `boxRoutes.pair(code)` — a bring-your-own machine's pairing script (sh, or PowerShell for
+ *   Windows). Its one-time code is
  *   its only authentication (`service/byo.ts` spends it on the first fetch, expires it, and
  *   throttles failures per client); the answer carries that machine's single-use bootstrap
  *   token and nothing else. Every refusal is the same 404 (or 429), so it says nothing about
@@ -92,7 +93,7 @@ export function registerBoxHubRoutes(app: FastifyInstance, hub: BoxHubServer, op
         return reply.code(outcome.status).send({ code: outcome.code, message: outcome.message });
       }
       request.log.info("serving a pairing script");
-      return reply.header("content-type", "text/x-shellscript").send(outcome.script);
+      return reply.header("content-type", outcome.contentType).send(outcome.script);
     });
   });
 }
