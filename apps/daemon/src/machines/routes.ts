@@ -278,7 +278,8 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
   app.post(
     "/api/machines/:id/wake",
     handle(async (request: IdRequest): Promise<WakeMachineResponse> => {
-      const machine = machineFor(request.params.id, viewerOf(request.principal));
+      const viewer = viewerOf(request.principal);
+      const machine = machineFor(request.params.id, viewer);
       if (machine.self) throw new MachineRouteError(409, "MACHINE_UNSUPPORTED", "This is the machine Orquester runs on; it is awake.");
       const port = registry.wakePort();
       if (!port) {
@@ -293,7 +294,8 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
           }
         };
       }
-      const result = await port.wake(machine.id);
+      // An agent's wake is never sent by a Hidden machine.
+      const result = await port.wake(machine.id, { agent: viewer.kind === "agent" });
       void registry.refresh();
       return result;
     })

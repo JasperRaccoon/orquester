@@ -34,6 +34,7 @@ import {
   resolveMachinePolicy,
   tailnetMachineId,
   TAILNET_MACHINE_ID_PREFIX,
+  type BoxNic,
   type BoxSummary,
   type MachineCapability,
   type MachineOs,
@@ -56,6 +57,7 @@ import type {
 } from "./ports.ts";
 import type { MachinePolicyStore } from "./store.ts";
 import type { TailnetNode, TailnetRead } from "./tailscale-peers.ts";
+import { mergeWolNics, type WakeMachineView } from "./wake.ts";
 
 /** How often the tailnet is read while the daemon runs. */
 export const MACHINES_POLL_MS = 15_000;
@@ -411,6 +413,50 @@ export class MachineRegistry implements MachineAccessPort {
     return this.wake;
   }
 
+  /** Every listed machine as the wake chooses senders and targets (the daemon's own host included). */
+  wakeMachines(): WakeMachineView[] {
+    return this.merged.map((machine) => ({
+      machineId: machine.id,
+      name: this.nameOf(machine),
+      self: machine.self,
+      os: this.osOf(machine),
+      visibility: this.policy(machine).visibility,
+      boxId: machine.box?.id ?? null,
+      wol: machine.stored?.wol ?? null
+    }));
+  }
+
+  /**
+   * A paired machine's box reported its NICs (hello or `sys.nics`): keep the wired ones in its
+   * record's `wol` ({@link mergeWolNics}), which stays while the machine is offline. A box that is
+   * not a paired machine is ignored; nothing is written when nothing changed. Never rejects.
+   */
+  async recordNics(boxId: string, nics: readonly BoxNic[]): Promise<void> {
+    if (!this.started || this.stopped) return;
+    let machine = this.merged.find((entry) => entry.box?.id === boxId);
+    if (!machine) {
+      // A box paired since the last merge.
+      this.rebuild();
+      machine = this.merged.find((entry) => entry.box?.id === boxId);
+    }
+    if (!machine) return;
+    const machineId = machine.id;
+    let changed = false;
+    try {
+      await this.deps.store.update((records) => {
+        const record = records[machineId] ?? {};
+        const wol = mergeWolNics(record.wol, nics, new Date(this.now()).toISOString());
+        if (!wol) return false;
+        records[machineId] = { ...record, wol };
+        changed = true;
+      });
+    } catch (error) {
+      this.logger.warn(`[machines] could not save ${machineId}'s network adapters`, error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (changed && !this.stopped) this.rebuild();
+  }
+
   // ---- the merge ------------------------------------------------------------------------------
 
   private queueRebuild(): void {
@@ -594,7 +640,7 @@ export class MachineRegistry implements MachineAccessPort {
     const link = machine.box ? this.deps.boxes.connection(machine.box.id) : null;
     const state = this.stateOf(machine, link);
     const probe = machine.self ? null : (this.pairing?.lastProbe(machine.id) ?? null);
-    const wake = machine.self ? { canWake: false } : (this.wake?.canWake(machine.id) ?? { canWake: false });
+    const wake = machine.self ? { canWake: false } : (this.wake?.canWake(machine.id, { agent: viewer.kind === "agent" }) ?? { canWake: false });
     const name = this.nameOf(machine);
     const problems: MachineProblem[] = [...(probe?.problems ?? [])];
     if (state === "asleep" && !problems.some((problem) => problem.code === "machine-asleep")) {
