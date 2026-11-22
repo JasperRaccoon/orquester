@@ -801,6 +801,8 @@ export interface UpdateByoMachineRequest {
 export interface RemoveByoMachineResponse {
   /** False when the machine was not connected: run `orq-agent uninstall-service` on it by hand. */
   uninstalled: boolean;
+  /** Files pairing added that the machine could not remove (no passwordless sudo); absent when none. */
+  leftovers?: string[];
 }
 
 /** A pairing command, shown once (only a hash of its code is kept). */
