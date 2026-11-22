@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -25,8 +26,9 @@ import (
 //
 // Trust runs both ways:
 //   - The service creates the pipe as its first instance (so nothing else holds the name), owned by
-//     LocalSystem and open only to LocalSystem and the desktop user (desktopPipeSecurity). A client
-//     must be this very orq-agent.exe, running in an interactive session, else it is told to exit.
+//     LocalSystem and open only to LocalSystem and the desktop user, who may not add instances of
+//     it (desktopPipeSecurity). A client must be this very orq-agent.exe, running in an
+//     interactive session, else it is told to exit.
 //   - The helper dials without letting the server impersonate it, and talks only to a pipe owned by
 //     LocalSystem: no other process can create one (it would need SeRestorePrivilege), so a process
 //     squatting the name before the service starts never gets a command run as the desktop user.
@@ -156,10 +158,12 @@ func verifyDesktopClient(conn net.Conn, exe string) error {
 	return nil
 }
 
-// dialDesktopPipe connects the helper to the service, refusing a pipe LocalSystem does not own.
-func dialDesktopPipe(dataDir string) (net.Conn, error) {
-	timeout := 5 * time.Second
-	conn, err := winio.DialPipe(pipeName("desktop", dataDir), &timeout)
+// dialDesktopPipe connects the helper to the service's pipe `name`, refusing a pipe LocalSystem
+// does not own. It asks for no more than desktopPipeSecurity grants the desktop user.
+func dialDesktopPipe(name string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := winio.DialPipeAccess(ctx, name, desktopPipeUserAccess)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +230,7 @@ func DesktopHelperCommand(version, dataDir string) int {
 	logger.Printf("desktop-session helper %s started (pid %d)", version, os.Getpid())
 	attempt := 0
 	for {
-		conn, err := dialDesktopPipe(dir)
+		conn, err := dialDesktopPipe(pipeName("desktop", dir))
 		if err == nil {
 			attempt = 0
 			err = runDeskHelperSession(conn, version, startProcess, os.Environ)
