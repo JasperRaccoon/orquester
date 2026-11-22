@@ -182,6 +182,8 @@ export class MachineRegistry implements MachineAccessPort {
   private unsubscribeBoxes: (() => void) | null = null;
   private rebuildQueued = false;
   private stopped = false;
+  /** `machines.json` was read: before that nothing is merged (a merge would write over the owner's file). */
+  private started = false;
 
   constructor(private readonly deps: MachineRegistryDeps) {
     this.now = deps.now ?? Date.now;
@@ -194,6 +196,7 @@ export class MachineRegistry implements MachineAccessPort {
   async start(): Promise<void> {
     this.stopped = false;
     await this.deps.store.load();
+    this.started = true;
     this.unsubscribeBoxes = this.deps.boxes.onChange(() => this.queueRebuild());
     await this.refresh();
     const pollMs = this.deps.pollMs ?? MACHINES_POLL_MS;
@@ -426,6 +429,7 @@ export class MachineRegistry implements MachineAccessPort {
    * read-only store keeps deciding the same way every time).
    */
   rebuild(): void {
+    if (!this.started) return;
     const records = this.deps.store.all();
     const boxes = this.deps.boxes.byoRecords().filter((box) => box.provider === "byo");
     const boxById = new Map(boxes.map((box) => [box.id, box]));

@@ -27,8 +27,8 @@ export class MachineStoreReadOnlyError extends Error {
 export class MachinePolicyStore {
   private file: MachinesFile = createDefaultMachinesFile();
   private writes: Promise<void> = Promise.resolve();
-  /** Why writes are refused this run, or null. */
-  readOnlyReason: string | null = null;
+  /** Why writes are refused this run, or null. Until {@link load} ran nothing may be written over the file. */
+  readOnlyReason: string | null = "machines.json has not been read yet";
 
   constructor(private readonly options: { path: string; logger?: Logger }) {}
 
