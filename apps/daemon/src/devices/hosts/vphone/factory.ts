@@ -1,7 +1,8 @@
 /**
  * Adopts bring-your-own Macs as vphone research hosts (phase 3 §2.3): a box with provider `byo`,
- * macOS, "Use for device simulators" on (`BoxSummary.deviceHost`) and "Virtual iPhones (research)"
- * on in Settings → Devices (`settings.research.vphoneHosts[boxId].enabled`). Follows the box
+ * macOS, used for device simulators (its machine's policy, else "Use for device simulators",
+ * `BoxSummary.deviceHost`: `machine-access.ts`) and "Virtual iPhones (research)" on in Settings →
+ * Devices (`settings.research.vphoneHosts[boxId].enabled`). Follows the box
  * registry, the box links and the settings; a machine that stops qualifying loses its host (its
  * leases end lost; its VMs keep running until the owner deletes them).
  */
@@ -13,6 +14,7 @@ import { devicesRuntimeDir } from "@orquester/config";
 
 import type { DaemonBoxes } from "../../../boxes/wiring.ts";
 import type { DeviceHostFactory, DeviceHostFactoryContext } from "../../host.ts";
+import { byoRunsDevices, type DeviceMachineAccess } from "../../machine-access.ts";
 import { VphoneDeviceHost, vphoneHostId, type VphoneBoxLink } from "./host.ts";
 
 interface VphoneHostFactoryDeps {
@@ -20,15 +22,17 @@ interface VphoneHostFactoryDeps {
   /** The box wiring (registry and hub); null while the boxes plugin is unavailable. */
   boxes: () => Pick<DaemonBoxes, "registry" | "hub"> | null;
   logger: Pick<Console, "info" | "warn" | "error">;
+  /** The machines registry's policies (absent: the boxes' own "Use for device simulators" decides). */
+  machineAccess?: DeviceMachineAccess | null;
 }
 
 const OFF: DevicesVphoneHostSettings = { enabled: false, iphoneSource: null, cloudosSource: null };
 
 /** Whether a box is a Mac the owner turned research iPhones on for. */
-function isVphoneCandidate(box: BoxSummary, settings: DevicesSettings): boolean {
+function isVphoneCandidate(box: BoxSummary, settings: DevicesSettings, access: DeviceMachineAccess | null): boolean {
   return (
     box.provider === BYO_PROVIDER_ID &&
-    box.deviceHost === true &&
+    byoRunsDevices(box.id, box.deviceHost, access) &&
     (box.kind === "macos" || box.os === "darwin") &&
     box.state !== "destroyed" &&
     box.state !== "pairing" &&
@@ -41,6 +45,7 @@ export function createVphoneHostFactory(deps: VphoneHostFactoryDeps): DeviceHost
   const hosts = new Map<string, VphoneDeviceHost>();
   const unsubscribes: (() => void)[] = [];
   let subscribedTo: Pick<DaemonBoxes, "registry" | "hub"> | null = null;
+  let unsubscribePolicies: (() => void) | null = null;
 
   const subscribe = (): Pick<DaemonBoxes, "registry" | "hub"> | null => {
     const boxes = deps.boxes();
@@ -61,7 +66,7 @@ export function createVphoneHostFactory(deps: VphoneHostFactoryDeps): DeviceHost
     const wanted = new Map<string, BoxSummary>();
     for (const record of boxes?.registry.list() ?? []) {
       const summary = boxes!.registry.summary(record.id);
-      if (summary && isVphoneCandidate(summary, settings)) wanted.set(summary.id, summary);
+      if (summary && isVphoneCandidate(summary, settings, deps.machineAccess ?? null)) wanted.set(summary.id, summary);
     }
     for (const [boxId, host] of [...hosts]) {
       if (wanted.has(boxId)) continue;
@@ -102,6 +107,9 @@ export function createVphoneHostFactory(deps: VphoneHostFactoryDeps): DeviceHost
     platforms: ["ios"],
     async start(context) {
       ctx = context;
+      // A machine's visibility or "Device simulators" switch changed: research hosts follow.
+      unsubscribePolicies?.();
+      unsubscribePolicies = deps.machineAccess?.onChange(() => sync()) ?? null;
       sync();
     },
     settingsChanged() {
@@ -109,6 +117,8 @@ export function createVphoneHostFactory(deps: VphoneHostFactoryDeps): DeviceHost
     },
     async stop() {
       for (const unsubscribe of unsubscribes.splice(0)) unsubscribe();
+      unsubscribePolicies?.();
+      unsubscribePolicies = null;
       subscribedTo = null;
       const context = ctx;
       ctx = null;

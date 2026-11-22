@@ -8,10 +8,13 @@
  *   only once the host is. Near its time limit a rented host drains (no new lease; the pool
  *   destroys it once empty); a failed one with no lease is destroyed at once. Idle teardown is the
  *   pool's alone (`pool-actor.ts`, `pool.idleTeardownMinutes`).
- * - **Your own Mac** (`kind: "byo"`): a bring-your-own machine the owner marked "Use for device
- *   simulators" (`BoxSummary.deviceHost`). Prepared when it connects; never destroyed — idle for
+ * - **Your own Mac** (`kind: "byo"`): a bring-your-own machine the owner uses for device
+ *   simulators — its machine's policy in the machines registry (visible, "Device simulators" on;
+ *   `machine-access.ts`), or without the registry the box's "Use for device simulators"
+ *   (`BoxSummary.deviceHost`). Prepared when it connects; never destroyed — idle for
  *   `pool.idleTeardownMinutes`, its helpers (hub, agent-device daemon) stop, and start again with
- *   the next lease.
+ *   the next lease. A machine whose policy turns devices off (Hidden, or the switch off) loses its
+ *   host at once, and everything of devices running on it stops.
  *
  * `start` adds a host for every such box already recorded (a restart reattaches: the hub and the
  * agent-device daemon keep running in the box and are found again). A box whose link drops makes
@@ -31,6 +34,7 @@ import type { BoxConnection } from "../../boxes/contracts.ts";
 import type { DaemonBoxes } from "../../boxes/wiring.ts";
 import { DeviceError, isDeviceError } from "../errors.ts";
 import type { DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProvisionRequest, DeviceRentalQuote } from "../host.ts";
+import { byoRunsDevices, type DeviceMachineAccess } from "../machine-access.ts";
 import type { DeviceToolchain } from "../toolchain/index.ts";
 import { BoxAndroidHost } from "./box/android-host.ts";
 import { androidRentalSpec } from "./box/android-remote.ts";
@@ -44,6 +48,8 @@ export interface BoxHostDeps {
   toolchain: DeviceToolchain;
   logger: Pick<Console, "info" | "warn" | "error">;
   fetch?: typeof fetch;
+  /** The machines registry's policies (absent: the boxes' own "Use for device simulators" decides). */
+  machineAccess?: DeviceMachineAccess | null;
 }
 
 /** A box host of either platform: Macs run iOS simulators, Linux boxes with KVM Android emulators. */
@@ -60,13 +66,14 @@ const IDLE_SWEEP_MS = 60_000;
 
 /**
  * What kind of device host a box record is, or null when it is none: rented device-host boxes (a
- * Mac runs iOS, a Linux box Android) and the owner's machines marked "Use for device simulators"
- * (a Mac; a Linux machine only once its orq-agent reported a usable `/dev/kvm`).
+ * Mac runs iOS, a Linux box Android) and the owner's machines used for device simulators (their
+ * policy in `access`, else "Use for device simulators"; a Mac; a Linux machine only once its
+ * orq-agent reported a usable `/dev/kvm`).
  */
-export function deviceHostOfRecord(record: StoredBox): DeviceHostRole | null {
+export function deviceHostOfRecord(record: StoredBox, access: DeviceMachineAccess | null = null): DeviceHostRole | null {
   if (record.state === "destroyed") return null;
   if (record.provider === "byo") {
-    if (record.deviceHost !== true) return null;
+    if (!byoRunsDevices(record.id, record.deviceHost, access)) return null;
     // A Mac: paired as one (`kind`), or reported so by its orq-agent (`os`).
     if (record.kind === "macos" || record.os === "darwin") return { kind: "byo", platform: "ios" };
     if ((record.kind === "linux" || record.os === "linux") && record.kvm === true) return { kind: "byo", platform: "android" };
@@ -176,13 +183,17 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
     return host;
   };
 
-  const removeHost = (boxId: string): void => {
+  const access = (): DeviceMachineAccess | null => deps.machineAccess ?? null;
+
+  /** `stopDevices`: the owner's machine stopped being a device host (its policy): what devices run there stops too. */
+  const removeHost = (boxId: string, options: { stopDevices?: boolean } = {}): void => {
     const host = hosts.get(boxId);
     if (!host) return;
     hosts.delete(boxId);
     idleSince.delete(boxId);
     ctx?.removeHost(host.id);
-    void host.dispose().catch(() => undefined);
+    const stop = !options.stopDevices ? host.dispose() : host instanceof BoxAndroidHost ? host.teardown() : host.stopHelpers().then(() => host.dispose());
+    void stop.catch((error) => logger.warn(`[devices] stopping ${host.id} failed`, error instanceof Error ? error.message : String(error)));
   };
 
   /** Add a host for every device-host box and flagged own Mac; remove the ones that went. */
@@ -191,7 +202,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
     if (!ctx || !boxes) return;
     const wanted = new Set<string>();
     for (const record of boxes.registry.list()) {
-      const role = deviceHostOfRecord(record);
+      const role = deviceHostOfRecord(record, access());
       if (!role) continue;
       wanted.add(record.id);
       const existing = hosts.get(record.id);
@@ -201,7 +212,11 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
       // A rented box being set up is prepared by its `devices` step; a ready one (a restart) or an own machine now.
       if (record.state === "ready" && !host.isReady() && host.state().status === "starting") prepareInBackground(host);
     }
-    for (const boxId of [...hosts.keys()]) if (!wanted.has(boxId)) removeHost(boxId);
+    for (const boxId of [...hosts.keys()]) {
+      if (wanted.has(boxId)) continue;
+      const record = boxes.registry.get(boxId);
+      removeHost(boxId, { stopDevices: record?.provider === "byo" && record.state !== "destroyed" && deps.boxes()?.hub.get(boxId)?.connected === true });
+    }
   };
 
   const recordChanged = (boxId: string): void => {
@@ -210,7 +225,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
       removeHost(boxId);
       return;
     }
-    if (!deviceHostOfRecord(record) && !hosts.has(boxId)) return;
+    if (!deviceHostOfRecord(record, access()) && !hosts.has(boxId)) return;
     sync();
   };
 
@@ -228,7 +243,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
   const preparer = async (input: { boxId: string; connection: BoxConnection; signal: AbortSignal; log: (line: string) => void }): Promise<void> => {
     const record = deps.boxes()?.registry.get(input.boxId);
     if (!record) throw new Error("The box record is gone.");
-    const host = hosts.get(input.boxId) ?? addHost(record, deviceHostOfRecord(record) ?? { kind: "box", platform: record.kind === "linux" ? "android" : "ios" });
+    const host = hosts.get(input.boxId) ?? addHost(record, deviceHostOfRecord(record, access()) ?? { kind: "box", platform: record.kind === "linux" ? "android" : "ios" });
     await host.prepare(input.connection, input.signal, (progress) => {
       if (progress.state === "running" && progress.logLine === undefined) input.log(`${progress.label}…`);
       else if (progress.state === "done" && progress.detail) input.log(`${progress.label}: ${progress.detail}`);
@@ -414,6 +429,9 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
           boxes.hub.onConnectionChange(connectionChanged)
         );
       }
+      // A machine's visibility or "Device simulators" switch changed: hosts follow at once.
+      const policies = access();
+      if (policies) unsubscribers.push(policies.onChange(() => sync()));
       // Synchronously: leases on hosts missing after `start` are marked lost.
       sync();
       refreshOffers();

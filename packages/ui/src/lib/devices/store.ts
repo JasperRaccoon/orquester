@@ -33,9 +33,12 @@ import {
   type DeviceHostSummary,
   type DeviceLeaseResponse,
   type DeviceLeaseSummary,
+  type AddDevicePortForwardRequest,
   type DeviceOpenRequest,
   type DevicePlatform,
   type DevicePoolSummary,
+  type DevicePortForward,
+  type DevicePortForwardsResponse,
   type DeviceProfile,
   type DevicesSettings,
   type DevicesSettingsPatch,
@@ -53,6 +56,7 @@ import {
   sanitizeActionEvent,
   sanitizeActionsResponse,
   sanitizeDevicesState,
+  sanitizeForwardsResponse,
   sanitizeHostsPayload,
   sanitizeLeaseClosed,
   sanitizeLeasePayload,
@@ -339,6 +343,37 @@ export function startDeviceSetup(api: DevicesApi, platform: DevicePlatform, acti
       if (job) applySetupJob(job);
     }
   ).then(({ job }) => job);
+}
+
+// ---------------------------------------------------------------------------
+// Port forwards (no events: the panel reads them when a device is ready, and after its own changes)
+// ---------------------------------------------------------------------------
+
+/** What the forward helpers need of the client. */
+export interface DeviceForwardsApi {
+  deviceForwards(leaseId: string, signal?: AbortSignal): Promise<DevicePortForwardsResponse>;
+  addDeviceForward(leaseId: string, req: AddDevicePortForwardRequest): Promise<DevicePortForwardsResponse>;
+  removeDeviceForward(leaseId: string, devicePort: number): Promise<DevicePortForwardsResponse>;
+}
+
+function forwardsOf(raw: unknown): DevicePortForward[] {
+  const forwards = sanitizeForwardsResponse(raw);
+  if (forwards === null) throw new Error("The daemon answered in an unexpected shape.");
+  return forwards;
+}
+
+/** A lease's port forwards to its chat's project now. */
+export async function loadDeviceForwards(api: DeviceForwardsApi, leaseId: string, signal?: AbortSignal): Promise<DevicePortForward[]> {
+  return forwardsOf(await api.deviceForwards(leaseId, signal));
+}
+
+/** Forward one more port (`targetPort` default: the same); resolves the lease's forwards. */
+export async function addDeviceForward(api: DeviceForwardsApi, leaseId: string, req: AddDevicePortForwardRequest): Promise<DevicePortForward[]> {
+  return forwardsOf(await api.addDeviceForward(leaseId, req));
+}
+
+export async function removeDeviceForward(api: DeviceForwardsApi, leaseId: string, devicePort: number): Promise<DevicePortForward[]> {
+  return forwardsOf(await api.removeDeviceForward(leaseId, devicePort));
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import test from "node:test";
 import { DEFAULT_DEVICES_SETTINGS, type DeviceHostSummary } from "@orquester/api";
 
 import {
+  deviceHostRows,
   fixLabel,
   macHosts,
   macHostView,
@@ -89,4 +90,27 @@ test("lists tool versions and readiness under their host", () => {
       ["expo-device-hub", "0.19.0-canary", "missing", "This machine"]
     ]
   );
+});
+
+test("lists device hosts in placement order: this host, then the owner's machines, then rentals; problems and the capacity basis with each", () => {
+  const rented = host({ id: "box:r1", label: "Android host (Blacksmith, 16 vCPU)", platforms: ["android"], box: { boxId: "r1", provider: "blacksmith", hourlyUsd: 1.92, startedAt: "2026-11-22T10:00:00.000Z", deadlineAt: null } });
+  const linger = { code: "linger-off" as const, message: "jasper stops orq-agent when jasper logs out.", fix: "sudo loginctl enable-linger jasper" };
+  const jasper = host({
+    id: "box:jasper",
+    kind: "byo",
+    label: "jasper (your Linux machine)",
+    platforms: ["android"],
+    capacity: { used: 1, total: 12, basis: { cpus: 24, freeMemBytes: 61 * 1024 ** 3, freeDiskBytes: 410 * 1024 ** 3, accel: "kvm", probedAt: "2026-11-22T10:00:00.000Z" } },
+    problems: [linger]
+  });
+  const local = host({ id: "local", kind: "local", label: "This machine", platforms: ["android"] });
+  const research = host({ id: "vphone:m1", kind: "byo", label: "Studio Mac", research: true });
+  const rows = deviceHostRows([rented, research, jasper, local], DEFAULT_DEVICES_SETTINGS);
+  assert.deepEqual(rows.map((row) => [row.id, row.order]), [["local", 1], ["box:jasper", 2], ["box:r1", 3], ["vphone:m1", null]]);
+  const own = rows.find((row) => row.id === "box:jasper")!;
+  assert.equal(own.capacityText, "1 of 12 devices · from 24 CPUs, 61 GB free memory, 410 GB free disk, KVM");
+  assert.deepEqual(own.problems, [linger]);
+
+  const poolOnly = deviceHostRows([rented, jasper, local], { ...DEFAULT_DEVICES_SETTINGS, pool: { ...DEFAULT_DEVICES_SETTINGS.pool, placement: "pool-only" } });
+  assert.deepEqual(poolOnly.map((row) => [row.id, row.order]), [["local", null], ["box:jasper", 1], ["box:r1", 2]]);
 });

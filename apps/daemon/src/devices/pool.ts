@@ -5,8 +5,9 @@
  * Phase 1 rules, in order:
  * 1. the platform is off in Settings → Devices → `disabled`;
  * 2. a named host (`hostId`) is used alone; research hosts (phase 3 vphone) are used only so;
- * 3. otherwise local first (unless `pool-only`), then the busiest ready box host that still has
- *    room (best fit packs hosts, so idle ones can be torn down);
+ * 3. otherwise local first (unless `pool-only`), then the owner's own machines (`byo`) before
+ *    rented boxes, and within each the busiest ready host that still has room (best fit packs
+ *    hosts, so idle ones can be torn down);
  * 4. no room, but a host is starting or installing → `wait` for it;
  * 5. a host that needs setup the daemon can do itself (every missing check has a fix action) →
  *    `setup` (the owner enabling the platform is the consent);
@@ -59,6 +60,11 @@ function platformEnabled(settings: DevicesSettings, platform: DevicePlatform): b
   return platform === "android" ? settings.android.enabled : settings.ios.enabled;
 }
 
+/** Own machines (paired, free to use) are placed on before rented boxes, which bill by the hour. */
+function ownershipRank(kind: DeviceHostKind): number {
+  return kind === "local" ? 0 : kind === "byo" ? 1 : 2;
+}
+
 const hasRoom = (host: PlacementHost): boolean => host.status === "ready" && !host.draining && host.used < host.total;
 const missingChecks = (host: PlacementHost): DeviceReadinessCheck[] => host.checks.filter((check) => check.state !== "ok");
 const selfFixable = (host: PlacementHost): boolean => {
@@ -82,7 +88,7 @@ export function choosePlacement(input: PlacementInput): Placement {
   if (local) return { kind: "host", hostId: local.id };
   const fits = hosts
     .filter((host) => host.kind !== "local" && hasRoom(host))
-    .sort((a, b) => a.total - a.used - (b.total - b.used) || a.id.localeCompare(b.id));
+    .sort((a, b) => ownershipRank(a.kind) - ownershipRank(b.kind) || a.total - a.used - (b.total - b.used) || a.id.localeCompare(b.id));
   if (fits[0]) return { kind: "host", hostId: fits[0].id };
 
   const coming = hosts.find((host) => host.status === "starting" || host.status === "installing");
@@ -107,7 +113,8 @@ export function choosePlacement(input: PlacementInput): Placement {
 // Placement, per request, oldest first (each takes one slot; the next sees what is left):
 // Research hosts (phase 3 vphone) are never placed on.
 //   1. this host, unless `pool-only` (a slot is free: ready, not draining, used < total);
-//   2. best fit: the most loaded ready pool host with a free slot (packs hosts so idle ones go);
+//   2. best fit: the owner's own machines before rented hosts, and within each the most loaded
+//      ready host with a free slot (packs hosts so idle ones go);
 //   3. a starting host's future slot (its total, else the learned/default capacity), soonest first;
 //   4. otherwise it needs a new host.
 // Scale up, per platform: unless `local-only` and only when a factory quotes a rental —
@@ -337,7 +344,7 @@ export function decidePool(input: PoolInput): PoolDecision {
     }
     const fit = hosts
       .filter((host) => host.kind !== "local" && room(host) > 0)
-      .sort((a, b) => room(a) - room(b) || a.id.localeCompare(b.id))[0];
+      .sort((a, b) => ownershipRank(a.kind) - ownershipRank(b.kind) || room(a) - room(b) || a.id.localeCompare(b.id))[0];
     if (fit) {
       take(fit);
       continue;

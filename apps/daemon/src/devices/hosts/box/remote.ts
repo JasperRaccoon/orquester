@@ -66,7 +66,8 @@ export function remoteLayout(input: { provider: string; home: string }): RemoteL
 
 /**
  * Prints `key=value` lines: the PATH processes get (the usual Homebrew and user dirs first), Node,
- * npm, the OS, whether it is a VM (`kern.hv_vmm_present`, macOS), Xcode and `simctl`, and KVM
+ * npm, the OS, whether it is a VM (`kern.hv_vmm_present`, macOS), Xcode and `simctl`, the
+ * `xcode-select` path and developer mode (macOS), CPUs, memory and free disk under the home, and KVM
  * (Linux). No secrets; constants only.
  */
 export const PROBE_SCRIPT = `PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -81,9 +82,17 @@ if [ "$(uname -s)" = Darwin ]; then
   printf 'vm=%s\\n' "$(sysctl -n kern.hv_vmm_present 2>/dev/null)"
   printf 'xcode=%s\\n' "$(xcodebuild -version 2>/dev/null | tr '\\n' ' ')"
   if xcrun simctl help > /dev/null 2>&1; then echo simctl=1; else echo simctl=0; fi
+  printf 'xcode_path=%s\\n' "$(xcode-select -p 2>/dev/null)"
+  if command -v DevToolsSecurity > /dev/null 2>&1; then
+    if DevToolsSecurity -status 2>/dev/null | grep -q enabled; then echo devtools=1; else echo devtools=0; fi
+  fi
+  printf 'cpus=%s\\n' "$(sysctl -n hw.ncpu 2>/dev/null)"
+  vm_stat 2>/dev/null | awk '/page size of/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) size = $i } /^Pages (free|inactive|speculative):/ { gsub(/[.]/, "", $NF); pages += $NF } END { if (size > 0) print "mem_free_bytes=" pages * size }'
 else
+  printf 'cpus=%s\\n' "$(nproc 2>/dev/null)"
   if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo kvm=1; else echo kvm=0; fi
 fi
+df -Pk "$HOME" 2>/dev/null | awk 'NR == 2 { print "disk_free_kb=" $4 }'
 `;
 
 export interface RemoteProbe {
@@ -100,6 +109,16 @@ export interface RemoteProbe {
   xcode: string | null;
   simctl: boolean;
   kvm: boolean | null;
+  /** macOS: `xcode-select -p`; null when unknown. */
+  xcodePath: string | null;
+  /** macOS: developer mode (`DevToolsSecurity -status`); null when unknown. */
+  devTools: boolean | null;
+  /** Logical CPUs; null when unknown. */
+  cpus: number | null;
+  /** macOS: free + inactive + speculative memory (`vm_stat`); null when unknown. */
+  memFreeBytes: number | null;
+  /** Free disk under the home; null when unknown. */
+  diskFreeBytes: number | null;
 }
 
 export function parseProbe(stdout: string): RemoteProbe {
@@ -125,8 +144,23 @@ export function parseProbe(stdout: string): RemoteProbe {
     vm: flag("vm"),
     xcode: text("xcode"),
     simctl: values.get("simctl") === "1",
-    kvm: flag("kvm")
+    kvm: flag("kvm"),
+    xcodePath: text("xcode_path"),
+    devTools: flag("devtools"),
+    cpus: positive(values.get("cpus")),
+    memFreeBytes: positive(values.get("mem_free_bytes")),
+    diskFreeBytes: kilobytes(values.get("disk_free_kb"))
   };
+}
+
+function positive(value: string | undefined): number | null {
+  const number = Number(value);
+  return value !== undefined && value !== "" && Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function kilobytes(value: string | undefined): number | null {
+  const kb = positive(value);
+  return kb === null ? null : kb * 1024;
 }
 
 /** The env every device command in the box runs with: the probed PATH with Node's dir first. */

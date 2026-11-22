@@ -13,7 +13,10 @@
  * 3. the pinned tools in the box (from the shipped lockfile; skipped when the cache restored them);
  * 4. the SDK, system image and the profiles' AVDs (skipped when the cache restored them);
  * 5. the first profile's golden snapshot `orq-golden` (the cache's, or made here: cold boot, settle,
- *    guest settings, dp cutout, named save; GPU modes tried in order, the working one recorded);
+ *    guest settings, dp cutout, named save; GPU modes tried in order, the working one recorded — an
+ *    own machine with a usable GPU tries `-gpu host` first, and a `host` boot that fails or renders
+ *    in software is remembered in `android-host.json` for that GPU and emulator, so later goldens
+ *    go straight to the software modes);
  * 6. the hub (detached through `hub-launcher.mjs`, uploaded; `--require-token`, the token read
  *    from its 0600 state file in the box, never argv or logs) and the agent-device daemon, both
  *    forwarded to this machine; the local 0600 `--config`; agent-device on this machine.
@@ -42,7 +45,8 @@ import {
   type DeviceProfile,
   type DeviceReadinessCheck,
   type DevicesSettings,
-  type DeviceSummary
+  type DeviceSummary,
+  type MachineProblem
 } from "@orquester/api";
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
@@ -83,10 +87,16 @@ import { boxExecutor } from "./android-executor.ts";
 import {
   ANDROID_PROBE_SCRIPT,
   type AndroidBoxProbe,
+  androidCapacityBasis,
+  androidProbeProblems,
   BOX_GOLDEN_MARKER,
   BOX_GOLDEN_SNAPSHOT,
-  BOX_GPU_MODES,
   boxAndroidCapacity,
+  boxGpuModes,
+  gpuSignature,
+  HOST_GPU_MODE,
+  rendersInSoftware,
+  usableHostGpu,
   boxAndroidRoot,
   boxAvdState,
   boxBaseEnv,
@@ -98,6 +108,7 @@ import {
   parseAndroidProbe,
   screenOfConfig
 } from "./android-remote.ts";
+import { unreachableProblem } from "./problems.ts";
 import { DEADLINE_MARGIN_MS } from "./host.ts";
 import { ensureLocalAgentDevice, localAgentDeviceEntry } from "./local-agent-device.ts";
 import { installedToolVersion, INSTALL_TOOLS_SCRIPT, outputTail, writeBoxToolLocks } from "./remote.ts";
@@ -203,6 +214,8 @@ export class BoxAndroidHost implements DeviceHost {
   private stateExtra: HostStateFile["extra"] = {};
   private stateWrites: Promise<void> = Promise.resolve();
   private memAvailable: number | null = null;
+  /** When the probe or the memory sample last ran (the capacity basis's `probedAt`). */
+  private sampledAt: string | null = null;
   private timers: ReturnType<typeof setInterval>[] = [];
   private cache: CacheFinding | null = null;
   private tearingDown = false;
@@ -272,17 +285,32 @@ export class BoxAndroidHost implements DeviceHost {
   capacity(): DeviceCapacity {
     const used = this.leasedCount();
     if (!this.deps.settings().android.enabled || !this.probe) return { used, total: 0 };
-    return { used, total: this.capacityTotal() };
+    return { used, total: this.capacityTotal(), basis: androidCapacityBasis(this.probe, this.memAvailable, this.sampledAt ?? new Date(this.now()).toISOString()) };
   }
 
+  /** From the probe: CPUs, free memory, and on an own machine its free disk too (rented runners have room to spare). */
   private capacityTotal(): number {
     const running = [...this.emulators.values()].filter((record) => !record.golden).length;
     return boxAndroidCapacity({
       cpus: this.probe?.cpus ?? 1,
       memAvailableBytes: this.memAvailable,
       running,
-      ...(this.kind === "byo" ? { cap: this.deps.settings().android.maxLocalDevices } : {})
+      ...(this.kind === "byo" ? { freeDiskBytes: this.probe?.diskFreeBytes ?? null } : {})
     });
+  }
+
+  /** An own machine's environment problems, each with its fix: what its probe found, and being asleep or offline. */
+  problems(): MachineProblem[] {
+    if (this.kind !== "byo") return [];
+    const machine = this.machineName();
+    if (!this.deps.connection()?.connected && this.deps.record()?.state === "ready") return [unreachableProblem(machine, "linux")];
+    return this.probe ? androidProbeProblems(this.probe, machine) : [];
+  }
+
+  /** The machine's own name ("jasper"), for problem messages. */
+  private machineName(): string {
+    const name = this.deps.record()?.machineName;
+    return typeof name === "string" && name ? name : "Your Linux machine";
   }
 
   box(): DeviceHostBoxInfo | null {
@@ -477,14 +505,16 @@ export class BoxAndroidHost implements DeviceHost {
   }
 
   private async probeBox(signal?: AbortSignal): Promise<AndroidBoxProbe> {
-    const result = await this.x.exec("/bin/sh", ["-c", ANDROID_PROBE_SCRIPT], { timeoutMs: this.timing.commandMs, ...(signal ? { signal } : {}) });
+    const root = boxAndroidRoot({ provider: this.deps.record()?.provider ?? "byo", home: this.link().sys.home });
+    const result = await this.x.exec("/bin/sh", ["-c", ANDROID_PROBE_SCRIPT, "probe", root], { timeoutMs: this.timing.commandMs, ...(signal ? { signal } : {}) });
     if (result.exitCode !== 0) throw new Error(`the probe did not run: ${outputTail(result.stderr) || `exit ${result.exitCode}`}`);
     const probe = parseAndroidProbe(result.stdout);
+    const before = this.probe === null ? null : JSON.stringify(this.problems());
     this.probe = probe;
-    if (!this.layoutValue && probe.nodePath) {
-      const root = boxAndroidRoot({ provider: this.deps.record()?.provider ?? "byo", home: this.link().sys.home });
-      this.layoutValue = androidLayoutAt(root);
-    }
+    this.sampledAt = new Date(this.now()).toISOString();
+    if (probe.memAvailableBytes !== null) this.memAvailable = probe.memAvailableBytes;
+    if (before !== null && before !== JSON.stringify(this.problems())) this.emitChange();
+    if (!this.layoutValue && probe.nodePath) this.layoutValue = androidLayoutAt(root);
     if (this.layoutValue && probe.nodePath) {
       this.env = buildAndroidEnv(this.layoutValue, boxBaseEnv(probe), { user: probe.user, nodePath: probe.nodePath, adbPort: adbServerPort(this.layoutValue.devices) });
       await this.readToolVersions();
@@ -609,7 +639,8 @@ export class BoxAndroidHost implements DeviceHost {
       if (this.instancesOf(profile.id) > 0) return null;
       const kvm = this.kvmMode();
       const deviceDensity = (await readAvdMarker(layout.avd, profile.id, this.x))?.deviceDensity;
-      const modes = BOX_GPU_MODES[this.kind];
+      const modes = this.gpuModes(revision);
+      const hostGpu = this.probe ? usableHostGpu(this.probe.gpu) : null;
       const failures: string[] = [];
       for (const gpu of modes) {
         await clearGolden(layout.avd, profile.id, this.x);
@@ -640,23 +671,47 @@ export class BoxAndroidHost implements DeviceHost {
               snapshotName: BOX_GOLDEN_SNAPSHOT,
               bootTimeoutMs: this.timing.goldenBootMs,
               density: avdHardware(profile).density,
-              ...(deviceDensity ? { cutoutDensity: deviceDensity } : {})
+              ...(deviceDensity ? { cutoutDensity: deviceDensity } : {}),
+              ...(gpu === HOST_GPU_MODE ? { checkRender: (serial: string, renderSignal: AbortSignal) => this.checkHardwareRender(serial, renderSignal) } : {})
             },
             signal,
             onProgress
           );
+          if (gpu === HOST_GPU_MODE) await this.rememberHostGpu(null);
           const marker: BoxGoldenMarker = { snapshot: BOX_GOLDEN_SNAPSHOT, gpu, configHash: profileHash(profile), emulatorRevision: revision, createdAt: new Date(this.now()).toISOString() };
           await this.x.writeText(posix.join(avdDir(layout.avd, profile.id), BOX_GOLDEN_MARKER), `${JSON.stringify(marker)}\n`);
           this.deps.logger.info(`[devices] golden ${profile.id} on ${this.id}: made with -gpu ${gpu}`);
           return { snapshot: BOX_GOLDEN_SNAPSHOT, gpu, source: "built" as const };
         } catch (error) {
           if (signal.aborted) throw error;
+          // `host` failed on this GPU and emulator: later goldens go straight to the software modes.
+          if (gpu === HOST_GPU_MODE && hostGpu) await this.rememberHostGpu(gpuSignature(hostGpu, revision));
           failures.push(`${gpu}: ${errorText(error)}`);
           this.deps.logger.warn(`[devices] golden ${profile.id} on ${this.id} with -gpu ${gpu} failed: ${errorText(error)}`);
         }
       }
       throw new Error(failures.join("; "));
     });
+  }
+
+  /** The GPU modes a golden made here tries now, best first ({@link boxGpuModes}). */
+  private gpuModes(emulatorRevision: string | null): string[] {
+    const failed = this.stateExtra.gpuHostFailed;
+    return boxGpuModes(this.kind, this.probe ? usableHostGpu(this.probe.gpu) : null, typeof failed === "string" ? failed : null, emulatorRevision);
+  }
+
+  /** A `host` golden boot must render on the GPU: the emulator silently falls back to SwiftShader for a GPU it blocklists. */
+  private async checkHardwareRender(serial: string, signal: AbortSignal): Promise<void> {
+    const dump = await this.x.exec(adbPath(this.layout().sdk), ["-s", serial, "shell", "dumpsys SurfaceFlinger"], { env: this.env!, signal, timeoutMs: 30_000 });
+    if (dump.exitCode === 0 && rendersInSoftware(dump.stdout)) throw new Error("-gpu host fell back to software rendering (the emulator does not accept this GPU or its driver)");
+  }
+
+  /** Remember (or, with null, forget) the GPU and emulator `-gpu host` failed on, in the box's state file. */
+  private async rememberHostGpu(signature: string | null): Promise<void> {
+    if ((this.stateExtra.gpuHostFailed ?? null) === signature) return;
+    if (signature === null) delete this.stateExtra.gpuHostFailed;
+    else this.stateExtra.gpuHostFailed = signature;
+    await this.persistState();
   }
 
   private async helperApks(): Promise<string[]> {
@@ -803,7 +858,7 @@ export class BoxAndroidHost implements DeviceHost {
     }
     signal.throwIfAborted();
     progress("start-device", `Starting ${profile.label}`);
-    const gpu = golden?.gpu ?? (BOX_GPU_MODES[this.kind])[0]!;
+    const gpu = golden?.gpu ?? this.gpuModes(await this.emulatorRevision())[0]!;
     let record: EmulatorRecord;
     try {
       try {
@@ -1185,7 +1240,11 @@ export class BoxAndroidHost implements DeviceHost {
   private async sample(): Promise<void> {
     if (!this.deps.connection()?.connected) return;
     const before = this.capacity().total;
-    this.memAvailable = await this.x.memAvailable().catch(() => this.memAvailable);
+    const memory = await this.x.memAvailable().catch(() => null);
+    if (memory !== null) {
+      this.memAvailable = memory;
+      this.sampledAt = new Date(this.now()).toISOString();
+    }
     if (this.capacity().total !== before) this.emitChange();
   }
 

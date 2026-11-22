@@ -85,6 +85,11 @@ export interface GoldenDeps {
   cutoutDensity?: number;
   /** The AVD's framebuffer density (`hw.lcd.density` after the patch). */
   density?: number;
+  /**
+   * Once booted, before anything else: reject when the boot does not render as it must (a `host`
+   * GPU boot that fell back to a software rasterizer); the attempt then fails and is cleaned up.
+   */
+  checkRender?(serial: string, signal: AbortSignal): Promise<void>;
 }
 
 /** How long a restarted SystemUI gets to draw its status bar and cutout before going on. */
@@ -228,6 +233,7 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
     const qemu = pid;
     await waitForBootCompleted({ exec: deps.exec, adb, env: deps.env, serial, alive: () => isProcessAlive(qemu, x), signal, timeoutMs: deps.bootTimeoutMs ?? GOLDEN_BOOT_TIMEOUT_MS });
     deps.logger.info(`[devices] golden ${profile.id}: booted in ${Math.round((Date.now() - started) / 1000)} s`);
+    if (deps.checkRender) await deps.checkRender(serial, signal);
     report("Waiting for first-boot work to settle", 25);
     const settleStart = Date.now();
     const settled = await waitForSettle(() => sampleCpuPercent(qemu, SETTLE_WINDOW_MS, signal, x), {

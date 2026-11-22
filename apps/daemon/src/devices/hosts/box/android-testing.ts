@@ -138,6 +138,8 @@ export interface FakeLinuxBoxOptions {
   cpus?: number;
   /** The fake box's MemAvailable, independent of the test host's current load (default 64 GiB). */
   memAvailableBytes?: number;
+  /** The probe's free disk under the device dir (default: not reported). */
+  diskFreeBytes?: number;
 }
 
 export interface FakeLinuxBox {
@@ -206,7 +208,8 @@ export async function createFakeLinuxBox(options: FakeLinuxBoxOptions = {}): Pro
     "java_home=",
     "unzip=1",
     "sudo=0",
-    `cpus=${options.cpus ?? 16}`
+    `cpus=${options.cpus ?? 16}`,
+    ...(options.diskFreeBytes !== undefined ? [`disk_free_kb=${Math.floor(options.diskFreeBytes / 1024)}`] : [])
   ].join("\n");
   const execs: string[][] = [];
   const envValues: string[] = [];

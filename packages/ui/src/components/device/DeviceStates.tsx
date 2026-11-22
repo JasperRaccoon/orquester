@@ -206,12 +206,26 @@ export function DevicePicker(props: {
       ) : null}
       <div className="flex flex-col gap-4">
         {props.groups.map((group) => (
-          <section key={group.hostId ?? group.platform} aria-label={group.title}>
-            <div className="mb-1.5 flex items-center gap-1.5 px-0.5">
-              <PlatformGlyph platform={group.platform} className="text-neutral-500" />
-              <h4 className="text-[11px] font-medium uppercase tracking-wider text-neutral-500">{group.title}</h4>
+          <section key={group.key} aria-label={group.title}>
+            <div className="mb-1.5 flex min-w-0 items-center gap-1.5 px-0.5">
+              <PlatformGlyph platform={group.platform} className="shrink-0 text-neutral-500" />
+              <h4 className="truncate text-[11px] font-medium uppercase tracking-wider text-neutral-500">{group.title}</h4>
             </div>
             {group.note ? <p className="mb-2 px-0.5 text-[11.5px] leading-relaxed text-neutral-500">{group.note}</p> : null}
+            {group.problems?.map((problem) => (
+              <p key={problem.code} className="mb-2 flex items-start gap-1.5 px-0.5 text-[11.5px] leading-relaxed text-neutral-400">
+                <AlertTriangle size={12} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+                <span className="min-w-0 [overflow-wrap:anywhere]">
+                  {problem.message}
+                  {problem.fix ? (
+                    <>
+                      {" "}
+                      <span className="text-neutral-500">Fix:</span> <span className="select-text text-neutral-300">{problem.fix}</span>
+                    </>
+                  ) : null}
+                </span>
+              </p>
+            ))}
             <ul className="divide-y divide-neutral-800/70 overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40">
               {group.rows.map((row) => {
                 const opening = props.opening === pickerRowKey(row);

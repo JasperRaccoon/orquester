@@ -1,6 +1,10 @@
 /**
  * Settings → Devices (devices spec §10.5): the "Device simulators" plugin's own page.
  *
+ * - **Device hosts**: every host — this one, the owner's machines, rented ones — with its state,
+ *   platforms, capacity (and what it was measured from), its place in placement and the problems
+ *   its probes found with their fixes. Which machines run devices is switched per machine in
+ *   Settings → Machines (linked here, not duplicated).
  * - **Android on this host**: the readiness checklist with Install all / Repair and per-item fixes,
  *   the live setup job (steps, percent, log line), the SDK licence notice, profiles, capacity.
  * - **iPhone & iPad (Mac hosts)**: the box provider (Blacksmith, set up in the Ephemeral AI VMs
@@ -19,8 +23,10 @@ import {
   Apple,
   Bot,
   CheckCircle2,
+  AlertTriangle,
   ChevronRight,
   Circle,
+  Laptop,
   ExternalLink,
   Loader2,
   MinusCircle,
@@ -59,6 +65,7 @@ import { useAppStore } from "../../store/app";
 import { Button, ConfirmDialog, Input } from "../ui";
 import { Switch } from "../ui/switch";
 import {
+  deviceHostRows,
   fixLabel,
   macHosts,
   macHostView,
@@ -355,6 +362,74 @@ const HOST_STATUS_TEXT: Readonly<Record<DeviceHostSummary["status"], string>> = 
 // ---------------------------------------------------------------------------
 // Sections
 // ---------------------------------------------------------------------------
+
+/** Every device host in placement order, with its problems; which machines run devices is Settings → Machines' switch. */
+const HostsSection: React.FC<{ hosts: readonly DeviceHostSummary[]; settings: DevicesSettingsValue; onMachines: () => void }> = ({ hosts, settings, onMachines }) => {
+  const rows = deviceHostRows(hosts, settings);
+  return (
+    <SettingsSection
+      title="Device hosts"
+      description="Where devices run. Placement tries this host first, then your own machines, then rented hosts."
+      actions={
+        <Button size="sm" variant="outline" onClick={onMachines}>
+          <Laptop size={12} />
+          Machines
+        </Button>
+      }
+    >
+      {rows.length === 0 ? (
+        <EmptyState
+          icon={<Server size={16} />}
+          title="No device host yet"
+          description="Turn Android on below for this host, turn Device simulators on for one of your machines in Settings → Machines, or let the first iPhone rent a Mac."
+          className="py-5"
+        />
+      ) : (
+        rows.map((row) => (
+          <SettingRow
+            key={row.id}
+            label={
+              <span className="inline-flex min-w-0 items-center gap-1.5">
+                {row.order !== null ? <span className="shrink-0 text-[11px] tabular-nums text-neutral-500">{row.order}.</span> : null}
+                <span className="truncate">{row.label}</span>
+              </span>
+            }
+            icon={row.owner === "rented" ? <Server size={14} /> : <Laptop size={14} />}
+            description={
+              <span className="block space-y-1">
+                <span className="block">{[row.ownerText, row.platformsText, row.capacityText, row.statusDetail].filter(Boolean).join(" · ")}</span>
+                <span className="block text-neutral-500">{row.placementText}</span>
+                {row.problems.map((problem) => (
+                  <span key={problem.code} className="flex items-start gap-1.5 text-neutral-300">
+                    <AlertTriangle size={12} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+                    <span className="min-w-0 [overflow-wrap:anywhere]">
+                      {problem.message}
+                      {problem.fix ? (
+                        <>
+                          {" "}
+                          <span className="text-neutral-500">Fix:</span> <span className="select-text font-mono text-[11px] text-neutral-200">{problem.fix}</span>
+                        </>
+                      ) : null}
+                    </span>
+                  </span>
+                ))}
+              </span>
+            }
+          >
+            <Badge tone={HOST_STATUS_TONE[row.status]}>{HOST_STATUS_TEXT[row.status]}</Badge>
+          </SettingRow>
+        ))
+      )}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-xs text-neutral-500">
+        <span>Which of your machines run device simulators (and whether agents see them at all) is set per machine.</span>
+        <button type="button" onClick={onMachines} className="inline-flex items-center gap-0.5 text-neutral-200 underline-offset-2 hover:underline">
+          Settings → Machines
+          <ChevronRight size={12} aria-hidden />
+        </button>
+      </div>
+    </SettingsSection>
+  );
+};
 
 const AndroidSection: React.FC<{ settings: DevicesSettingsValue; host: DeviceHostSummary | undefined; ctx: SaveContext; onError: (text: string) => void }> = ({
   settings,
@@ -993,6 +1068,7 @@ export const DevicesSettings: React.FC = () => {
         <Notice tone="info">Loading…</Notice>
       ) : (
         <>
+          <HostsSection hosts={hosts} settings={settings} onMachines={() => openSettings("machines")} />
           <AndroidSection settings={settings} host={localHost} ctx={ctx} onError={setError} />
           <IosSection settings={settings} hosts={hosts} ctx={ctx} onError={setError} />
           <AgentsSection settings={settings} ctx={ctx} />
