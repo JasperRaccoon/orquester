@@ -13,6 +13,8 @@ import {
   canPairOverSsh,
   canRemove,
   canWake,
+  wakeResultView,
+  wakeSenderName,
   EMPTY_PAIR_FORM,
   machineStateView,
   pairRequestOf,
@@ -118,6 +120,8 @@ const ProblemNotice: React.FC<{ problem: MachineProblem; tone?: "warn" | "danger
 
 const MachineCard: React.FC<{ machine: MachineSummary; pairingOn: boolean }> = ({ machine, pairingOn }) => {
   const api = useAppStore((s) => s.api);
+  const { machines } = useMachinesState();
+  const wakeVia = wakeSenderName(machine.wake.via, machines);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -162,13 +166,14 @@ const MachineCard: React.FC<{ machine: MachineSummary; pairingOn: boolean }> = (
               variant="outline"
               disabled={busy !== null}
               aria-label={`Wake ${machine.name}`}
+              title={wakeVia ? `Sends a Wake-on-LAN packet through ${wakeVia}, on the same network.` : "Sends a Wake-on-LAN packet from another machine on the same network."}
               onClick={() =>
                 void run(
                   "wake",
                   async () => {
-                    const result = await wakeMachine(api!, machine.id);
-                    if (result.sent) setNotice(`Wake sent. ${machine.name} shows Ready once it is back on the tailnet.`);
-                    else setError(result.problem ? `${result.problem.message}${result.problem.fix ? ` ${result.problem.fix}` : ""}` : "Nothing could send the wake.");
+                    const view = wakeResultView(await wakeMachine(api!, machine.id), machine, machines);
+                    if (view.sent) setNotice(view.text);
+                    else setError(view.text);
                   },
                   "Could not wake the machine."
                 )
@@ -239,8 +244,8 @@ const MachineCard: React.FC<{ machine: MachineSummary; pairingOn: boolean }> = (
         {machine.problems.map((problem) => (
           <ProblemNotice key={`${problem.code}:${problem.message}`} problem={problem} />
         ))}
-        {notice && <p className="text-xs text-neutral-400">{notice}</p>}
-        {error && <p className="text-xs text-danger">{error}</p>}
+        {notice && <p className="break-words text-xs text-neutral-400">{notice}</p>}
+        {error && <p className="break-words text-xs text-danger">{error}</p>}
       </div>
 
       {pairing && <PairOverSshDialog machine={machine} onClose={() => setPairing(false)} />}

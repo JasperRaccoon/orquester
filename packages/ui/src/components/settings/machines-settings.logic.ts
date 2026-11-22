@@ -4,7 +4,7 @@
  * decides and enforces every policy; these only choose what to show and what to send.
  */
 
-import type { MachineCapability, MachineState, MachineSummary, MachineVisibility, PairMachineOverSshRequest } from "@orquester/api";
+import type { MachineCapability, MachineState, MachineSummary, MachineVisibility, PairMachineOverSshRequest, WakeMachineResponse } from "@orquester/api";
 
 import type { Tone } from "./primitives";
 
@@ -40,6 +40,26 @@ export function canPairOverSsh(machine: Pick<MachineSummary, "self" | "state" | 
 /** Wake is offered on a machine that is asleep and that something can send the magic packet to. */
 export function canWake(machine: Pick<MachineSummary, "self" | "state" | "wake">): boolean {
   return machine.self !== true && machine.state === "asleep" && machine.wake.canWake;
+}
+
+/** The name of the machine that would send (or sent) a wake, when it is in the list. */
+export function wakeSenderName(via: string | null | undefined, machines: readonly Pick<MachineSummary, "id" | "name">[] | null): string | null {
+  if (!via) return null;
+  return machines?.find((machine) => machine.id === via)?.name ?? null;
+}
+
+/** What the Wake button reports: the wake went out (through which machine), or why not and the fix. */
+export function wakeResultView(
+  result: WakeMachineResponse,
+  machine: Pick<MachineSummary, "name">,
+  machines: readonly Pick<MachineSummary, "id" | "name">[] | null
+): { sent: boolean; text: string } {
+  if (result.sent) {
+    const via = wakeSenderName(result.via, machines);
+    return { sent: true, text: `Wake sent${via ? ` through ${via}` : ""}. ${machine.name} shows Ready once it is back on the tailnet.` };
+  }
+  if (!result.problem) return { sent: false, text: "Nothing could send the wake." };
+  return { sent: false, text: result.problem.fix ? `${result.problem.message} Fix: ${result.problem.fix}` : result.problem.message };
 }
 
 /** Remove unpairs a paired machine (never the server itself). */
