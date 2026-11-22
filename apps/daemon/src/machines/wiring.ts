@@ -16,10 +16,11 @@ import { machinesStorePath } from "@orquester/config";
 import type { FastifyInstance } from "fastify";
 
 import type { DaemonBoxes } from "../boxes/wiring.ts";
+import type { MachineWakeToolPort } from "../mcp/daemon-api.ts";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { MachineAccessPort } from "./ports.ts";
 import { MachineRegistry, type MachineBoxSource } from "./registry.ts";
-import { registerMachineRoutes } from "./routes.ts";
+import { registerMachineRoutes, wakeApprovedForAgent } from "./routes.ts";
 import { MachinePolicyStore } from "./store.ts";
 import { createTailnetReader } from "./tailscale-peers.ts";
 import { createLocalWakeSender, MachineWake, type LocalWakeSender } from "./wake.ts";
@@ -42,6 +43,8 @@ export interface DaemonMachines {
   registry: MachineRegistry;
   /** What boxes, devices and agent tools enforce. */
   access: MachineAccessPort;
+  /** `wake_machine`'s wake of an Ask-first machine after its card (`DaemonApi.machineWakeApproved`). */
+  wakeTools: MachineWakeToolPort;
   /** After the box records loaded (`DaemonBoxes.start`). */
   start(): Promise<void>;
   registerRoutes(app: FastifyInstance): void;
@@ -122,6 +125,7 @@ export function createDaemonMachines(deps: DaemonMachinesDeps): DaemonMachines {
   return {
     registry,
     access: registry,
+    wakeTools: { wakeApproved: (machineId, threadId) => wakeApprovedForAgent(registry, machineId, threadId) },
     async start() {
       await registry.start();
       agentVisible = registry.anyAgentVisible();

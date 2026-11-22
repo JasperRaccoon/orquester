@@ -118,7 +118,7 @@ test("pairing and waking without their features answer a named problem; removing
   assert.deepEqual([after.machine.state, after.machine.visibility, after.machine.boxId], ["not-paired", "hidden", null]);
 });
 
-test("an agent's wake asks the wake for an agent's senders; the owner's for any of their machines", async (t) => {
+test("an agent wakes only a Free-use machine through the route, with an agent's senders; the owner wakes any with any sender", async (t) => {
   const { app, registry, asAgent } = await harness(t);
   const asked: { machineId: string; agent: boolean }[] = [];
   registry.setWake({
@@ -128,10 +128,16 @@ test("an agent's wake asks the wake for an agent's senders; the owner's for any 
       return { sent: true, via: "ts:nMINIPC0000CNTRL" };
     }
   });
-  assert.equal((await asAgent("POST", machineRoutes.wake(JASPER))).statusCode, 200);
+  // jasper is Ask first: an agent needs wake_machine's card, which the route cannot stand in for.
+  const refused = await asAgent("POST", machineRoutes.wake(JASPER));
+  assert.equal(refused.statusCode, 403);
+  assert.equal(refused.json().code, "MACHINE_APPROVAL_REQUIRED");
+  assert.deepEqual(asked, []);
   assert.equal((await app.inject({ method: "POST", url: machineRoutes.wake(JASPER) })).statusCode, 200);
+  await app.inject({ method: "PATCH", url: machineRoutes.machine(JASPER), payload: { visibility: "free" } });
+  assert.equal((await asAgent("POST", machineRoutes.wake(JASPER))).statusCode, 200);
   assert.deepEqual(asked, [
-    { machineId: JASPER, agent: true },
-    { machineId: JASPER, agent: false }
+    { machineId: JASPER, agent: false },
+    { machineId: JASPER, agent: true }
   ]);
 });

@@ -1921,7 +1921,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // GPT Image: generate_image's operation (it refuses while the plugin is off).
     gptImage: () => gptImage,
     // Desktops: desktop_action, abortable by the call.
-    desktops: () => desktops
+    desktops: () => desktops,
+    // Machines: wake_machine's wake of an Ask-first machine after its card (no route reaches it).
+    machines: () => machines.wakeTools
   });
 
   lineage.attachApi(services.internalApi);

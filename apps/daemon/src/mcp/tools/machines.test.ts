@@ -12,6 +12,7 @@ import { machineRoutes, type MachineSummary, type MachineVisibility } from "@orq
 
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
+import type { DaemonApi } from "../daemon-api.ts";
 import { executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
 
@@ -38,8 +39,14 @@ function daemon(visibility: MachineVisibility | null): FakeDaemonApi {
   api
     .on("GET", machineRoutes.list, { status: 200, body: { machines: [...(studio ? [studio] : []), minipc], problems: [] } })
     .on("GET", machineRoutes.machine(STUDIO), studio ? { status: 200, body: { machine: studio } } : { status: 404, body: { code: "MACHINE_NOT_FOUND", message: "No such machine." } })
-    .on("POST", machineRoutes.wake(STUDIO), { status: 200, body: { sent: true, via: MINIPC } });
-  return api;
+    // As the daemon's route: an agent wakes only a Free-use machine there.
+    .on("POST", machineRoutes.wake(STUDIO), visibility === "free" ? { status: 200, body: { sent: true, via: MINIPC } } : { status: 403, body: { code: "MACHINE_APPROVAL_REQUIRED", message: "Ask first." } });
+  // After a card: the daemon-internal wake.
+  const machineWakeApproved: DaemonApi["machineWakeApproved"] = async (machineId) => {
+    api.calls.push({ method: "POST", path: `internal:approved-wake:${machineId}` });
+    return { ok: true, value: { sent: true, via: MINIPC } };
+  };
+  return Object.assign(api, { machineWakeApproved });
 }
 
 async function wake(api: FakeDaemonApi, port: FakeApprovalPort) {
@@ -47,7 +54,7 @@ async function wake(api: FakeDaemonApi, port: FakeApprovalPort) {
   return { isError: result.isError === true, body: result.structuredContent as Record<string, unknown> };
 }
 
-const wakes = (api: FakeDaemonApi) => api.calls.filter((call) => call.method === "POST" && call.path === machineRoutes.wake(STUDIO)).length;
+const wakes = (api: FakeDaemonApi) => api.calls.filter((call) => call.method === "POST" && (call.path === machineRoutes.wake(STUDIO) || call.path === `internal:approved-wake:${STUDIO}`)).length;
 
 test("wake_machine: a Hidden machine (the daemon answers it as unknown) is refused with no card and no wake", async () => {
   const api = daemon(null);

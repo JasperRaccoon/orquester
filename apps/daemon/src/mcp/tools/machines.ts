@@ -7,8 +7,10 @@
  * `wake_machine` follows the machine's visibility: a Free-use machine wakes without a card; an
  * Ask-first one only after the owner approves a `machines` spend card (every permission mode, never
  * a grant, like `create_box`'s "Use your machine" card); a Hidden one is unknown (the daemon answers
- * 404 for it exactly as for an id that does not exist). The daemon sends an agent's wake only
- * through machines that are not Hidden.
+ * 404 for it exactly as for an id that does not exist). The daemon enforces it too: its wake route
+ * wakes only a Free-use machine for an agent (an Ask-first one is 403 `MACHINE_APPROVAL_REQUIRED`),
+ * and the approved wake goes through `DaemonApi.machineWakeApproved`, which no HTTP route reaches.
+ * The daemon sends an agent's wake only through machines that are not Hidden.
  *
  * The daemon decides what is visible: `GET machineRoutes.list` with the chat's agent principal
  * answers only machines that are not Hidden, not the daemon's own host and not switched off for
@@ -134,14 +136,24 @@ const wakeMachine = defineTool({
   async run(args, { api, caller, approval }) {
     if (caller.kind !== "thread") throw new ToolError("TOOL_NOT_FOUND", "wake_machine is a chat tool.");
     const machine = await visibleMachine(api, args.machine_id);
+    const approved = approval?.pins?.machineId === machine.id;
     // Fail closed: without the approved card only a machine that is Free use now.
-    if (approval?.pins?.machineId !== machine.id && machine.visibility !== "free") {
+    if (!approved && machine.visibility !== "free") {
       throw new ToolError("PERMISSION_DENIED", `Waking ${machine.name} needs the owner's approval on its card.`);
     }
     if (machine.state === "ready") return { machine_id: machine.id, sent: false, note: `${machine.name} is awake already (state ready).` };
-    const res = await api.request("POST", machineRoutes.wake(machine.id));
-    if (res.status >= 400) throw daemonError(res);
-    const result = res.body as WakeMachineResponse;
+    let result: WakeMachineResponse;
+    if (approved) {
+      // After the card: the daemon-internal wake (the route wakes only Free-use machines for an agent).
+      if (!api.machineWakeApproved) throw new ToolError("MACHINES_UNAVAILABLE", "Waking machines is not available here.");
+      const outcome = await api.machineWakeApproved(machine.id);
+      if (!outcome.ok) throw new ToolError(outcome.code, outcome.message);
+      result = outcome.value;
+    } else {
+      const res = await api.request("POST", machineRoutes.wake(machine.id));
+      if (res.status >= 400) throw daemonError(res);
+      result = res.body as WakeMachineResponse;
+    }
     if (!result.sent) {
       return { machine_id: machine.id, sent: false, problem: result.problem?.message ?? "Nothing could send the wake packet.", ...(result.problem?.fix ? { fix: result.problem.fix } : {}) };
     }

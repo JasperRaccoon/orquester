@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { tmpdir } from "node:os";
 import type { Readable } from "node:stream";
 import { agentChatThreadAttachmentsDir, appTmpDir } from "@orquester/config";
-import { desktopRoutes, type BoxSummary, type DesktopActionRequest, type DesktopActionResponse, type DeviceActionInput, type DeviceLeaseSummary, type DevicePlatform, type EventMessage } from "@orquester/api";
+import { desktopRoutes, type BoxSummary, type DesktopActionRequest, type DesktopActionResponse, type DeviceActionInput, type DeviceLeaseSummary, type DevicePlatform, type EventMessage, type WakeMachineResponse } from "@orquester/api";
 import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal, type HtmlRenderAppearance, type HtmlRenderReference } from "@orquester/api/agent-chat";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
@@ -87,6 +87,16 @@ export interface DaemonBoxCallOptions {
 export interface DaemonDesktopCallOptions {
   principal?: CallerPrincipal;
   signal?: AbortSignal;
+}
+
+/** `machineWakeApproved`'s options: who acts (forced by `withPrincipal`, as for `request`). */
+export interface DaemonMachineCallOptions {
+  principal?: CallerPrincipal;
+}
+
+/** What `machineWakeApproved` runs on (the machines registry, `machines/routes.ts` `wakeApprovedForAgent`). */
+export interface MachineWakeToolPort {
+  wakeApproved(machineId: string, threadId: string): Promise<DaemonOutcome<WakeMachineResponse>>;
 }
 
 /** What `desktopAction` runs an action on (the desktop manager). */
@@ -190,6 +200,12 @@ export interface DaemonApi {
   // Optional like the device operations; generate_image answers GPT_IMAGE_DISABLED without it.
   /** Generate or edit one image with the plugin's ChatGPT account; writes the project copy when asked. */
   generateImage?(input: GptImageToolInput, opts?: GptImageCallOptions): Promise<DaemonOutcome<GptImageToolResult>>;
+
+  // Machines (tailnet machines spec §4.8): `wake_machine`'s wake of an Ask-first machine after the
+  // owner approved its card. In-process only (the machines route refuses an agent's wake of an
+  // Ask-first machine), for an agent principal's chat. Optional like the device operations;
+  // wake_machine answers MACHINES_UNAVAILABLE without it.
+  machineWakeApproved?(machineId: string, opts?: DaemonMachineCallOptions): Promise<DaemonOutcome<WakeMachineResponse>>;
   readonly fsRoot: string;
   readonly workspacesDir: string;
 }
@@ -250,6 +266,8 @@ export class InjectDaemonApi implements DaemonApi {
       gptImage?: () => GptImageToolPort | null;
       // Desktops: the desktop manager behind desktop_action (absent: the action route, not abortable).
       desktops?: () => DesktopActionPort;
+      // Machines: the approved wake behind wake_machine's card (absent: not wired here).
+      machines?: () => MachineWakeToolPort | null;
     }
   ) {}
 
@@ -462,6 +480,20 @@ export class InjectDaemonApi implements DaemonApi {
     return runGptImageTool(this.opts.gptImage?.() ?? null, input, opts);
   }
 
+  // Machines: only for an agent principal's own chat.
+  async machineWakeApproved(machineId: string, opts?: DaemonMachineCallOptions): Promise<DaemonOutcome<WakeMachineResponse>> {
+    const port = this.opts.machines?.() ?? null;
+    if (!port) return { ok: false, code: "MACHINES_UNAVAILABLE", message: "Waking machines is not available here." };
+    const principal = opts?.principal;
+    if (principal?.kind !== "agent") return { ok: false, code: "PERMISSION_DENIED", message: "Waking a machine after its card is for agent chats only." };
+    try {
+      return await port.wakeApproved(machineId, principal.threadId);
+    } catch (error) {
+      console.error("[machines] an approved wake failed", error instanceof Error ? error.message : String(error));
+      return { ok: false, code: "INTERNAL", message: "The wake failed." };
+    }
+  }
+
   subscribe(listener: (event: EventMessage) => void): () => void {
     // `Broadcaster.publish` drops a sink whose `send` throws — never throw here.
     const sink = { send: (data: string) => { try { listener(JSON.parse(data) as EventMessage); } catch { /* ignore */ } } };
@@ -512,6 +544,8 @@ export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): Daemo
       : {}),
     // GPT Image: the generation acts for the bound principal's chat too.
     ...(api.generateImage ? { generateImage: (input: GptImageToolInput, opts?: GptImageCallOptions) => api.generateImage!(input, { ...opts, principal }) } : {}),
+    // Machines: the approved wake acts for the bound principal's chat too.
+    ...(api.machineWakeApproved ? { machineWakeApproved: (machineId: string, opts?: DaemonMachineCallOptions) => api.machineWakeApproved!(machineId, { ...opts, principal }) } : {}),
     get fsRoot() { return api.fsRoot; },
     get workspacesDir() { return api.workspacesDir; }
   };
