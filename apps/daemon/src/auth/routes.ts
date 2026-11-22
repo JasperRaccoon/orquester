@@ -452,8 +452,12 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
       if (result === "invalid-code") return invalidProof(reply, "code");
       if (result === "enabled") return enabledAlready();
       pendingSetups.delete(setupKey);
-      // Sessions from before the factor go; the caller just proved password and code. API tokens stay.
-      await deps.store.revokeDevicesExcept(request.authSession?.id ?? null);
+      // Sessions from before the factor go; the caller just proved password and code. API tokens
+      // stay. The factor is on now, so its recovery codes are answered whatever this does: the
+      // owner must never be left with a factor whose codes they have not seen.
+      await deps.store.revokeDevicesExcept(request.authSession?.id ?? null).catch((error: unknown) => {
+        logger.error("auth: two-step sign-in is on, but signing out the other devices failed", error instanceof Error ? error.name : typeof error);
+      });
       return { recoveryCodes: result };
     });
   });

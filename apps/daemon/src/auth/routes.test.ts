@@ -711,6 +711,21 @@ test("enabling: setup needs the password, the pending secret's code turns it on,
   assert.ok(![secret, code, PASSWORD, ...recoveryCodes].some((value) => log.includes(value)), "no secret, code or password in the request log");
 });
 
+test("enabling answers the recovery codes even when signing the other devices out fails", async (t) => {
+  const { h, time, factor } = await factorHarness(t, { enable: false });
+  const caller = (await login(h, PASSWORD, "198.51.100.14")).json() as AuthIssuedTokenResponse;
+  t.mock.method(console, "error", () => undefined);
+  t.mock.method(h.store, "revokeDevicesExcept", async () => {
+    throw new Error("disk full");
+  });
+  const post = (url: string, payload: object) => h.remote.inject({ method: "POST", url, headers: bearer(caller.token), payload });
+  const { secret } = (await post(authRoutes.secondFactorSetup, { password: PASSWORD })).json() as AuthSecondFactorSetupResponse;
+  const enabled = await post(authRoutes.secondFactorEnable, { code: authenticatorCode(secret, time.now()) });
+  assert.equal(enabled.statusCode, 200);
+  assert.equal((enabled.json() as AuthRecoveryCodesResponse).recoveryCodes.length, 10);
+  assert.equal(factor.isEnabled(), true);
+});
+
 test("management proofs: a wrong one is 403 (never 401); new recovery codes replace the old; the socket needs no proof", async (t) => {
   const { h, factor, recoveryCodes, freshCode } = await factorHarness(t);
   const owner = await signIn(h, freshCode(), "198.51.100.10");
