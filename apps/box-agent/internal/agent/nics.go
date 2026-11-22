@@ -9,6 +9,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -245,8 +246,14 @@ func nicProbe(ctx context.Context, name string, args ...string) (string, bool) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	hideWindow(cmd)
-	out, err := cmd.Output()
-	return string(out), err == nil
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Start(); err != nil {
+		return "", false
+	}
+	resetChildOOMScore(cmd.Process.Pid)
+	err := cmd.Wait()
+	return out.String(), err == nil
 }
 
 // nicMonitor holds the current NIC list and the cached probe details.

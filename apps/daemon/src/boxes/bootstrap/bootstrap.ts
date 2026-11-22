@@ -415,7 +415,9 @@ exec "$B" run
 /**
  * OOM protection (tailnet machines spec §4.9) for a Linux VM bootstrapped as root under systemd:
  * `tailscaled` and `orq-agent` get {@link OOM_DROPIN_NAME} drop-ins, so the kernel's OOM killer
- * never picks them and the box stays reachable. `orq-agent`'s is written before `install-service`,
+ * never picks them and the box stays reachable (`orq-agent` gives every process it starts the neutral
+ * score back, `apps/box-agent/internal/agent/oom_linux.go`, so its work stays killable). `orq-agent`'s
+ * is written before `install-service`,
  * whose restart applies it; the running `tailscaled` gets the value at once (never restarted: the
  * box may be reached through it). `sshd` needs nothing: see {@link posixMachineFixes}.
  */
