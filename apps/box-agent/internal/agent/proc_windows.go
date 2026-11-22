@@ -355,6 +355,10 @@ func startConPTY(s *startSpec) (process, error) {
 	}
 	si := &windows.StartupInfoEx{ProcThreadAttributeList: attrs.List()}
 	si.Cb = uint32(unsafe.Sizeof(*si))
+	// Without this the child takes orq-agent's own standard handles whenever they are pipes or
+	// files (run from a redirected shell, over SSH, under a supervisor), and reads and writes
+	// those instead of the pseudoconsole. Null handles make it use the pseudoconsole's.
+	si.Flags = windows.STARTF_USESTDHANDLES
 	appName, err := windows.UTF16PtrFromString(s.path)
 	if err != nil {
 		return fail(err)
