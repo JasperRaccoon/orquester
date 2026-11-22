@@ -72,14 +72,21 @@ func writeDesktopMarker(dataDir string, m desktopMarker) error {
 	return writeFileAtomic(filepath.Join(dataDir, desktopMarkerFile), append(data, '\n'), 0o600)
 }
 
+// desktopPipeUserAccess is what the desktop user may do with the helper pipe, and all the helper
+// asks for when it dials: read and write (FILE_GENERIC_READ | FILE_GENERIC_WRITE) without
+// FILE_APPEND_DATA, which on a pipe is FILE_CREATE_PIPE_INSTANCE. With it any process of that
+// user, unelevated too, could add a server instance of the service's pipe; the helper would take
+// it for the service (it is the same pipe, owned by LocalSystem) and run its commands elevated.
+const desktopPipeUserAccess = 0x0012019b
+
 // desktopPipeSecurity is the helper pipe's security descriptor: owned by LocalSystem (the helper
 // checks that, so no other process can stand in for the service), and open to LocalSystem and the
-// desktop user alone.
+// desktop user alone; only LocalSystem may create its instances.
 func desktopPipeSecurity(sid string) (string, error) {
 	if !userSIDPattern.MatchString(sid) {
 		return "", fmt.Errorf("%q is not a user account's SID", sid)
 	}
-	return "O:SYG:SYD:P(A;;GA;;;SY)(A;;GRGW;;;" + sid + ")", nil
+	return fmt.Sprintf("O:SYG:SYD:P(A;;GA;;;SY)(A;;0x%08x;;;%s)", desktopPipeUserAccess, sid), nil
 }
 
 type desktopTaskData struct {
