@@ -198,7 +198,7 @@ import { applyKnowledgeEvent, loadKnowledge, resetKnowledge } from "../lib/knowl
 // The Device simulators plugin's module store (hosts, leases, settings; loaded while the plugin is on).
 import { DEVICES_CHANNEL, DEVICES_PLUGIN_ID } from "@orquester/api";
 import { STORAGE_EVENTS_CHANNEL } from "@orquester/api";
-import { isSecondFactorChallenge } from "@orquester/api";
+import { authErrorCodes, isSecondFactorChallenge } from "@orquester/api";
 import { applyStorageEvent } from "../components/system/storage/storage-status";
 import { applyDevicesEvent, loadDevices, resetDevices, setDevicesPluginOn } from "../lib/devices/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
@@ -619,15 +619,67 @@ function dropCredential(
   });
 }
 
-/** The sign-in prompt's message for a failed login. */
+/** A sign-in waiting for its authentication code (see `AppState.authPrompt`). */
+export interface PendingSecondFactor {
+  challenge: string;
+  /** ISO time the daemon stops accepting the challenge. */
+  expiresAt: string;
+  /** The normalized username the password was checked for (stored once the sign-in completes). */
+  username: string;
+}
+
+const SIGN_IN_TIMED_OUT = "Sign-in timed out. Enter your password again.";
+
+/**
+ * Keep the session token a login answered: only a well-formed one is stored (with the username,
+ * to pre-fill the next sign-in), then the client reconnects with it. Nothing happens when the
+ * active client changed while the login was in flight.
+ */
+async function completeSignIn(
+  get: StoreApi<AppState>["getState"],
+  set: StoreApi<AppState>["setState"],
+  api: ApiClient,
+  username: string,
+  token: string
+): Promise<void> {
+  if (get().api !== api || !asSessionToken(token)) {
+    if (get().api === api) set({ authError: "The server sent an invalid session token." });
+    return;
+  }
+  storeToken(api.connection.endpoint, token);
+  storeUsername(api.connection.endpoint, username);
+  set({ api: apiWithCredential(api, token), authPrompt: null, authError: null });
+  await get().connect();
+}
+
+/** The `code` of a daemon error body (`{ code, message }`), if any. */
+function apiErrorCode(error: ApiError): unknown {
+  const body = error.body;
+  return typeof body === "object" && body !== null ? (body as { code?: unknown }).code : undefined;
+}
+
+/** Whether the second-factor route refused the challenge itself: the sign-in restarts at the password. */
+function isChallengeExpired(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401 && apiErrorCode(error) === authErrorCodes.challengeExpired;
+}
+
+/** The sign-in prompt's message for a failed login (password or code step). */
 function signInError(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.status === 401) return "Incorrect username or password.";
+    if (error.status === 401) {
+      const code = apiErrorCode(error);
+      if (code === authErrorCodes.invalidCode) return "That code didn't work.";
+      if (code === authErrorCodes.challengeExpired) return SIGN_IN_TIMED_OUT;
+      return "Incorrect username or password.";
+    }
     if (error.status === 429) {
       const seconds = error.retryAfterSeconds;
       return seconds ? `Too many failed attempts. Try again in ${seconds}s.` : "Too many failed attempts. Try again later.";
     }
     if (error.serverMessage) return error.serverMessage;
+    if (error.status === 503 && apiErrorCode(error) === authErrorCodes.secondFactorUnavailable) {
+      return "Sign-in is unavailable on this server right now.";
+    }
   }
   return "Could not reach the server. Try again.";
 }
@@ -949,7 +1001,12 @@ export interface AppState {
   sidebarDrawerOpen: boolean;
 
   // auth (web → password-protected HTTP daemon)
-  authPrompt: { connectionId: string } | null;
+  /**
+   * The open sign-in prompt. `secondFactor` is set while it asks for an authentication code: the
+   * daemon accepted the password and answered a challenge. It lives only here (never stored), and
+   * any prompt opened anew (`{ connectionId }`) starts back at the password.
+   */
+  authPrompt: { connectionId: string; secondFactor?: PendingSecondFactor } | null;
   /** Whether the active connection requires a sign-in (its `/api/auth/info`). */
   authRequired: boolean;
   /** Whether the active connection's auth needs a username (UI hint). */
@@ -1204,8 +1261,13 @@ export interface AppState {
   updateAgentPrefs: (next: AgentPrefs) => Promise<void>;
 
   // auth
-  /** Sign in with the password: the daemon returns a session token, the only thing stored. */
+  /**
+   * Sign in with the password: the daemon returns a session token, the only thing stored — or,
+   * with its second factor on, a challenge that switches the prompt to the code step.
+   */
   submitCredentials: (username: string, password: string) => Promise<void>;
+  /** Finish a challenged sign-in with an authenticator or recovery code. */
+  submitSecondFactor: (code: string) => Promise<void>;
   /** Revoke this client's session on the daemon, forget its token and show the sign-in prompt. */
   signOut: () => Promise<void>;
 
@@ -2115,23 +2177,50 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const answer = await api.login({ username: normalizedUser, password });
       if (isSecondFactorChallenge(answer)) {
-        // Placeholder until the code step lands (feat/login-second-factor).
-        set({ authError: "This server needs an authentication code." });
+        // The password was right; the code step finishes the sign-in. The challenge stays in
+        // memory with the prompt (never stored) and dies with it.
+        if (get().api !== api) return;
+        const { challenge, expiresAt } = answer;
+        set({
+          authPrompt: { connectionId: api.connection.id, secondFactor: { challenge, expiresAt, username: normalizedUser } },
+          authError: null
+        });
         return;
       }
       token = answer.token;
     } catch (error) {
+      // A login route's 401 is a wrong password, never a dead session: no credential is dropped.
       set({ authError: signInError(error) });
       return;
     }
-    if (get().api !== api || !asSessionToken(token)) {
-      if (get().api === api) set({ authError: "The server sent an invalid session token." });
+    await completeSignIn(get, set, api, normalizedUser, token);
+  },
+
+  submitSecondFactor: async (code) => {
+    const api = get().api;
+    const pending = get().authPrompt?.secondFactor;
+    const entered = code.trim();
+    if (!api || !pending || get().authPrompt?.connectionId !== api.connection.id || !entered) {
       return;
     }
-    storeToken(api.connection.endpoint, token);
-    storeUsername(api.connection.endpoint, normalizedUser);
-    set({ api: apiWithCredential(api, token), authPrompt: null, authError: null });
-    await get().connect();
+    const restart = () => set({ authPrompt: { connectionId: api.connection.id }, authError: SIGN_IN_TIMED_OUT });
+    // The daemon would refuse it anyway: go back to the password without the round trip.
+    if (Date.parse(pending.expiresAt) <= Date.now()) {
+      restart();
+      return;
+    }
+    let token: string;
+    try {
+      token = (await api.loginSecondFactor({ challenge: pending.challenge, code: entered })).token;
+    } catch (error) {
+      // Only the prompt that sent this code takes its answer (not one the user left with Back or
+      // Cancel, or another server's).
+      if (get().api !== api || get().authPrompt?.secondFactor !== pending) return;
+      if (isChallengeExpired(error)) restart();
+      else set({ authError: signInError(error) });
+      return;
+    }
+    await completeSignIn(get, set, api, pending.username, token);
   },
 
   signOut: async () => {
