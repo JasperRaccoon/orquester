@@ -1688,6 +1688,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     threadTitle: (id) => agentChat.chat.get(id)?.title ?? null,
     threadProject: (id) => agentChat.chat.get(id)?.projectPath || null,
     threadExists: (id) => !sessionsReattached || agentChat.chat.has(id),
+    // Machines: Hidden machines and machines with Device simulators off are never device hosts.
+    machineAccess: () => machines.access,
     logger: console
   });
   // GPT Image: generate_image on a connected Codex account's ChatGPT plan, while the plugin is on.
