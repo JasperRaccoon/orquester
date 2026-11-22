@@ -34,6 +34,11 @@ import (
 // helperKickInterval: the service starts the helper's task at most this often.
 const helperKickInterval = 30 * time.Second
 
+// helperKeepAlive: while no helper is connected, the service runs its task this often. The task's
+// own restart-on-failure covers only a helper that failed to start (Task Scheduler does not count
+// an exit code as a failure), so this is what brings back one that exited or was ended.
+const helperKeepAlive = time.Minute
+
 // startDesktop serves the helper pipe when the helper is installed (desktop-helper.json) and
 // orq-agent runs as the service; the returned closer stops it. nil when there is no helper.
 func (a *Agent) startDesktop() io.Closer {
@@ -81,7 +86,23 @@ func (a *Agent) startDesktop() io.Closer {
 			go hub.serveConn(conn)
 		}
 	}()
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(helperKeepAlive)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if hub.connected() == nil {
+					hub.kick()
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
 	return closerFunc(func() error {
+		close(stop)
 		err := listener.Close()
 		hub.close()
 		return err
@@ -191,8 +212,8 @@ func runHidden(name string, args ...string) error {
 }
 
 // DesktopHelperCommand is `orq-agent desktop-helper`: it serves the service from the desktop
-// session until the service tells it to exit (exit code 3, so the task's restart-on-failure
-// starts the build on disk), dialling again whenever the pipe drops.
+// session until the service tells it to exit (exit code 3; the service then runs the task again,
+// which starts the build on disk), dialling again whenever the pipe drops.
 func DesktopHelperCommand(version, dataDir string) int {
 	dir, err := desktopDataDir(dataDir)
 	if err != nil {

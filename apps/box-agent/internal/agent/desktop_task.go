@@ -3,7 +3,9 @@ package agent
 // How the desktop-session helper (desktop_pipe.go) is started on Windows: a scheduled task with
 // an "At log on" trigger for the desktop user, "Run only when user is logged on" (an interactive
 // token, so it runs in that user's desktop session), "Run with highest privileges", no time
-// limit, and restarted a minute after it fails. `orq-agent install-desktop-helper --user NAME`
+// limit, and restarted a minute after it fails to start. The service also runs it every minute
+// while no helper is connected (desktop_windows.go helperKeepAlive), which brings back a helper
+// that exited or was ended. `orq-agent install-desktop-helper --user NAME`
 // registers it (desktop_windows.go) and writes desktop-helper.json beside agent.env, which tells
 // the service whom the helper's pipe admits. Rendered here, without build tags, so it is tested
 // on every OS.

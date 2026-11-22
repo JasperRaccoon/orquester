@@ -515,8 +515,11 @@ export type BoxChannelSpec =
       shell?: boolean;
       /**
        * `desktop` (Windows, `desktop-session` capability): run in the interactive desktop session
-       * through the desktop-session helper (GPU and desktop access) instead of the service session.
-       * No helper connected: the open fails with `NO_DESKTOP_SESSION`. Absent: the service session.
+       * through the desktop-session helper (GPU and desktop access) instead of the service session,
+       * as the signed-in desktop user with that user's environment and PATH. No helper connected:
+       * `orq-agent` starts its logon task and waits up to 20 s, then the open fails with
+       * `NO_DESKTOP_SESSION` (whose message names the cause). A `detach`ed one survives daemon
+       * disconnects but not an `orq-agent` restart. Absent: the service session.
        */
       session?: "desktop";
     }
