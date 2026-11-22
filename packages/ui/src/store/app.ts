@@ -265,7 +265,9 @@ const DEFAULT_AGENT_PREFS: AgentPrefs = {
   switchAccountOnUsageLimit: false,
   // Idle Claude compaction: offered when you return, T3 Code's default.
   claudeIdleCompaction: "onReturn",
-  claudeIdleCompactionByAccount: {}
+  claudeIdleCompactionByAccount: {},
+  // Agent SSH: the `Include` line in ~/.ssh/config is opt-in (that file is the owner's).
+  sshConfigInclude: false
 };
 
 /**
