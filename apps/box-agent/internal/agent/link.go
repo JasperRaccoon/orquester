@@ -39,6 +39,9 @@ type Link struct {
 
 	lastRecv atomic.Int64
 	pingID   atomic.Int64
+
+	nicsMu   sync.Mutex
+	sentNics []wire.Nic // the NIC list the daemon last heard (hello, then sys.nics)
 }
 
 func newLink(agent *Agent, conn *websocket.Conn, boxID string, config wire.AgentConfig) *Link {

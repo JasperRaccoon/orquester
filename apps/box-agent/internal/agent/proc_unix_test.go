@@ -436,8 +436,15 @@ func TestSignalFallsBackToThePidWhenTheGroupIsGone(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	if os.Getenv("ORQ_TEST_HELPER") == "leave-group" {
+	switch os.Getenv("ORQ_TEST_HELPER") {
+	case "leave-group":
 		runLeaveGroupHelper()
+	case "sftp-server":
+		// TestSSHSftpRunsAsTheWorkUser's stand-in for `orq-agent sftp-server`.
+		if err := ServeSFTP(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }

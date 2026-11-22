@@ -235,6 +235,10 @@ type Agent struct {
 	ghConfigDir string
 	statsPrev   cpuSample
 	client      *http.Client
+
+	// sshd is the built-in SSH server; nil when its host key could not be loaded.
+	sshd *sshServer
+	nics *nicMonitor
 }
 
 // New prepares an agent (data dir, credentials, sys info).
@@ -276,6 +280,12 @@ func New(cfg Config, logger *log.Logger) (*Agent, error) {
 	cleanupOldExecutable()
 	a.procs.recoverFrom(filepath.Join(cfg.DataDir, procStateFile), logger)
 	a.sys = detectSysInfo(a)
+	if signer, err := loadSSHHostKey(cfg.DataDir, logger); err != nil {
+		logger.Printf("built-in SSH server unavailable: %v", err)
+	} else {
+		a.sshd = newSSHServer(a, signer)
+	}
+	a.nics = newNicMonitor()
 	return a, nil
 }
 
@@ -329,6 +339,8 @@ func (a *Agent) Run(ctx context.Context) (int, bool) {
 			defer gh.Close()
 		}
 	}
+
+	go a.watchNics()
 
 	attempt := 0
 	for {
@@ -520,14 +532,7 @@ func (a *Agent) connectOnce(ctx context.Context) (bool, error) {
 	}
 	conn.SetReadLimit(64 * 1024 * 1024)
 
-	hello := wire.Hello{
-		T:            "hello",
-		Protocol:     wire.ProtocolVersion,
-		AgentVersion: a.cfg.Version,
-		Auth:         auth,
-		Sys:          a.sysInfo(),
-		Procs:        a.procs.list(),
-	}
+	hello := a.hello(auth)
 	data, err := json.Marshal(hello)
 	if err != nil {
 		_ = conn.CloseNow()
@@ -574,7 +579,10 @@ func (a *Agent) connectOnce(ctx context.Context) (bool, error) {
 		}
 		a.applyGh(m.Config.Gh)
 		link := newLink(a, conn, m.BoxID, m.Config)
+		link.sentNics = hello.Nics
 		a.setLink(link)
+		// The NICs may have changed since hello was built.
+		a.publishNics()
 		a.log.Printf("connected to the daemon as box %s", m.BoxID)
 		for _, f := range m.Config.Forwards {
 			if err := link.listenForward(f); err != nil {
@@ -589,6 +597,24 @@ func (a *Agent) connectOnce(ctx context.Context) (bool, error) {
 		_ = conn.Close(websocket.StatusProtocolError, "expected welcome")
 		return false, errors.New("daemon sent something other than welcome")
 	}
+}
+
+// hello is the handshake's first frame: who this box is, and what this build offers.
+func (a *Agent) hello(auth wire.Auth) wire.Hello {
+	hello := wire.Hello{
+		T:            "hello",
+		Protocol:     wire.ProtocolVersion,
+		AgentVersion: a.cfg.Version,
+		Auth:         auth,
+		Sys:          a.sysInfo(),
+		Procs:        a.procs.list(),
+		Nics:         a.nics.snapshot(),
+	}
+	if a.sshd != nil {
+		hello.Capabilities = append(hello.Capabilities, wire.CapabilitySSHServer)
+		hello.SSHHostKey = a.sshd.hostKey
+	}
+	return hello
 }
 
 func (a *Agent) acceptWelcome(auth wire.Auth, m *wire.Welcome) error {
