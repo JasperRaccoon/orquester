@@ -43,7 +43,8 @@ import {
   type DevicePlatform,
   type DeviceReadinessCheck,
   type DevicesSettings,
-  type DeviceSummary
+  type DeviceSummary,
+  type MachineProblem
 } from "@orquester/api";
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
@@ -85,6 +86,7 @@ import {
   type RemoteProbe,
   type RemoteResult
 } from "./remote.ts";
+import { macProblems, unreachableProblem } from "./problems.ts";
 import { SimPool, poolSimulatorName, profileOfPoolSimulator, type PoolSim } from "./sim-pool.ts";
 import { simulatorCapacity } from "./simslim-capacity.ts";
 import {
@@ -208,6 +210,8 @@ export class BoxDeviceHost implements DeviceHost {
   /** The readiness check being worked on while preparing. */
   private working: string | null = null;
   private probe: RemoteProbe | null = null;
+  /** When {@link probe} was taken (the capacity basis's `probedAt`). */
+  private probedAt: string | null = null;
   private layoutCache: RemoteLayout | null = null;
   private toolVersions: { hub: string | null; agent: string | null } | null = null;
   private hub: HubRuntime | null = null;
@@ -316,7 +320,22 @@ export class BoxDeviceHost implements DeviceHost {
       top: this.top,
       leased
     });
-    return { used: leased, total };
+    const probe = this.probe;
+    // What memory decides it from: the probe's numbers (simulators need no hypervisor of their own).
+    const basis =
+      probe && this.probedAt && probe.cpus !== null && probe.memFreeBytes !== null
+        ? { cpus: probe.cpus, freeMemBytes: probe.memFreeBytes, freeDiskBytes: probe.diskFreeBytes, accel: probe.vm === false ? ("hvf" as const) : null, probedAt: this.probedAt }
+        : null;
+    return { used: leased, total, ...(basis ? { basis } : {}) };
+  }
+
+  /** An own Mac's environment problems, each with its fix: asleep or offline, Xcode's path, developer mode. */
+  problems(): MachineProblem[] {
+    if (this.kind !== "byo") return [];
+    const record = this.deps.record();
+    const name = typeof record?.machineName === "string" && record.machineName ? record.machineName : "Your Mac";
+    if (!this.deps.connection()?.connected && record?.state === "ready") return [unreachableProblem(name, "macos")];
+    return this.probe ? macProblems({ xcodePath: this.probe.xcodePath, devTools: this.probe.devTools }, name) : [];
   }
 
   box(): DeviceHostBoxInfo | null {
@@ -498,7 +517,10 @@ export class BoxDeviceHost implements DeviceHost {
   private async probeBox(link: BoxConnection, signal?: AbortSignal): Promise<RemoteProbe> {
     const result = await execRemote(link, { command: "/bin/sh", args: ["-c", PROBE_SCRIPT] }, { ...(signal ? { signal } : {}), timeoutMs: this.timing.commandMs });
     const probe = parseProbe(result.stdout);
+    const before = this.probe === null ? null : JSON.stringify(this.problems());
     this.probe = probe;
+    this.probedAt = new Date().toISOString();
+    if (before !== null && before !== JSON.stringify(this.problems())) this.emitChange();
     await this.readToolVersions(link);
     return probe;
   }

@@ -226,7 +226,7 @@ describe("BoxDeviceHost", () => {
       devices.map((device) => ({ id: device.id, profile: device.profile, booted: device.booted })),
       [{ id: udid, profile: "iphone-17-pro", booted: true }]
     );
-    assert.deepEqual(host.capacity(), { used: 1, total: 3 });
+    assert.deepEqual({ used: host.capacity().used, total: host.capacity().total }, { used: 1, total: 3 });
 
     box.log.length = 0;
     await host.release(leases[0]!, { shutdown: false });

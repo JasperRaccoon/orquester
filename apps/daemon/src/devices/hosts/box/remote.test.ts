@@ -32,7 +32,8 @@ describe("box device host remote commands", () => {
 
   it("parses the probe", () => {
     const probe = parseProbe(
-      "path=/opt/homebrew/bin:/usr/bin\nos=Darwin\nnode=/usr/local/bin/node\nnode_version=v22.11.0\nnpm=/usr/local/bin/npm\nvm=1\nxcode=Xcode 26.6 Build version 17E202 \nsimctl=1\n"
+      "path=/opt/homebrew/bin:/usr/bin\nos=Darwin\nnode=/usr/local/bin/node\nnode_version=v22.11.0\nnpm=/usr/local/bin/npm\nvm=1\nxcode=Xcode 26.6 Build version 17E202 \nsimctl=1\n" +
+        "xcode_path=/Library/Developer/CommandLineTools\ndevtools=0\ncpus=14\nmem_free_bytes=17179869184\ndisk_free_kb=1048576\n"
     );
     assert.deepEqual(probe, {
       path: "/opt/homebrew/bin:/usr/bin",
@@ -44,7 +45,12 @@ describe("box device host remote commands", () => {
       vm: true,
       xcode: "Xcode 26.6 Build version 17E202",
       simctl: true,
-      kvm: null
+      kvm: null,
+      xcodePath: "/Library/Developer/CommandLineTools",
+      devTools: false,
+      cpus: 14,
+      memFreeBytes: 17179869184,
+      diskFreeBytes: 1024 ** 3
     });
     assert.equal(parseProbe("os=Linux\nnode=\nkvm=0\n").nodeMajor, null);
     assert.deepEqual(remoteEnv(probe), { PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin", FORCE_COLOR: "0", NO_COLOR: "1" });

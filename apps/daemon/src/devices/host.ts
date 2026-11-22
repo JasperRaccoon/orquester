@@ -32,7 +32,8 @@ import type {
   DeviceScreen,
   DeviceStreamInfo,
   DeviceSummary,
-  DevicesSettings
+  DevicesSettings,
+  MachineProblem
 } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
@@ -192,6 +193,11 @@ export interface DeviceHost {
   installApp?(lease: StoredDeviceLease, uploadedPath: string, signal: AbortSignal): Promise<{ appId: string | null; summary: string }>;
   /** Phase 3: a research host (vphone VMs). Placement never picks it unless asked by id; its notice is shown with it. */
   research?(): { notice: string } | null;
+  /**
+   * The owner's own machine: environment problems its probes found (KVM permission, linger, Xcode
+   * path, developer mode, asleep), each with its fix. Absent or empty: none.
+   */
+  problems?(): MachineProblem[];
 
   listDevices(signal?: AbortSignal): Promise<DeviceSummary[]>;
   /** Boot (or attach to) a device; resolves once the OS finished booting. */
@@ -340,6 +346,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
   const pool = host.pool?.() ?? null;
   const research = host.research?.() ?? null;
   const stream = host.streamCapabilities?.() ?? null;
+  const problems = host.problems?.() ?? [];
   return {
     id: host.id,
     kind: host.kind,
@@ -352,6 +359,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
     ...(box ? { box } : {}),
     ...(pool ? { pool } : {}),
     ...(research ? { research: true, notice: research.notice } : {}),
-    ...(stream ? { stream: { iosH264: stream.iosH264 === true } } : {})
+    ...(stream ? { stream: { iosH264: stream.iosH264 === true } } : {}),
+    ...(problems.length > 0 ? { problems } : {})
   };
 }
