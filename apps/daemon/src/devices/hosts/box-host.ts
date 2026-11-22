@@ -154,10 +154,14 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
 
   const connection = (boxId: string): BoxConnection | undefined => deps.boxes()?.hub.get(boxId);
 
-  /** Prepare a host in the background (it reports its own failure in its status). */
+  /**
+   * Prepare a host in the background (it reports its own failure in its status). Not while its
+   * platform is off in Settings → Devices: a Mac whose owner runs only iOS never downloads the
+   * Android SDK; turning the platform on prepares it ({@link settingsChanged}).
+   */
   const prepareInBackground = (host: BoxHost): void => {
     const link = connection(host.boxId);
-    if (!link?.connected) return;
+    if (!link?.connected || host.state().status === "disabled") return;
     void host.prepare(link, AbortSignal.timeout(30 * 60_000)).catch((error) => {
       if (!isDeviceError(error)) logger.warn(`[devices] preparing ${host.id} failed`, error instanceof Error ? error.message : String(error));
     });
@@ -502,6 +506,8 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
 
     settingsChanged() {
       for (const host of hosts.values()) host.linkChanged();
+      // A platform turned on: its own machines' hosts that wait for a prepare get one.
+      sync();
       refreshOffers();
     },
 

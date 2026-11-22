@@ -274,6 +274,16 @@ describe("box device host factory", () => {
     assert.equal(ios.capacity().total, 1);
     assert.equal(added.get("box:c")!.capacity().total, 3);
 
+    // Android is off in Settings → Devices: the Mac never starts preparing it (no SDK download); turned on, it does.
+    assert.equal(android.state().status, "disabled");
+    const probes = () => boxes.macs.get("b")!.log.filter((line) => line === "sh probe").length;
+    boxes.setConnected("b", false);
+    boxes.setConnected("b", true);
+    assert.equal(probes(), 0);
+    settings = { ...settings, android: { ...settings.android, enabled: true } };
+    factory.settingsChanged?.();
+    await eventually(() => probes() > 0 && android.state().status !== "starting", "the Mac's Android host prepared");
+
     // Device simulators off for the Mac: both of its hosts go.
     boxes.set({ ...boxes.records.get("b")!, deviceHost: false });
     assert.deepEqual([...added.keys()], ["box:c"]);
