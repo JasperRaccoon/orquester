@@ -434,7 +434,8 @@ export class DirectStreamGate {
   }
 
   private async tailscale(link: BoxConnection, place: GatePlace) {
-    if (!this.located) {
+    // Located again while missing: Tailscale may have been installed since.
+    if (!this.located || this.located.cli === null) {
       const result = await execRemote(link, { command: "/bin/sh", args: ["-c", TAILSCALE_LOCATE_SCRIPT], env: place.env }, { timeoutMs: 15_000 });
       this.located = parseTailscaleLocate(result.stdout);
     }

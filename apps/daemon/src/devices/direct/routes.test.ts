@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DEVICE_STREAM_TICKET_TTL_MS, type DeviceStreamTicketResponse } from "@orquester/api";
+import Fastify from "fastify";
+
+import { DEVICE_STREAM_TICKET_TTL_MS, deviceRoutes, type DeviceStreamTicketResponse } from "@orquester/api";
 
 import { DeviceError } from "../errors.ts";
 import type { DeviceDirectStream } from "../host.ts";
+import { registerDeviceHttpRoutes } from "../http-routes.ts";
+import { createHubProxy } from "../hub-proxy.ts";
 import { FakeDeviceHost, FakeHostFactory, FakeMachineAccess, startTestDeviceService } from "../testing.ts";
 import { signStreamTicket, verifyStreamTicket } from "./gate.mjs";
 
@@ -81,6 +85,41 @@ test("a stream ticket is only for a device leased on a visible host", async () =
     assert.equal(refused(host.id, "emulator-9999"), "DEVICE_NOT_LEASED");
     assert.equal(refused("box:nothing", "x"), "HOST_NOT_FOUND");
   } finally {
+    await t.cleanup();
+  }
+});
+
+test("POST stream-ticket: a person's viewer only, the ticket bound to the asking page", async () => {
+  const { t, host, device } = await setup();
+  host.direct = { tailnetUrl: "https://jasper.tail.ts.net:10043", lanUrls: ["http://192.168.2.6:41000"] };
+  const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
+  const appAs = (kind: string) => {
+    const app = Fastify();
+    app.decorateRequest("principal", null);
+    app.addHook("onRequest", async (request) => {
+      (request as unknown as { principal: unknown }).principal = { kind };
+    });
+    registerDeviceHttpRoutes(app, { devices: () => t.service, hubProxy: () => createHubProxy({ leaseOnDevice: () => null, userInput: () => undefined, viewerActive: () => undefined, logger: quiet }), logger: quiet });
+    return app;
+  };
+  const user = appAs("user");
+  const agent = appAs("agent");
+  try {
+    const url = deviceRoutes.streamTicket(host.id);
+    const page = "https://orq.tail.ts.net:10000";
+    const ok = await user.inject({ method: "POST", url, headers: { origin: page }, payload: { deviceId: device, client: "desktop" } });
+    assert.equal(ok.statusCode, 200);
+    const body = ok.json() as DeviceStreamTicketResponse;
+    assert.deepEqual(kinds(body), ["tailnet", "lan", "daemon"]);
+    const verdict = verifyStreamTicket(SECRET, body.ticket, { hostId: host.id, device, now: Date.now() });
+    assert.ok(verdict.ok && verdict.claims.origin === page);
+
+    const denied = await agent.inject({ method: "POST", url, payload: { deviceId: device } });
+    assert.equal(denied.statusCode, 403);
+    assert.equal((await user.inject({ method: "POST", url, payload: { deviceId: device, client: "phone" } })).statusCode, 400);
+  } finally {
+    await user.close();
+    await agent.close();
     await t.cleanup();
   }
 });

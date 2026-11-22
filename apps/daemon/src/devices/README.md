@@ -46,7 +46,7 @@ Foundation (shared seams; change them only with the other work packages in mind)
 | `ws-routes.ts` | `/ws-device/:hostId/*`: token, plugin, host and lease checks, then `HubProxy.handleWebSocket`. |
 | `wiring.ts` | `createDaemonDevices`: follows the plugin (service on/off), builds the factories and executor, routes; `machineAccess` (optional, read when the plugin turns on) goes to the box and vphone factories and the service; the forward link over `DaemonBoxes.projectForwards`. |
 | `testing.ts` | `FakeDeviceHost` (box info, problems), `FakeHostFactory`, `FakeActionExecutor`, `FakeMachineAccess`, `startTestDeviceService`. |
-| `hub-proxy.ts` | The hub proxy: path/method allowlists, leased-device check, header allowlists, the hub token as `Authorization: Bearer`, WS relay (8 MiB back-pressure), input → `userInput`, viewer counts → `DeviceHost.viewersChanged`. |
+| `hub-proxy.ts` | The hub proxy: path/method allowlists (`direct/hub-paths.mjs`), leased-device check, header allowlists, the hub token as `Authorization: Bearer`, WS relay (8 MiB back-pressure), input → `userInput`, viewer counts → `DeviceHost.viewersChanged` (with the streams own machines' gates report open on direct routes: `directViewers`, `directInput`). |
 | `mjpeg-still-frame.ts` | Re-sends the last MJPEG part once when the stream goes quiet (so `<img>` paints a still screen). |
 | `agent-device.ts` | The agent-device runner: pinned `--config`/`--session`/device flags before the command, no shell, an allowlisted environment (no daemon secrets, no `AGENT_DEVICE_*`), caps; typed text never in argv (`fill --text-stdin`; `type` and `wait` text as a one-step `batch --steps-file /dev/stdin`); `--json` refusals → `DeviceError`. Fixtures: `fixtures/agent-device/`. |
 | `actions.ts` | `planAction` (every `device_action` kind → agent-device or `DeviceHost.run`), points ↔ agent-device units, ref → point, session reopen, screenshots, installs, `restartApp` (foreground app → `open <app> --relaunch`; the home screen is refused); `DeviceHost.performAction` / `installApp` answer first. |
@@ -70,6 +70,25 @@ inside it, keep the exported signature `wiring.ts` calls):
 | `hosts/local-android.ts` | local Android host: emulators, supervised hub, capacity, readiness with fix actions | implemented (below) |
 | `hosts/box-host.ts` | Mac device hosts (box purpose `device-host`, setup step `devices`), `provision`, `provisionQuote`, `destroy` | implemented (above) |
 | `service.ts`, `leases.ts`, `http-routes.ts`, `ws-routes.ts`, `wiring.ts` | shared: extend, don't fork | complete for phase 1 |
+
+## Direct stream routes (`direct/`, tailnet machines spec §4.5)
+
+The owner's viewer streams an own machine's devices straight from it when it can reach it; agents
+keep going through the daemon. `POST deviceRoutes.streamTicket(hostId)` (`service.streamTicket`,
+people only) answers the routes best first — `tailnet` (the machine's `tailscale serve` is up),
+`lan` (desktop app only), `daemon` (always, last) — and a ticket for one leased device, bound to the
+asking page's origin, valid `DEVICE_STREAM_TICKET_TTL_MS`.
+
+| File | What it is |
+|---|---|
+| `direct/hub-paths.mjs` | The hub path allowlists and header allowlists, shared by the proxy and the gate (plain JS: uploaded to the machine). |
+| `direct/gate.mjs` | The stream gate on the machine (Node standard library only): `0.0.0.0:<port>`, the public identity (`DEVICE_HOST_IDENTITY_PATH`), ticketed hub paths that name a device (HMAC tickets: host, device, expiry, origin; CORS for that origin), WS relay reading client frames only to tell input from `reset-video`, `/.orq/gate/*` for the daemon (status, events long poll: viewers, input, LAN IPv4s; stop). Ticket sign/verify live here and the daemon imports them. |
+| `direct/machine-gate.ts` | `DirectStreamGate` (one per own-machine host, made by `hosts/box-host.ts`): uploads the gate, 0600 config with the per-host secret (read back after a restart), reuses or starts detached `orq-devices-gate`, long-polls its events into the hub proxy, keeps its `tailscale serve` route (every ensure and 2 min), `stop` (idle, teardown) removes only Orquester's route. |
+| `direct/serve.ts` | `tailscale` on the machine through the box link (`createLocalTailscale` with a remote runner; the macOS app's CLI found too), `decideGateServe` over `tailnet/decide.ts`'s ownership rules (ports 10043–10047, 8444), the problems with their fixes (`tailscale-not-operator`, `tailscale-https-disabled`, `tailscale-unavailable`, `serve-port-taken`). |
+| `direct/routes.ts` | `streamRoutes`: the ticket's route order per client. |
+
+The panel's side is `packages/ui/src/components/device/stream/routes.ts` (usable routes, identity
+probe, the roaming state machine) and `useStreamRoute.ts`.
 
 ## Local Android (toolchain, `android/`, `hosts/local-android.ts`)
 
@@ -145,8 +164,9 @@ cd apps/daemon && ORQ_IT_SDK=/var/lib/orquester/tmp/devices-local-it/app/daemon/
   `open_device` keeps waiting (`beginOpen`).
 - Leases whose device vanished from the host's `listDevices` (two lists in a row; on host changes
   and every 5 min) become `lost`.
-- Secrets (hub and agent-device tokens) stay in host-side files; never in summaries, events,
-  logs or process arguments. `DeviceError` messages are shown to the owner or the agent.
+- Secrets (hub and agent-device tokens, stream gate secrets) stay in host-side files; never in
+  summaries, events, logs or process arguments. Browsers get only short-lived stream tickets, and
+  only after the route's identity answered the expected machine. `DeviceError` messages are shown to the owner or the agent.
 - Agent tools act for the calling chat only: `runDeviceTool` takes the thread from the principal;
   a handle naming another chat's device reads `DEVICE_NOT_LEASED`.
 - Hosts on a Hidden machine or with "Device simulators" off do not exist for devices: no summary,
