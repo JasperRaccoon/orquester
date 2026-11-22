@@ -543,7 +543,8 @@ export class LinkedBoxConnection implements BoxConnection {
       ...(options.envUnset !== undefined ? { envUnset: options.envUnset } : {}),
       ...(options.pty !== undefined ? { pty: options.pty } : {}),
       ...(options.detach !== undefined ? { detach: options.detach } : {}),
-      ...(options.shell !== undefined ? { shell: options.shell } : {})
+      ...(options.shell !== undefined ? { shell: options.shell } : {}),
+      ...(options.session !== undefined ? { session: options.session } : {})
     };
     return new RemoteBoxProcess(this, spec, options.detach?.procId ?? null, 0, options.signal);
   }
