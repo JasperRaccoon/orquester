@@ -64,8 +64,12 @@ if [ "$(digest "$dest.part")" != "$sha" ]; then rm -f "$dest.part"; echo "the do
 mv "$dest.part" "$dest"
 `;
 
-/** The `ps` columns {@link parseDarwinPs} reads (UTC and the C locale make `lstart` parseable). */
-export const DARWIN_PS_COLUMNS = "pid=,ppid=,pgid=,stat=,time=,lstart=,comm=";
+/**
+ * The `ps` columns {@link parseDarwinPs} reads (UTC and the C locale make `lstart` parseable).
+ * `ucomm` is the executable's own name (16 characters at most: `qemu-system-aarc`), whatever the
+ * process made of its argv[0] (`comm` prints that).
+ */
+export const DARWIN_PS_COLUMNS = "pid=,ppid=,pgid=,stat=,time=,lstart=,ucomm=";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -88,9 +92,9 @@ export function parsePsStart(tokens: readonly string[]): number | null {
 }
 
 /**
- * `ps -o {@link DARWIN_PS_COLUMNS}` lines → stats: `comm` is the executable's name (macOS prints
- * its path), `state` the first letter of `stat`, `cpuTicks` hundredths of a second, `startTicks`
- * the start in epoch seconds. Unreadable lines are skipped.
+ * `ps -o {@link DARWIN_PS_COLUMNS}` lines → stats: `comm` is the executable's name (as `ucomm`
+ * gives it; a path's last part otherwise), `state` the first letter of `stat`, `cpuTicks`
+ * hundredths of a second, `startTicks` the start in epoch seconds. Unreadable lines are skipped.
  */
 export function parseDarwinPs(text: string): ProcStat[] {
   const stats: ProcStat[] = [];
