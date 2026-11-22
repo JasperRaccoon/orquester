@@ -417,7 +417,7 @@ const createBox = defineTool({
   name: "create_box",
   title: "Rent a temporary box",
   description:
-    "Rent a cloud machine for this chat when the host can't do the job (more CPU or RAM, another OS, a GPU, isolation). It COSTS the owner money: every box needs their approval on a card (up to 30 min); if denied, don't retry — ask. Then waits until ready (minutes; Windows and macOS longer). Orquester copies nothing in. Work on it from your bash with the result's ssh_command (ssh orq-<name>; scp, rsync and git work the same way, with the same -F <config> when the command has one); box_exec, box_upload and box_download remain available, and are the way in when there is no ssh_command. Destroy it with destroy_box once done; it is also destroyed at its time limit and when this chat closes.",
+    "Rent a cloud machine for this chat when the host can't do the job (CPU, RAM, another OS, a GPU, isolation). It COSTS the owner money: each box needs their approval card (up to 30 min); if denied, don't retry: ask. Waits until ready (minutes). It starts empty. Work on it from bash with the result's ssh_command (ssh orq-<name>; scp and rsync the same way); box_exec, box_upload and box_download also work. destroy_box when done; it is also destroyed at its time limit and when this chat closes.",
   input: {
     kind: z.enum(BOX_KINDS as unknown as [BoxKind, ...BoxKind[]]),
     provider: z
@@ -515,7 +515,7 @@ const listBoxes = defineTool({
   name: "list_boxes",
   title: "List this chat's boxes",
   description:
-    "This chat's temporary boxes: id, kind, provider, state, OS/arch, $/h, estimated cost so far, deadline, and ssh_alias with the exact ssh_command to work on it (ssh, scp, rsync; box_exec, box_upload and box_download remain); lent_accounts: logins it borrowed on any VM.",
+    "This chat's temporary boxes: id, kind, provider, state, OS/arch, $/h, cost so far, deadline, ssh_command; lent_accounts: logins it borrowed on any VM.",
   input: {},
   audiences: ["chat"],
   toolset: "boxes",
