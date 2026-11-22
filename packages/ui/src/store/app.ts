@@ -198,6 +198,7 @@ import { applyKnowledgeEvent, loadKnowledge, resetKnowledge } from "../lib/knowl
 // The Device simulators plugin's module store (hosts, leases, settings; loaded while the plugin is on).
 import { DEVICES_CHANNEL, DEVICES_PLUGIN_ID } from "@orquester/api";
 import { STORAGE_EVENTS_CHANNEL } from "@orquester/api";
+import { isSecondFactorChallenge } from "@orquester/api";
 import { applyStorageEvent } from "../components/system/storage/storage-status";
 import { applyDevicesEvent, loadDevices, resetDevices, setDevicesPluginOn } from "../lib/devices/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
@@ -2112,7 +2113,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     const normalizedUser = username.trim().toLowerCase();
     let token: string;
     try {
-      token = (await api.login({ username: normalizedUser, password })).token;
+      const answer = await api.login({ username: normalizedUser, password });
+      if (isSecondFactorChallenge(answer)) {
+        // Placeholder until the code step lands (feat/login-second-factor).
+        set({ authError: "This server needs an authentication code." });
+        return;
+      }
+      token = answer.token;
     } catch (error) {
       set({ authError: signInError(error) });
       return;

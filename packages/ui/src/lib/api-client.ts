@@ -205,6 +205,12 @@ import {
   authSessionPath,
   type AuthIssuedTokenResponse,
   type AuthLoginRequest,
+  type AuthLoginResponse,
+  type AuthRecoveryCodesResponse,
+  type AuthSecondFactorLoginRequest,
+  type AuthSecondFactorProof,
+  type AuthSecondFactorSetupResponse,
+  type AuthSecondFactorStatusResponse,
   type AuthSessionsResponse,
   type RevokeAuthSessionsResponse,
   type VerifyPasswordResponse
@@ -542,9 +548,17 @@ export class ApiClient {
     return this.send("GET", authRoutes.info, { signal });
   }
 
-  /** Sign in with the password: a new device session's token (shown once; store only it). */
-  login(req: AuthLoginRequest): Promise<AuthIssuedTokenResponse> {
+  /**
+   * Sign in with the password: a new device session's token (shown once; store only it), or a
+   * second-factor challenge to finish with {@link ApiClient.loginSecondFactor}.
+   */
+  login(req: AuthLoginRequest): Promise<AuthLoginResponse> {
     return this.send("POST", authRoutes.login, { body: req });
+  }
+
+  /** Finish a sign-in: the challenge plus an authenticator or recovery code → the session token. */
+  loginSecondFactor(req: AuthSecondFactorLoginRequest): Promise<AuthIssuedTokenResponse> {
+    return this.send("POST", authRoutes.secondFactorLogin, { body: req });
   }
 
   /** Revoke the session this client signed in with. */
@@ -570,9 +584,36 @@ export class ApiClient {
     return this.send("POST", authRoutes.revokeOthers);
   }
 
-  /** Mint a named API token for an external client (shown once). */
-  createApiToken(label: string): Promise<AuthIssuedTokenResponse> {
-    return this.send("POST", authRoutes.tokens, { body: { label } });
+  /** Mint a named API token for an external client (shown once). Remotely needs the owner's proof. */
+  createApiToken(label: string, proof: AuthSecondFactorProof = {}): Promise<AuthIssuedTokenResponse> {
+    return this.send("POST", authRoutes.tokens, { body: { label, ...proof } });
+  }
+
+  secondFactorStatus(signal?: AbortSignal): Promise<AuthSecondFactorStatusResponse> {
+    return this.send("GET", authRoutes.secondFactor, { signal });
+  }
+
+  /** Start enrolling: a pending secret to scan (remotely needs the password). */
+  setupSecondFactor(password?: string): Promise<AuthSecondFactorSetupResponse> {
+    return this.send("POST", authRoutes.secondFactorSetup, { body: password === undefined ? {} : { password } });
+  }
+
+  /** Confirm the pending secret with a code from it: turns the factor on, returns the recovery codes once. */
+  enableSecondFactor(code: string): Promise<AuthRecoveryCodesResponse> {
+    return this.send("POST", authRoutes.secondFactorEnable, { body: { code } });
+  }
+
+  /** Replace every recovery code (the old ones stop working). */
+  regenerateRecoveryCodes(proof: AuthSecondFactorProof = {}): Promise<AuthRecoveryCodesResponse> {
+    return this.send("POST", authRoutes.secondFactorRecoveryCodes, { body: proof });
+  }
+
+  disableSecondFactor(proof: AuthSecondFactorProof = {}): Promise<void> {
+    return this.send("POST", authRoutes.secondFactorDisable, { body: proof });
+  }
+
+  dismissSecondFactorAlert(): Promise<void> {
+    return this.send("POST", authRoutes.secondFactorDismissAlert);
   }
 
   getDaemonConfig(signal?: AbortSignal): Promise<DaemonConfig> {
