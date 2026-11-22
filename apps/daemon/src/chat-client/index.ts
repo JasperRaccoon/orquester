@@ -3,7 +3,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
-import { InjectDaemonApi, type DesktopActionPort, type LivePath } from "../mcp/daemon-api.ts";
+import { InjectDaemonApi, type DesktopActionPort, type LivePath, type MachineWakeToolPort } from "../mcp/daemon-api.ts";
 import type { TemporaryBoxTools } from "../boxes/temporary/tools.ts";
 import type { BoxRegistry } from "../boxes/contracts.ts";
 import type { TokenBrokerSession } from "../boxes/broker/broker.ts";
@@ -52,6 +52,8 @@ interface InternalDaemonApiOptions {
   gptImage?: () => GptImageToolPort | null;
   // Desktops: the desktop manager behind desktop_action (abortable, unlike its route).
   desktops?: () => DesktopActionPort;
+  // Machines: wake_machine's wake of an Ask-first machine after its card.
+  machines?: () => MachineWakeToolPort | null;
 }
 
 /**
@@ -74,6 +76,7 @@ export function createInternalDaemonApi(opts: InternalDaemonApiOptions): InjectD
     boxSessions: opts.boxSessions,
     devices: opts.devices,
     gptImage: opts.gptImage,
-    ...(opts.desktops ? { desktops: opts.desktops } : {})
+    ...(opts.desktops ? { desktops: opts.desktops } : {}),
+    ...(opts.machines ? { machines: opts.machines } : {})
   });
 }

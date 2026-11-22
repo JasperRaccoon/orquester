@@ -6,23 +6,26 @@
  * machines come from the box records, which load either way. Pairing needs the plugin.
  *
  * The feature ports are wired in by `startDaemon` once they exist: `registry.setPairing`,
- * `registry.setWake`, `registry.setSshAccess`; boxes and devices read `registry` as their
- * {@link MachineAccessPort}.
+ * `registry.setSshAccess`; boxes and devices read `registry` as their {@link MachineAccessPort}.
+ * Wake-on-LAN is wired here (`registry.setWake`, `wake.ts`): it needs only the box links, whose
+ * NIC reports (hello, then `sys.nics`) are kept in each paired machine's record.
  */
 
-import { MACHINES_CHANGED_EVENT, MACHINES_CHANNEL, machineOsOfBox } from "@orquester/api";
+import { BOX_NICS_EVENT, MACHINES_CHANGED_EVENT, MACHINES_CHANNEL, machineOsOfBox } from "@orquester/api";
 import { machinesStorePath } from "@orquester/config";
 import type { FastifyInstance } from "fastify";
 
 import type { LocalTailscale } from "../boxes/tailscale/local.ts";
 import type { DaemonBoxes } from "../boxes/wiring.ts";
+import type { MachineWakeToolPort } from "../mcp/daemon-api.ts";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { MachineAccessPort } from "./ports.ts";
 import { createMachinePairing } from "./pairing/index.ts";
 import { MachineRegistry, type MachineBoxSource } from "./registry.ts";
-import { registerMachineRoutes } from "./routes.ts";
+import { registerMachineRoutes, wakeApprovedForAgent } from "./routes.ts";
 import { MachinePolicyStore } from "./store.ts";
 import { createTailnetReader } from "./tailscale-peers.ts";
+import { createLocalWakeSender, MachineWake, type LocalWakeSender } from "./wake.ts";
 
 export interface DaemonMachinesDeps {
   baseDir: string;
@@ -35,6 +38,8 @@ export interface DaemonMachinesDeps {
    * follow it. Called only after {@link DaemonMachines.start} (the daemon's boot refresh covers the start).
    */
   agentToolsChanged?: () => void;
+  /** The daemon's own host as a Wake-on-LAN sender (default: its real network interfaces). */
+  localWake?: LocalWakeSender;
   logger?: Pick<Console, "warn" | "error">;
 }
 
@@ -42,6 +47,8 @@ export interface DaemonMachines {
   registry: MachineRegistry;
   /** What boxes, devices and agent tools enforce. */
   access: MachineAccessPort;
+  /** `wake_machine`'s wake of an Ask-first machine after its card (`DaemonApi.machineWakeApproved`). */
+  wakeTools: MachineWakeToolPort;
   /** After the box records loaded (`DaemonBoxes.start`). */
   start(): Promise<void>;
   registerRoutes(app: FastifyInstance): void;
@@ -100,6 +107,30 @@ export function createDaemonMachines(deps: DaemonMachinesDeps): DaemonMachines {
       logger
     })
   );
+  registry.setWake(
+    new MachineWake({
+      machines: () => registry.wakeMachines(),
+      connection: (boxId) => hub.get(boxId) ?? null,
+      local: deps.localWake ?? createLocalWakeSender()
+    })
+  );
+
+  // Wake-on-LAN: each paired machine's NIC reports go into its record (one listener per box link,
+  // which stays valid across reconnects); the registry ignores boxes that are not paired machines.
+  const nicListeners = new Map<string, () => void>();
+  const recordNics = (boxId: string): void => {
+    const nics = hub.get(boxId)?.nics;
+    if (nics) void registry.recordNics(boxId, nics);
+  };
+  const watchNics = (boxId: string): void => {
+    const connection = hub.get(boxId);
+    if (!connection) return;
+    if (!nicListeners.has(boxId)) nicListeners.set(boxId, connection.onEvent(BOX_NICS_EVENT, () => recordNics(boxId)));
+    recordNics(boxId);
+  };
+  const offNicLinks = hub.onConnectionChange((boxId, connected) => {
+    if (connected) watchNics(boxId);
+  });
 
   let started = false;
   let agentVisible = false;
@@ -114,10 +145,13 @@ export function createDaemonMachines(deps: DaemonMachinesDeps): DaemonMachines {
   return {
     registry,
     access: registry,
+    wakeTools: { wakeApproved: (machineId, threadId) => wakeApprovedForAgent(registry, machineId, threadId) },
     async start() {
       await registry.start();
       agentVisible = registry.anyAgentVisible();
       started = true;
+      // Machines that connected before the registry read machines.json.
+      for (const record of source.byoRecords()) if (hub.get(record.id)?.connected) watchNics(record.id);
     },
     registerRoutes(app) {
       registerMachineRoutes(app, {
@@ -132,6 +166,10 @@ export function createDaemonMachines(deps: DaemonMachinesDeps): DaemonMachines {
     },
     async stop() {
       offAccess();
+      offNicLinks();
+      for (const off of nicListeners.values()) off();
+      nicListeners.clear();
+      registry.setWake(null);
       registry.setPairing(null);
       registry.setSshAccess(null);
       service.setMachineAccess(null);

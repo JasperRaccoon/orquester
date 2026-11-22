@@ -11,7 +11,7 @@
 
 import { posix } from "node:path";
 
-import type { BoxSizeOffer, DeviceCapacityBasis, DeviceProfile, DevicesSettings, DeviceScreen, MachineProblem } from "@orquester/api";
+import { ANDROID_SYSTEM_IMAGE, androidImageAbi, type AndroidAbi, type BoxSizeOffer, type DeviceCapacityBasis, type DeviceProfile, type DevicesSettings, type DeviceScreen, type MachineProblem } from "@orquester/api";
 
 import { ANDROID_CACHE_SOURCE, ANDROID_GOLDEN_SNAPSHOT, ANDROID_RENTED_GPU_MODES, BOX_DEVICES_DIR, BOX_GOLDEN_MARKER } from "../../../boxes/github/device-cache.ts";
 import { BLACKSMITH_LINUX_IMAGES, BLACKSMITH_LINUX_SIZES, blacksmithRunnerLabel } from "../../../boxes/github/workflow-template.ts";
@@ -79,6 +79,26 @@ for node in /dev/dri/renderD*; do
   if [ -r "$node" ] && [ -w "$node" ]; then access=1; else access=0; fi
   printf 'render=%s:%s:%s\\n' "$name" "\${driver:-unknown}" "$access"
 done
+xcheck=
+if command -v xset > /dev/null 2>&1; then xcheck="xset q"; elif command -v xdpyinfo > /dev/null 2>&1; then xcheck=xdpyinfo; elif command -v xhost > /dev/null 2>&1; then xcheck=xhost; fi
+limit=
+if command -v timeout > /dev/null 2>&1; then limit="timeout 5"; fi
+if [ -n "$xcheck" ]; then
+  uid=$(id -u)
+  for sock in /tmp/.X11-unix/X*; do
+    [ -S "$sock" ] || continue
+    display=":\${sock##*/X}"
+    found=
+    for auth in /dev/null "\${XAUTHORITY:-}" "$HOME/.Xauthority" "/run/user/$uid/.Xauthority" "/run/user/$uid/gdm/Xauthority" /run/user/$uid/xauth_* /run/user/$uid/.mutter-Xwaylandauth.*; do
+      [ "$auth" = /dev/null ] || [ -f "$auth" -a -r "$auth" ] || continue
+      if DISPLAY="$display" XAUTHORITY="$auth" $limit $xcheck > /dev/null 2>&1; then found=$auth; break; fi
+    done
+    [ -n "$found" ] || continue
+    printf 'x_display=%s\\n' "$display"
+    if [ "$found" != /dev/null ]; then printf 'x_auth=%s\\n' "$found"; fi
+    break
+  done
+fi
 `;
 
 export interface AndroidBoxProbe {
@@ -115,6 +135,14 @@ export interface AndroidGpuProbe {
   nvidia: { version: string | null; usable: boolean } | null;
   /** DRM render nodes, their kernel driver, and whether the account can open them. */
   render: { node: string; driver: string; usable: boolean }[];
+  /** An Apple Silicon Mac's GPU (Metal; `machdep.cpu.brand_string` names the chip). Absent on Linux. */
+  apple?: { chip: string } | null;
+  /**
+   * An X display the account can open (`xset q`, `xdpyinfo` or `xhost` answered on it), with the
+   * cookie file that opened it (null: the server lets the account in without one, e.g.
+   * `xhost +SI:localuser:<user>`). Null or absent: none, or no X client to check with (a Mac needs none: Metal).
+   */
+  display?: { display: string; xauthority: string | null } | null;
 }
 
 export function parseAndroidProbe(stdout: string): AndroidBoxProbe {
@@ -170,7 +198,8 @@ export function parseAndroidProbe(stdout: string): AndroidBoxProbe {
     linger: values.get("linger") === "1" ? true : values.get("linger") === "0" ? false : null,
     gpu: {
       nvidia: values.has("nvidia") ? { version: text("nvidia"), usable: values.get("nvidia_dev") === "1" } : null,
-      render
+      render,
+      display: text("x_display") ? { display: text("x_display")!, xauthority: text("x_auth") } : null
     }
   };
 }
@@ -187,17 +216,29 @@ function kilobytes(value: string | undefined): number | null {
 /** DRM drivers of real GPUs (Mesa renders on them with direct rendering); virtual and display-only ones are left out. */
 const HARDWARE_DRM_DRIVERS = new Set(["amdgpu", "radeon", "i915", "xe", "nouveau", "nvidia", "msm", "panfrost", "v3d"]);
 
-/** A GPU `-gpu host` can render on: NVIDIA's driver with its device nodes open, or a hardware render node the account can open. */
+/**
+ * A GPU `-gpu host` can render on: an Apple Silicon Mac's (Metal), or on Linux NVIDIA's driver with
+ * its device nodes open or a hardware render node the account can open, and an X display to reach it
+ * through. The Linux emulator's host renderer is GLX: without a display it logs "Failed to open
+ * display" / "Could not start renderer" and QEMU stays up without ever booting (emulator 37.3,
+ * measured on an RTX 3080 Ti); its EGL path (`ANDROID_EGL_ON_EGL=1`) boots but its shaders fail and
+ * it crashes once booted.
+ */
 export interface HostGpu {
-  kind: "nvidia" | "mesa";
+  kind: "nvidia" | "mesa" | "apple";
   /** "NVIDIA 550.54.14", "amdgpu (renderD128)": also what a failed `host` attempt is remembered by. */
   detail: string;
+  /** What a `-gpu host` emulator adds to its environment: `DISPLAY`, and `XAUTHORITY` when the display needs a cookie. */
+  env: Record<string, string>;
 }
 
 export function usableHostGpu(gpu: AndroidGpuProbe): HostGpu | null {
-  if (gpu.nvidia?.usable) return { kind: "nvidia", detail: `NVIDIA ${gpu.nvidia.version ?? "driver"}` };
+  if (gpu.apple) return { kind: "apple", detail: `${gpu.apple.chip} (Metal)`, env: {} };
+  if (!gpu.display) return null;
+  const env = { DISPLAY: gpu.display.display, ...(gpu.display.xauthority ? { XAUTHORITY: gpu.display.xauthority } : {}) };
+  if (gpu.nvidia?.usable) return { kind: "nvidia", detail: `NVIDIA ${gpu.nvidia.version ?? "driver"}`, env };
   const node = gpu.render.find((entry) => entry.usable && HARDWARE_DRM_DRIVERS.has(entry.driver));
-  return node ? { kind: "mesa", detail: `${node.driver} (${node.node})` } : null;
+  return node ? { kind: "mesa", detail: `${node.driver} (${node.node})`, env } : null;
 }
 
 /** The hardware GPU mode: the emulator renders with the host's OpenGL driver. */
@@ -220,10 +261,35 @@ export function gpuSignature(gpu: HostGpu, emulatorRevision: string | null): str
   return `${gpu.detail} · emulator ${emulatorRevision ?? "unknown"}`;
 }
 
-/** `SurfaceFlinger`'s renderer line names a software rasterizer: the emulator fell back from `host` (its GPU blocklist) or never reached the GPU. */
-export function rendersInSoftware(surfaceFlingerDump: string): boolean {
-  const line = surfaceFlingerDump.split(/\r?\n/).find((entry) => /^\s*GLES:/.test(entry));
-  return line !== undefined && /swiftshader|llvmpipe|softpipe|lavapipe/i.test(line);
+/**
+ * The guest command a `host` golden boot's frame is measured with: the screen woken (a display that
+ * timed out captures black), a second to draw, then the PNG size of one frame.
+ */
+export const FRAME_BYTES_SCRIPT = "input keyevent KEYCODE_WAKEUP; sleep 1; screencap -p | wc -c";
+
+/**
+ * Below this a frame's PNG is one flat colour. Measured at 720×1616: a black frame (screen off) is
+ * 7,980 bytes, the home screen about 779,000; the largest profile has fewer than twice the pixels.
+ */
+export const BLANK_FRAME_PNG_BYTES = 32 * 1024;
+
+/**
+ * Why a `host` golden boot does not render on the GPU, or null when it does: `dumpsys
+ * SurfaceFlinger`'s `GLES:` line must be there (no line, or a failed dump, confirms nothing) and
+ * name no software rasterizer (the emulator falls back to SwiftShader for a GPU it blocklists), and
+ * a frame must not be blank (`frameBytes`: the {@link FRAME_BYTES_SCRIPT} output).
+ */
+export function hostRenderProblem(surfaceFlingerDump: string, frameBytes: string): string | null {
+  const line = surfaceFlingerDump
+    .split(/\r?\n/)
+    .find((entry) => /^\s*GLES:/.test(entry))
+    ?.trim();
+  if (!line) return "-gpu host could not be confirmed (dumpsys SurfaceFlinger names no GLES renderer)";
+  if (/swiftshader|llvmpipe|softpipe|lavapipe/i.test(line)) return `-gpu host fell back to software rendering (${line})`;
+  const bytes = /^\d+$/.test(frameBytes.trim()) ? Number(frameBytes.trim()) : null;
+  if (bytes === null) return "-gpu host could not be confirmed (no frame could be captured)";
+  if (bytes < BLANK_FRAME_PNG_BYTES) return `-gpu host renders a blank screen (a ${bytes}-byte frame)`;
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,9 +360,16 @@ export interface BoxGoldenMarker {
   createdAt: string;
   /** `"cache"`: made by the device-cache workflow (`boxes/github/device-cache.ts`). */
   source?: string;
+  /** The system image's ABI it was saved from; absent: x86_64 (the device cache's and older markers). */
+  abi?: AndroidAbi;
 }
 
 export { BOX_GOLDEN_MARKER };
+
+/** The ABI of a (host-resolved) profile's system image. */
+export function profileAbi(profile: Pick<DeviceProfile, "systemImage">): AndroidAbi {
+  return androidImageAbi(profile.systemImage ?? ANDROID_SYSTEM_IMAGE) ?? "x86_64";
+}
 
 /**
  * A profile's AVD in the box: from the device cache (`cache`), made here (`built`) — both current —,
@@ -339,6 +412,8 @@ export async function boxGolden(x: DeviceExecutor, avdHome: string, profile: Dev
   if (!(await x.exists(posix.join(dir, "snapshots", BOX_GOLDEN_SNAPSHOT, "snapshot.pb")))) return null;
   const marker = await readMarker<BoxGoldenMarker>(x, posix.join(dir, BOX_GOLDEN_MARKER));
   if (!marker || marker.snapshot !== BOX_GOLDEN_SNAPSHOT || marker.configHash !== profileHash(profile) || marker.emulatorRevision !== emulatorRevision || typeof marker.gpu !== "string" || !marker.gpu) return null;
+  // x86_64 and arm64 snapshots never stand in for each other (the config hash names the image too).
+  if ((marker.abi ?? "x86_64") !== profileAbi(profile)) return null;
   return { snapshot: marker.snapshot, gpu: marker.gpu, source: marker.source === ANDROID_CACHE_SOURCE ? "cache" : "built" };
 }
 

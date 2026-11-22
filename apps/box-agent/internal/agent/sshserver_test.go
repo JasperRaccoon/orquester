@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -368,7 +369,7 @@ func TestSSHHostKeyPersistsAndHelloAdvertisesIt(t *testing.T) {
 	a := &Agent{log: logger, procs: newProcRegistry()}
 	a.sshd = newSSHServer(a, again)
 	hello := a.hello(wire.Auth{Kind: "credential"})
-	if len(hello.Capabilities) != 1 || hello.Capabilities[0] != wire.CapabilitySSHServer {
+	if !slices.Contains(hello.Capabilities, wire.CapabilitySSHServer) {
 		t.Fatalf("capabilities = %v", hello.Capabilities)
 	}
 	advertised, _, _, _, err := ssh.ParseAuthorizedKey([]byte(hello.SSHHostKey))
@@ -376,7 +377,7 @@ func TestSSHHostKeyPersistsAndHelloAdvertisesIt(t *testing.T) {
 		t.Fatalf("sshHostKey = %q, %v", hello.SSHHostKey, err)
 	}
 	// Without a host key the capability is not claimed.
-	if bare := (&Agent{procs: newProcRegistry()}).hello(wire.Auth{}); len(bare.Capabilities) != 0 || bare.SSHHostKey != "" {
+	if bare := (&Agent{procs: newProcRegistry()}).hello(wire.Auth{}); slices.Contains(bare.Capabilities, wire.CapabilitySSHServer) || bare.SSHHostKey != "" {
 		t.Fatalf("hello without a server = %+v", bare)
 	}
 }

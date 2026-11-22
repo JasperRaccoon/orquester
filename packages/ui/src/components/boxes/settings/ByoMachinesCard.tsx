@@ -10,11 +10,13 @@ import { addByoMachine, newByoPairing, removeByoMachine, useBoxes, useBoxesLoade
 import { Button, ConfirmDialog, Input, Modal, ModalCloseButton } from "../../ui";
 import { Badge, EmptyState, FormField, Notice, SegmentedControl, SettingsSection } from "../../settings/primitives";
 import {
+  byoKindOf,
   byoMachines,
   byoStatusView,
   byoSubline,
   canRemoveMachine,
   machineNameProblem,
+  manualUninstallText,
   pairingHint,
   pairingPhase,
   removeMachineText,
@@ -23,15 +25,18 @@ import {
 
 const KINDS: readonly { value: ByoMachineKind; label: string }[] = [
   { value: "macos", label: "macOS" },
-  { value: "linux", label: "Linux" }
+  { value: "linux", label: "Linux" },
+  { value: "windows", label: "Windows" }
 ];
+
+const NAME_PLACEHOLDERS: Readonly<Record<ByoMachineKind, string>> = { macos: "Mac mini", linux: "Build server", windows: "Mini PC" };
 
 /** Status pills and the pairing countdown move with a display tick. */
 const TICK_MS = 15_000;
 
 /**
- * "Your machines" (Devices phase 3 §2.1): the owner's own always-on Mac or
- * Linux machines. "Add your machine" shows a one-line pairing command and
+ * "Your machines" (Devices phase 3 §2.1): the owner's own always-on Mac,
+ * Linux or Windows machines. "Add your machine" shows a one-line pairing command and
  * follows it live (waiting → connected); each machine can be removed (it
  * uninstalls its own service when connected). What agents may do on a paired
  * machine — device simulators included — is set in Settings → Machines.
@@ -47,7 +52,7 @@ export const ByoMachinesCard: React.FC = () => {
   return (
     <SettingsSection
       title="Your machines"
-      description="Pair an always-on Mac or Linux machine you own. It is free, projects and approved agent chats can use it, and Orquester never deletes it."
+      description="Pair an always-on Mac, Linux or Windows machine you own. It is free, projects and approved agent chats can use it, and Orquester never deletes it."
       actions={
         <Button size="sm" variant="outline" onClick={() => setDialog({ pairing: null })}>
           <Plus size={12} /> Add your machine
@@ -62,7 +67,7 @@ export const ByoMachinesCard: React.FC = () => {
         <EmptyState
           icon={<Laptop size={18} />}
           title="No machines yet"
-          description="Add a Mac mini or a Linux server you keep running: one command on it pairs it with this server."
+          description="Add a Mac mini, a Linux server or a Windows PC you keep running: one command on it pairs it with this server."
         />
       ) : (
         <ul aria-label="Your machines" className="divide-y divide-neutral-800/80">
@@ -157,7 +162,7 @@ const MachineRow: React.FC<{ box: BoxSummary; now: number; onPairing: (pairing: 
             "remove",
             async () => {
               const { uninstalled } = await removeByoMachine(api!, box.id);
-              if (!uninstalled && box.state !== "pairing") setNotice("Removed. Run `orq-agent uninstall-service` on the machine to remove its service.");
+              if (!uninstalled && box.state !== "pairing") setNotice(`Removed. ${manualUninstallText(box.kind)}`);
             },
             "Could not remove the machine."
           );
@@ -227,7 +232,7 @@ const AddMachineDialog: React.FC<{ initial: ByoPairingResponse | null; onClose: 
               >
                 <Input
                   id="byo-machine-name"
-                  placeholder={kind === "macos" ? "Mac mini" : "Build server"}
+                  placeholder={NAME_PLACEHOLDERS[kind]}
                   maxLength={MACHINE_NAME_MAX}
                   value={name}
                   disabled={busy !== null}
@@ -249,8 +254,8 @@ const AddMachineDialog: React.FC<{ initial: ByoPairingResponse | null; onClose: 
             </>
           ) : (
             <>
-              <PairingCommand command={pairing.command} />
-              <p className="text-xs leading-relaxed text-neutral-500">{pairingHint(pairing.box.kind === "macos" ? "macos" : "linux")}</p>
+              <PairingCommand command={pairing.command} windows={pairing.box.kind === "windows"} />
+              <p className="text-xs leading-relaxed text-neutral-500">{pairingHint(byoKindOf(pairing.box.kind))}</p>
               {phase?.kind === "waiting" && (
                 <p className="flex items-center gap-2 text-xs text-neutral-400" role="status">
                   <Loader2 size={12} className="animate-spin" /> Waiting for the machine… The command works once, for {phase.expiresInMinutes} more min.
@@ -312,7 +317,7 @@ const AddMachineDialog: React.FC<{ initial: ByoPairingResponse | null; onClose: 
 };
 
 /** The one-line command, with Copy. */
-const PairingCommand: React.FC<{ command: string }> = ({ command }) => {
+const PairingCommand: React.FC<{ command: string; windows: boolean }> = ({ command, windows }) => {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -322,7 +327,7 @@ const PairingCommand: React.FC<{ command: string }> = ({ command }) => {
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-neutral-300">Run this on the machine</span>
+        <span className="text-xs font-medium text-neutral-300">{windows ? "Run this in PowerShell as Administrator on the PC" : "Run this on the machine"}</span>
         <Button size="sm" variant="ghost" aria-label="Copy the pairing command" onClick={() => void copyText(command).then((ok) => setCopied(ok))}>
           {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? "Copied" : "Copy"}
         </Button>

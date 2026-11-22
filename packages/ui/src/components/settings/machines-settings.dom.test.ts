@@ -1,7 +1,8 @@
 /**
  * Settings → Machines in a DOM: Pair over SSH sends the overrides, shows an unknown host key and
  * pairs only with the fingerprint the owner confirmed, and a refused pairing shows its named fix;
- * a visibility choice and a capability switch send exactly that change. (The pairing test runs
+ * a visibility choice and a capability switch send exactly that change; Wake is offered only where
+ * something can send it, and says which machine did. (The pairing test runs
  * first: its dialog's focus-return tick lands while the DOM still exists.)
  */
 
@@ -10,7 +11,7 @@ import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import { EPHEMERAL_VMS_PLUGIN_ID, type MachineSummary, type PairMachineOverSshResponse, type PluginInfo } from "@orquester/api";
+import { EPHEMERAL_VMS_PLUGIN_ID, type MachineSummary, type PairMachineOverSshResponse, type PluginInfo, type WakeMachineResponse } from "@orquester/api";
 
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
@@ -87,10 +88,10 @@ describe("MachinesSettings", () => {
     resetMachines();
   });
 
-  const show = async () => {
+  const show = async (machines: MachineSummary[] = [mac], wakeAnswer: WakeMachineResponse = { sent: false, via: null }) => {
     const api = {
       connection: { id: "test" },
-      listMachines: async () => ({ machines: [mac], problems: [] }),
+      listMachines: async () => ({ machines, problems: [] }),
       updateMachine: async (id: string, req: unknown) => {
         calls.push(["update", id, req]);
         return { machine: mac };
@@ -100,7 +101,10 @@ describe("MachinesSettings", () => {
         calls.push(["pair", id, req]);
         return pairAnswers.shift()!;
       },
-      wakeMachine: async () => ({ sent: false, via: null })
+      wakeMachine: async (id: string) => {
+        calls.push(["wake", id, null]);
+        return wakeAnswer;
+      }
     };
     useAppStore.setState({ api: api as never, connectionStatus: "connected", plugins: [vmsPlugin] } as never);
     await act(async () => root.render(createElement(MachinesSettings)));
@@ -153,5 +157,17 @@ describe("MachinesSettings", () => {
       ["update", mac.id, { visibility: "free" }],
       ["update", mac.id, { capabilities: { commands: true } }]
     ]);
+  });
+
+  it("Wake shows on an asleep machine that has a sender, and says which machine sent it", async () => {
+    const jasper: MachineSummary = { ...mac, id: "ts:nJASPER", name: "jasper", os: "linux", state: "asleep", boxId: "byo-jasper", visibility: "ask", wake: { canWake: true, via: "ts:nMINIPC" } };
+    const minipc: MachineSummary = { ...mac, id: "ts:nMINIPC", name: "minipc", os: "windows", state: "ready", boxId: "byo-minipc", visibility: "ask" };
+    const noSender: MachineSummary = { ...jasper, id: "ts:nSTUDIO", name: "studio", wake: { canWake: false } };
+    await show([jasper, minipc, noSender], { sent: true, via: "ts:nMINIPC" });
+    assert.equal(byLabel("Wake studio"), null, "no sender: no Wake button");
+    assert.equal(byLabel("Wake minipc"), null, "awake: no Wake button");
+    await click(byLabel("Wake jasper")!);
+    assert.deepEqual(calls, [["wake", "ts:nJASPER", null]]);
+    assert.match(byLabel("jasper")!.textContent ?? "", /through minipc/);
   });
 });

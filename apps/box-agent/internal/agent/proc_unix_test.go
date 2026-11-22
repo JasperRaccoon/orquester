@@ -43,13 +43,16 @@ type dataFrame struct {
 	payload []byte
 }
 
-func newTestDaemon(t *testing.T) *testDaemon {
+func newTestDaemon(t *testing.T, setup ...func(*Agent)) *testDaemon {
 	t.Helper()
 	a := &Agent{
 		log:    log.New(io.Discard, "", 0),
 		procs:  newProcRegistry(),
 		linkUp: make(chan struct{}),
 		stop:   make(chan struct{}),
+	}
+	for _, f := range setup {
+		f(a)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)

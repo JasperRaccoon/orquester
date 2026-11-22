@@ -9,13 +9,16 @@ import type { MachinesResponse } from "@orquester/api";
 import { machinesStorePath, type StoredBox } from "@orquester/config";
 
 import { boxRecord } from "../boxes/remote/exec/testing.ts";
+import { localBoxConnection } from "../boxes/testing.ts";
 import type { MachineSshAccessEntry } from "./ports.ts";
 import { MachineRegistry, type MachineBoxConnection, type MachineBoxSource } from "./registry.ts";
 import { MachinePolicyStore } from "./store.ts";
 import { createTailnetReader } from "./tailscale-peers.ts";
+import { MachineWake } from "./wake.ts";
 
 const MAC = "ts:nMAC000000CNTRL";
 const JASPER = "ts:nJASPER000CNTRL";
+const MINIPC = "ts:nMINIPC0000CNTRL";
 
 /** The box side: BYO records and their links, with the calls the registry makes. */
 class Boxes implements MachineBoxSource {
@@ -218,4 +221,45 @@ test("policy effects: the device switch reaches the box, Hidden refuses the box 
   const view = registry.list({ kind: "agent", threadId: "chat-1" }).machines;
   assert.deepEqual(view.map((machine) => machine.id), [JASPER], "still visible for its other uses");
   assert.ok(!view.some((machine) => machine.self), "the daemon's own host is never listed to agents");
+});
+
+test("a paired machine's wired NICs stay in machines.json while it sleeps, and Wake is offered and sent through a machine on its LAN", async (t) => {
+  const h = await harness(t);
+  Object.values(h.status.Peer).find((peer) => peer.HostName === "minipc-desktop-0000000")!.Online = true;
+  h.boxes.add("byo-jasper", { machineName: "jasper" }, { hostname: "jasper", os: "linux" });
+  h.boxes.add("byo-minipc", { machineName: "minipc", kind: "windows" }, { hostname: "minipc-desktop-0000000", os: "windows" });
+  const minipc = localBoxConnection({
+    boxId: "byo-minipc",
+    capabilities: ["wake-sender"],
+    nics: [{ name: "Ethernet", mac: "02:00:5e:10:00:02", ipv4: "192.168.50.4", prefixLength: 24, broadcast: "192.168.50.255", wired: true, wolEnabled: null }]
+  });
+  const open = async () => {
+    const opened = await h.open();
+    opened.registry.setWake(new MachineWake({ machines: () => opened.registry.wakeMachines(), connection: (boxId) => (boxId === "byo-minipc" ? minipc : null) }));
+    return opened;
+  };
+  const first = await open();
+  const wired = { name: "enp6s0", mac: "02:00:5e:10:00:01", ipv4: "192.168.50.21", prefixLength: 24, broadcast: "192.168.50.255", wired: true, wolEnabled: null };
+  await first.registry.recordNics("byo-jasper", [wired, { ...wired, name: "wlp3s0", mac: "02:00:5e:10:00:03", ipv4: "192.168.50.22", wired: false }]);
+  // Going to sleep: the link loses its address, then orq-agent goes away and the peer goes offline.
+  await first.registry.recordNics("byo-jasper", [{ ...wired, ipv4: null, prefixLength: null, broadcast: null, wolEnabled: true }]);
+  h.boxes.links.get("byo-jasper")!.connected = false;
+  h.boxes.emit();
+  Object.values(h.status.Peer).find((peer) => peer.HostName === "jasper")!.Online = false;
+  await first.registry.refresh();
+  await first.registry.stop();
+
+  const stored = JSON.parse(await readFile(machinesStorePath(h.dir), "utf8")) as { machines: Record<string, { wol?: { nics: unknown[] } }> };
+  assert.deepEqual(stored.machines[JASPER]?.wol?.nics, [{ name: "enp6s0", mac: "02:00:5e:10:00:01", ipv4: "192.168.50.21", prefixLength: 24, broadcast: "192.168.50.255", wolEnabled: true }]);
+
+  // After a restart, with jasper still asleep.
+  const { registry } = await open();
+  const jasper = registry.get(JASPER);
+  assert.equal(jasper?.state, "asleep");
+  assert.deepEqual(jasper?.wake, { canWake: true, via: MINIPC });
+  assert.deepEqual(await registry.wakePort()!.wake(JASPER), { sent: true, via: MINIPC });
+  assert.deepEqual(
+    minipc.calls.filter((call) => call.method === "net.wake").map((call) => call.params),
+    [{ mac: "02:00:5e:10:00:01", broadcast: "192.168.50.255" }]
+  );
 });

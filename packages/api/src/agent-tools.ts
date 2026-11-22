@@ -223,11 +223,12 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
     tools: [act("generate_image")]
   },
   // Machines: advertised only while at least one of the owner's machines is visible to agents
-  // (`session-tools/manifest.ts`); Hidden machines never appear in it.
+  // (`session-tools/manifest.ts`); Hidden machines never appear in it. `wake_machine` is Act: an
+  // Ask-first machine raises a `spend` card (every permission mode), a Free-use one none.
   {
     id: "machines",
     label: "Your machines",
-    tools: [read("list_machines")]
+    tools: [read("list_machines"), act("wake_machine")]
   },
   // Tailnet previews: advertised only while Tailscale on the daemon host can serve HTTPS
   // (`session-tools/manifest.ts`). No card: only tailnet members reach a share, and it ends with the chat.

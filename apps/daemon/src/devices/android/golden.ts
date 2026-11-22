@@ -13,7 +13,7 @@ import type { DeviceProfile } from "@orquester/api";
 
 import type { DeviceHostProgress } from "../host.ts";
 import { avdName, CUTOUT_FILL_LOOKUP, CUTOUT_RECT_LOOKUP, cutoutOverlayPlan, cutoutSpecInDp } from "./avd-config.ts";
-import { type EmulatorLaunch, findQemuPid, type KvmMode, type ProcessMarker, serialOf, signalLauncher, spawnEmulator, stopEmulator, waitForBootCompleted } from "./emulator.ts";
+import { emulatorLogFailure, type EmulatorLaunch, findQemuPid, type KvmMode, type ProcessMarker, serialOf, signalLauncher, spawnEmulator, stopEmulator, waitForBootCompleted } from "./emulator.ts";
 import { type ExecFn, lastLine } from "./exec.ts";
 import { type DeviceExecutor, LOCAL_EXECUTOR } from "./executor.ts";
 import { delay, isProcessAlive } from "./procs.ts";
@@ -86,8 +86,9 @@ export interface GoldenDeps {
   /** The AVD's framebuffer density (`hw.lcd.density` after the patch). */
   density?: number;
   /**
-   * Once booted, before anything else: reject when the boot does not render as it must (a `host`
-   * GPU boot that fell back to a software rasterizer); the attempt then fails and is cleaned up.
+   * Once booted and settled (the home screen drawn), before anything is changed: reject when the
+   * boot does not render as it must (a `host` GPU boot that fell back to a software rasterizer or
+   * draws nothing); the attempt then fails and is cleaned up.
    */
   checkRender?(serial: string, signal: AbortSignal): Promise<void>;
 }
@@ -231,9 +232,17 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
     startTicks = (await x.procStat(pid))?.startTicks ?? null;
     await deps.track({ serial, pid, pgid, consolePort: ports.consolePort, grpcPort: ports.grpcPort, logPath, ...(startTicks !== null ? { startTicks } : {}) });
     const qemu = pid;
-    await waitForBootCompleted({ exec: deps.exec, adb, env: deps.env, serial, alive: () => isProcessAlive(qemu, x), signal, timeoutMs: deps.bootTimeoutMs ?? GOLDEN_BOOT_TIMEOUT_MS });
+    await waitForBootCompleted({
+      exec: deps.exec,
+      adb,
+      env: deps.env,
+      serial,
+      alive: () => isProcessAlive(qemu, x),
+      failed: async () => emulatorLogFailure((await x.readText(logPath)) ?? ""),
+      signal,
+      timeoutMs: deps.bootTimeoutMs ?? GOLDEN_BOOT_TIMEOUT_MS
+    });
     deps.logger.info(`[devices] golden ${profile.id}: booted in ${Math.round((Date.now() - started) / 1000)} s`);
-    if (deps.checkRender) await deps.checkRender(serial, signal);
     report("Waiting for first-boot work to settle", 25);
     const settleStart = Date.now();
     const settled = await waitForSettle(() => sampleCpuPercent(qemu, SETTLE_WINDOW_MS, signal, x), {
@@ -245,6 +254,7 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
       }
     });
     deps.logger.info(`[devices] golden ${profile.id}: ${settled ? "settled" : "did not settle"} after ${Math.round((Date.now() - settleStart) / 1000)} s`);
+    if (deps.checkRender) await deps.checkRender(serial, signal);
     report("Applying settings", 82);
     const settings = await deps.exec(adb, ["-s", serial, "shell", GUEST_SETTINGS_SCRIPT], { env: deps.env, signal, timeoutMs: 60_000 });
     if (settings.exitCode !== 0) throw new Error(`applying guest settings failed: ${lastLine(settings)}`);

@@ -18,18 +18,21 @@ import { dirname, join } from "node:path";
 import { PassThrough, Readable, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-import type {
-  BoxAgentCapability,
-  BoxChannelSpec,
-  BoxDetachedProcInfo,
-  BoxFsDirEntry,
-  BoxFsStat,
-  BoxHostToBoxMethods,
-  BoxMethodName,
-  BoxMethodParams,
-  BoxMethodResult,
-  BoxPathMap,
-  BoxSysInfo
+import {
+  BOX_NICS_EVENT,
+  parseBoxNics,
+  type BoxAgentCapability,
+  type BoxChannelSpec,
+  type BoxDetachedProcInfo,
+  type BoxFsDirEntry,
+  type BoxFsStat,
+  type BoxHostToBoxMethods,
+  type BoxMethodName,
+  type BoxMethodParams,
+  type BoxMethodResult,
+  type BoxNic,
+  type BoxPathMap,
+  type BoxSysInfo
 } from "@orquester/api";
 
 import type { BoxConnection, BoxExecOptions, BoxHostForward, BoxProcess, BoxRequestOptions } from "./contracts.ts";
@@ -134,6 +137,8 @@ export interface LocalBoxConnectionOptions {
   sshHostKey?: string;
   /** With `ssh-server`: an `ssh` channel connects to this local TCP port (a stand-in for the built-in server). */
   sshServerPort?: number;
+  /** The hello's NIC report; `emitEvent("sys.nics", …)` replaces it, as the hub's connection does. Default: not reported. */
+  nics?: BoxNic[];
 }
 
 export interface LocalBoxConnection extends BoxConnection {
@@ -147,6 +152,7 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
   const events = new EventEmitter();
   const status = new EventEmitter();
   let connected = true;
+  let nics: readonly BoxNic[] | null = options.nics ?? null;
   const calls: { method: string; params: unknown }[] = [];
   const sys = localSysInfo(options.sys);
   const watchers = new Map<string, FSWatcher>();
@@ -215,6 +221,11 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
     "ssh.keys": async () => {
       if (!options.capabilities?.includes("ssh-server")) throw Object.assign(new Error("UNKNOWN_METHOD ssh.keys"), { code: "UNKNOWN_METHOD" });
       return undefined;
+    },
+    // Sends nothing: the call is recorded in `calls`.
+    "net.wake": async () => {
+      if (!options.capabilities?.includes("wake-sender")) throw Object.assign(new Error("UNKNOWN_METHOD net.wake"), { code: "UNKNOWN_METHOD" });
+      return undefined;
     }
   };
 
@@ -232,6 +243,9 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
     agentVersion: "test",
     capabilities: options.capabilities ?? [],
     sshHostKey: options.sshHostKey ?? null,
+    get nics() {
+      return nics;
+    },
     calls,
     detachedProcs: (): BoxDetachedProcInfo[] => [],
     async request<K extends BoxMethodName<BoxHostToBoxMethods>>(
@@ -375,6 +389,7 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
       status.emit("status", next);
     },
     emitEvent(name: string, data: unknown): void {
+      if (name === BOX_NICS_EVENT) nics = parseBoxNics((data as { nics?: unknown } | null)?.nics) ?? nics;
       events.emit(name, data);
     }
   };

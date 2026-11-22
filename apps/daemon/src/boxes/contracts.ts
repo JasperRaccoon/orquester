@@ -22,6 +22,7 @@ import type {
   BoxMethodName,
   BoxMethodParams,
   BoxMethodResult,
+  BoxNic,
   BoxOs,
   BoxPathMap,
   BoxProviderCredentialField,
@@ -116,6 +117,11 @@ export interface BoxConnection {
   readonly capabilities?: readonly BoxAgentCapability[];
   /** With `ssh-server`: the built-in SSH server's host public key from the latest hello (`ssh-ed25519 AAAA…`). */
   readonly sshHostKey?: string | null;
+  /**
+   * The NICs `orq-agent` reported for Wake-on-LAN: the latest hello's, then each `sys.nics` event's
+   * (`BOX_NICS_EVENT`, applied before its `onEvent` listeners run). Null or absent: not reported.
+   */
+  readonly nics?: readonly BoxNic[] | null;
   /** Detached processes as of the latest hello. */
   detachedProcs(): BoxDetachedProcInfo[];
 

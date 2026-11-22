@@ -64,10 +64,18 @@ export interface MachineSshAccessPort {
   sync(entries: readonly MachineSshAccessEntry[]): Promise<void>;
 }
 
+/**
+ * Who a wake is for. The owner's own wake may be sent by any of their connected machines; an agent's
+ * (`agent: true`) never by a Hidden one, and its answer never names one.
+ */
+export interface MachineWakeOptions {
+  agent?: boolean;
+}
+
 /** Wake-on-LAN; implemented by the wake feature. */
 export interface MachineWakePort {
-  canWake(machineId: string): { canWake: boolean; via?: string };
-  wake(machineId: string): Promise<WakeMachineResponse>;
+  canWake(machineId: string, options?: MachineWakeOptions): { canWake: boolean; via?: string };
+  wake(machineId: string, options?: MachineWakeOptions): Promise<WakeMachineResponse>;
 }
 
 /** A paired machine's effective policy, as boxes and devices see it. */

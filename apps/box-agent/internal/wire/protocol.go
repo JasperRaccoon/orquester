@@ -100,6 +100,8 @@ const (
 	CapabilitySSHServer = "ssh-server"
 	// CapabilityDesktopSession: Windows, exec with Session "desktop" runs in the interactive session.
 	CapabilityDesktopSession = "desktop-session"
+	// CapabilityWakeSender: "net.wake" sends a Wake-on-LAN magic packet onto one of the box's LANs.
+	CapabilityWakeSender = "wake-sender"
 )
 
 // NicsEventName is the box → host event carrying a NicsEvent (BOX_NICS_EVENT).

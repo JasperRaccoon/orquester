@@ -1,8 +1,14 @@
 /**
  * The pairing run's probe lines (`orq-probe: key=value`, printed by the unattended pairing script,
- * `boxes/bootstrap/bootstrap.ts` `posixMachineFixes`) as the machine's {@link MachineProbeResult}:
- * passwordless sudo, and a {@link MachineProblem} with the exact fix for every gap the run could
- * not close. Only known keys and plain values are read; nothing else from the output is kept.
+ * `boxes/bootstrap/bootstrap.ts` `posixMachineFixes` and the Windows script) as the machine's
+ * {@link MachineProbeResult}: passwordless sudo, and a {@link MachineProblem} with the exact fix for
+ * every gap the run could not close. Only known keys and plain values are read; nothing else from
+ * the output is kept.
+ *
+ * Windows: `sudo=yes` is an administrator whose SSH session is elevated without a prompt (the
+ * script refuses to pair otherwise; orq-agent itself runs as LocalSystem). `whpx`, `autologon`,
+ * `desktop` and `desktop-helper` become `whpx-off` and `no-desktop-session` problems. The fixes
+ * never involve reading or printing a password.
  */
 
 import type { MachineProblem, MachineSudoInfo } from "@orquester/api";
@@ -94,6 +100,42 @@ export function probeResult(facts: ReadonlyMap<string, string>, context: ProbeCo
     add("xcode-path", `xcode-select on ${machineName} points at the Command Line Tools, not Xcode, so iOS simulators aren't available.`, `On ${machineName}: sudo xcode-select -s /Applications/Xcode.app`);
   } else if (xcode === "none") {
     add("xcode-path", `Xcode isn't installed on ${machineName}, so it can't run iOS simulators.`, `Install Xcode from the App Store on ${machineName}, open it once, then run sudo xcode-select -s /Applications/Xcode.app`);
+  }
+
+  const whpx = facts.get("whpx");
+  if (whpx === "off") {
+    add(
+      "whpx-off",
+      `The Windows Hypervisor Platform is off on ${machineName}, so Android emulators there get no hardware acceleration.`,
+      `On ${machineName}, in an administrator PowerShell: Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform, then restart ${machineName}.`
+    );
+  } else if (whpx === "pending") {
+    add("whpx-off", `The Windows Hypervisor Platform is turned on on ${machineName} but isn't running yet, so Android emulators get no acceleration.`, `Restart ${machineName}.`);
+  }
+  const autologon = facts.get("autologon");
+  const desktop = facts.get("desktop");
+  const helper = facts.get("desktop-helper");
+  const desktopUser = autologon === "on" ? "the automatic sign-in user" : user;
+  if (helper === "failed") {
+    add(
+      "no-desktop-session",
+      `Orquester couldn't register its desktop-session helper on ${machineName}, so programs that need the desktop or the GPU (Android emulators) can't run there.`,
+      `Pair ${machineName} again; if it fails again, pair it with the copy-paste command in an administrator PowerShell on ${machineName} to see why.`
+    );
+  } else if (autologon === "off") {
+    add(
+      "no-desktop-session",
+      `Automatic sign-in is off on ${machineName}, so after a restart nothing runs in its desktop session (Android emulators need it) until ${user} signs in there.`,
+      `Turn on automatic sign-in for ${user} on ${machineName}: run Sysinternals Autologon (autologon.exe, which keeps the password encrypted), or, for an account without a password, set AutoAdminLogon=1 and DefaultUserName=${user} under HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon. Then restart ${machineName}.`
+    );
+  } else if (desktop === "none") {
+    add("no-desktop-session", `Nobody is signed in at ${machineName}'s screen right now, so programs that need its desktop can't start there.`, `Restart ${machineName} (automatic sign-in then signs ${desktopUser} in), or sign in at it.`);
+  } else if (desktop === "other") {
+    add(
+      "no-desktop-session",
+      `Someone other than ${desktopUser} is signed in at ${machineName}'s screen, so the desktop-session helper (which runs as ${desktopUser}) isn't running.`,
+      `Sign the other user out on ${machineName} and sign in as ${desktopUser}.`
+    );
   }
 
   if (noSudo && problems.length > 0) {

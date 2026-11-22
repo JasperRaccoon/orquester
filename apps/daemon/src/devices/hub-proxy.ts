@@ -5,10 +5,11 @@
  * (`http-routes.ts`, `ws-routes.ts`) authenticate, find the host, its loopback hub origin and
  * token, and hand the request here with the hub path. This module owns:
  *
- * - the allowlists: only the paths the Device panel uses (device list, serve-sim helper streams,
- *   input socket and screenshot, serve-emu socket, screenshot and fold); serve-sim's grid start is
- *   the box host's own call (`hosts/box/host.ts`), never a client's;
- *   everything else 404, a method off the path's list 405;
+ * - the allowlists (`direct/hub-paths.mjs`, shared with the stream gate on the owner's machines):
+ *   only the paths the Device panel uses (device list, serve-sim helper streams, input socket and
+ *   screenshot, serve-emu socket, screenshot and fold); serve-sim's grid start is the box host's
+ *   own call (`hosts/box/host.ts`), never a client's; everything else 404, a method off the path's
+ *   list 405;
  * - the device check: a `?device=` (or a helper path's UDID) must name a device leased on the host;
  * - headers: only an allowlist goes upstream (no cookie, authorization, dpop, forwarding or
  *   client token), `Host` and `Origin` become the hub's, the hub's own token is added as
@@ -20,7 +21,9 @@
  *   `reset-video`) or a fold is the user's input — control switches to the user at once
  *   (`DeviceService.userInput`, spec §7); watching never changes control;
  * - viewer activity: an open stream restarts the lease's idle clock and the host learns how many
- *   streams of a device are open (it may recycle a capture session nobody watches).
+ *   streams of a device are open (it may recycle a capture session nobody watches) — the streams
+ *   its stream gate reports open on a direct route (tailnet machines spec §4.5) counted too, and
+ *   the gate's input reports switch control like proxied input.
  */
 
 import { request as httpRequest, type IncomingMessage } from "node:http";
@@ -30,6 +33,7 @@ import type { Readable } from "node:stream";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { WebSocket, type RawData } from "ws";
 
+import { FORWARDED_REQUEST_HEADERS, FORWARDED_RESPONSE_HEADERS, hubDeviceOf, isResetVideoText, matchHubHttpRoute, matchHubWsRoute, TOKEN_SUBPROTOCOL } from "./direct/hub-paths.mjs";
 import { repeatStillFrame } from "./mjpeg-still-frame.ts";
 
 /** Where one proxied request goes. */
@@ -50,6 +54,14 @@ export interface HubProxy {
   handleHttp(request: FastifyRequest, reply: FastifyReply, target: HubProxyTarget): Promise<void>;
   /** Relay an accepted, authenticated WebSocket to the target. */
   handleWebSocket(socket: WebSocket, request: FastifyRequest, target: HubProxyTarget): void;
+  /**
+   * How many streams of a device the host's stream gate has open on its direct routes (it reports
+   * them over its control channel, `direct/machine-gate.ts`): counted with the proxied ones, and the
+   * lease's idle clock restarts while any is open.
+   */
+  directViewers(hostId: string, deviceParam: string, count: number): void;
+  /** The stream gate saw the panel's input on a device (a direct route): the user takes control, as through the proxy. */
+  directInput(hostId: string, deviceParam: string): void;
 }
 
 interface HubProxyDeps {
@@ -72,49 +84,8 @@ const PENDING_MAX_MSGS = 512;
 const VIEWER_TOUCH_MS = 60_000;
 const UPSTREAM_OPEN_TIMEOUT_MS = 10_000;
 
-/** One allowed HTTP path. */
-interface HttpRoute {
-  pattern: RegExp;
-  methods: readonly string[];
-  /** Where the device is named: the `device` query parameter, or the pattern's first group. */
-  device: "query" | "path" | "none";
-  /** A long-lived video response (a viewer while open). */
-  stream?: boolean;
-  /** A POST that changes the device (the user's input). */
-  input?: boolean;
-}
-
-const READ = ["GET", "HEAD"] as const;
-
-const HUB_HTTP_ROUTES: readonly HttpRoute[] = [
-  { pattern: /^\/api\/devices$/, methods: READ, device: "none" },
-  { pattern: /^\/vendor\/serve-sim\/helper\/([^/]+)\/(?:stream\.mjpeg|stream\.avcc)$/, methods: READ, device: "path", stream: true },
-  // serve-sim screenshots the first booted simulator when `device` is missing: always name a leased one.
-  { pattern: /^\/vendor\/serve-sim\/api\/screenshot$/, methods: ["POST"], device: "query" },
-  // serve-emu answers its screenshot to POST only (the panel's poll for browsers without WebCodecs).
-  { pattern: /^\/vendor\/serve-emu\/api\/screenshot$/, methods: [...READ, "POST"], device: "query" },
-  { pattern: /^\/vendor\/serve-emu\/api\/fold$/, methods: [...READ, "POST"], device: "query", input: true }
-];
-
-/** One allowed WebSocket path: every client message is input, except what `control` accepts. */
-interface WsRoute {
-  pattern: RegExp;
-  /** A client message that is not input (it passes for viewers too). */
-  control?: (data: RawData, isBinary: boolean) => boolean;
-}
-
-const HUB_WS_ROUTES: readonly WsRoute[] = [
-  { pattern: /^\/vendor\/serve-sim\/helper\/ws$/ },
-  { pattern: /^\/vendor\/serve-emu\/ws$/, control: (data, isBinary) => !isBinary && isResetVideo(data) }
-];
-
 function isResetVideo(data: RawData): boolean {
-  try {
-    const value: unknown = JSON.parse(toBuffer(data).toString("utf8"));
-    return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "reset-video";
-  } catch {
-    return false;
-  }
+  return isResetVideoText(toBuffer(data).toString("utf8"));
 }
 
 function toBuffer(data: RawData): Buffer {
@@ -122,13 +93,6 @@ function toBuffer(data: RawData): Buffer {
   if (Array.isArray(data)) return Buffer.concat(data);
   return Buffer.from(data);
 }
-
-/** Request headers that may go upstream (everything else — cookies, credentials, forwarding — stays). */
-const FORWARDED_REQUEST_HEADERS = ["accept", "accept-language", "content-type", "content-length", "range", "if-none-match", "if-modified-since", "user-agent"];
-/** Response headers that may come back. */
-const FORWARDED_RESPONSE_HEADERS = ["content-type", "content-length", "content-encoding", "content-range", "accept-ranges", "etag", "last-modified", "content-disposition"];
-/** Subprotocols the hub reads as its token (`serve-sim.token.<t>`, `serve-emu.token.<t>`): a client's never pass. */
-const TOKEN_SUBPROTOCOL = /^serve-(?:sim|emu)\.token\./;
 
 /** What the client sends upstream: allowlisted headers, the hub's Origin when one was sent, the hub's bearer. */
 function upstreamHeaders(headers: FastifyRequest["headers"], target: Pick<HubProxyTarget, "origin" | "token">): Record<string, string> {
@@ -157,35 +121,24 @@ function downstreamHeaders(headers: IncomingMessage["headers"]): Record<string, 
   return out;
 }
 
-/** The device a request names, from its query or its path; null when it names none. */
-function deviceOf(match: RegExpExecArray, where: HttpRoute["device"], search: string): string | null {
-  if (where === "path") return decodeURIComponentSafe(match[1] ?? "");
-  const device = new URLSearchParams(search).get("device");
-  return device === null || device === "" ? null : device;
-}
-
-function decodeURIComponentSafe(value: string): string | null {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return null;
-  }
-}
-
 async function refuse(reply: FastifyReply, status: number, code: string, message: string): Promise<void> {
   await reply.code(status).header("cache-control", "no-store").send({ code, message });
 }
 
 export function createHubProxy(deps: HubProxyDeps): HubProxy {
   const viewers = new Map<string, number>();
+  /** Streams open on the hosts' direct routes, as their gates last reported (key → count and its idle-clock timer). */
+  const direct = new Map<string, { count: number; timer: ReturnType<typeof setInterval> }>();
+  const keyOf = (hostId: string, device: string): string => `${hostId}\u0000${device}`;
+  /** Proxied and direct streams of a device together: what its host learns. */
+  const total = (key: string): number => (viewers.get(key) ?? 0) + (direct.get(key)?.count ?? 0);
 
   /** A stream of a device opened: count it, touch its lease now and while it stays open. Returns the close. */
   const watch = (hostId: string, device: string, leaseId: string): (() => void) => {
-    const key = `${hostId}\u0000${device}`;
-    const count = (viewers.get(key) ?? 0) + 1;
-    viewers.set(key, count);
+    const key = keyOf(hostId, device);
+    viewers.set(key, (viewers.get(key) ?? 0) + 1);
     deps.viewerActive(leaseId);
-    deps.viewersChanged?.(hostId, device, count);
+    deps.viewersChanged?.(hostId, device, total(key));
     const timer = setInterval(() => deps.viewerActive(leaseId), VIEWER_TOUCH_MS);
     timer.unref?.();
     let done = false;
@@ -196,27 +149,44 @@ export function createHubProxy(deps: HubProxyDeps): HubProxy {
       const left = Math.max(0, (viewers.get(key) ?? 1) - 1);
       if (left === 0) viewers.delete(key);
       else viewers.set(key, left);
-      deps.viewersChanged?.(hostId, device, left);
+      deps.viewersChanged?.(hostId, device, total(key));
     };
   };
 
   return {
-    async handleHttp(request, reply, target) {
-      let route: HttpRoute | undefined;
-      let match: RegExpExecArray | null = null;
-      for (const entry of HUB_HTTP_ROUTES) {
-        match = entry.pattern.exec(target.hubPath);
-        if (match) {
-          route = entry;
-          break;
-        }
+    directViewers(hostId, device, count) {
+      const key = keyOf(hostId, device);
+      const before = direct.get(key);
+      const next = Math.max(0, Math.floor(count));
+      if ((before?.count ?? 0) === next) return;
+      if (before) clearInterval(before.timer);
+      if (next === 0) direct.delete(key);
+      else {
+        const touch = () => {
+          const lease = deps.leaseOnDevice(hostId, device);
+          if (lease) deps.viewerActive(lease.id);
+        };
+        const timer = setInterval(touch, VIEWER_TOUCH_MS);
+        timer.unref?.();
+        direct.set(key, { count: next, timer });
+        if (!before) touch();
       }
-      if (!route || !match) return refuse(reply, 404, "NOT_FOUND", "This hub path is not available through Orquester.");
+      deps.viewersChanged?.(hostId, device, total(key));
+    },
+
+    directInput(hostId, device) {
+      if (deps.leaseOnDevice(hostId, device)) deps.userInput(hostId, device);
+    },
+
+    async handleHttp(request, reply, target) {
+      const found = matchHubHttpRoute(target.hubPath);
+      if (!found) return refuse(reply, 404, "NOT_FOUND", "This hub path is not available through Orquester.");
+      const { route, match } = found;
       if (!route.methods.includes(request.method)) {
         void reply.header("allow", route.methods.join(", "));
         return refuse(reply, 405, "METHOD_NOT_ALLOWED", `${request.method} is not allowed on this hub path.`);
       }
-      const device = deviceOf(match, route.device, target.search);
+      const device = hubDeviceOf(match, route.device, target.search);
       if (route.device !== "none" && device === null) return refuse(reply, 400, "INVALID_ARGUMENT", "Name the device (`device`).");
       const lease = device !== null ? deps.leaseOnDevice(target.hostId, device) : null;
       if (device !== null && !lease) return refuse(reply, 404, "DEVICE_NOT_LEASED", "That device is not leased on this host.");
@@ -258,7 +228,7 @@ export function createHubProxy(deps: HubProxyDeps): HubProxy {
     },
 
     handleWebSocket(socket, request, target) {
-      const route = HUB_WS_ROUTES.find((entry) => entry.pattern.test(target.hubPath));
+      const route = matchHubWsRoute(target.hubPath);
       if (!route) {
         socket.close(1008, "hub path not available");
         return;
@@ -314,7 +284,7 @@ export function createHubProxy(deps: HubProxyDeps): HubProxy {
       // Attach synchronously: fastify-websocket drops messages that arrive before a listener exists.
       socket.on("message", (data: RawData, isBinary: boolean) => {
         if (closed) return;
-        if (!route.control?.(data, isBinary)) {
+        if (!(route.control === "reset-video" && !isBinary && isResetVideo(data))) {
           // Input: the panel touched or typed — the user takes control (spec §7).
           if (!deps.leaseOnDevice(target.hostId, device)) {
             closeBoth(1008, "device not leased");

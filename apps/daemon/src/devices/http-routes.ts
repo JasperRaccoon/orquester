@@ -28,6 +28,7 @@ import {
   parseDeviceOpenRequest,
   parseDeviceSetupRequest,
   parseDevicesSettingsPatch,
+  parseDeviceStreamTicketRequest,
   parseDeviceUserActionRequest,
   type AddDevicePortForwardRequest,
   type DeviceActionsResponse,
@@ -42,6 +43,7 @@ import {
   type DevicesSettingsResponse,
   type DevicesStateResponse,
   type DeviceSetupResponse,
+  type DeviceStreamTicketResponse,
   type DeviceUserActionResponse
 } from "@orquester/api";
 
@@ -72,6 +74,12 @@ export function hubSearch(url: string): string {
   params.delete("token");
   const rest = params.toString();
   return rest ? `?${rest}` : "";
+}
+
+/** A page's `Origin` header when it is one (`https://host[:port]`, `http://…`, or a file page's `null`); null otherwise. */
+function pageOrigin(value: string | string[] | undefined): string | null {
+  if (typeof value !== "string" || value.length > 300) return null;
+  return value === "null" || /^https?:\/\/[^/\s?#]+$/i.test(value) ? value : null;
 }
 
 /** The panel's own changes: an agent's (or external client's) principal is refused — agents change forwards with `device_forward_port`, for their own chat only. */
@@ -126,6 +134,20 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
     withService(async (service, request: FastifyRequest<Params<"hostId">>, reply) => {
       await service.destroyHost(request.params.hostId);
       return reply.code(204).send();
+    })
+  );
+
+  // The viewer's stream routes and a ticket for the direct ones (tailnet machines spec §4.5): a
+  // person's only (agents and external clients use screenshots and actions through the daemon).
+  // The ticket is bound to the asking page's origin, so the machine's gate answers CORS for it alone.
+  app.post<Params<"hostId">>(
+    `${deviceRoutes.hosts}/:hostId/stream-ticket`,
+    withService((service, request: FastifyRequest<Params<"hostId">>): DeviceStreamTicketResponse => {
+      const principal = (request as FastifyRequest & { principal?: { kind: string } | null }).principal;
+      if (principal && principal.kind !== "user") throw new DeviceError("PERMISSION_DENIED", "Only a person's device viewer streams directly; agents use device_action.");
+      const parsed = parseDeviceStreamTicketRequest(request.body);
+      if (!parsed.ok) throw new DeviceError("INVALID_ARGUMENT", parsed.message);
+      return service.streamTicket(request.params.hostId, parsed.value, { client: parsed.value.client ?? "browser", origin: pageOrigin(request.headers.origin) });
     })
   );
 

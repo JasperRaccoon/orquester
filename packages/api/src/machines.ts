@@ -387,6 +387,11 @@ export type MachineErrorCode =
   | "MACHINE_INVALID_REQUEST"
   /** 403: pairing, policy changes and removal are for the owner, never an agent. */
   | "MACHINE_OWNER_ONLY"
+  /**
+   * 403: an agent asked the route to wake an Ask-first machine. Only Free-use machines wake from the
+   * route; an Ask-first one wakes through `wake_machine`, after the owner approves its card.
+   */
+  | "MACHINE_APPROVAL_REQUIRED"
   /** 409: a pairing is already running, or the machine is paired already. */
   | "MACHINE_PAIRING_IN_PROGRESS"
   | "MACHINE_ALREADY_PAIRED"

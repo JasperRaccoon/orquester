@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { androidProbeProblems, boxAndroidCapacity, boxGpuModes, gpuSignature, parseAndroidProbe, rendersInSoftware, usableHostGpu } from "./android-remote.ts";
+import { androidProbeProblems, boxAndroidCapacity, boxGpuModes, gpuSignature, hostRenderProblem, parseAndroidProbe, usableHostGpu } from "./android-remote.ts";
 
 const GiB = 1024 ** 3;
 
@@ -28,38 +28,52 @@ function probe(lines: readonly string[] = []) {
   return parseAndroidProbe([...[...base].map(([key, value]) => `${key}=${value}`), ...render].join("\n"));
 }
 
+/** The GPU lines of a probe on an RTX 3080 Ti desktop (driver 595.99.02, KDE on X11 at :0 letting the account in through `xhost +SI:localuser`). */
+const NVIDIA_DESKTOP = ["nvidia=595.99.02", "nvidia_dev=1", "render=renderD128:nvidia:1", "x_display=:0"];
+
 describe("GPU modes of an own machine's golden snapshot", () => {
-  it("tries -gpu host first only where the probe found a GPU it can render on, then the software modes", () => {
-    const nvidia = usableHostGpu(probe(["nvidia=550.54.14", "nvidia_dev=1"]).gpu);
+  it("tries -gpu host first only where the probe found a GPU it can render on and an X display, then the software modes", () => {
+    const nvidia = usableHostGpu(probe(NVIDIA_DESKTOP).gpu);
     assert.equal(nvidia?.kind, "nvidia");
-    assert.deepEqual(boxGpuModes("byo", nvidia, null, "37.2.12"), ["host", "swangle_indirect", "swiftshader_indirect"]);
-    const mesa = usableHostGpu(probe(["render=renderD128:amdgpu:1"]).gpu);
+    assert.deepEqual(nvidia?.env, { DISPLAY: ":0" });
+    assert.deepEqual(boxGpuModes("byo", nvidia, null, "37.3.10"), ["host", "swangle_indirect", "swiftshader_indirect"]);
+    const mesa = usableHostGpu(probe(["render=renderD128:amdgpu:1", "x_display=:1", "x_auth=/run/user/1000/gdm/Xauthority"]).gpu);
     assert.equal(mesa?.kind, "mesa");
+    assert.deepEqual(mesa?.env, { DISPLAY: ":1", XAUTHORITY: "/run/user/1000/gdm/Xauthority" });
+    // The emulator's host renderer is GLX: without a display it never boots (a headless server, a logged-out desktop).
+    assert.equal(usableHostGpu(probe(NVIDIA_DESKTOP.filter((line) => !line.startsWith("x_display="))).gpu), null);
     // A driver loaded whose device nodes the account cannot open, or a virtual GPU: no host mode.
-    const closed = usableHostGpu(probe(["nvidia=550.54.14", "nvidia_dev=0", "render=renderD128:virtio_gpu:1", "render=renderD129:amdgpu:0"]).gpu);
+    const closed = usableHostGpu(probe(["nvidia=550.54.14", "nvidia_dev=0", "render=renderD128:virtio_gpu:1", "render=renderD129:amdgpu:0", "x_display=:0"]).gpu);
     assert.equal(closed, null);
-    assert.deepEqual(boxGpuModes("byo", closed, null, "37.2.12"), ["swangle_indirect", "swiftshader_indirect"]);
+    assert.deepEqual(boxGpuModes("byo", closed, null, "37.3.10"), ["swangle_indirect", "swiftshader_indirect"]);
   });
 
   it("rented runners keep the device cache's order whatever their GPU", () => {
-    const gpu = usableHostGpu(probe(["nvidia=550.54.14", "nvidia_dev=1"]).gpu);
+    const gpu = usableHostGpu(probe(NVIDIA_DESKTOP).gpu);
     assert.ok(!boxGpuModes("box", gpu, null, "37.2.12").includes("host"));
   });
 
   it("after host mode failed on a GPU and emulator, goes straight to software until either changes", () => {
-    const gpu = usableHostGpu(probe(["nvidia=550.54.14", "nvidia_dev=1"]).gpu)!;
+    const gpu = usableHostGpu(probe(NVIDIA_DESKTOP).gpu)!;
     const failedOn = gpuSignature(gpu, "37.2.12");
     assert.deepEqual(boxGpuModes("byo", gpu, failedOn, "37.2.12"), ["swangle_indirect", "swiftshader_indirect"]);
     assert.equal(boxGpuModes("byo", gpu, failedOn, "37.3.1")[0], "host");
-    const newDriver = usableHostGpu(probe(["nvidia=560.35.03", "nvidia_dev=1"]).gpu)!;
+    const newDriver = usableHostGpu(probe([...NVIDIA_DESKTOP, "nvidia=600.10.01"]).gpu)!;
     assert.equal(boxGpuModes("byo", newDriver, failedOn, "37.2.12")[0], "host");
   });
 
-  it("a boot that fell back to a software rasterizer does not count as host rendering", () => {
-    assert.equal(rendersInSoftware("RenderEngine\nGLES: Google (Google Inc.), Android Emulator OpenGL ES Translator (Google SwiftShader), OpenGL ES 3.0\n"), true);
-    assert.equal(rendersInSoftware("GLES: Google (NVIDIA Corporation), Android Emulator OpenGL ES Translator (NVIDIA GeForce RTX 3080 Ti/PCIe/SSE2), OpenGL ES 3.0\n"), false);
-    // No renderer line: nothing to go on, the boot stands.
-    assert.equal(rendersInSoftware("Display 0 HWC layers:\n"), false);
+  it("a host boot counts only with a GPU renderer named and a frame that is not blank", () => {
+    // `dumpsys SurfaceFlinger` and frame sizes of emulator 37.3.10 booted on that desktop.
+    const nvidia = " ------------RE GLES------------\nGLES: Google (NVIDIA Corporation), Android Emulator OpenGL ES Translator (NVIDIA GeForce RTX 3080 Ti/PCIe/SSE2), OpenGL ES 3.1 (4.5.0 NVIDIA 595.99.02)\n";
+    const swangle =
+      " ------------RE GLES------------\nGLES: Google (Google Inc. (Google)), Android Emulator OpenGL ES Translator (ANGLE (Google, Vulkan 1.2.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver-5.0.0)), OpenGL ES 3.1 (OpenGL ES 3.1.0 (ANGLE 2.1.17841 git hash: 5fa2e61da947))\n";
+    const homeScreen = "779404\n";
+    assert.equal(hostRenderProblem(nvidia, homeScreen), null);
+    assert.match(hostRenderProblem(swangle, homeScreen) ?? "", /fell back to software rendering \(GLES: .*SwiftShader/);
+    assert.match(hostRenderProblem(nvidia, "7980\n") ?? "", /blank screen \(a 7980-byte frame\)/);
+    // Nothing to confirm it by (a failed dump or capture, another dump format): it does not count.
+    assert.match(hostRenderProblem("Display 0 HWC layers:\n", homeScreen) ?? "", /could not be confirmed/);
+    assert.match(hostRenderProblem(nvidia, "") ?? "", /could not be confirmed/);
   });
 });
 

@@ -256,6 +256,40 @@ describe("box device host factory", () => {
     assert.deepEqual([...added.keys()], ["box:b"]);
   });
 
+  it("an Apple Silicon Mac is an iOS host and an Android host that share it; an Intel Mac runs iOS only", async () => {
+    boxes.records.set("b", record("b", { provider: "byo", purpose: "machine", deviceHost: true, machineName: "Studio", arch: "arm64" }));
+    boxes.records.set("c", record("c", { provider: "byo", purpose: "machine", deviceHost: true, machineName: "Old", arch: "x64" }));
+    boxes.mac("b");
+    boxes.mac("c");
+    await factory.start(context());
+    assert.deepEqual([...added.keys()].sort(), ["box:b", "box:b:android", "box:c"]);
+    const android = added.get("box:b:android")!;
+    assert.deepEqual({ kind: android.kind, platforms: android.platforms, box: android.box?.()?.boxId }, { kind: "byo", platforms: ["android"], box: "b" });
+
+    const ios = added.get("box:b")!;
+    const intel = added.get("box:c")!;
+    // Ready, with the Macs' RAM read (24 GB: three stock simulators).
+    await eventually(() => [ios, intel].every((host) => host.state().status === "ready" && host.capacity().total === 3), "both Macs' iOS hosts ready");
+    // Two emulators leased on the same Mac: their memory comes off the simulators' room.
+    leases = [{ id: "A1", hostId: "box:b:android" } as StoredDeviceLease, { id: "A2", hostId: "box:b:android" } as StoredDeviceLease];
+    assert.equal(ios.capacity().total, 1);
+    assert.equal(intel.capacity().total, 3);
+
+    // Android is off in Settings → Devices: the Mac never starts preparing it (no SDK download); turned on, it does.
+    assert.equal(android.state().status, "disabled");
+    const probes = () => boxes.macs.get("b")!.log.filter((line) => line === "sh probe").length;
+    boxes.setConnected("b", false);
+    boxes.setConnected("b", true);
+    assert.equal(probes(), 0);
+    settings = { ...settings, android: { ...settings.android, enabled: true } };
+    factory.settingsChanged?.(settings);
+    await eventually(() => probes() > 0 && android.state().status !== "starting", "the Mac's Android host prepared");
+
+    // Device simulators off for the Mac: both of its hosts go.
+    boxes.set({ ...boxes.records.get("b")!, deviceHost: false });
+    assert.deepEqual([...added.keys()], ["box:c"]);
+  });
+
   it("quotes a rental from Settings → Devices and the month's spending", async () => {
     await factory.start(context());
     const { providerLabel: _iosProviderLabel, sizeLabel: _iosSizeLabel, ...iosQuote } = factory.provisionQuote!("ios")!;

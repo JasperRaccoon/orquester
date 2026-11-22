@@ -13,6 +13,7 @@ import { createServer, type AddressInfo, type Server, type Socket } from "node:n
 import { Duplex, PassThrough, Readable, Writable } from "node:stream";
 
 import {
+  BOX_NICS_EVENT,
   BOX_STREAM_FROM_BOX,
   BOX_STREAM_STDERR,
   BOX_STREAM_TO_BOX,
@@ -24,8 +25,10 @@ import {
   type BoxMethodName,
   type BoxMethodParams,
   type BoxMethodResult,
+  type BoxNic,
   type BoxPathMap,
-  type BoxSysInfo
+  type BoxSysInfo,
+  parseBoxNics
 } from "@orquester/api";
 
 import type { BoxConnection, BoxExecOptions, BoxHostForward, BoxProcess, BoxRequestOptions } from "../contracts.ts";
@@ -44,6 +47,8 @@ export interface LinkInfo {
   capabilities?: BoxAgentCapability[];
   /** The latest hello's `sshHostKey` (with `ssh-server`). */
   sshHostKey?: string;
+  /** The latest NIC report (hello, then `sys.nics`); absent: not reported. */
+  nics?: BoxNic[];
 }
 
 /** A Readable fed by one inbound stream, returning credit as it drains. */
@@ -388,6 +393,9 @@ export class LinkedBoxConnection implements BoxConnection {
   get sshHostKey(): string | null {
     return this.info.sshHostKey ?? null;
   }
+  get nics(): readonly BoxNic[] | null {
+    return this.info.nics ?? null;
+  }
 
   detachedProcs(): BoxDetachedProcInfo[] {
     return this.info.procs.map((proc) => ({ ...proc }));
@@ -440,6 +448,10 @@ export class LinkedBoxConnection implements BoxConnection {
 
   /** Feed a box event (from the mux's `onEvent`). */
   emitEvent(name: string, data: unknown): void {
+    if (name === BOX_NICS_EVENT) {
+      const nics = parseBoxNics((data as { nics?: unknown } | null)?.nics);
+      if (nics) this.info = { ...this.info, nics };
+    }
     this.events.emit(name, data);
     for (const listener of this.anyEvent) listener(name, data);
   }

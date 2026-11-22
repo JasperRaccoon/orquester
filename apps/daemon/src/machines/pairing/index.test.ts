@@ -6,6 +6,8 @@ import test from "node:test";
 
 import type { BoxLocalTailscale, MachineSummary } from "@orquester/api";
 
+import { WINDOWS_PAIRING_COMMAND } from "../../boxes/bootstrap/bootstrap.ts";
+
 import type { ByoSshPairingRequest } from "../../boxes/service/byo.ts";
 import type { MachineTarget } from "../ports.ts";
 import { createMachinePairing } from "./index.ts";
@@ -25,6 +27,8 @@ interface FakeMachine {
   /** `ssh -G`'s `user` (the daemon user's name when nothing in ~/.ssh/config sets one). */
   configUser: string;
   bootstrap: (input: string) => SshRunResult;
+  /** Win32-OpenSSH with cmd.exe as the login shell, instead of a POSIX machine. */
+  windows?: boolean;
 }
 
 interface Call {
@@ -58,6 +62,12 @@ function fakeSsh(machine: FakeMachine, key: { blob: string }) {
     if (known === "unknown") return fail(`No ED25519 host key is known for ${ADDRESS} and you have requested strict checking.\r\nHost key verification failed.\r\n`);
     if (known === "changed") return fail(`@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\nHost key for ${ADDRESS} has changed and you have requested strict checking.\r\nHost key verification failed.\r\n`);
     const command = args.at(-1);
+    if (machine.windows) {
+      // cmd.exe: no uname; `echo %OS%` expands.
+      if (command === "echo %OS%") return ok("Windows_NT\r\n");
+      if (command === WINDOWS_PAIRING_COMMAND) return machine.bootstrap(options.input ?? "");
+      return { code: 1, stdout: "", stderr: `"${command?.split(" ")[0]}" no se reconoce como un comando interno o externo,\r\n`, timedOut: false };
+    }
     if (command === "uname -s") return ok("Linux\n");
     if (command === "sh -s") return machine.bootstrap(options.input ?? "");
     throw new Error(`unexpected remote command ${command}`);
@@ -206,4 +216,58 @@ test("with no user given or configured, the owner is asked for one instead of th
   // ~/.ssh/config naming a user for that host is the owner's choice.
   const configured = await setup(t, { known: "same", configUser: "jasper" });
   assert.equal((await configured.pairing.pairOverSsh({ ...TARGET, ssh: {} }, {})).status, "pairing");
+});
+
+const MINI_PC: MachineTarget = {
+  machineId: "ts:nMiniPc",
+  name: "minipc",
+  hostname: "minipc-desktop-11fqvre",
+  dnsName: null,
+  tailnetIps: [ADDRESS],
+  os: "windows",
+  boxId: null,
+  ssh: { user: "user" }
+};
+
+test("a Windows machine is confirmed by cmd.exe and paired by PowerShell reading the script on stdin; its probe reads like the real mini PC's", async (t) => {
+  const observed = await readFile(new URL("../fixtures/windows-pairing-probe.stderr.txt", import.meta.url), "utf8");
+  const { pairing, ssh, added } = await setup(t, { known: "same", windows: true, bootstrap: () => ({ code: 0, stdout: "", stderr: observed, timedOut: false }) });
+  const result = await pairing.pairOverSsh(MINI_PC, {});
+  assert.equal(result.status, "pairing");
+  assert.deepEqual(
+    ssh.calls.slice(1).map((call) => call.args.at(-1)),
+    ["echo %OS%", WINDOWS_PAIRING_COMMAND]
+  );
+  assert.equal(added[0]?.kind, "windows");
+  const bootstrap = ssh.calls.at(-1)!;
+  assert.equal(bootstrap.input, SCRIPT);
+  for (const call of ssh.calls) assert.ok(!call.args.some((arg) => arg.includes("TOKEN")), `no secret in argv: ${call.args.join(" ")}`);
+  const probe = pairing.lastProbe(MINI_PC.machineId)!;
+  // An administrator over SSH is elevated without a prompt: Windows' passwordless sudo.
+  assert.deepEqual(probe.sudo, { passwordless: true });
+  assert.deepEqual(probe.problems, []);
+});
+
+test("Windows gaps are named with their fixes, and a non-administrator is refused naming the account", async (t) => {
+  const gaps = ["orq-probe: sudo=yes", "orq-probe: whpx=off", "orq-probe: autologon=off", "orq-probe: desktop=none", "orq-probe: desktop-helper=installed"].join("\r\n");
+  const machine = await setup(t, { known: "same", windows: true, bootstrap: () => ({ code: 0, stdout: "", stderr: `${gaps}\r\n`, timedOut: false }) });
+  assert.equal((await machine.pairing.pairOverSsh(MINI_PC, {})).status, "pairing");
+  const problems = machine.pairing.lastProbe(MINI_PC.machineId)!.problems;
+  assert.deepEqual(
+    problems.map((problem) => problem.code),
+    ["whpx-off", "no-desktop-session"]
+  );
+  assert.match(problems[0]!.fix!, /Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform/);
+  assert.match(problems[1]!.fix!, /Autologon.*DefaultUserName=user/s);
+  assert.ok(!/password=|DefaultPassword/i.test(JSON.stringify(problems)), "no fix asks to store a password in the registry");
+
+  const refused = await setup(t, {
+    known: "same",
+    windows: true,
+    bootstrap: () => ({ code: 1, stdout: "", stderr: "orq-probe: sudo=no\r\norq-bootstrap: error: run the pairing command in PowerShell as Administrator: orq-agent installs a Windows service\r\n", timedOut: false })
+  });
+  const result = await refused.pairing.pairOverSsh(MINI_PC, {});
+  assert.equal(result.status === "failed" && result.problem.code, "sudo-unavailable");
+  assert.match(result.status === "failed" ? result.problem.message : "", /^user isn't an administrator on minipc/);
+  assert.deepEqual(refused.removed, ["box-abc123456"], "the failed pairing's record is removed");
 });

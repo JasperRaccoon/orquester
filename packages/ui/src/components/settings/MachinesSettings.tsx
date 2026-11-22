@@ -13,6 +13,8 @@ import {
   canPairOverSsh,
   canRemove,
   canWake,
+  wakeResultView,
+  wakeSenderName,
   EMPTY_PAIR_FORM,
   machineStateView,
   pairRequestOf,
@@ -118,6 +120,8 @@ const ProblemNotice: React.FC<{ problem: MachineProblem; tone?: "warn" | "danger
 
 const MachineCard: React.FC<{ machine: MachineSummary; pairingOn: boolean }> = ({ machine, pairingOn }) => {
   const api = useAppStore((s) => s.api);
+  const { machines } = useMachinesState();
+  const wakeVia = wakeSenderName(machine.wake.via, machines);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -162,13 +166,14 @@ const MachineCard: React.FC<{ machine: MachineSummary; pairingOn: boolean }> = (
               variant="outline"
               disabled={busy !== null}
               aria-label={`Wake ${machine.name}`}
+              title={wakeVia ? `Sends a Wake-on-LAN packet through ${wakeVia}, on the same network.` : "Sends a Wake-on-LAN packet from another machine on the same network."}
               onClick={() =>
                 void run(
                   "wake",
                   async () => {
-                    const result = await wakeMachine(api!, machine.id);
-                    if (result.sent) setNotice(`Wake sent. ${machine.name} shows Ready once it is back on the tailnet.`);
-                    else setError(result.problem ? `${result.problem.message}${result.problem.fix ? ` ${result.problem.fix}` : ""}` : "Nothing could send the wake.");
+                    const view = wakeResultView(await wakeMachine(api!, machine.id), machine, machines);
+                    if (view.sent) setNotice(view.text);
+                    else setError(view.text);
                   },
                   "Could not wake the machine."
                 )
@@ -239,8 +244,8 @@ const MachineCard: React.FC<{ machine: MachineSummary; pairingOn: boolean }> = (
         {machine.problems.map((problem) => (
           <ProblemNotice key={`${problem.code}:${problem.message}`} problem={problem} />
         ))}
-        {notice && <p className="text-xs text-neutral-400">{notice}</p>}
-        {error && <p className="text-xs text-danger">{error}</p>}
+        {notice && <p className="break-words text-xs text-neutral-400">{notice}</p>}
+        {error && <p className="break-words text-xs text-danger">{error}</p>}
       </div>
 
       {pairing && <PairOverSshDialog machine={machine} onClose={() => setPairing(false)} />}
@@ -333,8 +338,19 @@ const PairOverSshDialog: React.FC<{ machine: MachineSummary; onClose: () => void
         {step.kind === "form" && (
           <>
             <p className="text-xs text-neutral-400">Leave a field blank to use this server's SSH setup (its ~/.ssh/config and ~/.ssh/id_ed25519). What you enter is kept for this machine.</p>
+            {machine.os === "windows" && (
+              <p className="text-xs text-neutral-400">
+                Log in as an administrator of {machine.name}: orq-agent installs a Windows service for shells and files, and a helper that runs in the signed-in user's desktop
+                for programs that need the screen or the GPU (Android emulators). Turn on automatic sign-in there so the helper is back after a restart.
+              </p>
+            )}
             <div className="grid gap-3 sm:grid-cols-2">
-              {field("user", "User", "The account orq-agent runs as there.", "your login on the machine")}
+              {field(
+                "user",
+                "User",
+                machine.os === "windows" ? "An administrator account on the machine." : "The account orq-agent runs as there.",
+                "your login on the machine"
+              )}
               {field("port", "Port", "SSH port on the machine.", "22")}
               {field("identityFile", "Identity file", "Private key path on the Orquester server.", "/home/you/.ssh/id_ed25519")}
               {field("sshAlias", "SSH alias", "A Host from ~/.ssh/config on the Orquester server.", "minipc")}
@@ -351,7 +367,11 @@ const PairOverSshDialog: React.FC<{ machine: MachineSummary; onClose: () => void
               <dd className="break-all font-mono text-neutral-100">{step.hostKey.fingerprint}</dd>
             </dl>
             <p className="text-xs text-neutral-500">
-              On the machine, <code>ssh-keygen -lf /etc/ssh/ssh_host_{step.hostKey.keyType.replace(/^ssh-|-.*$/g, "") || "ed25519"}_key.pub</code> prints it (on Windows, under C:\ProgramData\ssh).
+              On the machine,{" "}
+              <code>
+                ssh-keygen -lf {machine.os === "windows" ? "C:\\ProgramData\\ssh\\" : "/etc/ssh/"}ssh_host_{step.hostKey.keyType.replace(/^ssh-|-.*$/g, "") || "ed25519"}_key.pub
+              </code>{" "}
+              prints it.
             </p>
           </div>
         )}

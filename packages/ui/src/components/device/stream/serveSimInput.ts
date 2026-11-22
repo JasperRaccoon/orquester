@@ -11,8 +11,10 @@ import { HID_USAGE_LEFT_SHIFT, textToHidStrokes } from "./keymap.ts";
 import { clampUnit } from "./pointer.ts";
 import {
   DeviceStreamError,
+  resolveStreamUrl,
   type DeviceOrientation,
   type DeviceScreenConfig,
+  type StreamUrl,
   type TouchPhase
 } from "./types.ts";
 
@@ -74,7 +76,7 @@ function rawSimulatorPoint(screen: DeviceScreenConfig | null, x: number, y: numb
 
 export interface ServeSimInputOptions {
   /** Full WebSocket URL; the caller's API client has already added the auth token. */
-  readonly url: string;
+  readonly url: StreamUrl;
   /** Input admitted (and not marked unavailable) or lost; `reason` explains a loss. */
   readonly onReady?: (ready: boolean, reason?: string) => void;
   readonly onScreenConfig?: (config: DeviceScreenConfig) => void;
@@ -173,7 +175,7 @@ export class ServeSimInputSocket {
     if (this.closed) return;
     let socket: WebSocket;
     try {
-      socket = new WebSocket(this.options.url);
+      socket = new WebSocket(resolveStreamUrl(this.options.url));
     } catch (cause) {
       this.scheduleReconnect(cause instanceof Error ? cause.message : String(cause));
       return;

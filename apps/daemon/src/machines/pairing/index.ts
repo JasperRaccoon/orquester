@@ -20,6 +20,14 @@
  *    bootstrap token, goes over stdin to `sh -s`: no secret is in any argv, here or on the machine.
  *    It probes and fixes the machine (linger, `/dev/kvm`, OOM protection; developer mode and Xcode
  *    on macOS) with `sudo -n` only, and installs `orq-agent`, which then connects on its own.
+ *
+ *    **Windows** (the registry says so, and `echo %OS%` answers `Windows_NT` from cmd.exe, or
+ *    `%OS%` from a PowerShell login shell): the PowerShell script goes over stdin to
+ *    {@link WINDOWS_PAIRING_COMMAND} instead. It needs an administrator (elevated over SSH without a
+ *    prompt, which is what `sudo.passwordless` means there: `orq-agent` then runs as LocalSystem),
+ *    installs the OrqAgent service and the desktop-session helper's logon task, and probes the
+ *    Windows Hypervisor Platform and the desktop session (`probe.ts`). It prints ASCII only, so the
+ *    console's code page can't garble what is parsed here. No OOM protection on Windows (§4.9.3).
  * 4. **Result.** `pairing` once the script succeeded; otherwise the record is removed and the
  *    failure classified (`classify.ts`). The probe's findings stay in {@link MachinePairingPort.lastProbe}
  *    (in memory: the next pairing probes again).
@@ -35,6 +43,7 @@ import { join } from "node:path";
 
 import type { MachineProblem, MachineSummary, PairMachineOverSshRequest, PairMachineOverSshResponse } from "@orquester/api";
 
+import { WINDOWS_PAIRING_COMMAND } from "../../boxes/bootstrap/bootstrap.ts";
 import type { ByoMachines } from "../../boxes/service/byo.ts";
 import { BoxError } from "../../boxes/service/errors.ts";
 import type { LocalTailscale } from "../../boxes/tailscale/local.ts";
@@ -146,11 +155,8 @@ export function createMachinePairing(deps: MachinePairingDeps): MachinePairingPo
   /** Where to connect and as whom; a failed answer when the inputs can't make a connection. */
   async function plan(target: MachineTarget, request: PairMachineOverSshRequest): Promise<Plan | PairMachineOverSshResponse> {
     const name = (request.name ?? "").trim() || target.name;
-    if (target.os === "windows") {
-      return failed(problemOf(target, "pair-bootstrap-failed", `Pairing a Windows machine over SSH isn't available yet, so ${target.name} can't be paired this way.`));
-    }
-    if (target.os !== "linux" && target.os !== "macos") {
-      return failed(problemOf(target, "pair-bootstrap-failed", `${target.name} doesn't run Linux or macOS, so it can't be paired.`));
+    if (target.os !== "linux" && target.os !== "macos" && target.os !== "windows") {
+      return failed(problemOf(target, "pair-bootstrap-failed", `${target.name} doesn't run Linux, macOS or Windows, so it can't be paired.`));
     }
     if (target.boxId !== null) {
       return failed(problemOf(target, "pair-bootstrap-failed", `${target.name} is paired already.`, `Remove ${target.name} first to pair it again.`));
@@ -258,10 +264,12 @@ export function createMachinePairing(deps: MachinePairingDeps): MachinePairingPo
     if ("status" in planned) return planned;
     const p = planned;
     const dir = await mkdtemp(join(deps.tempDir ?? tmpdir(), "orq-pair-"));
+    // Win32-OpenSSH runs commands with cmd.exe (or PowerShell): no uname there.
+    const osCommand = target.os === "windows" ? "echo %OS%" : "uname -s";
     try {
       const strict = ["-o", "StrictHostKeyChecking=yes"];
       let hostKeys = strict;
-      let preflight = await run(ssh, sshArgs(p, hostKeys, "uname -s"), { timeoutMs: PREFLIGHT_TIMEOUT_MS });
+      let preflight = await run(ssh, sshArgs(p, hostKeys, osCommand), { timeoutMs: PREFLIGHT_TIMEOUT_MS });
       let problem = preflight.code === 0 ? null : classifySshFailure(preflight, p.context);
       if (problem?.code === "ssh-host-key-unknown") {
         const { keys, result } = await fetchHostKey(p, join(dir, "offered"));
@@ -287,7 +295,7 @@ export function createMachinePairing(deps: MachinePairingDeps): MachinePairingPo
         const pinnedFile = join(dir, "pinned");
         await writeFile(pinnedFile, `${pinned.map((candidate) => candidate.line).join("\n")}\n`, { mode: 0o600 });
         hostKeys = [...strict, "-o", `UserKnownHostsFile=${optionPath(pinnedFile)}`, "-o", "GlobalKnownHostsFile=/dev/null", "-o", "CheckHostIP=no"];
-        preflight = await run(ssh, sshArgs(p, hostKeys, "uname -s"), { timeoutMs: PREFLIGHT_TIMEOUT_MS });
+        preflight = await run(ssh, sshArgs(p, hostKeys, osCommand), { timeoutMs: PREFLIGHT_TIMEOUT_MS });
         problem = preflight.code === 0 ? null : classifySshFailure(preflight, p.context);
       }
       if (problem) return failed(problem);
@@ -295,8 +303,20 @@ export function createMachinePairing(deps: MachinePairingDeps): MachinePairingPo
         return failed(problemOf(target, "pair-bootstrap-failed", `${target.name} accepted the SSH login but couldn't run a shell command.`, `Check ${p.context.user ?? "the user"}'s login shell on ${target.name}.`));
       }
       const uname = preflight.stdout.trim().split(/\s+/).at(-1) ?? "";
-      const kind = uname === "Linux" ? "linux" : uname === "Darwin" ? "macos" : null;
-      if (kind === null) return failed(problemOf(target, "pair-bootstrap-failed", `${target.name} doesn't run Linux or macOS, so it can't be paired over SSH.`));
+      const kind =
+        target.os === "windows" ? (uname === "Windows_NT" || uname === "%OS%" ? "windows" : null) : uname === "Linux" ? "linux" : uname === "Darwin" ? "macos" : null;
+      if (kind === null) {
+        return failed(
+          problemOf(
+            target,
+            "pair-bootstrap-failed",
+            target.os === "windows"
+              ? `${target.name} answered the SSH login, but not like Windows' OpenSSH server, so it can't be paired over SSH.`
+              : `${target.name} doesn't run Linux or macOS, so it can't be paired over SSH.`,
+            target.os === "windows" ? `Pair it with the copy-paste command from Settings → Plugins → Ephemeral AI VMs → Add your machine, in an administrator PowerShell on ${target.name}.` : undefined
+          )
+        );
+      }
 
       let route: { mode: "public-url" | "tailscale"; daemonUrl: string };
       let boxId: string;
@@ -309,7 +329,7 @@ export function createMachinePairing(deps: MachinePairingDeps): MachinePairingPo
       }
       try {
         await deps.linkBox?.(target.machineId, boxId);
-        const result = await run(ssh, sshArgs(p, hostKeys, "sh -s"), { input: script, timeoutMs: BOOTSTRAP_TIMEOUT_MS });
+        const result = await run(ssh, sshArgs(p, hostKeys, kind === "windows" ? WINDOWS_PAIRING_COMMAND : "sh -s"), { input: script, timeoutMs: BOOTSTRAP_TIMEOUT_MS });
         const facts = parseProbeLines(`${result.stderr}\n${result.stdout}`);
         if (facts.size > 0) {
           probes.set(target.machineId, probeResult(facts, { machineId: target.machineId, machineName: target.name, user: p.context.user ?? localUser }, new Date(now()).toISOString()));
@@ -321,6 +341,17 @@ export function createMachinePairing(deps: MachinePairingDeps): MachinePairingPo
         }
         const classified = result.code === 255 || result.spawnError !== undefined ? classifySshFailure(result, p.context) : null;
         if (classified) return failed(classified);
+        if (kind === "windows" && facts.get("sudo") === "no") {
+          const user = p.context.user ?? "the SSH user";
+          return failed(
+            problemOf(
+              target,
+              "sudo-unavailable",
+              `${user} isn't an administrator on ${target.name}, so orq-agent can't be installed as a Windows service there.`,
+              `Pair over SSH as an administrator of ${target.name}, or add ${user} to its Administrators group, then pair again.`
+            )
+          );
+        }
         const reason = bootstrapErrorLine(`${result.stderr}\n${result.stdout}`);
         return failed(
           problemOf(
