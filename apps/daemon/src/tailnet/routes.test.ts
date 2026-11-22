@@ -16,6 +16,7 @@ const share = (port: number, threadId: string | null): TailnetPreviewShare => ({
 test("an agent shares and lists only its own chat's previews, from its principal; the owner settings refuse it", async (t) => {
   const shared: SharePreviewInput[] = [];
   const stopped: { port: number; threadId?: string }[] = [];
+  const disabled: boolean[] = [];
   const service = {
     previews: (threadId?: string) => [share(5173, "c1"), share(6000, null)].filter((entry) => threadId === undefined || entry.threadId === threadId),
     sharePreview: async (input: SharePreviewInput) => {
@@ -29,7 +30,11 @@ test("an agent shares and lists only its own chat's previews, from its principal
       stopped.push({ port, ...options });
       return [];
     },
-    enableHttps: async () => assert.fail("an agent must not change the tailnet address")
+    enableHttps: async () => assert.fail("an agent must not change the tailnet address"),
+    disableHttps: async (options: { confirm?: boolean } = {}) => {
+      disabled.push(options.confirm === true);
+      return { available: true, url: null, operatorOk: true, serveState: "off", port: 10000, checkedAt: null };
+    }
   } as unknown as TailnetService;
   const app = Fastify();
   t.after(() => app.close());
@@ -52,6 +57,11 @@ test("an agent shares and lists only its own chat's previews, from its principal
 
   assert.equal((await asAgent.request("POST", tailnetRoutes.https)).status, 403);
   assert.equal((await asAgent.request("POST", tailnetRoutes.operator)).status, 403);
+
+  // The owner confirms turning the address off with the query flag only.
+  await api.request("DELETE", tailnetRoutes.https);
+  await api.request("DELETE", tailnetRoutes.https, { query: { confirm: "true" } });
+  assert.deepEqual(disabled, [false, true]);
 
   // The owner names a chat or none, and lists every share.
   await api.request("POST", tailnetRoutes.previews, { body: { port: 8080 } });

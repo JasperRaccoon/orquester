@@ -72,7 +72,9 @@ export const tailnetRoutes = {
   /**
    * `GET` → {@link TailnetHttpsStatus}; `POST` → {@link TailnetHttpsStatus}: set up (or repair) the
    * serve route through the existing "Set up for me" path; `DELETE` → {@link TailnetHttpsStatus}:
-   * remove Orquester's own route only.
+   * remove Orquester's own route only. While boxes or paired machines reach the daemon through that
+   * address, `DELETE` answers 409 {@link TailnetConfirmRequired} unless it carries
+   * `?${TAILNET_CONFIRM_PARAM}=true`.
    */
   https: "/api/tailnet/https",
   /** `POST` → {@link TailnetHttpsStatus}: run `tailscale set --operator=<daemon user>` once (with `sudo -n`). */
@@ -93,7 +95,18 @@ export interface TailnetChangedPayload {
   previews: TailnetPreviewShare[];
 }
 
-export type TailnetErrorCode = "TAILNET_PROBLEM" | "TAILNET_INVALID_REQUEST" | "TAILNET_PREVIEW_NOT_FOUND";
+export type TailnetErrorCode = "TAILNET_PROBLEM" | "TAILNET_INVALID_REQUEST" | "TAILNET_PREVIEW_NOT_FOUND" | "TAILNET_CONFIRM_REQUIRED";
+
+/** The query flag that confirms turning the tailnet address off while something reaches the daemon through it. */
+export const TAILNET_CONFIRM_PARAM = "confirm";
+
+/** `DELETE tailnetRoutes.https` without the confirm flag while the address is in use: 409 with who would disconnect. */
+export interface TailnetConfirmRequired {
+  code: "TAILNET_CONFIRM_REQUIRED";
+  message: string;
+  /** Plain names of what reaches the daemon through the address ("Tailscale-mode boxes", "2 paired machines"). */
+  users: string[];
+}
 
 // Which addresses are tailnet ones (§4.7.5): by interface or Tailscale's IPv6 range, never 100.64/10 alone.
 export * from "./tailnet-address.ts";

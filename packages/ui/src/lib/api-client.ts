@@ -135,7 +135,7 @@ import { accountLendRoutes, boxRoutes, type AccountLendsResponse } from "@orques
 // Devices: the Device simulators plugin's routes and payloads (answers validated by `lib/devices/validate.ts`).
 import { deviceRoutes } from "@orquester/api";
 import { selfUpdateRoutes, type SelfUpdateStartResponse, type SelfUpdateStatusResponse } from "@orquester/api";
-import { tailnetRoutes, type TailnetHttpsStatus, type TailnetPreviewShare } from "@orquester/api";
+import { TAILNET_CONFIRM_PARAM, tailnetRoutes, type TailnetHttpsStatus, type TailnetPreviewShare } from "@orquester/api";
 import { parseTailnetHttpsStatus, parseTailnetPreviewResponse, parseTailnetPreviews } from "./tailnet/validate";
 import type {
   DeviceActionsResponse,
@@ -542,8 +542,8 @@ export class ApiClient {
   // --- Tailnet (`tailnetRoutes`, spec 2026-11-22 §4.7): answers validated by `tailnet/validate.ts`;
   // a refusal's `{ problem }` (409 TAILNET_PROBLEM) is read with `problemOfError`. ---
 
-  private async tailnetStatus(method: TransportMethod, path: string, signal?: AbortSignal): Promise<TailnetHttpsStatus> {
-    const status = parseTailnetHttpsStatus(await this.send<unknown>(method, path, { signal }));
+  private async tailnetStatus(method: TransportMethod, path: string, signal?: AbortSignal, query?: Record<string, string>): Promise<TailnetHttpsStatus> {
+    const status = parseTailnetHttpsStatus(await this.send<unknown>(method, path, { signal, ...(query ? { query } : {}) }));
     if (!status) throw new Error("The server answered with an unreadable tailnet status.");
     return status;
   }
@@ -558,9 +558,12 @@ export class ApiClient {
     return this.tailnetStatus("POST", tailnetRoutes.https);
   }
 
-  /** Remove Orquester's own tailnet route to the daemon. */
-  disableTailnetHttps(): Promise<TailnetHttpsStatus> {
-    return this.tailnetStatus("DELETE", tailnetRoutes.https);
+  /**
+   * Remove Orquester's own tailnet route to the daemon. While boxes or paired machines dial it this
+   * throws 409 `TAILNET_CONFIRM_REQUIRED` (read with `confirmUsersOfError`) unless `confirm` is set.
+   */
+  disableTailnetHttps(options: { confirm?: boolean } = {}): Promise<TailnetHttpsStatus> {
+    return this.tailnetStatus("DELETE", tailnetRoutes.https, undefined, options.confirm ? { [TAILNET_CONFIRM_PARAM]: "true" } : undefined);
   }
 
   /** `sudo -n tailscale set --operator=<daemon user>` on the server, so serve changes need no sudo. */

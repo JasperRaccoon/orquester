@@ -5,9 +5,9 @@ import { encode } from "uqr";
 import type { MachineProblem, TailnetHttpsStatus, TailnetPreviewShare } from "@orquester/api";
 import { copyText } from "../../lib/clipboard";
 import { loadTailnet, setTailnetHttps, setTailnetPreviews, tailnetStore } from "../../lib/tailnet/store";
-import { problemOfError } from "../../lib/tailnet/validate";
+import { confirmUsersOfError, problemOfError } from "../../lib/tailnet/validate";
 import { useAppStore } from "../../store/app";
-import { Button, Input } from "../ui";
+import { Button, ConfirmDialog, Input } from "../ui";
 import { Badge, EmptyState, Notice, SettingRow, SettingsSection } from "./primitives";
 
 /**
@@ -107,6 +107,8 @@ export const TailnetSettings: React.FC = () => {
   /** Which section the last failed action belongs to. */
   const [errorScope, setErrorScope] = useState<"https" | "previews">("https");
   const [sharePort, setSharePort] = useState("");
+  /** What would disconnect if the address went off: the confirm dialog is open while set. */
+  const [confirmUsers, setConfirmUsers] = useState<string[] | null>(null);
 
   useEffect(() => {
     if (!api) return;
@@ -136,7 +138,16 @@ export const TailnetSettings: React.FC = () => {
   };
 
   const enable = () => run("enable", async (client) => setTailnetHttps(await client.enableTailnetHttps()));
-  const disable = () => run("disable", async (client) => setTailnetHttps(await client.disableTailnetHttps()));
+  const disable = (confirm = false) =>
+    run("disable", async (client) => {
+      try {
+        setTailnetHttps(await client.disableTailnetHttps({ confirm }));
+      } catch (error) {
+        const users = confirmUsersOfError(error);
+        if (!users) throw error;
+        setConfirmUsers(users);
+      }
+    });
   const grantOperator = () => run("operator", async (client) => setTailnetHttps(await client.setTailnetOperator()));
   const port = Number(sharePort.trim());
   const portValid = sharePort.trim() !== "" && Number.isInteger(port) && port >= 1024 && port <= 65535;
@@ -246,6 +257,19 @@ export const TailnetSettings: React.FC = () => {
           </>
         )}
       </SettingsSection>
+
+      <ConfirmDialog
+        open={confirmUsers !== null}
+        title="Turn off the tailnet address?"
+        message={`${(confirmUsers ?? []).join(" and ")} reach Orquester through this address and will disconnect. They reconnect only once it is served again or their Connection setting points elsewhere.`}
+        confirmLabel="Turn off"
+        danger
+        onCancel={() => setConfirmUsers(null)}
+        onConfirm={() => {
+          setConfirmUsers(null);
+          void disable(true);
+        }}
+      />
 
       <SettingsSection
         title="Shared previews"

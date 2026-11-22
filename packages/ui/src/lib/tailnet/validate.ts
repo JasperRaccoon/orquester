@@ -73,6 +73,14 @@ export function parseTailnetChanged(value: unknown): TailnetChangedPayload | nul
   return https && previews ? { https, previews } : null;
 }
 
+/** What would disconnect, when turning the address off was refused for want of a confirm (`409 TAILNET_CONFIRM_REQUIRED`); null otherwise. */
+export function confirmUsersOfError(error: unknown): string[] | null {
+  const body = (error as { body?: unknown } | null)?.body;
+  if (!isRecord(body) || body.code !== "TAILNET_CONFIRM_REQUIRED") return null;
+  const users = Array.isArray(body.users) ? body.users.filter((user): user is string => typeof user === "string" && user.trim() !== "") : [];
+  return users.length > 0 ? users : ["Paired machines and boxes"];
+}
+
 /** The problem a refused tailnet request carries (`409 TAILNET_PROBLEM` bodies), if any. */
 export function problemOfError(error: unknown): MachineProblem | undefined {
   const body = (error as { body?: unknown } | null)?.body;

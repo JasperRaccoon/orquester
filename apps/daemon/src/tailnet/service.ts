@@ -56,7 +56,9 @@ export class TailnetError extends Error {
     readonly status: number,
     readonly code: TailnetErrorCode | "PERMISSION_DENIED",
     message: string,
-    readonly problem?: MachineProblem
+    readonly problem?: MachineProblem,
+    /** TAILNET_CONFIRM_REQUIRED: what reaches the daemon through the address. */
+    readonly users?: readonly string[]
   ) {
     super(message);
   }
@@ -93,6 +95,12 @@ export interface TailnetServiceDeps {
    */
   hostPortFor?(projectPath: string, port: number): Promise<number | null>;
   publish(payload: TailnetChangedPayload): void;
+  /**
+   * What reaches the daemon through one of these `https://…ts.net[:port]` addresses (boxes in
+   * Tailscale mode, paired machines), in plain words; empty when nothing does. Turning the address
+   * off then needs an explicit confirm. Absent: nothing does.
+   */
+  addressUsers?(addresses: readonly string[]): readonly string[];
   now?(): number;
   logger?: { warn(message: string): void };
 }
@@ -113,8 +121,12 @@ export interface TailnetService {
   httpsStatus(): Promise<TailnetHttpsStatus>;
   /** Serve the daemon on the tailnet (or adopt the route already serving it). Throws {@link TailnetError}. */
   enableHttps(): Promise<TailnetHttpsStatus>;
-  /** Remove Orquester's own route(s) to the daemon and stop repairing. Throws {@link TailnetError}. */
-  disableHttps(): Promise<TailnetHttpsStatus>;
+  /**
+   * Remove Orquester's own route(s) to the daemon and stop repairing. Throws {@link TailnetError}:
+   * TAILNET_CONFIRM_REQUIRED while something reaches the daemon through the address and `confirm`
+   * is not set.
+   */
+  disableHttps(options?: { confirm?: boolean }): Promise<TailnetHttpsStatus>;
   /** `tailscale set --operator=<daemon user>` through `sudo -n`. Throws {@link TailnetError}. */
   setOperator(): Promise<TailnetHttpsStatus>;
   /** Shared previews, all or one chat's. */
@@ -475,12 +487,23 @@ export function createTailnetService(deps: TailnetServiceDeps): TailnetService {
       return setStatus(evaluate(after.current, after.decision, after.alive, false));
     });
 
-  const disableHttps = (): Promise<TailnetHttpsStatus> =>
+  const disableHttps = (options: { confirm?: boolean } = {}): Promise<TailnetHttpsStatus> =>
     serial(async () => {
       const { current, live } = await read();
       const record = httpsRecord();
       if (current.running && !current.serveKnown) throw problemError(readinessProblem(current)!);
-      for (const port of ownHttpsRoutes({ live, record, routes: current.routes })) {
+      const ports = ownHttpsRoutes({ live, record, routes: current.routes });
+      const users = current.dnsName && ports.length > 0 ? (deps.addressUsers?.(ports.map((port) => tailnetUrl(current.dnsName!, port))) ?? []) : [];
+      if (users.length > 0 && options.confirm !== true) {
+        throw new TailnetError(
+          409,
+          "TAILNET_CONFIRM_REQUIRED",
+          `${users.join(" and ")} reach Orquester through this address and will disconnect if it is turned off.`,
+          undefined,
+          users
+        );
+      }
+      for (const port of ports) {
         const result = await local.unserve(port);
         if (!result.ok) throw problemError(changeProblem(result, local.operatorCommand()));
       }

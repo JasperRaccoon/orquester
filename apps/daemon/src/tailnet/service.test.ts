@@ -164,11 +164,18 @@ test("every 30 s the route is recreated when deleted, repointed when the daemon 
   assert.equal(h.ts.calls.filter((line) => line.endsWith("http://127.0.0.1:3000")).length, 0);
 });
 
-test("a route already serving the daemon is adopted; turning it off removes only Orquester's own route", async (t) => {
+test("a route already serving the daemon is adopted; turning it off asks first while boxes dial it, then removes only Orquester's own route", async (t) => {
+  const asked: string[][] = [];
   const h = await harness(t, {
     setup: (ts) => {
       ts.routes.set(10000, "http://127.0.0.1:47831");
       ts.routes.set(10001, "http://127.0.0.1:3000");
+    },
+    deps: {
+      addressUsers: (addresses) => {
+        asked.push([...addresses]);
+        return ["Tailscale-mode boxes"];
+      }
     }
   });
   await h.service.start();
@@ -176,7 +183,16 @@ test("a route already serving the daemon is adopted; turning it off removes only
   const stored = JSON.parse(await readFile(h.file, "utf8"));
   assert.deepEqual([stored.https.enabled, stored.https.port, stored.https.target], [true, 10000, "http://127.0.0.1:47831"]);
 
-  const off = await h.service.disableHttps();
+  const refusal = await h.service.disableHttps().then(
+    () => assert.fail("turned off while boxes dial it"),
+    (error: unknown) => error
+  );
+  assert.equal((refusal as TailnetError).code, "TAILNET_CONFIRM_REQUIRED");
+  assert.deepEqual((refusal as TailnetError).users, ["Tailscale-mode boxes"]);
+  assert.deepEqual(asked, [[`https://${NAME}:10000`]]);
+  assert.equal(h.ts.routes.has(10000), true, "nothing removed without the confirm");
+
+  const off = await h.service.disableHttps({ confirm: true });
   assert.equal(off.serveState, "off");
   assert.deepEqual([...h.ts.routes.keys()], [10001]);
   assert.deepEqual(h.ts.calls.filter((line) => line.endsWith(" off")), ["tailscale serve --https=10000 off"]);

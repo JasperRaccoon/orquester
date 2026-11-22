@@ -9,6 +9,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import {
+  TAILNET_CONFIRM_PARAM,
   tailnetRoutes,
   type CreateTailnetPreviewShareRequest,
   type TailnetHttpsStatus,
@@ -24,7 +25,9 @@ export interface TailnetRoutesDeps {
 
 function send(reply: FastifyReply, error: unknown): FastifyReply {
   if (error instanceof TailnetError) {
-    return reply.code(error.status).send({ code: error.code, message: error.message, ...(error.problem ? { problem: error.problem } : {}) });
+    return reply
+      .code(error.status)
+      .send({ code: error.code, message: error.message, ...(error.problem ? { problem: error.problem } : {}), ...(error.users ? { users: [...error.users] } : {}) });
   }
   throw error;
 }
@@ -38,10 +41,10 @@ const ownerOnly = (request: FastifyRequest, reply: FastifyReply): boolean => {
 export function registerTailnetRoutes(app: FastifyInstance, deps: TailnetRoutesDeps): void {
   const { service } = deps;
 
-  const owner = (run: () => Promise<TailnetHttpsStatus>) => async (request: FastifyRequest, reply: FastifyReply) => {
+  const owner = (run: (request: FastifyRequest) => Promise<TailnetHttpsStatus>) => async (request: FastifyRequest, reply: FastifyReply) => {
     if (!ownerOnly(request, reply)) return reply;
     try {
-      return reply.send(await run());
+      return reply.send(await run(request));
     } catch (error) {
       return send(reply, error);
     }
@@ -49,7 +52,10 @@ export function registerTailnetRoutes(app: FastifyInstance, deps: TailnetRoutesD
 
   app.get(tailnetRoutes.https, owner(() => service.httpsStatus()));
   app.post(tailnetRoutes.https, owner(() => service.enableHttps()));
-  app.delete(tailnetRoutes.https, owner(() => service.disableHttps()));
+  app.delete(
+    tailnetRoutes.https,
+    owner((request) => service.disableHttps({ confirm: (request.query as Record<string, unknown> | undefined)?.[TAILNET_CONFIRM_PARAM] === "true" }))
+  );
   app.post(tailnetRoutes.operator, owner(() => service.setOperator()));
 
   app.get(tailnetRoutes.previews, async (request, reply) => {

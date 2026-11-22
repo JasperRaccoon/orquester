@@ -372,6 +372,7 @@ import { createDaemonBoxes, type DaemonBoxes } from "./boxes/wiring.ts";
 import { createLocalTailscale } from "./boxes/tailscale/local.ts";
 import { registerTailnetRoutes } from "./tailnet/routes.ts";
 import { createTailnetService, type TailnetService } from "./tailnet/service.ts";
+import { tailnetAddressUsers } from "./tailnet/address-users.ts";
 
 const daemonId = randomUUID();
 
@@ -817,6 +818,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // A box project's port is shared through its host forward.
     hostPortFor: (projectPath, port) => boxes.previewHostPort(projectPath, port),
     publish: (payload) => broadcaster.publish(TAILNET_CHANNEL, TAILNET_CHANGED_EVENT, payload),
+    // Turning the address off asks first while boxes or paired machines dial it (boxes Connection).
+    addressUsers: (addresses) => tailnetAddressUsers(boxes.service.settings.connectionSettings(), boxes.registry.list(), addresses),
     logger: console
   });
 
