@@ -18,7 +18,8 @@ export const BYO_REGION: BoxRegionOffer = { id: "own", label: "Your machine", co
 export const byoAdapter: BoxProviderAdapter = {
   id: "byo",
   label: "Your machines",
-  kinds: BYO_MACHINE_KINDS,
+  // Windows is a BYO kind (tailnet machines spec 2026-11-22 §4.2.6) that cannot be paired yet, so no Windows machine exists to offer.
+  kinds: BYO_MACHINE_KINDS.filter((kind) => kind !== "windows"),
   website: "",
   credentialsUrl: "",
   credentialFields: [],
@@ -47,7 +48,7 @@ export function byoMachineIdle(record: StoredBox, connected: boolean): boolean {
 /** "Mac mini (macOS, arm64)". */
 export function byoMachineLabel(record: StoredBox): string {
   const name = record.machineName ?? record.name;
-  const details = [record.os === "darwin" ? "macOS" : record.os === "linux" ? "Linux" : null, record.arch ?? null].filter(Boolean);
+  const details = [record.os === "darwin" ? "macOS" : record.os === "linux" ? "Linux" : record.os === "win32" ? "Windows" : null, record.arch ?? null].filter(Boolean);
   return details.length > 0 ? `${name} (${details.join(", ")})` : name;
 }
 

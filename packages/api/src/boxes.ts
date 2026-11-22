@@ -114,9 +114,13 @@ export function isBoxPurpose(value: unknown): value is BoxPurpose {
 
 /** The provider id of the owner's own machines (Devices phase 3 §2.1). */
 export const BYO_PROVIDER_ID = "byo" satisfies BoxProviderId;
-/** The kinds a bring-your-own machine can be. */
-export type ByoMachineKind = "linux" | "macos";
-export const BYO_MACHINE_KINDS: readonly ByoMachineKind[] = ["linux", "macos"];
+/**
+ * The kinds a bring-your-own machine can be. `windows` (tailnet machines spec 2026-11-22 §4.2.6):
+ * the kind exists, but pairing one is refused with `BOX_UNSUPPORTED` until its PowerShell
+ * bootstrap lands.
+ */
+export type ByoMachineKind = "linux" | "macos" | "windows";
+export const BYO_MACHINE_KINDS: readonly ByoMachineKind[] = ["linux", "macos", "windows"];
 /** How long a pairing command works. */
 export const BYO_PAIRING_TTL_MINUTES = 30;
 
@@ -261,6 +265,11 @@ export interface BoxSummary {
   byo?: BoxByoInfo;
   /** Accounts lent to this box right now (lending spec 2026-11-03). Absent: none, or an older daemon. */
   lentAccounts?: BoxLentAccount[];
+  /**
+   * The `orq-<name>` SSH alias the caller may use for this box (agent SSH, tailnet machines spec
+   * 2026-11-22 §4.3.5; `list_boxes` and `create_box` return it). Absent: none for this caller.
+   */
+  sshAlias?: string;
 }
 
 /** The agents whose accounts can be lent to a box. */
@@ -552,6 +561,11 @@ export interface BoxLocalTailscale {
   suggestedUrl: string | null;
   /** The command that serves Orquester on `servePort` (null when Tailscale is not installed). */
   serveCommand: string | null;
+  /**
+   * The daemon's user is Tailscale's operator, so `tailscale serve` changes need no sudo (tailnet
+   * machines spec 2026-11-22 §4.7.2). Absent: not checked (older daemons).
+   */
+  operatorOk?: boolean;
 }
 
 /** Body for `PUT boxRoutes.connection`; secret fields are write-only. */

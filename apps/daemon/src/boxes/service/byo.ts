@@ -177,8 +177,10 @@ export class ByoMachines {
   /** "Add your machine": the `pairing` record and its one-time command. */
   async add(body: AddByoMachineRequest | undefined): Promise<ByoPairingResponse> {
     const request = (body && typeof body === "object" ? body : {}) as Partial<AddByoMachineRequest>;
-    if (!(BYO_MACHINE_KINDS as readonly unknown[]).includes(request.kind)) throw invalid('`kind` must be "linux" or "macos".');
+    if (!(BYO_MACHINE_KINDS as readonly unknown[]).includes(request.kind)) throw invalid('`kind` must be "linux", "macos" or "windows".');
     const kind = request.kind as ByoMachineKind;
+    // The kind exists for tailnet machines (spec 2026-11-22 §4.2.6); its PowerShell pairing does not yet.
+    if (kind === "windows") throw new BoxError(409, "BOX_UNSUPPORTED", "Pairing a Windows machine isn't available yet.");
     const name = machineName(request.name);
     // No route to this daemon: the machine could never connect.
     const route = this.deps.settings.route("byo");

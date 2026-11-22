@@ -97,6 +97,10 @@ export * from "./gpt-image.ts";
 export * from "./devices.ts";
 export * from "./boxes.ts";
 export * from "./box-protocol.ts";
+// Tailnet machines, agent SSH and the daemon's own Tailscale (spec 2026-11-22-tailnet-machines-and-agent-ssh-design.md).
+export * from "./machines.ts";
+export * from "./agent-ssh.ts";
+export * from "./tailnet.ts";
 // boxes: temporary boxes for agent chats (routes behind the box MCP tools).
 export * from "./box-tools.ts";
 export * from "./agent-tools.ts";

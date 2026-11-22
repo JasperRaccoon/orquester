@@ -68,7 +68,9 @@ test("Add your machine: a pairing record and a one-time command; only the code's
   // An idle machine is not a running box.
   assert.equal(service.boxesResponse().totals.activeCount, 0);
 
-  await assert.rejects(service.byo.add({ kind: "windows" as never, name: "x" }), (error: BoxError) => error.code === "BOX_INVALID_REQUEST");
+  await assert.rejects(service.byo.add({ kind: "freebsd" as never, name: "x" }), (error: BoxError) => error.code === "BOX_INVALID_REQUEST");
+  // A Windows machine is a known kind whose pairing is not there yet: refused, never given a POSIX script.
+  await assert.rejects(service.byo.add({ kind: "windows", name: "Mini PC" }), (error: BoxError) => error.status === 409 && error.code === "BOX_UNSUPPORTED");
   await assert.rejects(service.byo.add({ kind: "linux", name: " " }), (error: BoxError) => error.code === "BOX_INVALID_REQUEST");
 });
 
