@@ -312,6 +312,39 @@ test("after a restart a live alias keeps its name and key, served before its box
   assert.equal(await readFile(keyPath, "utf8"), key);
 });
 
+test("a chat closed while the daemon was down loses its aliases once the chat list is loaded", async (t) => {
+  const port = await echoServer(t);
+  const first = await setup(t);
+  first.hub.connections.set("b1", builtInServerBox(t, "b1", first.dir, port));
+  first.registry.set(record("b1"));
+  await first.agentSsh.start();
+  await first.agentSsh.settled("t-1", "b1");
+  await first.agentSsh.stop();
+
+  const box = builtInServerBox(t, "b1", first.dir, port);
+  const hub = new Hub();
+  hub.connections.set("b1", box);
+  const again = new AgentSsh({
+    baseDir: first.baseDir,
+    home: first.home,
+    hub,
+    registry: first.registry,
+    chats: { isOpen: () => false, projectPath: () => null },
+    includeSetting: async () => false
+  });
+  t.after(() => again.stop());
+  await again.start();
+  // Until the chat list is loaded, no chat is taken for closed.
+  assert.equal(again.aliasFor("t-1", "b1")?.alias, "orq-b1");
+
+  await again.chatsLoaded();
+  assert.equal(again.aliasFor("t-1", "b1"), null);
+  assert.equal(existsSync(managedSshConfigPath(first.home, "b1")), false);
+  assert.equal(existsSync(agentChatThreadSshDir(first.baseDir, "t-1")), false);
+  assert.equal(await readFile(managedSshKnownHostsPath(first.home), "utf8"), "");
+  assert.deepEqual(keysPushed(box), []);
+});
+
 test("a box project's chat gets the alias in its own box, dialling a forward that goes through the same checks", async (t) => {
   const port = await echoServer(t);
   const forwards: { close(): Promise<void> }[] = [];

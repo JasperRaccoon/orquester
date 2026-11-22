@@ -329,7 +329,6 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
 
   // Agent SSH (spec 2026-11-22 §4.3): built after `projectForwards`, so a project box's re-listen on
   // connect is queued before the aliases' checks of their forwards. Chats are known from `attach` on.
-  let chatsLoaded: () => boolean = () => false;
   const agentSsh = new AgentSsh({
     baseDir: deps.baseDir,
     home: deps.home,
@@ -337,8 +336,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     registry,
     projectForwards,
     chats: {
-      // Until the chat list is loaded every chat counts as open: nothing is revoked for it.
-      isOpen: (threadId) => !agentChat || !chatsLoaded() || agentChat.chat.has(threadId),
+      // Asked only after `chatsLoaded()` below (before it, every chat counts as open).
+      isOpen: (threadId) => agentChat?.chat.has(threadId) ?? true,
       projectPath: (threadId) => agentChat?.chat.get(threadId)?.projectPath || null
     },
     includeSetting: deps.sshConfigInclude ?? (async () => false),
@@ -572,8 +571,11 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       attachment.agentChat.setBoxes({ registry, tooling });
 
       // Agent SSH: aliases are read back and reconciled, and the proxy socket opens.
-      chatsLoaded = attachment.sessionsLoaded;
       await agentSsh.start().catch((error) => logger.warn("[boxes] Agent SSH did not start", errorText(error)));
+      // `startDaemon` awaits the session reattach (which loads the chat tabs) before `attach`: once
+      // it succeeded, chats closed while the daemon was down lose their aliases now. If it failed,
+      // no chat is taken for closed.
+      if (attachment.sessionsLoaded()) await agentSsh.chatsLoaded().catch((error) => logger.warn("[boxes] Agent SSH: dropping closed chats' aliases failed", errorText(error)));
 
       // boxes: the Browser tab of a Linux box project runs its Chromium in the box.
       const vmBrowsers = new BoxBrowsers({

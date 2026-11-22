@@ -35,7 +35,9 @@
  *   every connect sweeps lines tagged for that box that are no longer live). A closed chat's
  *   thread `ssh/` dir goes whole. `expiry-time` is the backstop when the box never returns.
  * - **Restarts.** The managed configs are read back at start (their tag says whose they are), so a
- *   live alias keeps its name and key, and one that is no longer wanted is revoked.
+ *   live alias keeps its name and key, and one that is no longer wanted is revoked. Every chat
+ *   counts as open until {@link AgentSsh.chatsLoaded} says the chat list is loaded; then the
+ *   aliases of chats that closed (or vanished) while the daemon was down go, like a chat close.
  *
  * Security (spec §7.3): agents run as the daemon's user and can read the appdir; the per-chat
  * scoping is bookkeeping and cleanup, not isolation. No key, config body or host key is logged.
@@ -99,7 +101,7 @@ export interface AgentSshAliasInfo {
 }
 
 export interface AgentSshChats {
-  /** Whether the chat is open (a closed one keeps no alias). */
+  /** Whether the chat is open (a closed one keeps no alias). Asked only after {@link AgentSsh.chatsLoaded}. */
   isOpen(threadId: string): boolean;
   /** The chat's project path (to tell a box project's chat), or null. */
   projectPath(threadId: string): string | null;
@@ -265,6 +267,8 @@ export class AgentSsh {
   private readonly applied = new Map<string, string>();
   /** Until the registry's first `syncMachines`, the machine-level aliases read back at start are kept. */
   private machinesSynced = false;
+  /** The chat list is loaded: `chats.isOpen` is believed (before, every chat counts as open). */
+  private chatsKnown = false;
   private readonly unsubscribers: (() => void)[] = [];
   private files: Promise<void> = Promise.resolve();
   /** The Include line is in `~/.ssh/config` (the setting is on and writing it worked). */
@@ -385,6 +389,19 @@ export class AgentSsh {
     await rm(agentChatThreadSshDir(this.deps.baseDir, threadId), { recursive: true, force: true }).catch((error) =>
       this.warn("agent SSH: a closed chat's ssh dir could not be deleted", error, { threadId })
     );
+  }
+
+  /**
+   * The chat list is loaded (the daemon's session reattach finished): every chat that owns an
+   * alias but is no longer open loses them all, with its keys, pins, `ssh.keys` entries and
+   * thread `ssh/` dir, as if it had just closed.
+   */
+  async chatsLoaded(): Promise<void> {
+    this.chatsKnown = true;
+    const gone = new Set<string>();
+    for (const alias of this.aliases.values()) if (alias.threadId !== null && !this.chatOpen(alias.threadId)) gone.add(alias.threadId);
+    for (const placed of this.placements.values()) for (const placement of placed.values()) if (!this.chatOpen(placement.threadId)) gone.add(placement.threadId);
+    await Promise.all([...gone].map((threadId) => this.chatClosed(threadId)));
   }
 
   /**
@@ -534,7 +551,7 @@ export class AgentSsh {
   }
 
   private chatOpen(threadId: string): boolean {
-    return !this.closedThreads.has(threadId) && this.deps.chats.isOpen(threadId);
+    return !this.closedThreads.has(threadId) && (!this.chatsKnown || this.deps.chats.isOpen(threadId));
   }
 
   /** The project box a chat's CLI runs in, or null for a host project. */
