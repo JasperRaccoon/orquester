@@ -429,7 +429,8 @@ export class MachineRegistry implements MachineAccessPort {
   /**
    * A paired machine's box reported its NICs (hello or `sys.nics`): keep the wired ones in its
    * record's `wol` ({@link mergeWolNics}), which stays while the machine is offline. A box that is
-   * not a paired machine is ignored; nothing is written when nothing changed. Never rejects.
+   * not a paired machine is ignored; nothing is written when nothing changed. The list is rebuilt
+   * either way: a sender's new address changes what can be woken. Never rejects.
    */
   async recordNics(boxId: string, nics: readonly BoxNic[]): Promise<void> {
     if (!this.started || this.stopped) return;
@@ -441,20 +442,17 @@ export class MachineRegistry implements MachineAccessPort {
     }
     if (!machine) return;
     const machineId = machine.id;
-    let changed = false;
     try {
       await this.deps.store.update((records) => {
         const record = records[machineId] ?? {};
         const wol = mergeWolNics(record.wol, nics, new Date(this.now()).toISOString());
         if (!wol) return false;
         records[machineId] = { ...record, wol };
-        changed = true;
       });
     } catch (error) {
       this.logger.warn(`[machines] could not save ${machineId}'s network adapters`, error instanceof Error ? error.message : String(error));
-      return;
     }
-    if (changed && !this.stopped) this.rebuild();
+    if (!this.stopped) this.rebuild();
   }
 
   // ---- the merge ------------------------------------------------------------------------------

@@ -30,6 +30,11 @@ export const MAX_WAKE_ATTEMPTS = 3;
 const WAKE_REQUEST_TIMEOUT_MS = 15_000;
 /** The two ports network adapters listen for magic packets on. */
 const WAKE_PORTS = [9, 7] as const;
+/**
+ * Interfaces of the daemon's host that are never a LAN a machine sleeps on: tunnels (Tailscale,
+ * WireGuard), container and VM bridges (their private ranges often overlap a home LAN's).
+ */
+const VIRTUAL_INTERFACE = /^(lo|tailscale|utun|wg|tun|tap|zt|docker|br-|bridge|veth|virbr|vnet|vmnet|vboxnet|cni|flannel|cali|kube|lxc|lxd|podman|incusbr)/i;
 
 // ---------------------------------------------------------------------------
 // Addresses
@@ -325,16 +330,16 @@ function magicPacket(mac: string): Buffer {
 }
 
 /**
- * The daemon's host as a sender: its up, non-internal IPv4 networks with a broadcast address, and
+ * The daemon's host as a sender: its non-internal, non-virtual IPv4 networks with a broadcast address, and
  * an IPv4 UDP broadcast with SO_BROADCAST from the address on that network. `ports`: where the
  * packet goes (default 9 and 7).
  */
 export function createLocalWakeSender(options: { ports?: readonly number[] } = {}): LocalWakeSender {
   const ports = options.ports ?? WAKE_PORTS;
   const lans = (): WakeLan[] =>
-    Object.entries(networkInterfaces()).flatMap(([, entries]) =>
+    Object.entries(networkInterfaces()).flatMap(([name, entries]) =>
       (entries ?? []).flatMap((entry): WakeLan[] => {
-        if (entry.family !== "IPv4" || entry.internal || !entry.cidr) return [];
+        if (VIRTUAL_INTERFACE.test(name) || entry.family !== "IPv4" || entry.internal || !entry.cidr) return [];
         const prefix = Number(entry.cidr.split("/")[1]);
         const network = networkOf(entry.address, prefix);
         if (network === null || prefix >= 31 || entry.address.startsWith("169.254.")) return [];
