@@ -84,6 +84,16 @@ describe("presentConnectionDiagnosis", () => {
     }
   });
 
+  it("names Tailscale only for a tailnet address, not for another VPN's 100.x one", () => {
+    const tailscaleStep = (endpoint: string, kind: ConnectionFailure["kind"]) =>
+      diagnose({ endpoint, status: "error", attempt: 0, log: log({ lastFailure: failure(kind) }) })?.steps.some((step) => step.includes("Tailscale")) ?? false;
+    assert.equal(tailscaleStep("https://ryzen7700.taila64f1b.ts.net:10000", "dns"), true);
+    assert.equal(tailscaleStep("https://ryzen7700.taila64f1b.ts.net:10000", "timeout"), true);
+    assert.equal(tailscaleStep("http://[fd7a:115c:a1e0::1]:47831", "unreachable"), true);
+    assert.equal(tailscaleStep("http://100.96.0.5:47831", "timeout"), false);
+    assert.equal(tailscaleStep("https://orq.example.com", "dns"), false);
+  });
+
   it("an offline device beats whatever the last failure said", () => {
     assert.equal(diagnose({ online: false, log: log({ lastFailure: failure("dns") }) })?.kind, "offline");
   });

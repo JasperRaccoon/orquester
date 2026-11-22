@@ -135,6 +135,8 @@ import { accountLendRoutes, boxRoutes, type AccountLendsResponse } from "@orques
 // Devices: the Device simulators plugin's routes and payloads (answers validated by `lib/devices/validate.ts`).
 import { deviceRoutes } from "@orquester/api";
 import { selfUpdateRoutes, type SelfUpdateStartResponse, type SelfUpdateStatusResponse } from "@orquester/api";
+import { tailnetRoutes, type TailnetHttpsStatus, type TailnetPreviewShare } from "@orquester/api";
+import { parseTailnetHttpsStatus, parseTailnetPreviewResponse, parseTailnetPreviews } from "./tailnet/validate";
 import type {
   DeviceActionsResponse,
   DeviceCacheWarmResponse,
@@ -535,6 +537,55 @@ export class ApiClient {
   /** Ask the host updater to update and restart the server; a 409 `SELF_UPDATE_BUSY` / `SELF_UPDATE_UNAVAILABLE` throws. */
   startSelfUpdate(): Promise<SelfUpdateStartResponse> {
     return this.send("POST", selfUpdateRoutes.status);
+  }
+
+  // --- Tailnet (`tailnetRoutes`, spec 2026-11-22 §4.7): answers validated by `tailnet/validate.ts`;
+  // a refusal's `{ problem }` (409 TAILNET_PROBLEM) is read with `problemOfError`. ---
+
+  private async tailnetStatus(method: TransportMethod, path: string, signal?: AbortSignal): Promise<TailnetHttpsStatus> {
+    const status = parseTailnetHttpsStatus(await this.send<unknown>(method, path, { signal }));
+    if (!status) throw new Error("The server answered with an unreadable tailnet status.");
+    return status;
+  }
+
+  /** The daemon's tailnet HTTPS address, read fresh from its `tailscale`. */
+  getTailnetHttps(signal?: AbortSignal): Promise<TailnetHttpsStatus> {
+    return this.tailnetStatus("GET", tailnetRoutes.https, signal);
+  }
+
+  /** Serve the daemon at `https://<host>.ts.net:<port>` (or adopt the route already serving it). */
+  enableTailnetHttps(): Promise<TailnetHttpsStatus> {
+    return this.tailnetStatus("POST", tailnetRoutes.https);
+  }
+
+  /** Remove Orquester's own tailnet route to the daemon. */
+  disableTailnetHttps(): Promise<TailnetHttpsStatus> {
+    return this.tailnetStatus("DELETE", tailnetRoutes.https);
+  }
+
+  /** `sudo -n tailscale set --operator=<daemon user>` on the server, so serve changes need no sudo. */
+  setTailnetOperator(): Promise<TailnetHttpsStatus> {
+    return this.tailnetStatus("POST", tailnetRoutes.operator);
+  }
+
+  async listTailnetPreviews(signal?: AbortSignal): Promise<TailnetPreviewShare[]> {
+    const previews = parseTailnetPreviews(await this.send<unknown>("GET", tailnetRoutes.previews, { signal }));
+    if (!previews) throw new Error("The server answered with an unreadable preview list.");
+    return previews;
+  }
+
+  /** Share a dev-server port of the server as `https://<host>.ts.net:<port>`. */
+  async shareTailnetPreview(port: number): Promise<TailnetPreviewShare> {
+    const preview = parseTailnetPreviewResponse(await this.send<unknown>("POST", tailnetRoutes.previews, { body: { port } }));
+    if (!preview) throw new Error("The server answered with an unreadable preview.");
+    return preview;
+  }
+
+  /** Stop sharing a port; resolves to the shares left. */
+  async stopTailnetPreview(port: number): Promise<TailnetPreviewShare[]> {
+    const previews = parseTailnetPreviews(await this.send<unknown>("DELETE", tailnetRoutes.preview(port)));
+    if (!previews) throw new Error("The server answered with an unreadable preview list.");
+    return previews;
   }
 
   /** Public auth metadata: whether a sign-in is required (and a username with it). */
