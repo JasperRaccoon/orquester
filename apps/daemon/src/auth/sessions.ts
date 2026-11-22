@@ -343,6 +343,16 @@ export class AuthSessionStore {
     return revoked.length;
   }
 
+  /** Revoke every DEVICE session except `keepId` (none kept when null); API tokens stay. */
+  async revokeDevicesExcept(keepId: string | null): Promise<number> {
+    const revoked = this.removeWhere((session) => session.kind === "device" && session.id !== keepId);
+    if (revoked.length > 0) {
+      await this.persist();
+      this.announce(revoked);
+    }
+    return revoked.length;
+  }
+
   /** Called with the revoked ids after each revocation (to close their open streams). */
   onRevoked(listener: (ids: string[]) => void): () => void {
     this.revokeListeners.add(listener);

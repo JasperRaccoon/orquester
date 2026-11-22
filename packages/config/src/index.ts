@@ -110,6 +110,14 @@ export function authSessionsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "auth-sessions.json");
 }
 
+/**
+ * The remote login's second factor: the authenticator secret and recovery-code digests. 0600, read
+ * tolerantly ({@link parseAuthSecondFactorFile}); absent means the factor is off.
+ */
+export function authSecondFactorPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "auth-second-factor.json");
+}
+
 export function accountsConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "accounts.json");
 }
@@ -3523,6 +3531,7 @@ export function isValidName(name: string | undefined): name is string {
 export * from "./workflows.ts";
 export * from "./agent-tools.ts";
 export * from "./auth-sessions.ts";
+export * from "./auth-second-factor.ts";
 export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
 export * from "./secret-files.ts";

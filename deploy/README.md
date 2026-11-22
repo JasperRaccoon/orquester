@@ -45,12 +45,23 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
 - `targets.conf.example` → copy to `deploy/targets.conf` (**gitignored** — real hosts, never committed)
   and fill in one `[name]` section per VPS.
 - `lib/` → helpers for the repo-root `./deploy.sh` (deploy / provision / verify / rollback / logs /
-  rotate-password): `common.sh` (targets.conf parser, ssh/scp helpers, output) plus the payloads
+  rotate-password / reset-2fa): `common.sh` (targets.conf parser, ssh/scp helpers, output) plus the payloads
   `remote-update.sh` and `remote-provision.sh`, which are `scp`'d to the VPS and run there, and the
   helpers they run from a release (`ensure-public-url.sh`, `ensure-web-fallback.sh`).
 
 `./deploy.sh provision <target>` installs the templates above onto a fresh VPS; the rest of this
 file documents what those templates are for.
+
+### Lost second factor — `reset-2fa`
+
+Use `./deploy.sh reset-2fa <target>` when two-step sign-in is on and both the authenticator (phone)
+and every recovery code are lost, so nobody can sign in remotely. Over ssh it stops the daemon,
+deletes `/var/lib/orquester/daemon/auth-second-factor.json` (the authenticator secret and recovery
+codes; without the file the factor is off), starts the daemon and waits for `/health`. The password
+alone signs in afterwards; signed-in devices and API tokens stay valid (`auth-sessions.json` and
+`daemon.env` are not touched). It asks you to type the target name first (`--yes` skips that, and is
+required when stdin is not a terminal). If the file is already absent it says so and restarts
+nothing. Set the factor up again in Settings → Server once you are back in.
 
 ### Releases (staged updates)
 

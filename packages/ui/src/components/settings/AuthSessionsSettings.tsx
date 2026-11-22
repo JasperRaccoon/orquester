@@ -1,12 +1,18 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound, Laptop, Loader2, LogOut, Plus, X } from "lucide-react";
-import { AUTH_SESSION_LABEL_MAX, type AuthIssuedTokenResponse, type AuthSessionSummary } from "@orquester/api";
+import {
+  AUTH_SESSION_LABEL_MAX,
+  type AuthIssuedTokenResponse,
+  type AuthSecondFactorProof,
+  type AuthSessionSummary
+} from "@orquester/api";
 import { Button, Input } from "../ui";
 import { CopyButton } from "../agent-chat/primitives/CopyButton";
 import { useApi } from "../../context/orquester-context";
 import { relativeTime } from "../../lib/relative-time";
 import { useAppStore } from "../../store/app";
 import { Badge, EmptyState, Notice, SettingsSection } from "./primitives";
+import { ProofPrompt } from "./ProofPrompt";
 
 const errorText = (err: unknown, fallback: string): string => {
   const message = (err as { serverMessage?: unknown } | null)?.serverMessage;
@@ -24,7 +30,11 @@ const dateOf = (iso: string): string => {
  * external client (an MCP client) and lasts until revoked. Changing the password signs every device
  * out; API tokens stay. The daemon keeps only token digests, so a new token is shown once.
  */
-export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ remoteAccessOn }) => {
+export const AuthSessionsSettings: React.FC<{
+  remoteAccessOn: boolean;
+  /** Changing it reloads the list in place (a token shown once and an open prompt stay). */
+  reloadSignal?: number;
+}> = ({ remoteAccessOn, reloadSignal }) => {
   const api = useApi();
   const isLocal = api.connection.kind === "local";
   const signOut = useAppStore((s) => s.signOut);
@@ -35,6 +45,8 @@ export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ re
   const [naming, setNaming] = useState(false);
   const [label, setLabel] = useState("");
   const [issued, setIssued] = useState<AuthIssuedTokenResponse | null>(null);
+  // Remotely a new token needs the password, and a code while two-step sign-in is on.
+  const [codeRequired, setCodeRequired] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -50,6 +62,13 @@ export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ re
     setIssued(null);
     void reload();
   }, [reload]);
+
+  const seenSignal = useRef(reloadSignal);
+  useEffect(() => {
+    if (seenSignal.current === reloadSignal) return;
+    seenSignal.current = reloadSignal;
+    void reload();
+  }, [reloadSignal, reload]);
 
   const run = async (id: string, action: () => Promise<unknown>, failure: string) => {
     setBusyId(id);
@@ -74,18 +93,30 @@ export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ re
     void run("others", () => api.revokeOtherAuthSessions(), "Could not revoke the other sessions.");
   };
 
-  const createToken = () => {
+  const startNaming = () => {
+    setNaming(true);
+    if (isLocal) return;
+    api
+      .secondFactorStatus()
+      .then((status) => setCodeRequired(status.enabled))
+      // An older daemon has no such route; the prompt still adds the code field if the daemon asks.
+      .catch(() => setCodeRequired(false));
+  };
+
+  /** Rejections stay with the prompt, which shows them under the field they concern. */
+  const createToken = async (proof: AuthSecondFactorProof) => {
     const name = label.trim();
     if (!name) return;
-    void run(
-      "create",
-      async () => {
-        setIssued(await api.createApiToken(name));
-        setNaming(false);
-        setLabel("");
-      },
-      "Could not create the token."
-    );
+    setBusyId("create");
+    setError(null);
+    try {
+      setIssued(await api.createApiToken(name, proof));
+      setNaming(false);
+      setLabel("");
+      void reload();
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const others = (sessions ?? []).filter((session) => !session.current).length;
@@ -115,7 +146,7 @@ export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ re
               </Button>
             ))}
           {!naming && (
-            <Button size="sm" variant="outline" onClick={() => setNaming(true)}>
+            <Button size="sm" variant="outline" onClick={startNaming}>
               <Plus size={13} />
               API token
             </Button>
@@ -130,27 +161,30 @@ export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ re
       )}
 
       {naming && (
-        <div className="flex flex-wrap items-center gap-2 px-4 py-3">
-          <Input
-            autoFocus
-            aria-label="API token name"
-            className="min-w-0 flex-1 basis-56"
-            maxLength={AUTH_SESSION_LABEL_MAX}
-            placeholder="Name, e.g. Claude Code on my laptop"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") createToken();
-              if (e.key === "Escape") setNaming(false);
-            }}
-          />
-          <Button size="sm" variant="ghost" onClick={() => setNaming(false)}>
-            Cancel
-          </Button>
-          <Button size="sm" disabled={!label.trim() || busyId !== null} onClick={createToken}>
-            {busyId === "create" && <Loader2 size={13} className="animate-spin" />}
-            Create
-          </Button>
+        <div className="px-4 py-3">
+          <ProofPrompt
+            password={!isLocal}
+            code={!isLocal && codeRequired}
+            submitLabel="Create"
+            canSubmit={label.trim() !== "" && busyId === null}
+            message={isLocal ? undefined : "Confirm it's you: a token signs in without your password."}
+            failureMessage="Could not create the token."
+            onCancel={() => setNaming(false)}
+            onSubmit={createToken}
+          >
+            <Input
+              autoFocus
+              aria-label="API token name"
+              className="min-w-0"
+              maxLength={AUTH_SESSION_LABEL_MAX}
+              placeholder="Name, e.g. Claude Code on my laptop"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setNaming(false);
+              }}
+            />
+          </ProofPrompt>
         </div>
       )}
 
