@@ -272,6 +272,29 @@
           "uninstall": true
         }
       }
+    ],
+    "ssh.keys": [
+      {
+        "params": {
+          "keys": []
+        }
+      },
+      {
+        "params": {
+          "keys": [
+            {
+              "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIChatKeyFixture",
+              "comment": "orquester chat=t-1 box=box1",
+              "expiresAt": 1729000000000
+            },
+            {
+              "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMachineKeyFixture",
+              "comment": "orquester box=box1",
+              "expiresAt": null
+            }
+          ]
+        }
+      }
     ]
   },
   "boxToHost": {

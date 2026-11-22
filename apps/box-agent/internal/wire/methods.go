@@ -30,6 +30,9 @@ type ExecSpec struct {
 	Pty      *PtySpec          `json:"pty,omitempty"`
 	Detach   *DetachSpec       `json:"detach,omitempty"`
 	Shell    *bool             `json:"shell,omitempty"`
+	// Session: "" (the service session) or "desktop" (Windows: the interactive desktop session
+	// through the desktop-session helper; refused with NO_DESKTOP_SESSION when none is connected).
+	Session string `json:"session,omitempty"`
 }
 
 type AttachSpec struct {
@@ -96,6 +99,11 @@ type MCPBridgeSpec struct {
 	ServerID string `json:"serverId"`
 }
 
+// SSHSpec opens one connection to the built-in SSH server (CapabilitySSHServer); no network port.
+type SSHSpec struct {
+	Kind string `json:"kind"`
+}
+
 // ChannelKinds maps every BoxChannelKind to a constructor of its spec struct.
 var ChannelKinds = map[string]func() any{
 	"exec":       func() any { return &ExecSpec{} },
@@ -110,6 +118,7 @@ var ChannelKinds = map[string]func() any{
 	"ssh-agent":  func() any { return &SSHAgentSpec{} },
 	"gh-api":     func() any { return &GhAPISpec{} },
 	"mcp-bridge": func() any { return &MCPBridgeSpec{} },
+	"ssh":        func() any { return &SSHSpec{} },
 }
 
 // DecodeSpec decodes a channel spec into its kind's struct.
@@ -255,6 +264,19 @@ type ShutdownParams struct {
 	Uninstall bool `json:"uninstall,omitempty"`
 }
 
+// SSHAuthorizedKey is one key the built-in SSH server accepts, held in memory only (BoxSshAuthorizedKey).
+type SSHAuthorizedKey struct {
+	PublicKey string `json:"publicKey"`
+	Comment   string `json:"comment"`
+	// ExpiresAt: epoch ms after which the key is refused; nil until replaced.
+	ExpiresAt *int64 `json:"expiresAt"`
+}
+
+// SSHKeysParams replaces the whole set of authorized keys ("ssh.keys").
+type SSHKeysParams struct {
+	Keys []SSHAuthorizedKey `json:"keys"`
+}
+
 type TokenGetParams struct {
 	Agent           string `json:"agent"`
 	AccountID       string `json:"accountId"`
@@ -307,6 +329,7 @@ var HostToBoxMethods = map[string]MethodTypes{
 	"agent.ensurePaths": {func() any { return &EnsurePathsParams{} }, nil},
 	"agent.update":      {func() any { return &UpdateParams{} }, nil},
 	"agent.shutdown":    {func() any { return &ShutdownParams{} }, nil},
+	"ssh.keys":          {func() any { return &SSHKeysParams{} }, nil},
 }
 
 // BoxToHostMethods is every BoxBoxToHostMethods entry.

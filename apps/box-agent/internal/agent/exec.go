@@ -53,7 +53,8 @@ func (a *Agent) handleOpen(l *Link, ch *Channel, raw json.RawMessage) {
 	case *wire.TarWriteSpec:
 		a.openTarWrite(ch, s)
 	default:
-		// host-tcp, ssh-agent, gh-api and mcp-bridge are opened by the box, never by the daemon.
+		// host-tcp, ssh-agent, gh-api and mcp-bridge are opened by the box, never by the daemon;
+		// ssh needs the built-in SSH server, which this build does not have (no CapabilitySSHServer).
 		ch.OpenFailed(rpcErr("UNKNOWN_CHANNEL", "the box does not accept "+kind+" channels"))
 	}
 }
@@ -75,6 +76,10 @@ func (a *Agent) buildStart(spec *wire.ExecSpec) (*startSpec, error) {
 	}
 	if spec.Command == "" {
 		return nil, rpcErr("BAD_REQUEST", "command is required")
+	}
+	if spec.Session != "" {
+		// This build has no desktop-session helper (it does not list CapabilityDesktopSession).
+		return nil, rpcErr("NO_DESKTOP_SESSION", "this orq-agent cannot run commands in the desktop session")
 	}
 	env := a.processEnv(spec.Env, spec.EnvUnset, spec.Pty)
 	var argv []string
