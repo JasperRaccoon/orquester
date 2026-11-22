@@ -120,7 +120,6 @@ function optionPath(path: string): string {
 interface Plan {
   machineId: string;
   name: string;
-  kind: "linux" | "macos";
   destination: string;
   /** `-p`, `-l`, `-i`, as overridden. */
   overrides: string[];
@@ -214,7 +213,7 @@ export function createMachinePairing(deps: MachinePairingDeps): MachinePairingPo
       }
       context.user = resolved.user;
     }
-    return { machineId: target.machineId, name, kind: target.os, destination: address, overrides, context };
+    return { machineId: target.machineId, name, destination: address, overrides, context };
   }
 
   function sshArgs(p: Plan, hostKeys: string[], command: string): string[] {
@@ -317,7 +316,10 @@ export function createMachinePairing(deps: MachinePairingDeps): MachinePairingPo
         }
         if (result.code === 0 && !result.timedOut) return { status: "pairing", machine: deps.summarize(target.machineId) };
         await deps.byo.remove(boxId).catch((error: unknown) => deps.logger.warn(`Machine ${target.machineId}: could not remove the failed pairing's record`, userMessage(error)));
-        const classified = result.code === 255 || result.timedOut || result.spawnError !== undefined ? classifySshFailure(result, p.context) : null;
+        if (result.timedOut) {
+          return failed(problemOf(target, "pair-bootstrap-failed", `The pairing script on ${target.name} didn't finish within ${BOOTSTRAP_TIMEOUT_MS / 60_000} minutes.`, `Check that ${target.name} can reach the Orquester server, then pair again.`));
+        }
+        const classified = result.code === 255 || result.spawnError !== undefined ? classifySshFailure(result, p.context) : null;
         if (classified) return failed(classified);
         const reason = bootstrapErrorLine(`${result.stderr}\n${result.stdout}`);
         return failed(
