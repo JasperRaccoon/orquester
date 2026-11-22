@@ -19,9 +19,12 @@
  *   rented provider rents the kind.
  * - **Ownership** is the daemon's: the temporary-box routes and the `DaemonApi` box operations reach
  *   only the calling chat's own boxes (`boxes/temporary/tools.ts`).
- * - **Nothing is copied into a box**: the agent moves what it needs with `box_upload` /
- *   `box_download` (streamed by the daemon, never through JSON; paths inside the chat's project,
- *   spelled as host paths, whose files are in the project's own box for a box project).
+ * - **Nothing is copied into a box**: the agent moves what it needs itself — over plain `ssh`, `scp`
+ *   and `rsync` with the box's `orq-<name>` alias (agent SSH, spec 2026-11-22 §4.3: `create_box`
+ *   and `list_boxes` return `ssh_alias` and the exact `ssh_command`; the daemon tunnels it through
+ *   its connection to the box, `boxes/agent-ssh/`), or with `box_upload` / `box_download`
+ *   (streamed by the daemon, never through JSON; paths inside the chat's project, spelled as host
+ *   paths, whose files are in the project's own box for a box project), which stay available.
  * - **Lending** (spec docs/superpowers/specs/2026-11-03-lend-accounts-to-boxes-design.md §8, §9):
  *   `box_lend_accounts` uses subscription quota and exposes tokens to the box, so it opens a `spend`
  *   card like `create_box`. The accounts, box and minutes are resolved BEFORE the card and pinned;
@@ -197,8 +200,14 @@ function boxView(box: BoxSummary): Record<string, unknown> {
     hourly_usd: box.hourlyUsd,
     estimated_cost_usd: Math.round(box.estimatedCostUsd * 100) / 100,
     deadline: box.deadlineAt,
-    purpose: box.purposeNote
+    purpose: box.purposeNote,
+    ...sshView(box)
   };
+}
+
+/** The box's `orq-<name>` alias for this chat and the command that opens a shell with it, when it has one. */
+function sshView(box: BoxSummary): Record<string, unknown> {
+  return box.sshAlias && box.sshCommand ? { ssh_alias: box.sshAlias, ssh_command: box.sshCommand } : {};
 }
 
 async function getJson<T>(api: DaemonApi, path: string, notFound: { code: string; message: string }): Promise<T> {
@@ -390,7 +399,7 @@ const createBox = defineTool({
   name: "create_box",
   title: "Rent a temporary box",
   description:
-    "Rent a cloud machine for this chat when the host can't do the job (more CPU or RAM, another OS, a GPU, isolation). It COSTS the owner money: every box needs their approval on a card (up to 30 min); if denied, don't retry — ask. Then waits until ready (minutes; Windows and macOS longer). Orquester copies nothing in: send what you need with box_upload (e.g. a git bundle), run with box_exec, fetch results with box_download. Destroy it with destroy_box once done; it is also destroyed at its time limit and when this chat closes.",
+    "Rent a cloud machine for this chat when the host can't do the job (more CPU or RAM, another OS, a GPU, isolation). It COSTS the owner money: every box needs their approval on a card (up to 30 min); if denied, don't retry — ask. Then waits until ready (minutes; Windows and macOS longer). Orquester copies nothing in. Work on it from your bash with the result's ssh_command (ssh orq-<name>; scp, rsync and git work the same way, with the same -F <config> when the command has one); box_exec, box_upload and box_download remain available, and are the way in when there is no ssh_command. Destroy it with destroy_box once done; it is also destroyed at its time limit and when this chat closes.",
   input: {
     kind: z.enum(BOX_KINDS as unknown as [BoxKind, ...BoxKind[]]),
     provider: z
@@ -464,6 +473,7 @@ const createBox = defineTool({
       arch: box.arch,
       hourly_usd: box.hourlyUsd,
       deadline: box.deadlineAt,
+      ...sshView(box),
       note:
         box.provider === BYO_PROVIDER_ID
           ? "The owner's own machine, lent to this chat: it is not empty, so touch only what the task needs. destroy_box gives it back (nothing is deleted); so do its deadline and this chat closing."
@@ -475,7 +485,8 @@ const createBox = defineTool({
 const listBoxes = defineTool({
   name: "list_boxes",
   title: "List this chat's boxes",
-  description: "This chat's temporary boxes: id, kind, provider, state, OS/arch, $/h, estimated cost so far, deadline; lent_accounts: logins it borrowed on any VM.",
+  description:
+    "This chat's temporary boxes: id, kind, provider, state, OS/arch, $/h, estimated cost so far, deadline, and ssh_alias with the exact ssh_command to work on it (ssh, scp, rsync; box_exec, box_upload and box_download remain); lent_accounts: logins it borrowed on any VM.",
   input: {},
   audiences: ["chat"],
   toolset: "boxes",

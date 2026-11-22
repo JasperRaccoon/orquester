@@ -10,6 +10,7 @@
 //	orq-agent rpc <method> [json]
 //	orq-agent status
 //	orq-agent version
+//	orq-agent sftp-server                   internal: the SSH server's sftp subsystem, as the work user
 //
 // Config comes from env (ORQ_DAEMON_URL, ORQ_BOX_ID, ORQ_BOOTSTRAP_TOKEN[_FILE],
 // ORQ_DATA_DIR, ORQ_GITHUB_OIDC, ORQ_WORK_USER), then `<dataDir>/agent.env`.
@@ -137,6 +138,11 @@ func run(args []string) int {
 		}
 		out, _ := json.Marshal(status)
 		fmt.Println(string(out))
+		return 0
+	case "sftp-server":
+		if err := agent.ServeSFTP(os.Stdin, os.Stdout); err != nil {
+			return fail(err)
+		}
 		return 0
 	case "version", "--version":
 		fmt.Println(version)

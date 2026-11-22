@@ -46,7 +46,8 @@ const WORKFLOW_OWNED_LINE = "This chat runs inside an automated workflow: change
  * boxes: the one line the boxes toolset adds while it is advertised. Without it, agents asked to
  * rent a VM advised the user which server to buy, or reached for the provider's CLI (tool-use eval).
  */
-const BOXES_LINE = "Machines: asked to rent a VM or server (any provider), or short of CPU, RAM, an OS or a GPU: create_box, never a provider's CLI or API token.";
+const BOXES_LINE =
+  "Machines: asked to rent a VM or server (any provider), or short of CPU, RAM, an OS or a GPU: create_box, never a provider's CLI or API token. Work on a box with plain `ssh orq-<name>`, scp or rsync (the ssh_command create_box and list_boxes give); box_exec, box_upload and box_download remain available.";
 
 /** Devices spec §9: the one line the devices toolset adds (the rest travels in `open_device`'s quick start). */
 const DEVICES_LINE =

@@ -63,7 +63,8 @@ import type {
   BoxOutputTail,
   BoxShell,
   BoxTransferResult,
-  TemporaryBoxes
+  TemporaryBoxes,
+  TemporaryBoxSsh
 } from "./contract.ts";
 import { ProjectBoxForwardError, type ProjectBoxForward, type ProjectBoxForwards } from "./project-forwards.ts";
 
@@ -176,6 +177,8 @@ export interface TemporaryBoxesConnection {
   projectForwards?: Pick<ProjectBoxForwards, "open">;
   /** Whether a box project's Browser tab runs its Chromium in the project box (`BoxBrowsers.runsInBox`); else it runs on the host. */
   browserRunsInBox?: (projectPath: string) => boolean;
+  /** Agent SSH: a chat's `orq-<name>` alias of its box, added to the summaries it reads (`sshAlias`, `sshCommand`). */
+  ssh?: TemporaryBoxSsh;
 }
 
 /** Call options of the operations: who acts (forced by `withPrincipal`), and the call's abort. */
@@ -575,11 +578,24 @@ export class TemporaryBoxTools {
     if (!boxes) return DISABLED;
     if (principal.kind === "external") return refuse(403, "PERMISSION_DENIED", "The box tools are for agent chats only.");
     const owner = principal.kind === "agent" ? principal.threadId : threadId;
-    return done(boxes.list().filter((box) => box.purpose === "temporary" && (owner === undefined || box.threadId === owner)));
+    return done(
+      boxes
+        .list()
+        .filter((box) => box.purpose === "temporary" && (owner === undefined || box.threadId === owner))
+        .map((box) => this.withSsh(principal, box, this.connection?.ssh?.aliasFor(principal.kind === "agent" ? principal.threadId : "", box.id) ?? null))
+    );
   }
 
   get(principal: CallerPrincipal, boxId: string): BoxOutcome<BoxSummary> {
-    return this.owned(principal, boxId);
+    const found = this.owned(principal, boxId);
+    if (!found.ok || principal.kind !== "agent") return found;
+    return done(this.withSsh(principal, found.value, this.connection?.ssh?.aliasFor(principal.threadId, boxId) ?? null));
+  }
+
+  /** An agent's view of its box: its SSH alias and command, when it has one. */
+  private withSsh(principal: CallerPrincipal, box: BoxSummary, ssh: { alias: string; command: string } | null): BoxSummary {
+    if (principal.kind !== "agent" || !ssh) return box;
+    return { ...box, sshAlias: ssh.alias, sshCommand: ssh.command };
   }
 
   /** An APPROVED `create_box` (agent principals only): the record is created and provisioning starts. */
@@ -659,7 +675,18 @@ export class TemporaryBoxTools {
       const check = (): void => {
         const box = boxes.get(boxId);
         if (!box) return finish(refuse(409, "BOX_PROVISIONING_FAILED", "The box's record disappeared while it was starting."));
-        if (box.state === "ready") return finish(done(box));
+        if (box.state === "ready") {
+          const ssh = this.connection?.ssh;
+          if (principal.kind !== "agent" || !ssh) return finish(done(box));
+          // The chat's alias is issued once the box is ready: answered with it (its wait is bounded).
+          unsubscribe();
+          this.clock.clearTimer(timer);
+          void ssh.settled(principal.threadId, boxId).then(
+            (alias) => finish(done(this.withSsh(principal, boxes.get(boxId) ?? box, alias))),
+            () => finish(done(box))
+          );
+          return;
+        }
         if (box.state === "destroyed" || box.state === "destroying" || box.state === "destroy-failed") {
           // The failed step says why ("no instances available"); the state reason only says what
           // happens next ("Destroying…").

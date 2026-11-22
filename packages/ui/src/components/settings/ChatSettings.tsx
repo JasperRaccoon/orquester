@@ -167,6 +167,19 @@ export const ChatSettings: React.FC = () => {
         </SettingRow>
       </SettingsSection>
 
+      <SettingsSection title="SSH to boxes and machines" description="Shared by every client of this server.">
+        <SettingRow
+          label="Add Orquester's ssh aliases to ~/.ssh/config"
+          description="Adds one Include line at the top of the server user's ~/.ssh/config so agents can type plain ssh orq-<name>; when off, nothing in that file changes and agents are given the ssh -F command instead."
+        >
+          <Switch
+            label="Add Orquester's ssh aliases to ~/.ssh/config"
+            checked={agentPrefs.sshConfigInclude}
+            onChange={(checked) => void updateAgentPrefs({ ...agentPrefs, sshConfigInclude: checked })}
+          />
+        </SettingRow>
+      </SettingsSection>
+
       <SettingsSection title="Idle Claude chats" description="Shared by every client of this server.">
         <SettingRow
           label="Compact idle chats"

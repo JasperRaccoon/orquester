@@ -791,6 +791,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workspacesMetaFile: resolved.workspacesMetaFile,
     writeJson: writeJsonFile,
     sessionPath,
+    // Agent SSH: the opt-in `Include ~/.ssh/orquester/*.conf` line in ~/.ssh/config.
+    sshConfigInclude: async () => (await readAppConfigFile(resolved.appConfigFile)).agents.sshConfigInclude,
     logger: console
   });
   // boxes: end
@@ -1742,6 +1744,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (!rolledBack) temporaryBoxTools.chatClosed(id);
   });
   services.temporaryBoxTools = temporaryBoxTools;
+  services.agentSsh = boxes.agentSsh;
   // Devices: a closed chat's leases end (their devices are turned off).
   agentChat.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
     if (!rolledBack) devices.chatClosed(id);
@@ -2221,6 +2224,8 @@ interface Services {
   // umcp:t6 end
   // boxes: temporary boxes for agent chats (routes and the box tools' operations). Optional: route tests build a partial `services`.
   temporaryBoxTools?: TemporaryBoxTools;
+  /** Agent SSH: the opt-in `Include` line follows `agents.sshConfigInclude`. Optional: route tests build a partial `services`. */
+  agentSsh?: Pick<DaemonBoxes["agentSsh"], "setIncludeEnabled">;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   /** Per-day usage from Orquester's own chat logs, for agents without a transcript scanner (Grok, OpenCode). Optional: route tests build a partial `services`. */
@@ -3231,6 +3236,10 @@ export function createServer(
           JSON.stringify(current.agents.claudeIdleCompactionByAccount)
       ) {
         services.idleCompaction?.prefsChanged();
+      }
+      // Agent SSH: the Include line goes into (or out of) ~/.ssh/config at once.
+      if (merged.agents.sshConfigInclude !== current.agents.sshConfigInclude) {
+        void services.agentSsh?.setIncludeEnabled(merged.agents.sshConfigInclude);
       }
       return merged;
     } catch {

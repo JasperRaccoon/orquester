@@ -270,6 +270,12 @@ export interface BoxSummary {
    * 2026-11-22 §4.3.5; `list_boxes` and `create_box` return it). Absent: none for this caller.
    */
   sshAlias?: string;
+  /**
+   * The exact command that opens a shell on it with {@link sshAlias} where the caller runs:
+   * `ssh orq-<name>` when the alias resolves without `-F` (the owner's opt-in `Include`), else
+   * `ssh -F <absolute path of its config> orq-<name>`. Present exactly when `sshAlias` is.
+   */
+  sshCommand?: string;
 }
 
 /** The agents whose accounts can be lent to a box. */

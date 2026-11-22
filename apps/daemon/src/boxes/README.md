@@ -24,6 +24,7 @@ Contracts: `packages/api/src/boxes.ts` (HTTP/UI), `packages/api/src/box-protocol
 | `agent-host/boxes/` | Agent CLIs in boxes: remote spawn, path mapping, auth wiring per CLI, MCP bridge. |
 | `mcp/tools/boxes.ts` | Temporary-box MCP tools and their approval card. |
 | `boxes/temporary/` | The box tools' daemon side: the `TemporaryBoxes` seam the service implements (`connect`ed in the daemon wiring), ownership per chat, exec and background jobs, streamed transfers, port forwards (for a box project's chat, listeners in its own box: `project-forwards.ts`, the hub's one `host-tcp` handler and owner of every box's forward list), the temporary-box routes, chat-close cleanup. |
+| `boxes/agent-ssh/` | Direct SSH for agents (spec `2026-11-22-tailnet-machines-and-agent-ssh-design.md` §4.3): `orq-<name>` aliases per chat and box (and machine-level ones for Free-use machines, `MachineSshAccessPort`), their keys, `~/.ssh/orquester/<name>.conf` and pinned `known_hosts`, the Phase 1 `authorized_keys` lines and the Phase 2 `ssh.keys` push, the proxy socket (`sshProxySocketPath`) behind every alias's ProxyCommand (`ssh-proxy-helper.mjs`, plain Node), the copies in a box project's own box, revocation, and the opt-in `Include` line in `~/.ssh/config`. |
 | `boxes/wiring.ts` | Every module above put together over the daemon's services for `startDaemon` (build order, the plugin switch gating the hub and the box tools, routes per transport, shutdown), the Template command runner, and the "Run in box" route's wiring. |
 
 Rules every module follows:
@@ -36,7 +37,19 @@ Rules every module follows:
   `lentBy: "orquester"`; neither a chat nor a lend overwrites or removes a login or account index
   that is not ours (`isOwnBoxLogin`, `BOX_LOGIN_IN_USE`, `LEND_APPDIR_IN_USE`). Each check and its
   write are separate box requests, so a process on the box writing in between is not excluded.
-- A box is reached only through `BoxConnection`. No SSH.
+  A second exception is agent SSH in a box project (`agent-ssh/`): a chat whose CLI runs in a
+  project box gets its private keys for its own temporary boxes and lent machines (0600, under the
+  work user's `~/.ssh/orquester/`), so `ssh orq-<name>` works there too. Each key opens only that
+  chat's own box or machine, through the daemon, and stops working when the alias is revoked (box
+  destroyed or given back, deadline, chat closed); the files are removed then, or at the project
+  box's next connect.
+- A box is reached only through `BoxConnection`; the daemon never opens SSH to a box. Agents' SSH
+  (`ssh orq-<name>`, scp, rsync from their bash) is tunnelled through that same connection: the
+  alias's ProxyCommand talks to the daemon's proxy socket, which opens an `ssh` channel to
+  orq-agent's built-in server (capability `ssh-server`, Phase 2: its keys are pushed with `ssh.keys`
+  and held in memory only) or, for an orq-agent without one, `openTcp(22)` to the box's own sshd
+  (Phase 1: one tagged `authorized_keys` line per alias, with an `expiry-time` backstop). Host keys
+  are pinned from the connection (never trust-on-first-use). No box gets a public SSH port for it.
 - Persist a box record before any provider call that creates something billable.
 - Waits use events, receipts or deadlines — never sleeps.
 
