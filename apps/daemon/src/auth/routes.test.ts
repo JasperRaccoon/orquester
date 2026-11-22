@@ -635,6 +635,17 @@ test("the owner signing in between two global lockouts does not reset their doub
   assert.equal((await lockAll(30)).headers["retry-after"], String(30 * 60), "the second lockout is twice as long");
 });
 
+test("a flood of challenges from other addresses does not evict the owner's pending one", async (t) => {
+  const { h, freshCode } = await factorHarness(t);
+  const ownerIp = "192.0.2.50";
+  const pending = await passwordStep(h, ownerIp);
+  for (let i = 0; i < 20; i += 1) await passwordStep(h, "203.0.113.200");
+  for (let i = 0; i < 100; i += 1) {
+    for (let j = 0; j < 3; j += 1) await passwordStep(h, `10.0.0.${i}`);
+  }
+  assert.equal((await codeStep(h, pending, freshCode(), ownerIp)).statusCode, 200);
+});
+
 test("an expired challenge, another IP's challenge and one from before a password change are refused", async (t) => {
   const { h, time, freshCode } = await factorHarness(t);
   const ip = "198.51.100.6";

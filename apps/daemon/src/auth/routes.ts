@@ -65,7 +65,12 @@ const CODE_MAX = 64;
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 /** Wrong codes one challenge takes before it is void. */
 const CHALLENGE_MAX_ATTEMPTS = 5;
-/** Pending challenges kept at most (only a correct password makes one); the oldest go first. */
+/** Pending challenges one IP keeps at most; its oldest goes first. */
+const CHALLENGES_PER_IP_MAX = 3;
+/**
+ * Pending challenges kept at most (a memory bound): past it, the oldest challenge of the IP with
+ * the most goes, so a flood from other addresses never evicts the owner's.
+ */
 const CHALLENGES_MAX = 256;
 /** Wrong sign-in codes from every IP together that lock all public code entry (15 min doubling). */
 const GLOBAL_CODE_MAX_FAILS = 20;
@@ -292,7 +297,23 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
   const issueChallenge = (ip: string, passwordHash: string, label: string): AuthSecondFactorChallenge => {
     const at = now();
     for (const [key, challenge] of challenges) if (challenge.expiresAt <= at) challenges.delete(key);
-    while (challenges.size >= CHALLENGES_MAX) challenges.delete(challenges.keys().next().value as string);
+    // Map order is age order: the first match is the oldest.
+    const evictOldestOf = (from: string) => {
+      for (const [key, challenge] of challenges) {
+        if (challenge.ip === from) {
+          challenges.delete(key);
+          return;
+        }
+      }
+    };
+    const pendingFrom = (from: string) => [...challenges.values()].filter((challenge) => challenge.ip === from).length;
+    for (let pending = pendingFrom(ip); pending >= CHALLENGES_PER_IP_MAX; pending -= 1) evictOldestOf(ip);
+    while (challenges.size >= CHALLENGES_MAX) {
+      const counts = new Map<string, number>();
+      for (const challenge of challenges.values()) counts.set(challenge.ip, (counts.get(challenge.ip) ?? 0) + 1);
+      const most = Math.max(...counts.values());
+      evictOldestOf([...challenges.values()].find((challenge) => counts.get(challenge.ip) === most)!.ip);
+    }
     const token = randomBytes(32).toString("base64url");
     const expiresAt = at + CHALLENGE_TTL_MS;
     challenges.set(challengeKey(token), { ip, passwordHash, label, expiresAt, attempts: 0 });
