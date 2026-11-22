@@ -622,8 +622,6 @@ function dropCredential(
 /** A sign-in waiting for its authentication code (see `AppState.authPrompt`). */
 export interface PendingSecondFactor {
   challenge: string;
-  /** ISO time the daemon stops accepting the challenge. */
-  expiresAt: string;
   /** The normalized username the password was checked for (stored once the sign-in completes). */
   username: string;
 }
@@ -676,10 +674,8 @@ function signInError(error: unknown): string {
       const seconds = error.retryAfterSeconds;
       return seconds ? `Too many failed attempts. Try again in ${seconds}s.` : "Too many failed attempts. Try again later.";
     }
+    // A 503 `SECOND_FACTOR_UNAVAILABLE` carries the remedy (`deploy.sh reset-2fa`) in its message.
     if (error.serverMessage) return error.serverMessage;
-    if (error.status === 503 && apiErrorCode(error) === authErrorCodes.secondFactorUnavailable) {
-      return "Sign-in is unavailable on this server right now.";
-    }
   }
   return "Could not reach the server. Try again.";
 }
@@ -2180,9 +2176,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         // The password was right; the code step finishes the sign-in. The challenge stays in
         // memory with the prompt (never stored) and dies with it.
         if (get().api !== api) return;
-        const { challenge, expiresAt } = answer;
         set({
-          authPrompt: { connectionId: api.connection.id, secondFactor: { challenge, expiresAt, username: normalizedUser } },
+          authPrompt: { connectionId: api.connection.id, secondFactor: { challenge: answer.challenge, username: normalizedUser } },
           authError: null
         });
         return;
@@ -2203,12 +2198,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api || !pending || get().authPrompt?.connectionId !== api.connection.id || !entered) {
       return;
     }
-    const restart = () => set({ authPrompt: { connectionId: api.connection.id }, authError: SIGN_IN_TIMED_OUT });
-    // The daemon would refuse it anyway: go back to the password without the round trip.
-    if (Date.parse(pending.expiresAt) <= Date.now()) {
-      restart();
-      return;
-    }
+    // Expiry is the daemon's call (`CHALLENGE_EXPIRED`): its `expiresAt` is on the server's clock,
+    // which this device's need not match.
     let token: string;
     try {
       token = (await api.loginSecondFactor({ challenge: pending.challenge, code: entered })).token;
@@ -2216,7 +2207,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Only the prompt that sent this code takes its answer (not one the user left with Back or
       // Cancel, or another server's).
       if (get().api !== api || get().authPrompt?.secondFactor !== pending) return;
-      if (isChallengeExpired(error)) restart();
+      if (isChallengeExpired(error)) set({ authPrompt: { connectionId: api.connection.id }, authError: SIGN_IN_TIMED_OUT });
       else set({ authError: signInError(error) });
       return;
     }

@@ -1,8 +1,9 @@
 /**
  * Settings → Server's two-step sign-in in a DOM, against a fake client over the remote transport:
- * turning it on goes password → setup → code → enable and shows the codes the daemon returned; an
- * expired pending setup starts over at the password; and an API token is minted only with the
- * owner's proof, a wrong code landing on the code field.
+ * turning it on goes password → setup → code → enable and shows the codes the daemon returned (which
+ * Escape does not dismiss); an expired pending setup starts over at the password; an API token is
+ * minted only with the owner's proof, a wrong code landing on the code field; and a just-issued
+ * token survives the device-list reload that turning it on triggers.
  */
 
 import assert from "node:assert/strict";
@@ -19,6 +20,7 @@ let OrquesterProvider: typeof import("../../context/orquester-context").Orqueste
 let ApiError: typeof import("../../lib/api-client").ApiError;
 let SecondFactorSettings: typeof import("./SecondFactorSettings").SecondFactorSettings;
 let AuthSessionsSettings: typeof import("./AuthSessionsSettings").AuthSessionsSettings;
+let ServerSettings: typeof import("./ServerSettings").ServerSettings;
 
 let dom: JSDOM;
 const globals = [
@@ -53,6 +55,7 @@ before(async () => {
   ({ ApiError } = await import("../../lib/api-client"));
   ({ SecondFactorSettings } = await import("./SecondFactorSettings"));
   ({ AuthSessionsSettings } = await import("./AuthSessionsSettings"));
+  ({ ServerSettings } = await import("./ServerSettings"));
 });
 
 after(() => {
@@ -160,6 +163,10 @@ describe("two-step sign-in settings", () => {
     ]);
     const shown = [...doc().querySelectorAll('[aria-label="Recovery codes"] li')].map((li) => li.textContent);
     assert.deepEqual(shown, CODES);
+    await act(async () => {
+      doc().dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    assert.ok(doc().querySelector('[aria-label="Recovery codes"]'), "Escape does not throw away codes shown once");
     await click(button("I've saved these"));
     assert.equal(doc().querySelector('[role="dialog"]'), null);
     assert.ok(button("New recovery codes"), "the section now offers the enabled actions");
@@ -226,6 +233,46 @@ describe("two-step sign-in settings", () => {
       ["token", { label: "laptop", password: "hunter22", code: "000000" }],
       ["token", { label: "laptop", password: "hunter22", code: "123456" }]
     ]);
+    assert.equal(doc().querySelector('[data-testid="issued-token"]')?.textContent, "orq_secret_token");
+  });
+
+  it("keeps a just-issued API token on screen when turning two-step sign-in on reloads the device list", async () => {
+    let status = OFF;
+    let listed = 0;
+    await render(ServerSettings, {}, {
+      getDaemonConfig: async () => {
+        throw new Error("not needed here");
+      },
+      listAuthSessions: async () => {
+        listed += 1;
+        return { sessions: [] };
+      },
+      secondFactorStatus: async () => status,
+      createApiToken: async (label: string) => ({
+        token: "orq_secret_token",
+        session: { id: "t1", kind: "api", label, createdAt: "2026-11-22T10:00:00.000Z", lastUsedAt: null, expiresAt: null, current: false }
+      }),
+      setupSecondFactor: async () => SETUP,
+      enableSecondFactor: async () => {
+        status = ON;
+        return { recoveryCodes: CODES };
+      }
+    });
+
+    await click(button("API token"));
+    await type(doc().querySelector<HTMLInputElement>('input[aria-label="API token name"]'), "laptop");
+    await type(field("Password"), "hunter22");
+    await click(button("Create"));
+    assert.equal(doc().querySelector('[data-testid="issued-token"]')?.textContent, "orq_secret_token");
+
+    const listedBefore = listed;
+    await click(button("Set up"));
+    await type(field("Password"), "hunter22");
+    await click(button("Continue"));
+    await type(field("Authentication code"), "123456");
+    await click(button("Turn on"));
+
+    assert.ok(listed > listedBefore, "the device list reloaded after the other devices were signed out");
     assert.equal(doc().querySelector('[data-testid="issued-token"]')?.textContent, "orq_secret_token");
   });
 });

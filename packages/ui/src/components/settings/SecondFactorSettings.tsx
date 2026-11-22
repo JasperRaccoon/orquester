@@ -119,22 +119,25 @@ const RecoveryCodes: React.FC<{ codes: string[]; onDone: () => void }> = ({ code
   );
 };
 
+const ignore = () => undefined;
+
 const DialogFrame: React.FC<{
   title: string;
   icon: React.ReactNode;
   onClose: () => void;
+  /** Off while recovery codes are shown once: Escape, Back and the X stay put, so "I've saved these" is the way out. */
+  dismissible?: boolean;
   children: React.ReactNode;
-}> = ({ title, icon, onClose, children }) => (
-  // Only the explicit controls close it: a stray backdrop tap must not throw away typed proof or
-  // codes that are shown once.
-  <Modal open onClose={onClose} onBackdropClick={() => undefined} className="max-w-md" ariaLabel={title}>
+}> = ({ title, icon, onClose, dismissible = true, children }) => (
+  // Only the explicit controls close it: a stray backdrop tap must not throw away typed proof.
+  <Modal open onClose={dismissible ? onClose : ignore} onBackdropClick={ignore} className="max-w-md" ariaLabel={title}>
     <div className="w-full space-y-4 overflow-y-auto p-5">
       <div className="flex items-start gap-3">
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-neutral-800 text-neutral-300">
           {icon}
         </span>
         <p className="min-w-0 flex-1 pt-1.5 text-sm font-medium text-neutral-100">{title}</p>
-        <ModalCloseButton onClose={onClose} />
+        {dismissible && <ModalCloseButton onClose={onClose} />}
       </div>
       {children}
     </div>
@@ -148,7 +151,7 @@ type SetupStep =
 
 /**
  * Pairing an authenticator: password (remote only) → scan and confirm a code → the recovery codes.
- * Leaving before the code is confirmed changes nothing (the daemon drops the pending secret).
+ * Leaving before the code is confirmed changes nothing (the daemon's pending secret lapses after 10 minutes).
  */
 const SetupDialog: React.FC<{
   initial: SetupStep;
@@ -180,7 +183,12 @@ const SetupDialog: React.FC<{
   };
 
   return (
-    <DialogFrame title="Set up two-step sign-in" icon={<ShieldCheck size={15} />} onClose={onClose}>
+    <DialogFrame
+      title="Set up two-step sign-in"
+      icon={<ShieldCheck size={15} />}
+      onClose={onClose}
+      dismissible={step.kind !== "codes"}
+    >
       {step.kind === "password" && (
         <>
           {step.notice && <Notice tone="warn">{step.notice}</Notice>}
@@ -270,6 +278,7 @@ const ManageDialog: React.FC<{
       title={action === "codes" ? "New recovery codes" : "Turn off two-step sign-in"}
       icon={action === "codes" ? <KeyRound size={15} /> : <ShieldOff size={15} />}
       onClose={onClose}
+      dismissible={codes === null}
     >
       {codes ? (
         <RecoveryCodes codes={codes} onDone={onClose} />
