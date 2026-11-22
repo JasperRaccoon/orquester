@@ -202,6 +202,25 @@ describe("box device host factory", () => {
     assert.equal(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux" })), null);
     assert.deepEqual(deviceHostOfRecord(record("d", { kind: "linux" })), { kind: "box", platform: "android" });
     assert.equal(deviceHostOfRecord(record("d", { kind: "windows" })), null);
+    // An own Windows machine runs Android (WHPX is its probe's to check), paired as one or reported win32.
+    assert.deepEqual(deviceHostOfRecord(record("e", { provider: "byo", purpose: "machine", deviceHost: true, kind: "windows", os: null })), { kind: "byo", platform: "android" });
+    assert.deepEqual(deviceHostOfRecord(record("e", { provider: "byo", purpose: "machine", deviceHost: true, kind: "linux", os: "win32" })), { kind: "byo", platform: "android" });
+    assert.equal(deviceHostOfRecord(record("e", { provider: "byo", purpose: "machine", deviceHost: false, kind: "windows", os: "win32" })), null);
+  });
+
+  it("an own Windows machine is one Android host, streamed through the daemon (no direct gate)", async () => {
+    settings = { ...settings, android: { ...settings.android, enabled: true } };
+    boxes.records.set("w", record("w", { provider: "byo", purpose: "machine", deviceHost: true, kind: "windows", os: "win32", machineName: "minipc" }));
+    await factory.start(context());
+    assert.deepEqual([...added.keys()], ["box:w"]);
+    const host = added.get("box:w")!;
+    assert.deepEqual({ kind: host.kind, platforms: host.platforms, label: host.label }, { kind: "byo", platforms: ["android"], label: "minipc (your Windows machine)" });
+    assert.equal(host.directStream, undefined);
+    // Never connected: offline, with the fix.
+    assert.equal(host.state().status, "unreachable");
+    assert.deepEqual(host.problems?.().map((problem) => problem.code), ["machine-asleep"]);
+    boxes.set({ ...boxes.records.get("w")!, deviceHost: false });
+    assert.deepEqual([...added.keys()], []);
   });
 
   it("adopts rented device hosts and own Macs at start, and follows their boxes", async () => {

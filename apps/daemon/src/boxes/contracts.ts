@@ -56,6 +56,8 @@ export interface BoxExecOptions {
   /** Survive disconnects; reattach with {@link BoxConnection.attach}. */
   detach?: { procId: string; bufferBytes?: number };
   shell?: boolean;
+  /** `desktop`: run in the interactive desktop session (Windows, `desktop-session` capability; else the open fails with `NO_DESKTOP_SESSION`). */
+  session?: "desktop";
   signal?: AbortSignal;
 }
 
