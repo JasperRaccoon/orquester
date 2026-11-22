@@ -883,7 +883,8 @@ interface ByoPairingScriptInput {
   daemonUrl: string;
   /** The single-use bootstrap token minted when the pairing code was spent. */
   bootstrapToken: string;
-  kind: "linux" | "macos";
+  /** `windows`: a PowerShell script ({@link byoWindowsPairingScript}); otherwise POSIX sh. */
+  kind: "linux" | "macos" | "windows";
   /** The owner's name for the machine (only shown in the script's messages). */
   name: string;
   /**
@@ -916,6 +917,7 @@ export function byoPairingScript(input: ByoPairingScriptInput): string {
   const daemonUrl = normalizeDaemonUrl(input.daemonUrl);
   if (!BOX_ID_PATTERN.test(input.boxId)) throw new Error("Invalid box id for a bootstrap");
   if (!SECRET_PATTERN.test(input.bootstrapToken)) throw new Error("Invalid bootstrap token format");
+  if (input.kind === "windows") return byoWindowsPairingScript({ ...input, daemonUrl });
   const os = input.kind === "macos" ? "darwin" : "linux";
   const osLabel = input.kind === "macos" ? "macOS" : "Linux";
   // Only printed: keep it to plain characters so it can sit in single quotes.
@@ -963,6 +965,210 @@ say "installing the orq-agent service"
 say ${shQuote(`done: this machine connects to Orquester as "${name}". Remove it in Orquester (Settings → Plugins → Ephemeral AI VMs) to uninstall.`)}
 `
   ].join("\n");
+}
+
+/**
+ * The scheduled task `orq-agent install-desktop-helper` registers (`apps/box-agent/internal/agent/desktop_task.go`
+ * `desktopTaskName`): the pairing script ends it before replacing the executable.
+ */
+export const WINDOWS_DESKTOP_HELPER_TASK = "Orquester desktop helper";
+
+/**
+ * The Windows pairing command for the owner's PowerShell or cmd window: a child `powershell`
+ * fetches the one-time script and runs it (its `exit` ends the child, not the owner's window;
+ * the execution policy does not apply to a script that never touches the disk).
+ */
+export function byoWindowsPairingCommand(pairUrl: string): string {
+  if (/[\s'"`$;&|<>()\\]/.test(pairUrl)) throw new Error("The pairing URL contains characters a command cannot carry");
+  return `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm '${pairUrl}' | iex"`;
+}
+
+/**
+ * How pairing over SSH runs {@link byoWindowsPairingScript} on a Windows machine: the script on
+ * stdin (Win32-OpenSSH hands the command to cmd.exe or PowerShell alike), never in an argument.
+ */
+export const WINDOWS_PAIRING_COMMAND = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -";
+
+/**
+ * The PowerShell `irm <daemon>/api/boxes/pair/<code> | iex` and pairing over SSH run on the owner's
+ * Windows machine (tailnet machines spec §4.2.6). One `& { … }` block, because `-Command -` runs its
+ * input statement by statement: as one statement, `$ErrorActionPreference = 'Stop'`, `try`/`catch`
+ * and `exit` work as in a script file. Output is ASCII only (`Say`): the console's code page
+ * (850 on the owner's mini PC) would garble anything else. Steps:
+ *
+ * 1. Refuses to run unless elevated (an Administrator: a service is installed; over SSH an
+ *    administrator's session is elevated). That is the machine's `sudo=yes`: orq-agent runs as
+ *    LocalSystem, so it is passwordless "sudo" on Windows.
+ * 2. Like the rented-box script ({@link powershellScript}): `C:\orq\agent` readable only by SYSTEM
+ *    and Administrators, the token in a file there, `orq-agent.exe` (`win32-x64`) downloaded with
+ *    the bearer token and checked with `--version`. An earlier install's service, helper and
+ *    executable are stopped and moved aside first (a running .exe can be renamed, not replaced).
+ * 3. Probes (also `orq-probe:` lines when unattended): `whpx` (the Windows Hypervisor Platform
+ *    feature and the hypervisor running: the Android emulator's acceleration; never turned on here,
+ *    it needs a restart and can disturb other hypervisors), `autologon` (Winlogon's
+ *    `AutoAdminLogon`/`DefaultUserName`, read by value name; `DefaultPassword` is never read) and
+ *    `desktop` (whether the desktop user is signed in at the console now).
+ * 4. `orq-agent install-desktop-helper --user <desktop user>`: the auto-logon user when automatic
+ *    sign-in is on, else whoever runs the pairing. Its logon task runs the desktop-session helper
+ *    there, for programs that need the desktop or the GPU. A failure is reported, not fatal.
+ * 5. `orq-agent install-service`: the OrqAgent service, LocalSystem, automatic start. Services
+ *    can't run as a password-less account (Windows refuses blank passwords for service logons),
+ *    and LocalSystem is what rented Windows boxes use: the desktop session is the helper's job.
+ *
+ * No OOM protection: Windows has no OOM killer that picks services (§4.9.3).
+ */
+function byoWindowsPairingScript(input: ByoPairingScriptInput & { daemonUrl: string }): string {
+  // Only printed, and the console is not UTF-8: plain ASCII in single quotes.
+  const name = input.name.replace(/[^A-Za-z0-9 ._()+-]/g, "").trim().slice(0, 60) || "this machine";
+  const deadline = input.unattended ? UNATTENDED_DOWNLOAD_DEADLINE_SECONDS : DOWNLOAD_DEADLINE_SECONDS;
+  return `& {
+# Orquester: pair this Windows machine as a bring-your-own box (Ephemeral AI VMs). Downloads
+# orq-agent from the Orquester daemon, installs it as the OrqAgent service and registers its
+# desktop-session helper. The one-time token stays in a file only SYSTEM and Administrators can
+# read; never in arguments or this script's output.
+Set-PSDebug -Off
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$DaemonUrl = ${psQuote(input.daemonUrl)}
+$BoxId = ${psQuote(input.boxId)}
+$Unattended = ${input.unattended ? "$true" : "$false"}
+$Task = ${psQuote(WINDOWS_DESKTOP_HELPER_TASK)}
+function Say([string]$Message) { [Console]::Error.WriteLine('orq-bootstrap: ' + ($Message -replace '[^\\x20-\\x7E]', '?')) }
+function Probe([string]$Fact) { if ($Unattended) { [Console]::Error.WriteLine('${PAIRING_PROBE_PREFIX} ' + $Fact) } }
+# A native program's exit code and last output line; what it prints never stops the script.
+function Run([string]$Exe, [string[]]$Arguments, [switch]$Quiet) {
+  $ErrorActionPreference = 'Continue'
+  $Lines = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+  if (-not $Quiet) { foreach ($Line in $Lines) { Say $Line } }
+  [pscustomobject]@{ Code = $LASTEXITCODE; Last = ($Lines | Select-Object -Last 1) }
+}
+$TokenFile = $null
+try {
+  if ($env:OS -ne 'Windows_NT') { throw 'this pairing command is for a Windows machine' }
+  $Me = [Security.Principal.WindowsIdentity]::GetCurrent()
+  if (([Security.Principal.WindowsPrincipal]$Me).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Probe 'sudo=yes'
+  } else {
+    Probe 'sudo=no'
+    throw 'run the pairing command in PowerShell as Administrator: orq-agent installs a Windows service'
+  }
+  $Arch = $env:PROCESSOR_ARCHITECTURE
+  if ($env:PROCESSOR_ARCHITEW6432) { $Arch = $env:PROCESSOR_ARCHITEW6432 }
+  if ($Arch -ne 'AMD64') { throw "orq-agent has no build for this processor ($Arch): it needs 64-bit x86 Windows" }
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+  $Dir = '${WINDOWS_DATA_DIR}'
+  New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+  # Only SYSTEM (S-1-5-18) and Administrators (S-1-5-32-544) may read the agent directory.
+  if ((Run icacls.exe @($Dir, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F') -Quiet).Code -ne 0) { throw 'could not restrict the agent directory' }
+  $TokenFile = Join-Path $Dir 'bootstrap-token'
+  [IO.File]::WriteAllText($TokenFile, ${psQuote(input.bootstrapToken)})
+
+  $Exe = Join-Path $Dir 'orq-agent.exe'
+  # Ends in .exe: PowerShell runs only PATHEXT files as programs.
+  $Download = Join-Path $Dir 'orq-agent.download.exe'
+  Say 'downloading orq-agent (win32-x64)'
+  $Until = (Get-Date).AddSeconds(${deadline})
+  $Attempt = 0
+  while ($true) {
+    try {
+      $Headers = @{ Authorization = 'Bearer ' + [IO.File]::ReadAllText($TokenFile) }
+      Invoke-WebRequest -UseBasicParsing -Uri "$DaemonUrl/api/boxes/agent/win32-x64" -Headers $Headers -OutFile $Download -TimeoutSec 900 -MaximumRedirection 0
+      $Headers = $null
+      break
+    } catch {
+      $Headers = $null
+      $Status = 0
+      if ($_.Exception.Response) { $Status = [int]$_.Exception.Response.StatusCode }
+      if ($Status -eq 401 -or $Status -eq 403) { throw "the daemon refused the bootstrap token (HTTP $Status): create a new pairing command" }
+      if ($Status -eq 404) { throw 'the daemon has no orq-agent build for win32-x64' }
+      if ((Get-Date) -gt $Until) { throw "could not download orq-agent (last HTTP status $Status)" }
+      $Attempt++
+      $Wait = [Math]::Min(30, 2 * $Attempt)
+      Say "download failed (HTTP $Status); retrying in $Wait s"
+      Start-Sleep -Seconds $Wait
+    }
+  }
+  if ((Run $Download @('--version') -Quiet).Code -ne 0) { throw 'the downloaded orq-agent does not run here' }
+
+  # An earlier install (a machine removed while it was offline): stop it and move its executable aside.
+  if ((Run schtasks.exe @('/Query', '/TN', $Task) -Quiet).Code -eq 0) { Run schtasks.exe @('/End', '/TN', $Task) -Quiet | Out-Null }
+  if (Get-Service -Name OrqAgent -ErrorAction SilentlyContinue) {
+    Say 'stopping the orq-agent service of an earlier pairing'
+    Stop-Service -Name OrqAgent -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath $Exe) {
+    Remove-Item -LiteralPath "$Exe.old" -Force -ErrorAction SilentlyContinue
+    Rename-Item -LiteralPath $Exe -NewName 'orq-agent.exe.old' -Force
+  }
+  Move-Item -LiteralPath $Download -Destination $Exe -Force
+  Say "installed orq-agent at $Exe"
+
+  # Android emulator acceleration: the Windows Hypervisor Platform, and the hypervisor running.
+  $Feature = $null
+  try { $Feature = "$((Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform).State)" } catch { }
+  $Hypervisor = $false
+  try { $Hypervisor = [bool](Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent } catch { }
+  if ($Feature -eq 'Enabled' -and $Hypervisor) {
+    Probe 'whpx=on'
+  } elseif ($Feature -eq 'Enabled' -or $Feature -eq 'EnablePending') {
+    Say 'the Windows Hypervisor Platform is on but not running yet: restart this PC'
+    Probe 'whpx=pending'
+  } elseif ($Feature) {
+    Say 'the Windows Hypervisor Platform is off, so Android emulators get no acceleration: Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform, then restart'
+    Probe 'whpx=off'
+  } else {
+    Probe 'whpx=unknown'
+  }
+
+  # The desktop session: automatic sign-in (value names only; DefaultPassword is never read).
+  $Winlogon = 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon'
+  $AutoLogon = "$((Get-ItemProperty -Path $Winlogon -Name AutoAdminLogon -ErrorAction SilentlyContinue).AutoAdminLogon)"
+  $AutoUser = "$((Get-ItemProperty -Path $Winlogon -Name DefaultUserName -ErrorAction SilentlyContinue).DefaultUserName)"
+  $AutoDomain = "$((Get-ItemProperty -Path $Winlogon -Name DefaultDomainName -ErrorAction SilentlyContinue).DefaultDomainName)"
+  if ($AutoLogon -eq '1' -and $AutoUser) {
+    $DesktopUser = $AutoUser
+    if ($AutoDomain -and $AutoUser -notmatch '[\\\\@]') { $DesktopUser = "$AutoDomain\\$AutoUser" }
+    Probe 'autologon=on'
+  } else {
+    $DesktopUser = $Me.Name
+    Say "automatic sign-in is off: the desktop-session helper runs only while $DesktopUser is signed in at this PC"
+    Probe 'autologon=off'
+  }
+  $Console = $null
+  try { $Console = "$((Get-CimInstance -ClassName Win32_ComputerSystem).UserName)" } catch { }
+  $Short = ($DesktopUser -split '\\\\')[-1]
+  if (-not $Console) {
+    Probe 'desktop=none'
+  } elseif ($Console -eq $DesktopUser -or ($Console -split '\\\\')[-1] -eq $Short) {
+    Probe 'desktop=signed-in'
+  } else {
+    Probe 'desktop=other'
+  }
+  $Helper = Run $Exe @('install-desktop-helper', '--user', $DesktopUser, '--data-dir', $Dir)
+  if ($Helper.Code -eq 0) {
+    Probe 'desktop-helper=installed'
+  } else {
+    Say "could not register the desktop-session helper: $($Helper.Last)"
+    Probe 'desktop-helper=failed'
+  }
+
+  $env:${ORQ_AGENT_ENV.daemonUrl} = $DaemonUrl
+  $env:${ORQ_AGENT_ENV.boxId} = $BoxId
+  $env:${ORQ_AGENT_ENV.bootstrapTokenFile} = $TokenFile
+  Say 'installing the orq-agent service'
+  $Service = Run $Exe @('install-service', '--data-dir', $Dir)
+  if ($Service.Code -ne 0) { throw "orq-agent install-service failed: $($Service.Last)" }
+  Say ${psQuote(`done: this machine connects to Orquester as "${name}". Remove it in Orquester (Settings -> Machines) to uninstall.`)}
+} catch {
+  Say "error: $($_.Exception.Message)"
+  if ($TokenFile) { Remove-Item -LiteralPath $TokenFile -Force -ErrorAction SilentlyContinue }
+  exit 1
+}
+exit 0
+}
+
+`;
 }
 
 /** Build every bootstrap variant for one box (`BuildBootstrap`, contracts.ts). Throws on invalid input. */

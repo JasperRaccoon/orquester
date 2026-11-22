@@ -115,9 +115,8 @@ export function isBoxPurpose(value: unknown): value is BoxPurpose {
 /** The provider id of the owner's own machines (Devices phase 3 §2.1). */
 export const BYO_PROVIDER_ID = "byo" satisfies BoxProviderId;
 /**
- * The kinds a bring-your-own machine can be. `windows` (tailnet machines spec 2026-11-22 §4.2.6):
- * the kind exists, but pairing one is refused with `BOX_UNSUPPORTED` until its PowerShell
- * bootstrap lands.
+ * The kinds a bring-your-own machine can be. `windows` (tailnet machines spec 2026-11-22 §4.2.6)
+ * pairs with a PowerShell command in an elevated PowerShell, or over SSH.
  */
 export type ByoMachineKind = "linux" | "macos" | "windows";
 export const BYO_MACHINE_KINDS: readonly ByoMachineKind[] = ["linux", "macos", "windows"];
@@ -740,7 +739,8 @@ export const boxRoutes = {
   /** `POST` → `ByoPairingResponse`: a new pairing command for a `pairing` machine (the old one stops working). */
   byoPairing: (id: string): string => `/api/boxes/byo/${encodeURIComponent(id)}/pairing`,
   /**
-   * REMOTE, NOT behind the daemon's user auth: `GET` → the pairing script (`text/x-shellscript`) for
+   * REMOTE, NOT behind the daemon's user auth: `GET` → the pairing script (`text/x-shellscript`;
+   * a Windows machine's PowerShell script as `text/plain`) for
    * a one-time pairing code. The code is spent by the first fetch and expires after
    * `BYO_PAIRING_TTL_MINUTES`; failures are rate-limited per client. Answers 404 for any code that
    * is not live.
@@ -814,7 +814,10 @@ export interface RemoveByoMachineResponse {
 /** A pairing command, shown once (only a hash of its code is kept). */
 export interface ByoPairingResponse {
   box: BoxSummary;
-  /** `curl -fsSL <daemon>/api/boxes/pair/<code> | sh`. */
+  /**
+   * `curl -fsSL <daemon>/api/boxes/pair/<code> | sh`; Windows:
+   * `powershell -NoProfile -ExecutionPolicy Bypass -Command "… irm '<daemon>/api/boxes/pair/<code>' | iex"`.
+   */
   command: string;
   expiresAt: string;
 }

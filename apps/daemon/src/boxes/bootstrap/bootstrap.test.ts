@@ -10,7 +10,15 @@ import { parse } from "yaml";
 
 import { parseProbeLines } from "../../machines/pairing/probe.ts";
 import type { BootstrapInput } from "../contracts.ts";
-import { bootstrapSecondStage, buildBootstrap, byoPairingScript, byoUnpairCleanupScript, normalizeDaemonUrl, OOM_DROPIN_LINES } from "./bootstrap.ts";
+import {
+  bootstrapSecondStage,
+  buildBootstrap,
+  byoPairingScript,
+  byoUnpairCleanupScript,
+  byoWindowsPairingCommand,
+  normalizeDaemonUrl,
+  OOM_DROPIN_LINES
+} from "./bootstrap.ts";
 
 const TOKEN = "obt_test-TOKEN.value_0123456789abcdef";
 // Split so secret scanners do not read the fake key as a real one.
@@ -509,6 +517,28 @@ test("the pairing script refuses bad input and puts the macOS agent under Applic
   assert.throws(() => byoPairingScript({ ...ok, boxId: "x;rm" }), /box id/);
   const script = byoPairingScript({ ...ok, name: "Mac 'mini' $(reboot)" });
   assert.ok(script.includes('T="$HOME/Library/Application Support/Orquester/orq-agent"'));
+});
+
+test("the Windows pairing script is one ASCII PowerShell statement whose only secret is written to the token file", () => {
+  for (const unattended of [false, true]) {
+    const script = byoPairingScript({ boxId: BOX_ID, daemonUrl: "https://orq.example.com/base/", bootstrapToken: TOKEN, kind: "windows", name: "Mini PC 'x' $(Stop-Computer) ünïcode", unattended });
+    // `-Command -` runs its input statement by statement: the whole script is one block, closed by a blank line.
+    assert.ok(script.startsWith("& {\n") && script.endsWith("\n}\n\n"));
+    // The console code page is not UTF-8: nothing but ASCII may reach it.
+    assert.match(script, /^[\x09\x0a\x20-\x7e]*$/);
+    assert.equal(script.split(TOKEN).length, 2, "the token appears once");
+    assert.ok(script.includes(`[IO.File]::WriteAllText($TokenFile, '${TOKEN}')`));
+    assert.ok(script.includes("$DaemonUrl = 'https://orq.example.com/base'"));
+    assert.ok(script.includes('"$DaemonUrl/api/boxes/agent/win32-x64"'));
+    assert.ok(!script.includes("$(Stop-Computer)"), "the machine's name cannot inject PowerShell");
+    assert.ok(script.includes(`$Unattended = ${unattended ? "$true" : "$false"}`));
+    // Winlogon is read value by value: the stored password never enters the script's memory.
+    assert.ok(!/DefaultPassword/i.test(script.replace(/# .*$/gm, "")));
+  }
+  assert.throws(() => byoPairingScript({ boxId: BOX_ID, daemonUrl: "https://orq.example.com", bootstrapToken: "short", kind: "windows", name: "PC" }), /token/);
+  const url = "https://orq.example.com/api/boxes/pair/AbCdEfGhIjKlMnOpQrStUvWx";
+  assert.equal(byoWindowsPairingCommand(url), `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm '${url}' | iex"`);
+  assert.throws(() => byoWindowsPairingCommand("https://orq.example.com/x';Stop-Computer;'"), /characters/);
 });
 
 // ---------------------------------------------------------------------------
