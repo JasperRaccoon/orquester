@@ -7,6 +7,7 @@ import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { Badge, FormField, Notice, SettingRow, SettingsPage, SettingsSection } from "./primitives";
 import { AuthSessionsSettings } from "./AuthSessionsSettings";
+import { SecondFactorSettings } from "./SecondFactorSettings";
 
 /** The editable slice of daemon.json, as the form holds it. */
 interface Draft {
@@ -62,6 +63,8 @@ export const ServerSettings: React.FC = () => {
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<SaveResult | null>(null);
+  // Bumped when turning on two-step sign-in signs the other devices out, so their list reloads.
+  const [sessionsVersion, setSessionsVersion] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -183,8 +186,8 @@ export const ServerSettings: React.FC = () => {
           {!isLocal && (
             <Notice tone="info" title="Read-only on this connection">
               Server settings can only be changed from the local app (unix socket). Connected over HTTP they are
-              read-only — except “Protect archived data”, which has its own endpoint and can be changed from any
-              client.
+              read-only — except “Protect archived data”, two-step sign-in and API tokens, which have their own
+              endpoints and can be changed from any client.
             </Notice>
           )}
           {loadFailed && <Notice tone="danger">Could not load daemon config.</Notice>}
@@ -327,7 +330,12 @@ export const ServerSettings: React.FC = () => {
         )}
       </SettingsSection>
 
-      {(!isLocal || saved?.httpEnabled || passwordSet) && <AuthSessionsSettings remoteAccessOn={saved?.httpEnabled ?? !isLocal} />}
+      {(!isLocal || saved?.httpEnabled || passwordSet) && (
+        <>
+          <SecondFactorSettings onSessionsChanged={() => setSessionsVersion((v) => v + 1)} />
+          <AuthSessionsSettings reloadSignal={sessionsVersion} remoteAccessOn={saved?.httpEnabled ?? !isLocal} />
+        </>
+      )}
 
       <SettingsSection title="Security">
         <SettingRow

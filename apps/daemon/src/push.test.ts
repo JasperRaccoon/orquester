@@ -15,7 +15,7 @@ import { Broadcaster } from "./broadcaster.ts";
 import { InjectDaemonApi, withPrincipal } from "./mcp/daemon-api.ts";
 import { chatSummary } from "./mcp/fixtures.ts";
 import { registerPrincipalHook } from "./mcp/principal.ts";
-import { AGENT_PUSH_CREDENTIAL_INTERVAL_MS, AGENT_PUSH_THREAD_INTERVAL_MS, PushService, pushRateKey, registerPushNotifyRoute } from "./push.ts";
+import { AGENT_PUSH_CREDENTIAL_INTERVAL_MS, AGENT_PUSH_THREAD_INTERVAL_MS, PushService, SIGN_IN_ALERT_INTERVAL_MS, pushRateKey, registerPushNotifyRoute } from "./push.ts";
 
 /** A PushService over a temp push.json with one subscription, a fake clock, and every payload it sends. */
 async function rig(t: TestContext, onNotification?: (event: PushNotificationEvent) => void) {
@@ -174,4 +174,14 @@ test("a workflow gate's push carries the gate for its deep link (kind workflow)"
   await push.notifyWorkflowGate({ title: "Needs you: Deploy", body: "Ship?", tag: "workflow-gate-r1-g1", workflowId: "w1", runId: "r1", gateId: "g1" });
   assert.deepEqual(seen, [{ kind: "workflow", title: "Needs you: Deploy", body: "Ship?", tag: "workflow-gate-r1-g1", workflowId: "w1", runId: "r1", gateId: "g1" }]);
   assert.deepEqual(sent.at(-1), { title: "Needs you: Deploy", body: "Ship?", tag: "workflow-gate-r1-g1", workflowId: "w1", runId: "r1", gateId: "g1", sessionId: "" });
+});
+
+test("sign-in alerts push at most once per 15 minutes and open no chat", async (t) => {
+  const { push, sent, clock } = await rig(t);
+  await push.notifySignInAlert("Someone entered your Orquester password from 203.0.113.1 but not a valid code.");
+  await push.notifySignInAlert("Sign-in with a code is locked.");
+  assert.deepEqual(sent, [{ title: "Orquester sign-in alert", body: "Someone entered your Orquester password from 203.0.113.1 but not a valid code.", tag: "orquester-sign-in", sessionId: "" }]);
+  clock.now += SIGN_IN_ALERT_INTERVAL_MS;
+  await push.notifySignInAlert("Sign-in with a code is locked.");
+  assert.equal(sent.length, 2);
 });
