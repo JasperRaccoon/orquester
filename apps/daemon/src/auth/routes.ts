@@ -127,30 +127,38 @@ async function passwordMatches(
 export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): void {
   const checking = new Set<string>();
 
+  // Wrong passwords in a signed-in owner's re-proof (management routes, API tokens), per session:
+  // nothing from outside that session — e.g. an attacker guessing at the login from the owner's
+  // apparent IP (CGNAT, a proxy without X-Forwarded-For) — can lock the owner out of them.
+  const sessionPasswordThrottle = new LoginThrottle({ now: () => deps.secondFactor.now() });
+
   /**
-   * Run one password check for the request's IP: refused (429) while the IP is locked out or
-   * already has one in flight; a `false` result counts as a failure, a `true` one clears the IP.
+   * Run one password check: refused (429) while its key is locked out or already has one in
+   * flight; a `false` result counts as a failure, a `true` one clears the key. Keyed on the
+   * request's IP (the per-IP `passwordThrottle`), or with `ownerSession` on that session.
    */
   const guarded = async (
     request: FastifyRequest,
     reply: FastifyReply,
-    check: () => Promise<boolean>
+    check: () => Promise<boolean>,
+    ownerSession?: string
   ): Promise<boolean | null> => {
-    const ip = clientIp(request);
-    const retryAfterMs = deps.passwordThrottle.retryAfterMs(ip);
-    if (retryAfterMs > 0 || checking.has(ip)) {
+    const [throttle, key] = ownerSession ? [sessionPasswordThrottle, ownerSession] : [deps.passwordThrottle, clientIp(request)];
+    const inFlight = ownerSession ? `password-session:${ownerSession}` : key;
+    const retryAfterMs = throttle.retryAfterMs(key);
+    if (retryAfterMs > 0 || checking.has(inFlight)) {
       reply.header("retry-after", String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
       await reply.code(429).send({ code: "TOO_MANY_ATTEMPTS", message: "Too many failed password attempts. Try again later." });
       return null;
     }
-    checking.add(ip);
+    checking.add(inFlight);
     try {
       const ok = await check();
-      if (ok) deps.passwordThrottle.recordSuccess(ip);
-      else deps.passwordThrottle.recordFailure(ip, true);
+      if (ok) throttle.recordSuccess(key);
+      else throttle.recordFailure(key, true);
       return ok;
     } finally {
-      checking.delete(ip);
+      checking.delete(inFlight);
     }
   };
 
@@ -260,8 +268,8 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
   };
 
   /**
-   * Re-prove the owner on the remote transport: the password (through the password throttle),
-   * then, when `needCode`, a code (the session's own code limit only). Answers 403 / 429 itself and returns
+   * Re-prove the owner on the remote transport: the password, then, when `needCode`, a code — each
+   * against the caller session's own limits only. Answers 403 / 429 itself and returns
    * false; over the unix socket always true.
    */
   const proveOwner = async (request: FastifyRequest, reply: FastifyReply, needCode: boolean): Promise<boolean> => {
@@ -273,7 +281,7 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
       return false;
     }
     const credentials = deps.credentials();
-    const passwordOk = await guarded(request, reply, () => passwordMatches(credentials, undefined, password, false));
+    const passwordOk = await guarded(request, reply, () => passwordMatches(credentials, undefined, password, false), request.authSession?.id);
     if (passwordOk === null) return false;
     if (!passwordOk) {
       await invalidProof(reply, "password");

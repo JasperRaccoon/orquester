@@ -603,6 +603,23 @@ test("wrong sign-in codes from the owner's own IP do not lock the signed-in owne
   assert.equal(factor.isEnabled(), false);
 });
 
+test("wrong passwords at the login from the owner's own IP do not lock the signed-in owner out of turning the factor off", async (t) => {
+  const { h, factor, freshCode } = await factorHarness(t);
+  const shared = "198.51.100.21";
+  const owner = await signIn(h, freshCode(), shared);
+  for (let i = 0; i < 5; i += 1) assert.equal((await login(h, "wrong-password", shared)).statusCode, 401);
+  assert.equal((await login(h, PASSWORD, shared)).statusCode, 429, "the IP's password entry is locked");
+  const disabled = await h.remote.inject({
+    method: "POST",
+    url: authRoutes.secondFactorDisable,
+    remoteAddress: shared,
+    headers: bearer(owner),
+    payload: { password: PASSWORD, code: freshCode() }
+  });
+  assert.equal(disabled.statusCode, 204);
+  assert.equal(factor.isEnabled(), false);
+});
+
 test("a completed sign-in clears the global wrong-code count, so scattered typos never add up to a lockout", async (t) => {
   const { h, freshCode } = await factorHarness(t);
   const typos = async (from: number) => {
