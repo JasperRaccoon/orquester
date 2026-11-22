@@ -41,6 +41,8 @@ const STRUCTURAL_PUSH_VERB = {
  */
 export const AGENT_PUSH_THREAD_INTERVAL_MS = 5 * 60_000;
 export const AGENT_PUSH_CREDENTIAL_INTERVAL_MS = 60_000;
+/** A sign-in alert (a leaked password: right password, wrong code) pushes at most this often. */
+export const SIGN_IN_ALERT_INTERVAL_MS = 15 * 60_000;
 /** 429 code of a rate-limited `POST /api/push/notify`. */
 const PUSH_RATE_LIMITED = "RATE_LIMITED";
 
@@ -109,6 +111,8 @@ export class PushService {
   private readonly lastPushAt = new Map<string, number>();
   /** Last agent push per rate key (`pushRateKey`), for `notify_user`'s limits. */
   private readonly lastAgentPushAt = new Map<string, number>();
+  /** Last sign-in alert, for {@link SIGN_IN_ALERT_INTERVAL_MS}. */
+  private lastSignInAlertAt: number | null = null;
   private readonly now: () => number;
   private readonly onNotification: ((event: PushNotificationEvent) => void) | undefined;
 
@@ -310,6 +314,28 @@ export class PushService {
     } catch (error) {
       this.logger.error("agent push failed", error);
       return { ok: true, sent: 0 };
+    }
+  }
+
+  /**
+   * A sign-in alert for the owner (login second factor: a correct password followed by a wrong
+   * code, or the global code lockout). At most one per {@link SIGN_IN_ALERT_INTERVAL_MS}, whatever
+   * the message; a call inside the interval is dropped. Opens no session (`kind: "agent"`, the
+   * generic push the clients already show). Never throws.
+   */
+  async notifySignInAlert(body: string): Promise<void> {
+    const now = this.now();
+    if (this.lastSignInAlertAt !== null && now - this.lastSignInAlertAt < SIGN_IN_ALERT_INTERVAL_MS) return;
+    this.lastSignInAlertAt = now;
+    try {
+      await this.send({
+        kind: "agent",
+        title: "Orquester sign-in alert",
+        body: sanitizeApprovalProse(body, PUSH_NOTIFY_BODY_MAX_CHARS).trim(),
+        tag: "orquester-sign-in"
+      });
+    } catch (error) {
+      this.logger.error("sign-in alert push failed", error);
     }
   }
 

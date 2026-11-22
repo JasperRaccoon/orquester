@@ -16,6 +16,8 @@ export class LoginThrottle {
     { fails: number; lockedUntil: number; strikes: number; burstStartAt: number }
   >();
   private static readonly MAX_FAILS = 5;
+  private readonly maxFails: number;
+  private readonly now: () => number;
   private static readonly BASE_LOCKOUT_MS = 15 * 60 * 1000;
   private static readonly MAX_LOCKOUT_MS = 24 * 60 * 60 * 1000;
   // One login attempt fans out into several authenticated requests (workspaces,
@@ -28,13 +30,20 @@ export class LoginThrottle {
   private static readonly PRUNE_THRESHOLD = 1024;
   private static readonly STALE_AFTER_MS = 10 * 60 * 1000;
 
+  /** `maxFails`: failures that lock a key (default 5). `now`: the clock (tests). */
+  constructor(opts: { maxFails?: number; now?: () => number } = {}) {
+    this.maxFails = opts.maxFails ?? LoginThrottle.MAX_FAILS;
+    this.now = opts.now ?? Date.now;
+  }
+
   /** Ms remaining on an active lockout for this IP, or 0 if not locked. */
   retryAfterMs(ip: string): number {
     const entry = this.state.get(ip);
-    if (!entry || entry.lockedUntil <= Date.now()) {
+    const now = this.now();
+    if (!entry || entry.lockedUntil <= now) {
       return 0;
     }
-    return entry.lockedUntil - Date.now();
+    return entry.lockedUntil - now;
   }
 
   /**
@@ -44,7 +53,7 @@ export class LoginThrottle {
    */
   recordFailure(ip: string, perAttempt = false): void {
     const entry = this.state.get(ip) ?? { fails: 0, lockedUntil: 0, strikes: 0, burstStartAt: 0 };
-    const now = Date.now();
+    const now = this.now();
     this.prune(now);
     // Burst collapse: failures arriving within BURST_WINDOW_MS of the FIRST failure
     // of the current burst belong to one login attempt's fan-out (or a rapid
@@ -59,12 +68,12 @@ export class LoginThrottle {
     }
     entry.burstStartAt = now;
     entry.fails += 1;
-    if (entry.fails >= LoginThrottle.MAX_FAILS) {
+    if (entry.fails >= this.maxFails) {
       const lockout = Math.min(
         LoginThrottle.BASE_LOCKOUT_MS * 2 ** entry.strikes,
         LoginThrottle.MAX_LOCKOUT_MS
       );
-      entry.lockedUntil = Date.now() + lockout;
+      entry.lockedUntil = now + lockout;
       entry.strikes += 1;
       entry.fails = 0;
     }
