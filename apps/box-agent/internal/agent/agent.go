@@ -609,6 +609,8 @@ func (a *Agent) hello(auth wire.Auth) wire.Hello {
 		Sys:          a.sysInfo(),
 		Procs:        a.procs.list(),
 		Nics:         a.nics.snapshot(),
+		// Every build can send a Wake-on-LAN packet (net.wake).
+		Capabilities: []string{wire.CapabilityWakeSender},
 	}
 	if a.sshd != nil {
 		hello.Capabilities = append(hello.Capabilities, wire.CapabilitySSHServer)

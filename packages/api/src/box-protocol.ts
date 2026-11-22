@@ -228,11 +228,12 @@ export interface BoxDetachedProcInfo {
  * - `ssh-server` — the built-in SSH server (§4.3 Phase 2): it serves `ssh` channels, takes
  *   `ssh.keys`, and `hello.sshHostKey` is its host key;
  * - `desktop-session` — Windows: the desktop-session helper is installed, so an `exec` with
- *   `session: "desktop"` runs in the interactive desktop session (§4.2.6).
+ *   `session: "desktop"` runs in the interactive desktop session (§4.2.6);
+ * - `wake-sender` — `net.wake` sends a Wake-on-LAN magic packet onto one of the box's own LANs (§4.8).
  * Receivers ignore values they do not know.
  */
-export type BoxAgentCapability = "ssh-server" | "desktop-session";
-export const BOX_AGENT_CAPABILITIES: readonly BoxAgentCapability[] = ["ssh-server", "desktop-session"];
+export type BoxAgentCapability = "ssh-server" | "desktop-session" | "wake-sender";
+export const BOX_AGENT_CAPABILITIES: readonly BoxAgentCapability[] = ["ssh-server", "desktop-session", "wake-sender"];
 
 /**
  * One network interface for Wake-on-LAN (tailnet machines spec 2026-11-22 §4.8). `orq-agent` lists
@@ -262,6 +263,52 @@ export interface BoxNicsEvent {
 
 /** Box → host event name of {@link BoxNicsEvent}. */
 export const BOX_NICS_EVENT = "sys.nics";
+
+/** A MAC address as {@link BoxNic.mac} spells it: six lowercase hex pairs joined by `:`. */
+export const BOX_NIC_MAC_PATTERN = /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/;
+const BOX_NIC_IPV4_PATTERN = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+
+/**
+ * A NIC list from `hello.nics` or a {@link BOX_NICS_EVENT}, read leniently: entries that are not a
+ * well-formed {@link BoxNic} (or name a malformed MAC or address) are dropped; an address with a
+ * malformed companion field reads as no address. Null when `value` is not a list at all (not reported).
+ */
+export function parseBoxNics(value: unknown): BoxNic[] | null {
+  if (!Array.isArray(value)) return null;
+  const nics: BoxNic[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const raw = entry as Record<string, unknown>;
+    const mac = typeof raw.mac === "string" ? raw.mac.toLowerCase() : "";
+    if (!BOX_NIC_MAC_PATTERN.test(mac)) continue;
+    const ipv4 = typeof raw.ipv4 === "string" && BOX_NIC_IPV4_PATTERN.test(raw.ipv4) ? raw.ipv4 : null;
+    const prefix = typeof raw.prefixLength === "number" && Number.isInteger(raw.prefixLength) && raw.prefixLength >= 0 && raw.prefixLength <= 32 ? raw.prefixLength : null;
+    const addressed = ipv4 !== null && prefix !== null;
+    const broadcast = addressed && typeof raw.broadcast === "string" && BOX_NIC_IPV4_PATTERN.test(raw.broadcast) ? raw.broadcast : null;
+    nics.push({
+      name: typeof raw.name === "string" ? raw.name.slice(0, 64) : "",
+      mac,
+      ipv4: addressed ? ipv4 : null,
+      prefixLength: addressed ? prefix : null,
+      broadcast,
+      wired: raw.wired === true,
+      wolEnabled: typeof raw.wolEnabled === "boolean" ? raw.wolEnabled : null
+    });
+  }
+  return nics;
+}
+
+/**
+ * `net.wake` params (`wake-sender` capability): send the standard Wake-on-LAN magic packet (6 × 0xFF,
+ * then the MAC 16 times) as an IPv4 UDP broadcast. `broadcast` must be the broadcast address of one
+ * of the box's own IPv4 interfaces (the box refuses any other); `port` 9 or 7, absent: both.
+ */
+export interface BoxNetWakeParams {
+  /** The machine to wake, `aa:bb:cc:dd:ee:ff`. */
+  mac: string;
+  broadcast: string;
+  port?: 7 | 9;
+}
 
 export interface BoxHello {
   t: "hello";
@@ -371,7 +418,8 @@ export const BOX_RPC_NAMESPACES = [
   "sync", // config and transcript sync (both)
   "tooling", // plugin tooling installs (host → box)
   "mcp", // MCP bridge bookkeeping (both)
-  "ssh" // the built-in SSH server's authorized keys (host → box)
+  "ssh", // the built-in SSH server's authorized keys (host → box)
+  "net" // sending onto the box's LAN: Wake-on-LAN (host → box)
 ] as const;
 
 export interface BoxFsStat {
@@ -458,6 +506,8 @@ export interface BoxHostToBoxMethods {
    * list revokes every key at once). Sent after every `welcome` and on every change.
    */
   "ssh.keys": [{ keys: BoxSshAuthorizedKey[] }, void];
+  /** With `wake-sender`: send a Wake-on-LAN magic packet onto one of the box's LANs ({@link BoxNetWakeParams}). */
+  "net.wake": [BoxNetWakeParams, void];
 }
 
 /** Core box → host methods. */

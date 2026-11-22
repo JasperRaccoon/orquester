@@ -5,8 +5,10 @@
  * Who asks is the request's server-stamped principal: `user` is the owner and sees every machine;
  * any other principal (an agent chat's tools, an external MCP client) sees only machines visible to
  * agents (never Hidden, never the daemon host, never one with every use off) — a machine hidden from
- * it answers 404 `MACHINE_NOT_FOUND` exactly like an unknown id — and may only wake. Policy changes,
- * pairing and removal are the owner's (403 `MACHINE_OWNER_ONLY`).
+ * it answers 404 `MACHINE_NOT_FOUND` exactly like an unknown id — and may only wake, and only a
+ * Free-use machine (an Ask-first one is 403 `MACHINE_APPROVAL_REQUIRED`: `wake_machine` wakes it after
+ * the owner's card, through {@link wakeApprovedForAgent}, which no HTTP route reaches). Policy
+ * changes, pairing and removal are the owner's (403 `MACHINE_OWNER_ONLY`).
  */
 
 import { isAbsolute } from "node:path";
@@ -23,6 +25,7 @@ import {
   type MachineProblem,
   type MachineResponse,
   type MachinesResponse,
+  type MachineSummary,
   type MachineVisibility,
   type PairMachineOverSshRequest,
   type PairMachineOverSshResponse,
@@ -158,6 +161,42 @@ function parsePairRequest(body: unknown): PairMachineOverSshRequest {
 
 const failed = (problem: MachineProblem): PairMachineOverSshResponse => ({ status: "failed", problem });
 
+/** Wake a machine `viewer` may see (not the daemon's own). An agent's wake is never sent by a Hidden machine. */
+async function wakeAs(registry: MachineRegistry, machine: MachineSummary, viewer: MachineViewer): Promise<WakeMachineResponse> {
+  const port = registry.wakePort();
+  if (!port) {
+    return {
+      sent: false,
+      via: null,
+      problem: {
+        code: "wake-unavailable",
+        machineId: machine.id,
+        message: `Orquester can't wake ${machine.name} in this version.`,
+        fix: `Turn ${machine.name} on by hand.`
+      }
+    };
+  }
+  const result = await port.wake(machine.id, { agent: viewer.kind === "agent" });
+  void registry.refresh();
+  return result;
+}
+
+/**
+ * The wake `wake_machine` runs after the owner approved its card for an Ask-first machine: a
+ * daemon-internal call (`DaemonApi.machineWakeApproved`, in-process only), never an HTTP route, so
+ * no caller can skip the card by calling the route. The machine must still be one the chat may see.
+ */
+export async function wakeApprovedForAgent(
+  registry: MachineRegistry,
+  machineId: string,
+  threadId: string
+): Promise<{ ok: true; value: WakeMachineResponse } | { ok: false; code: MachineErrorCode; message: string }> {
+  const viewer: MachineViewer = { kind: "agent", threadId };
+  const machine = registry.get(machineId, viewer);
+  if (!machine) return { ok: false, code: "MACHINE_NOT_FOUND", message: "No such machine." };
+  return { ok: true, value: await wakeAs(registry, machine, viewer) };
+}
+
 export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesDeps): void {
   const { registry, boxes } = deps;
   const logger = deps.logger ?? console;
@@ -278,24 +317,13 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
   app.post(
     "/api/machines/:id/wake",
     handle(async (request: IdRequest): Promise<WakeMachineResponse> => {
-      const machine = machineFor(request.params.id, viewerOf(request.principal));
+      const viewer = viewerOf(request.principal);
+      const machine = machineFor(request.params.id, viewer);
       if (machine.self) throw new MachineRouteError(409, "MACHINE_UNSUPPORTED", "This is the machine Orquester runs on; it is awake.");
-      const port = registry.wakePort();
-      if (!port) {
-        return {
-          sent: false,
-          via: null,
-          problem: {
-            code: "wake-unavailable",
-            machineId: machine.id,
-            message: `Orquester can't wake ${machine.name} in this version.`,
-            fix: `Turn ${machine.name} on by hand.`
-          }
-        };
+      if (viewer.kind === "agent" && machine.visibility !== "free") {
+        throw new MachineRouteError(403, "MACHINE_APPROVAL_REQUIRED", `${machine.name} is set to Ask first: waking it needs the owner's approval, which wake_machine asks for on a card.`);
       }
-      const result = await port.wake(machine.id);
-      void registry.refresh();
-      return result;
+      return wakeAs(registry, machine, viewer);
     })
   );
 }

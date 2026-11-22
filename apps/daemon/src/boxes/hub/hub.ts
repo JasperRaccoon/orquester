@@ -17,6 +17,7 @@ import {
   boxAgentPlatform,
   boxPathMapFor,
   boxRoutes,
+  parseBoxNics,
   parseControlMessage,
   type BoxAgentCapability,
   type BoxAgentConfig,
@@ -493,6 +494,8 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
     if (!(await handshakeVersion(boxId, hello, mux, socket))) return;
     if (links.get(boxId) !== link) return;
 
+    // Wake-on-LAN details (a malformed entry is dropped; absent: not reported).
+    const nics = parseBoxNics(hello.nics);
     const info = {
       sys: hello.sys,
       paths,
@@ -500,7 +503,8 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
       procs: hello.procs ?? [],
       // Unknown values are ignored by whoever checks one; anything else than strings is no capability.
       capabilities: Array.isArray(hello.capabilities) ? hello.capabilities.filter((value): value is BoxAgentCapability => typeof value === "string") : [],
-      ...(typeof hello.sshHostKey === "string" && hello.sshHostKey.length > 0 ? { sshHostKey: hello.sshHostKey } : {})
+      ...(typeof hello.sshHostKey === "string" && hello.sshHostKey.length > 0 ? { sshHostKey: hello.sshHostKey } : {}),
+      ...(nics ? { nics } : {})
     };
     if (!connection) {
       connection = new LinkedBoxConnection(boxId, info, { replay: true });
