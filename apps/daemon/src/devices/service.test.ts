@@ -10,7 +10,7 @@ import { DeviceError } from "./errors.ts";
 import { DeviceScreenshots } from "./screenshots.ts";
 import { DeviceService } from "./service.ts";
 import { DeviceLeaseStore, DeviceSettingsStore } from "./store.ts";
-import { FakeActionExecutor, FakeDeviceHost, FakeHostFactory, startTestDeviceService } from "./testing.ts";
+import { FakeActionExecutor, FakeDeviceHost, FakeHostFactory, FakeMachineAccess, startTestDeviceService } from "./testing.ts";
 
 const ANDROID_ON = { android: { enabled: true } };
 const signal = () => new AbortController().signal;
@@ -433,14 +433,18 @@ test("a setup names its host: the research host runs its own fix, and an unknown
   }
 });
 
-test("an agent names a research host to open it: only a ready one, and only a research host", async () => {
+test("an agent names a host to open on: any visible host of the platform; a research host only once ready", async () => {
   const mac = new FakeDeviceHost("box:m1", "box", ["ios"], "Mac host");
   const research = researchHost();
   research.status = { status: "needs-setup", detail: null };
   research.checks = [{ id: "template", label: "Template", state: "missing", detail: null, fixActionId: "vphone-template" }];
   const t = await startTestDeviceService({ factories: [new FakeHostFactory("box", ["ios"], [mac]), new FakeHostFactory("byo", ["ios"], [research])], settings: { ios: { enabled: true } } });
   try {
-    assert.equal(await codeOf(t.service.toolOpen("t1", { platform: "ios", hostId: "box:m1" }, signal())), "INVALID_ARGUMENT");
+    const onMac = await t.service.toolOpen("t1", { platform: "ios", hostId: "box:m1" }, signal());
+    assert.equal(onMac.lease.hostId, "box:m1");
+    assert.equal(onMac.notice, undefined);
+    assert.equal(await codeOf(t.service.toolOpen("t1", { platform: "android", hostId: "box:m1" }, signal())), "INVALID_ARGUMENT");
+    await t.service.toolClose("t1", { device: onMac.lease.id });
     assert.equal(await codeOf(t.service.toolOpen("t1", { platform: "ios", hostId: "vphone:b1" }, signal())), "PLATFORM_NOT_READY");
     assert.deepEqual(research.ensured, [], "an agent's open never starts the template build");
 
@@ -484,6 +488,48 @@ test("a rental the pool's caps would refuse is not promised", async () => {
     assert.deepEqual(t.service.snapshot().pool?.rentable, ["ios"]);
     await t.service.updateSettings({ pool: { maxHourlyUsd: 1 } });
     assert.deepEqual(t.service.snapshot().pool?.rentable, []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a Hidden machine's host is never listed, placed on or opened by id; once visible, it is preferred over a rental", async () => {
+  const access = new FakeMachineAccess();
+  access.set("jasper", { machineId: "ts:jasper-node", visibility: "hidden" });
+  const jasper = new FakeDeviceHost("box:jasper", "byo", ["android"], "jasper (your Linux machine)");
+  jasper.boxInfo = { boxId: "jasper", provider: "byo", hourlyUsd: 0, startedAt: "2026-11-22T00:00:00.000Z", deadlineAt: null };
+  const rented = new FakeDeviceHost("box:rented", "box", ["android"], "Android host (Blacksmith, 16 vCPU)");
+  rented.boxInfo = { boxId: "rented", provider: "blacksmith", hourlyUsd: 1.92, startedAt: "2026-11-22T00:00:00.000Z", deadlineAt: null };
+  const t = await startTestDeviceService({
+    factories: [new FakeHostFactory("box", ["android"], [jasper, rented])],
+    settings: { ...ANDROID_ON, pool: { placement: "pool-only" } },
+    deps: { machineAccess: access }
+  });
+  try {
+    assert.deepEqual(t.service.toolList("t1").hosts.map((host) => host.id), ["box:rented"]);
+    // Named, it answers exactly like an id that names no host.
+    const hidden = await t.service.toolOpen("t1", { platform: "android", hostId: "box:jasper" }, signal()).catch((error: DeviceError) => error);
+    const unknown = await t.service.toolOpen("t1", { platform: "android", hostId: "box:nothing" }, signal()).catch((error: DeviceError) => error);
+    assert.ok(hidden instanceof DeviceError && unknown instanceof DeviceError);
+    assert.equal(hidden.code, "HOST_NOT_FOUND");
+    assert.equal(hidden.message.replace("box:jasper", "<id>"), unknown.message.replace("box:nothing", "<id>"));
+    const placed = await t.service.toolOpen("t1", { platform: "android" }, signal());
+    assert.equal(placed.lease.hostId, "box:rented");
+    assert.equal(jasper.booted.length, 0);
+
+    access.set("jasper", { machineId: "ts:jasper-node", visibility: "free" });
+    access.changed();
+    const summary = t.service.toolList("t2").hosts.find((host) => host.id === "box:jasper");
+    assert.equal(summary?.machineId, "ts:jasper-node");
+    const own = await t.service.toolOpen("t2", { platform: "android" }, signal());
+    assert.equal(own.lease.hostId, "box:jasper");
+    const named = await t.service.toolOpen("t3", { platform: "android", hostId: "box:jasper" }, signal());
+    assert.equal(named.lease.hostId, "box:jasper");
+
+    // "Device simulators" off behaves like Hidden for devices.
+    access.set("jasper", { machineId: "ts:jasper-node", visibility: "free", capabilities: { devices: false, commands: true, chats: true } });
+    access.changed();
+    assert.equal(await codeOf(t.service.toolOpen("t4", { platform: "android", hostId: "box:jasper" }, signal())), "HOST_NOT_FOUND");
   } finally {
     await t.cleanup();
   }

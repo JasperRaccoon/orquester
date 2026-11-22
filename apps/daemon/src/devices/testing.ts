@@ -10,11 +10,13 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { crc32, deflateSync } from "node:zlib";
 
-import type { DeviceActionInput, DeviceHostKind, DeviceHostPoolInfo, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary } from "@orquester/api";
+import type { DeviceActionInput, DeviceHostBoxInfo, DeviceHostKind, DeviceHostPoolInfo, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary, MachineCapability } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
 import type { DeviceActionContext, DeviceActionExecutor, DeviceActionResult } from "./actions.ts";
 import type { DeviceBootRequest, DeviceBootResult, DeviceCommandResult, DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostState, DeviceRentalQuote } from "./host.ts";
+import type { MachineBoxPolicy } from "../machines/ports.ts";
+import type { DeviceMachineAccess } from "./machine-access.ts";
 import { DeviceScreenshots } from "./screenshots.ts";
 import { DeviceService, type DeviceServiceDeps } from "./service.ts";
 import { DeviceLeaseStore, DevicePoolStore, DeviceSettingsStore } from "./store.ts";
@@ -27,6 +29,8 @@ export class FakeDeviceHost implements DeviceHost {
   total = 2;
   /** Set: a research host with this notice. */
   researchNotice: string | null = null;
+  /** Set: a box host (rented, or the owner's machine) on this box. */
+  boxInfo: DeviceHostBoxInfo | null = null;
   booted: DeviceBootRequest[] = [];
   released: { lease: StoredDeviceLease; shutdown: boolean }[] = [];
   ensured: (readonly string[] | undefined)[] = [];
@@ -76,6 +80,10 @@ export class FakeDeviceHost implements DeviceHost {
 
   research(): { notice: string } | null {
     return this.researchNotice !== null ? { notice: this.researchNotice } : null;
+  }
+
+  box(): DeviceHostBoxInfo | null {
+    return this.boxInfo;
   }
 
   readiness(): DeviceHostReadiness {
@@ -207,6 +215,34 @@ export class FakeHostFactory implements DeviceHostFactory {
 
   async stop(): Promise<void> {
     for (const host of this.hosts) this.ctx?.removeHost(host.id);
+  }
+}
+
+/** The machines registry as devices read it: set a paired box's policy, then `changed()`. Boxes without one are rentals. */
+export class FakeMachineAccess implements DeviceMachineAccess {
+  readonly policies = new Map<string, MachineBoxPolicy>();
+  private readonly events = new EventEmitter();
+
+  set(boxId: string, policy: Partial<MachineBoxPolicy> & Pick<MachineBoxPolicy, "visibility">): void {
+    this.policies.set(boxId, { machineId: `box:${boxId}`, capabilities: { devices: true, commands: true, chats: true }, ...policy });
+  }
+
+  policyOfBox(boxId: string): MachineBoxPolicy | null {
+    return this.policies.get(boxId) ?? null;
+  }
+
+  allowsBox(boxId: string, capability: MachineCapability): boolean {
+    const policy = this.policies.get(boxId);
+    return !policy || (policy.visibility !== "hidden" && policy.capabilities[capability]);
+  }
+
+  onChange(listener: () => void): () => void {
+    this.events.on("change", listener);
+    return () => void this.events.off("change", listener);
+  }
+
+  changed(): void {
+    this.events.emit("change");
   }
 }
 

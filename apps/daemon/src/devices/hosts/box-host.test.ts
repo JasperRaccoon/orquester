@@ -13,6 +13,7 @@ import type { CreateDeviceHostBoxRequest, DeviceHostPreparer } from "../../boxes
 import type { DaemonBoxes } from "../../boxes/wiring.ts";
 import { isDeviceError } from "../errors.ts";
 import type { DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProgress } from "../host.ts";
+import { FakeMachineAccess } from "../testing.ts";
 import type { DeviceToolchain } from "../toolchain/index.ts";
 import { createBoxHostFactory, deviceHostOfRecord } from "./box-host.ts";
 import { FakeMacBox } from "./box/testing.ts";
@@ -235,6 +236,24 @@ describe("box device host factory", () => {
 
     await factory.stop();
     assert.equal(boxes.preparer, null);
+  });
+
+  it("follows the machines registry: a Hidden machine or one with Device simulators off is no device host, whatever the box's own flag", async () => {
+    const access = new FakeMachineAccess();
+    access.set("b", { visibility: "hidden" });
+    access.set("c", { visibility: "free" });
+    boxes.records.set("b", record("b", { provider: "byo", purpose: "machine", deviceHost: true }));
+    boxes.records.set("c", record("c", { provider: "byo", purpose: "machine", deviceHost: false }));
+    boxes.mac("b");
+    boxes.mac("c");
+    factory = createBoxHostFactory({ appDir, boxes: () => boxes.wiring(), toolchain: { toolBin: () => process.execPath } as unknown as DeviceToolchain, logger: quiet, fetch: boxes.fetch, machineAccess: access });
+    await factory.start(context());
+    assert.deepEqual([...added.keys()], ["box:c"]);
+
+    access.set("b", { visibility: "ask" });
+    access.set("c", { visibility: "free", capabilities: { devices: false, commands: true, chats: true } });
+    access.changed();
+    assert.deepEqual([...added.keys()], ["box:b"]);
   });
 
   it("quotes a rental from Settings → Devices and the month's spending", async () => {

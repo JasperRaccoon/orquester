@@ -30,6 +30,7 @@ import type { PluginsService } from "../plugins/plugins-service.ts";
 import { createDeviceActionExecutor, type DeviceActionExecutor } from "./actions.ts";
 import { createAgentDeviceClient } from "./agent-device.ts";
 import type { DeviceHostFactory } from "./host.ts";
+import type { DeviceMachineAccess } from "./machine-access.ts";
 import { createBoxHostFactory } from "./hosts/box-host.ts";
 import { createLocalAndroidHostFactory } from "./hosts/local-android.ts";
 import { createVphoneHostFactory } from "./hosts/vphone/factory.ts";
@@ -55,6 +56,12 @@ interface DaemonDevicesDeps {
   threadTitle(threadId: string): string | null;
   threadProject(threadId: string): string | null;
   threadExists(threadId: string): boolean;
+  /**
+   * The machines registry (`MachineAccessPort`, `machines/ports.ts`): hosts on Hidden machines or
+   * with "Device simulators" off are never prepared, listed or placed on. Read when the plugin turns
+   * on; absent or null: the boxes' own "Use for device simulators" decides.
+   */
+  machineAccess?: () => DeviceMachineAccess | null;
   logger: Pick<Console, "info" | "warn" | "error">;
   /** Tests: the host factories instead of the real ones. */
   factories?: (toolchain: DeviceToolchain) => DeviceHostFactory[];
@@ -124,10 +131,11 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
   const publish = (type: DevicesEventType, payload: unknown) => deps.broadcaster.publish(DEVICES_CHANNEL, type, payload);
 
   const build = (): DeviceService => {
+    const machineAccess = deps.machineAccess?.() ?? null;
     const factories = deps.factories?.(toolchain) ?? [
       createLocalAndroidHostFactory({ toolchain, logger }),
-      createBoxHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, toolchain, logger }),
-      createVphoneHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, logger })
+      createBoxHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, toolchain, logger, machineAccess }),
+      createVphoneHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, logger, machineAccess })
     ];
     const built = new DeviceService({
       settingsStore: new DeviceSettingsStore({ file: devicesSettingsPath(deps.baseDir), logger }),
@@ -140,6 +148,7 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
       threadTitle: deps.threadTitle,
       threadProject: deps.threadProject,
       threadExists: deps.threadExists,
+      machineAccess,
       cacheWarmer: () => boxCacheWarmer(deps.boxes()),
       // The box records: the same spend the box host factory's approval reads.
       poolSpend: () => deviceHostSpend(deps.boxes()?.registry.list() ?? [], Date.now()),

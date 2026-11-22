@@ -144,6 +144,8 @@ export interface DevicePoolDeps {
   timers?: boolean;
   /** Overrides {@link CACHE_POLL_MS} (tests). */
   cachePollMs?: number;
+  /** Whether the pool may place on a host now (a Hidden machine's, or one with "Device simulators" off, it may not); absent: every host. */
+  placeable?: (host: DeviceHost) => boolean;
 }
 
 interface Waiter {
@@ -618,7 +620,7 @@ export class DevicePool {
     const state = this.deps.store.state();
     const out: PoolHost[] = [];
     for (const host of this.deps.hosts.list()) {
-      if (this.destroying.has(host.id)) continue;
+      if (this.destroying.has(host.id) || this.deps.placeable?.(host) === false) continue;
       const capacity = host.capacity();
       const leases = this.deps.leasesOn(host.id);
       const rental = state.rentals.find((entry) => entry.hostId === host.id);

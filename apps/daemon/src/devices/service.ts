@@ -9,7 +9,10 @@
  *   kept screenshots (`screenshots.ts`);
  * - the live-device reconcile: each host's `listDevices` on its changes and every
  *   {@link DEVICE_SWEEP_MS}; a ready lease whose device vanished is lost;
- * - the agent tools' operations ({@link DeviceToolsPort}, reached through `DaemonApi`).
+ * - the agent tools' operations ({@link DeviceToolsPort}, reached through `DaemonApi`);
+ * - visibility (tailnet machines spec §4.4.5): with the machines registry's port, a host on a Hidden
+ *   machine or one with "Device simulators" off is in no summary, no placement and no tool answer,
+ *   and naming it reads like an unknown host (its factory drops it too: `hosts/box-host.ts`).
  *
  * Host internals (booting, streams, agent-device) stay behind `DeviceHost` and the action
  * executor. Every change is published on `DEVICES_CHANNEL` through `publish`; `events` emits
@@ -89,6 +92,7 @@ import {
   withController
 } from "./leases.ts";
 import { choosePlacement, hostCap, type PlacementHost } from "./pool.ts";
+import { boxAllowsDevices, machineIdOfBox, type DeviceMachineAccess } from "./machine-access.ts";
 import { DeviceThumbnails, ThumbnailError } from "./thumbnails.ts";
 import { DevicePool, PoolRefusal, type DeviceCacheWarmer, type PoolAcquired, type PoolWaitHooks } from "./pool-actor.ts";
 import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS } from "./screenshot-image.ts";
@@ -146,6 +150,8 @@ export interface DeviceServiceDeps {
   poolSpend?: () => { todayUsd: number; monthUsd: number; committedUsd?: number };
   /** Tests: how thumbnails reach a hub. */
   thumbnailFetch?: typeof fetch;
+  /** The machines registry's policies: hosts on Hidden machines, or with "Device simulators" off, are never used (absent: every host is). */
+  machineAccess?: DeviceMachineAccess | null;
 }
 
 /** One running or finished setup job, with its promise. */
@@ -236,6 +242,7 @@ export class DeviceService implements DeviceToolsPort {
       now: () => this.nowMs(),
       id: () => this.newId(),
       logger: this.logger,
+      placeable: (host) => this.hostAllowed(host),
       ...(deps.idleTimer === false ? { timers: false } : {})
     });
   }
@@ -268,6 +275,17 @@ export class DeviceService implements DeviceToolsPort {
     }
     await this.reconcile();
     await this.pool.start();
+    const access = this.deps.machineAccess;
+    if (access) {
+      // A machine's policy changed: the host list, placement and the agents' view follow at once.
+      this.unsubscribers.push(
+        access.onChange(() => {
+          if (this.stopping) return;
+          this.publishHosts();
+          this.pool.kick();
+        })
+      );
+    }
     if (this.deps.idleTimer !== false) {
       this.sweepTimer = setInterval(() => void this.sweepIdle().catch(() => undefined), IDLE_SWEEP_MS);
       this.sweepTimer.unref?.();
@@ -360,9 +378,36 @@ export class DeviceService implements DeviceToolsPort {
   // Views
   // -------------------------------------------------------------------------
 
+  /** Hosts devices may use now: none on a Hidden machine or one with "Device simulators" off. */
+  private visibleHosts(): DeviceHost[] {
+    return this.hosts.list().filter((host) => this.hostAllowed(host));
+  }
+
+  private hostAllowed(host: DeviceHost): boolean {
+    const box = host.box?.() ?? null;
+    return box === null || boxAllowsDevices(box.boxId, this.deps.machineAccess ?? null);
+  }
+
+  /** A host by id, when devices may use it (else as if there were none). */
+  private visibleHost(hostId: string): DeviceHost | undefined {
+    const host = this.hosts.get(hostId);
+    return host && this.hostAllowed(host) ? host : undefined;
+  }
+
+  /** The machine a host runs on: an own machine's registry id (`ts:` once matched to a tailnet peer, else `box:`); null for rentals and this host. */
+  private machineIdOf(host: DeviceHost): string | null {
+    const box = host.kind === "byo" ? (host.box?.() ?? null) : null;
+    return box ? machineIdOfBox(box.boxId, this.deps.machineAccess ?? null) : null;
+  }
+
   hostSummaries(): DeviceHostSummary[] {
-    return this.hosts.list().map((host) => {
+    return this.visibleHosts().map((host) => {
       const summary = deviceHostSummary(host);
+      const machineId = this.machineIdOf(host);
+      if (machineId !== null) {
+        summary.machineId = machineId;
+        if (summary.problems) summary.problems = summary.problems.map((problem) => ({ ...problem, machineId: problem.machineId ?? machineId }));
+      }
       const leased = this.leases.filter((lease) => lease.hostId === host.id && isLiveLease(lease)).length;
       // The pool's view (drained by the owner, kept warm, idle since) over what the host reports
       // (drained near its deadline: that reason wins, no Resume undoes it).
@@ -380,7 +425,7 @@ export class DeviceService implements DeviceToolsPort {
   /** Every device of every ready host (one host's failure leaves it out). */
   async listDevices(signal?: AbortSignal): Promise<DeviceSummary[]> {
     const lists = await Promise.all(
-      this.hosts.list().map((host) =>
+      this.visibleHosts().map((host) =>
         host.state().status === "ready" ? host.listDevices(signal).catch(() => [] as DeviceSummary[]) : Promise.resolve([] as DeviceSummary[])
       )
     );
@@ -442,14 +487,14 @@ export class DeviceService implements DeviceToolsPort {
    * opening an iPhone rents and prepares one).
    */
   startSetup(platform: DevicePlatform, actions?: readonly string[], hostId?: string): DeviceSetupJob {
-    const named = hostId !== undefined ? this.hosts.get(hostId) : undefined;
+    const named = hostId !== undefined ? this.visibleHost(hostId) : undefined;
     if (hostId !== undefined && !named?.platforms.includes(platform)) throw new DeviceError(DEVICE_ERROR_CODES.HOST_NOT_FOUND, `There is no ${DEVICE_PLATFORM_LABELS[platform]} device host ${hostId}.`);
     const running = this.setups.get(this.setupKey(named, platform));
     if (running?.job.state === "running") {
       if (named && running.job.hostId !== named.id) throw new DeviceError("UNAVAILABLE", `Another ${DEVICE_PLATFORM_LABELS[platform]} setup is running. Try again when it finishes.`);
       return structuredClone(running.job);
     }
-    const host = named ?? this.hosts.list().find((entry) => entry.platforms.includes(platform) && entry.research?.() == null && entry.state().status !== "disabled");
+    const host = named ?? this.visibleHosts().find((entry) => entry.platforms.includes(platform) && entry.research?.() == null && entry.state().status !== "disabled");
     if (!host) {
       throw new DeviceError(
         DEVICE_ERROR_CODES.PLATFORM_NOT_READY,
@@ -532,6 +577,8 @@ export class DeviceService implements DeviceToolsPort {
       throw new DeviceError("INVALID_ARGUMENT", "There is no such chat to lease a device to.");
     }
     const profile = this.resolveProfile(request.platform, request.profile);
+    // A named host must be one devices may use: a Hidden machine's reads like no host at all.
+    if (request.hostId !== undefined && !this.visibleHost(request.hostId)) throw this.unknownHost(request.hostId);
     if (request.hostId !== undefined && request.deviceId !== undefined) {
       const existing = this.leases.find((lease) => lease.hostId === request.hostId && lease.deviceId === request.deviceId && isLiveLease(lease));
       if (existing && existing.threadId === request.threadId) {
@@ -736,7 +783,7 @@ export class DeviceService implements DeviceToolsPort {
       switch (placement.kind) {
         case "host": {
           if (!named) return this.acquire(request, profile, signal, onWait);
-          const host = this.hosts.get(placement.hostId);
+          const host = this.visibleHost(placement.hostId);
           if (host) return { host, reserved: false, done: () => undefined };
           continue;
         }
@@ -793,7 +840,7 @@ export class DeviceService implements DeviceToolsPort {
       switch (error.code) {
         case "DEVICE_CAPACITY":
           // No host of the platform at all, and none could be rented (its provider is off or not set up).
-          if (!this.hosts.list().some((host) => host.platforms.includes(request.platform) && host.research?.() == null)) {
+          if (!this.visibleHosts().some((host) => host.platforms.includes(request.platform) && host.research?.() == null)) {
             return Promise.reject(
               new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `No ${label} host can be rented right now. Ask the owner to check Settings → Devices and Settings → Ephemeral AI VMs.`)
             );
@@ -842,6 +889,10 @@ export class DeviceService implements DeviceToolsPort {
       DEVICE_ERROR_CODES.DEVICE_CAPACITY,
       `Every ${DEVICE_PLATFORM_LABELS[platform]} host is full${busy.length > 0 ? ` (in use: ${busy.map(describeLease).join(", ")})` : ""}. Close a device with close_device, or try again later.`
     );
+  }
+
+  private unknownHost(hostId: string): DeviceError {
+    return new DeviceError(DEVICE_ERROR_CODES.HOST_NOT_FOUND, `There is no device host ${hostId}. Call list_devices for the hosts.`);
   }
 
   private platformOff(platform: DevicePlatform): DeviceError {
@@ -939,7 +990,7 @@ export class DeviceService implements DeviceToolsPort {
   /** Settings → Devices "Destroy" on a box host: its box goes, its leases end lost. */
   async destroyHost(hostId: string): Promise<void> {
     this.assertRunning();
-    const host = this.hosts.get(hostId);
+    const host = this.visibleHost(hostId);
     if (!host) throw new DeviceError(DEVICE_ERROR_CODES.HOST_NOT_FOUND, `There is no device host ${hostId}.`);
     if (!host.destroy) throw new DeviceError("INVALID_ARGUMENT", `${host.label} cannot be destroyed (only rented hosts can).`);
     await host.destroy();
@@ -952,7 +1003,7 @@ export class DeviceService implements DeviceToolsPort {
   /** The fleet view's Drain (`draining: true`) and Undrain: no new lease on the host; a rented one is destroyed once empty. */
   setHostDraining(hostId: string, draining: boolean): DeviceHostSummary {
     this.assertRunning();
-    const host = this.hosts.get(hostId);
+    const host = this.visibleHost(hostId);
     if (!host) throw new DeviceError(DEVICE_ERROR_CODES.HOST_NOT_FOUND, `There is no device host ${hostId}.`);
     const own = host.pool?.() ?? null;
     if (!draining && own?.draining === true && own.drainReason === "deadline") {
@@ -1241,7 +1292,7 @@ export class DeviceService implements DeviceToolsPort {
     this.assertAgentsAllowed();
     // A platform that is off answers as such (`beginOpen`); otherwise only an offered profile opens.
     const profile = this.settings()[input.platform].enabled ? this.agentProfile(input.platform, input.profile) : input.profile;
-    const research = input.hostId !== undefined ? this.researchTarget(input.platform, input.hostId) : null;
+    const research = input.hostId !== undefined ? this.agentHostTarget(input.platform, input.hostId) : null;
     const opening = await this.beginOpen(
       {
         threadId,
@@ -1275,13 +1326,19 @@ export class DeviceService implements DeviceToolsPort {
   }
 
   /**
-   * The research host an agent named: agents open no other host by name, and only a ready one (the
-   * owner starts its setup: a template build takes hours).
+   * The host an agent named: any host devices may use that runs the platform (a Hidden machine's
+   * reads like an unknown id). A research host opens only when ready (the owner starts its setup: a
+   * template build takes hours) and answers its notice; other hosts follow the named-host rules of
+   * placement (a starting one is waited for, a full one refuses).
    */
-  private researchTarget(platform: DevicePlatform, hostId: string): { notice: string } {
-    const host = this.hosts.get(hostId);
-    const research = host?.platforms.includes(platform) ? (host.research?.() ?? null) : null;
-    if (!host || !research) throw new DeviceError("INVALID_ARGUMENT", `${hostId} is not a research host. Open other devices without \`host\`.`);
+  private agentHostTarget(platform: DevicePlatform, hostId: string): { notice: string } | null {
+    const host = this.visibleHost(hostId);
+    if (!host) throw this.unknownHost(hostId);
+    if (!host.platforms.includes(platform)) {
+      throw new DeviceError("INVALID_ARGUMENT", `${host.label} runs ${host.platforms.map((entry) => DEVICE_PLATFORM_LABELS[entry]).join(" and ")} devices, not ${DEVICE_PLATFORM_LABELS[platform]}.`);
+    }
+    const research = host.research?.() ?? null;
+    if (!research) return null;
     const { status, detail } = host.state();
     if (status !== "ready") throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `${host.label} is not ready${detail ? `: ${detail}` : ""}. Ask the owner to check Settings → Devices.`);
     return research;
