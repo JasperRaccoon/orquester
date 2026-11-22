@@ -251,26 +251,29 @@ describe("a sign-in with the second factor on", () => {
     assert.equal(connected, 1);
   });
 
-  it("returns to the password when the challenge has expired, on the daemon's word or the clock's", async () => {
+  it("returns to the password when the daemon says the challenge expired", async () => {
     useAppStore.setState({ api: fakeApi(), connect: async () => assert.fail("must not connect") });
-    useAppStore.setState({
-      authPrompt: { connectionId: CONNECTION.id, secondFactor: { challenge: CHALLENGE, expiresAt: inFiveMinutes(), username: "admin" } }
-    });
+    useAppStore.setState({ authPrompt: { connectionId: CONNECTION.id, secondFactor: { challenge: CHALLENGE, username: "admin" } } });
     codeAnswer = async () => {
       throw refused("CHALLENGE_EXPIRED");
     };
     await store().submitSecondFactor("123456");
     assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id }, "back at the password step");
     assert.ok(store().authError?.trim(), "the user is told why");
-
-    useAppStore.setState({
-      authPrompt: { connectionId: CONNECTION.id, secondFactor: { challenge: CHALLENGE, expiresAt: new Date(Date.now() - 1000).toISOString(), username: "admin" } },
-      authError: null
-    });
-    await store().submitSecondFactor("123456");
-    assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id }, "a lapsed challenge is not sent");
-    assert.ok(store().authError?.trim());
-    assert.equal(codes.length, 1);
     assert.equal(storage.size, 0);
+  });
+
+  it("sends the code even when this device's clock is already past the server's expiresAt", async () => {
+    let connected = 0;
+    useAppStore.setState({ api: fakeApi(), authPrompt: { connectionId: CONNECTION.id }, connect: async () => void (connected += 1) });
+    // A client clock running ten minutes fast sees a five-minute challenge as long gone.
+    loginAnswer = async () => ({ secondFactorRequired: true, challenge: CHALLENGE, expiresAt: new Date(Date.now() - 5 * 60_000).toISOString() });
+    await store().submitCredentials("admin", "hunter2hunter2");
+    codeAnswer = async () => ({ token: TOKEN });
+    await store().submitSecondFactor("123456");
+    assert.deepEqual(codes, [{ challenge: CHALLENGE, code: "123456" }]);
+    assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN);
+    assert.equal(store().authPrompt, null);
+    assert.equal(connected, 1);
   });
 });

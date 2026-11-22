@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound, Laptop, Loader2, LogOut, Plus, X } from "lucide-react";
 import {
   AUTH_SESSION_LABEL_MAX,
@@ -30,7 +30,11 @@ const dateOf = (iso: string): string => {
  * external client (an MCP client) and lasts until revoked. Changing the password signs every device
  * out; API tokens stay. The daemon keeps only token digests, so a new token is shown once.
  */
-export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ remoteAccessOn }) => {
+export const AuthSessionsSettings: React.FC<{
+  remoteAccessOn: boolean;
+  /** Changing it reloads the list in place (a token shown once and an open prompt stay). */
+  reloadSignal?: number;
+}> = ({ remoteAccessOn, reloadSignal }) => {
   const api = useApi();
   const isLocal = api.connection.kind === "local";
   const signOut = useAppStore((s) => s.signOut);
@@ -58,6 +62,13 @@ export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ re
     setIssued(null);
     void reload();
   }, [reload]);
+
+  const seenSignal = useRef(reloadSignal);
+  useEffect(() => {
+    if (seenSignal.current === reloadSignal) return;
+    seenSignal.current = reloadSignal;
+    void reload();
+  }, [reloadSignal, reload]);
 
   const run = async (id: string, action: () => Promise<unknown>, failure: string) => {
     setBusyId(id);

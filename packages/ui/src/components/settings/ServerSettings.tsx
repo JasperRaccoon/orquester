@@ -333,7 +333,7 @@ export const ServerSettings: React.FC = () => {
       {(!isLocal || saved?.httpEnabled || passwordSet) && (
         <>
           <SecondFactorSettings onSessionsChanged={() => setSessionsVersion((v) => v + 1)} />
-          <AuthSessionsSettings key={sessionsVersion} remoteAccessOn={saved?.httpEnabled ?? !isLocal} />
+          <AuthSessionsSettings reloadSignal={sessionsVersion} remoteAccessOn={saved?.httpEnabled ?? !isLocal} />
         </>
       )}
 
