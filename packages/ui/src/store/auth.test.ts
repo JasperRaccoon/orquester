@@ -1,13 +1,14 @@
 /**
  * Remote sign-in in the store: only a validated session token is ever sent; a 401 drops it and
  * shows the sign-in prompt (no retry loop); a sign-in stores the token the daemon returns and
- * nothing derived from the password.
+ * nothing derived from the password. With the daemon's second factor on, the password earns a
+ * challenge that only a code turns into the token.
  */
 
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import type { AuthLoginRequest } from "@orquester/api";
+import type { AuthLoginRequest, AuthSecondFactorChallenge, AuthSecondFactorLoginRequest } from "@orquester/api";
 
 import { fakeIndexedDb } from "../lib/agent-chat/testing/indexed-db.ts";
 import { ApiError, type ApiClient } from "../lib/api-client.ts";
@@ -36,8 +37,10 @@ const LEGACY = btoa("admin:$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa"
 const CONNECTION: UiConnection = { id: "remote", name: "Remote", kind: "remote", endpoint: ENDPOINT, status: "disconnected" };
 
 let infoCalls: string[];
-let loginAnswer: () => Promise<{ token: string }>;
+let loginAnswer: () => Promise<{ token: string } | AuthSecondFactorChallenge>;
 let logins: AuthLoginRequest[];
+let codeAnswer: (req: AuthSecondFactorLoginRequest) => Promise<{ token: string }>;
+let codes: AuthSecondFactorLoginRequest[];
 
 /** A fake client; `password` is the bearer it would send. */
 function fakeApi(password?: string): ApiClient {
@@ -51,6 +54,10 @@ function fakeApi(password?: string): ApiClient {
     login: async (req: AuthLoginRequest) => {
       logins.push(req);
       return loginAnswer();
+    },
+    loginSecondFactor: async (req: AuthSecondFactorLoginRequest) => {
+      codes.push(req);
+      return codeAnswer(req);
     }
   } as unknown as ApiClient;
 }
@@ -66,6 +73,8 @@ beforeEach(async () => {
   infoCalls = [];
   logins = [];
   loginAnswer = async () => ({ token: TOKEN });
+  codes = [];
+  codeAnswer = async () => assert.fail("no code was expected");
   useAppStore.setState({ authPrompt: null, authError: null, connections: [CONNECTION], activeConnectionId: CONNECTION.id });
 });
 
@@ -203,5 +212,65 @@ describe("submitCredentials", () => {
     await store().submitCredentials("admin", "pw");
     assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false);
     assert.ok(store().authError, "an invalid token response supplies an error");
+  });
+});
+
+describe("a sign-in with the second factor on", () => {
+  const CHALLENGE = "challenge-1";
+  const inFiveMinutes = () => new Date(Date.now() + 5 * 60_000).toISOString();
+  const refused = (code: string) => new ApiError(401, "POST", "/api/auth/login/second-factor", undefined, { code, message: "refused" });
+
+  it("asks for a code after the password; a wrong one keeps that step, the right one connects", async () => {
+    let connected = 0;
+    useAppStore.setState({ api: fakeApi(), authPrompt: { connectionId: CONNECTION.id }, connectionError: null, connect: async () => void (connected += 1) });
+    loginAnswer = async () => ({ secondFactorRequired: true, challenge: CHALLENGE, expiresAt: inFiveMinutes() });
+    await store().submitCredentials("Admin", "hunter2hunter2");
+    assert.equal(store().authPrompt?.secondFactor?.challenge, CHALLENGE, "the prompt moved to the code step");
+    assert.equal(store().api?.connection.password, undefined, "a challenge is not a credential");
+
+    codeAnswer = async ({ code }) => {
+      if (code !== "123456") throw refused("INVALID_CODE");
+      return { token: TOKEN };
+    };
+    await store().submitSecondFactor("000000");
+    assert.ok(store().authError?.trim(), "a wrong code supplies a reason");
+    assert.equal(store().authPrompt?.secondFactor?.challenge, CHALLENGE, "a wrong code keeps the code step");
+    assert.equal(store().connectionError, null, "a refused code is not a session that ended");
+    assert.ok(![...storage.values()].some((value) => value.includes(CHALLENGE)), "the challenge is never stored");
+
+    await store().submitSecondFactor(" 123456 ");
+    assert.deepEqual(codes, [
+      { challenge: CHALLENGE, code: "000000" },
+      { challenge: CHALLENGE, code: "123456" }
+    ]);
+    assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN);
+    assert.equal(storage.get(`orquester.user:${ENDPOINT}`), "admin");
+    assert.ok(![...storage.values()].some((value) => value.includes(CHALLENGE) || value.includes("hunter2")));
+    assert.equal(store().api?.connection.password, TOKEN);
+    assert.equal(store().authPrompt, null);
+    assert.equal(connected, 1);
+  });
+
+  it("returns to the password when the challenge has expired, on the daemon's word or the clock's", async () => {
+    useAppStore.setState({ api: fakeApi(), connect: async () => assert.fail("must not connect") });
+    useAppStore.setState({
+      authPrompt: { connectionId: CONNECTION.id, secondFactor: { challenge: CHALLENGE, expiresAt: inFiveMinutes(), username: "admin" } }
+    });
+    codeAnswer = async () => {
+      throw refused("CHALLENGE_EXPIRED");
+    };
+    await store().submitSecondFactor("123456");
+    assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id }, "back at the password step");
+    assert.ok(store().authError?.trim(), "the user is told why");
+
+    useAppStore.setState({
+      authPrompt: { connectionId: CONNECTION.id, secondFactor: { challenge: CHALLENGE, expiresAt: new Date(Date.now() - 1000).toISOString(), username: "admin" } },
+      authError: null
+    });
+    await store().submitSecondFactor("123456");
+    assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id }, "a lapsed challenge is not sent");
+    assert.ok(store().authError?.trim());
+    assert.equal(codes.length, 1);
+    assert.equal(storage.size, 0);
   });
 });
