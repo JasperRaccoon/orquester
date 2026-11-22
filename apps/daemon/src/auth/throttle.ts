@@ -98,6 +98,15 @@ export class LoginThrottle {
   recordSuccess(ip: string): void {
     this.state.delete(ip);
   }
+
+  /**
+   * Clear only a key's failure count: its lockout (if any) and its strikes stay, so the next
+   * lockout is still longer than the last one.
+   */
+  clearFails(ip: string): void {
+    const entry = this.state.get(ip);
+    if (entry) entry.fails = 0;
+  }
 }
 
 /**

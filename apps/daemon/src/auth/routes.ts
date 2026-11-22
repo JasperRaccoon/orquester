@@ -13,7 +13,8 @@
  *   clears: per IP (5 → 15 min doubling to 24 h), across every IP ({@link GLOBAL_CODE_MAX_FAILS}),
  *   and per challenge ({@link CHALLENGE_MAX_ATTEMPTS}). Every lockout guards only the public sign-in
  *   steps: bearer requests, streams, WebSockets and `/mcp` never consult them, and the bearer-gated
- *   management routes ignore the global one, so a signed-in owner can always turn the factor off.
+ *   management routes count wrong codes per session instead, so a signed-in owner can always turn
+ *   the factor off.
  * - The management routes and API-token minting re-prove the owner on the remote transport
  *   (password, and a code while the factor is on); a wrong proof is 403 `INVALID_PROOF`, never 401.
  *   Over the unix socket no proof is asked for.
@@ -64,7 +65,12 @@ const CODE_MAX = 64;
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 /** Wrong codes one challenge takes before it is void. */
 const CHALLENGE_MAX_ATTEMPTS = 5;
-/** Pending challenges kept at most (only a correct password makes one); the oldest go first. */
+/** Pending challenges one IP keeps at most; its oldest goes first. */
+const CHALLENGES_PER_IP_MAX = 3;
+/**
+ * Pending challenges kept at most (a memory bound): past it, the oldest challenge of the IP with
+ * the most goes, so a flood from other addresses never evicts the owner's.
+ */
 const CHALLENGES_MAX = 256;
 /** Wrong sign-in codes from every IP together that lock all public code entry (15 min doubling). */
 const GLOBAL_CODE_MAX_FAILS = 20;
@@ -156,6 +162,9 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
   const codeThrottle = new LoginThrottle({ now });
   // Wrong sign-in codes from every IP together (an attacker spreading guesses over addresses).
   const globalCodeThrottle = new LoginThrottle({ maxFails: GLOBAL_CODE_MAX_FAILS, now });
+  // Wrong management proofs, per signed-in session: someone sharing the owner's apparent IP
+  // (CGNAT, a proxy without X-Forwarded-For) and guessing sign-in codes never locks them out.
+  const sessionCodeThrottle = new LoginThrottle({ now });
   /** Challenges by the SHA-256 of their token. */
   const challenges = new Map<string, Challenge>();
   /** Pending enrollments by the caller's session id ({@link LOCAL_SETUP_KEY} over the socket). */
@@ -209,10 +218,11 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
   };
 
   /**
-   * Run one code check for the request's IP: refused (429) while the IP's code entry is locked
-   * (or, for the public sign-in step, all code entry is), or it already has a check in flight. A
-   * `false` result counts as a wrong code; a `true` one clears the IP. Over the unix socket nothing
-   * is counted.
+   * Run one code check: refused (429) while its key's code entry is locked (or, for the public
+   * sign-in step, all code entry is), or the key already has a check in flight. The sign-in step is
+   * keyed on the IP; a management proof on the caller's session, so nothing from outside that
+   * session counts against it. A `false` result counts as a wrong code; a `true` one clears the
+   * key. Over the unix socket nothing is counted.
    */
   const codeGuarded = async (
     request: FastifyRequest,
@@ -222,18 +232,22 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
   ): Promise<boolean | null> => {
     if (deps.mode === "local") return check();
     const ip = clientIp(request);
-    const retryAfterMs = Math.max(codeThrottle.retryAfterMs(ip), scope === "sign-in" ? globalCodeThrottle.retryAfterMs(EVERY_IP) : 0);
-    if (retryAfterMs > 0 || checking.has(ip)) return tooManyCodes(reply, retryAfterMs);
-    checking.add(ip);
+    const sessionId = scope === "management" ? request.authSession?.id : undefined;
+    const [throttle, key] = sessionId ? [sessionCodeThrottle, sessionId] : [codeThrottle, ip];
+    const inFlight = sessionId ? `session:${sessionId}` : `code:${ip}`;
+    const retryAfterMs = Math.max(throttle.retryAfterMs(key), scope === "sign-in" ? globalCodeThrottle.retryAfterMs(EVERY_IP) : 0);
+    if (retryAfterMs > 0 || checking.has(inFlight)) return tooManyCodes(reply, retryAfterMs);
+    checking.add(inFlight);
     try {
       const ok = await check();
       if (ok) {
-        codeThrottle.recordSuccess(ip);
+        throttle.recordSuccess(key);
         // Only the owner can produce a right code, so a completed sign-in also clears the global
-        // count: their own typos, spread over months, must not add up to a lockout.
-        if (scope === "sign-in") globalCodeThrottle.recordSuccess(EVERY_IP);
+        // count: their own typos, spread over months, must not add up to a lockout. Its strikes
+        // stay, so an attack that resumes afterwards still meets a doubled lockout.
+        if (scope === "sign-in") globalCodeThrottle.clearFails(EVERY_IP);
       } else {
-        codeThrottle.recordFailure(ip, true);
+        throttle.recordFailure(key, true);
         if (scope === "sign-in") {
           globalCodeThrottle.recordFailure(EVERY_IP, true);
           if (globalCodeThrottle.retryAfterMs(EVERY_IP) > 0) alertOwner(ip, "lockout");
@@ -241,13 +255,13 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
       }
       return ok;
     } finally {
-      checking.delete(ip);
+      checking.delete(inFlight);
     }
   };
 
   /**
    * Re-prove the owner on the remote transport: the password (through the password throttle),
-   * then, when `needCode`, a code (per-IP code limits only). Answers 403 / 429 itself and returns
+   * then, when `needCode`, a code (the session's own code limit only). Answers 403 / 429 itself and returns
    * false; over the unix socket always true.
    */
   const proveOwner = async (request: FastifyRequest, reply: FastifyReply, needCode: boolean): Promise<boolean> => {
@@ -283,7 +297,23 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
   const issueChallenge = (ip: string, passwordHash: string, label: string): AuthSecondFactorChallenge => {
     const at = now();
     for (const [key, challenge] of challenges) if (challenge.expiresAt <= at) challenges.delete(key);
-    while (challenges.size >= CHALLENGES_MAX) challenges.delete(challenges.keys().next().value as string);
+    // Map order is age order: the first match is the oldest.
+    const evictOldestOf = (from: string) => {
+      for (const [key, challenge] of challenges) {
+        if (challenge.ip === from) {
+          challenges.delete(key);
+          return;
+        }
+      }
+    };
+    const pendingFrom = (from: string) => [...challenges.values()].filter((challenge) => challenge.ip === from).length;
+    for (let pending = pendingFrom(ip); pending >= CHALLENGES_PER_IP_MAX; pending -= 1) evictOldestOf(ip);
+    while (challenges.size >= CHALLENGES_MAX) {
+      const counts = new Map<string, number>();
+      for (const challenge of challenges.values()) counts.set(challenge.ip, (counts.get(challenge.ip) ?? 0) + 1);
+      const most = Math.max(...counts.values());
+      evictOldestOf([...challenges.values()].find((challenge) => counts.get(challenge.ip) === most)!.ip);
+    }
     const token = randomBytes(32).toString("base64url");
     const expiresAt = at + CHALLENGE_TTL_MS;
     challenges.set(challengeKey(token), { ip, passwordHash, label, expiresAt, attempts: 0 });
@@ -422,8 +452,12 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
       if (result === "invalid-code") return invalidProof(reply, "code");
       if (result === "enabled") return enabledAlready();
       pendingSetups.delete(setupKey);
-      // Sessions from before the factor go; the caller just proved password and code. API tokens stay.
-      await deps.store.revokeDevicesExcept(request.authSession?.id ?? null);
+      // Sessions from before the factor go; the caller just proved password and code. API tokens
+      // stay. The factor is on now, so its recovery codes are answered whatever this does: the
+      // owner must never be left with a factor whose codes they have not seen.
+      await deps.store.revokeDevicesExcept(request.authSession?.id ?? null).catch((error: unknown) => {
+        logger.error("auth: two-step sign-in is on, but signing out the other devices failed", error instanceof Error ? error.name : typeof error);
+      });
       return { recoveryCodes: result };
     });
   });

@@ -585,6 +585,24 @@ test("wrong codes spread over many IPs lock all code entry; the signed-in owner 
   assert.equal(factor.isEnabled(), false);
 });
 
+test("wrong sign-in codes from the owner's own IP do not lock the signed-in owner out of turning the factor off", async (t) => {
+  const { h, factor, freshCode } = await factorHarness(t);
+  const shared = "198.51.100.20";
+  const owner = await signIn(h, freshCode(), shared);
+  const challenge = await passwordStep(h, shared);
+  for (let i = 0; i < 5; i += 1) assert.equal((await codeStep(h, challenge, "000000", shared)).statusCode, 401);
+  assert.equal((await codeStep(h, await passwordStep(h, shared), freshCode(), shared)).statusCode, 429, "the IP's sign-in code entry is locked");
+  const disabled = await h.remote.inject({
+    method: "POST",
+    url: authRoutes.secondFactorDisable,
+    remoteAddress: shared,
+    headers: bearer(owner),
+    payload: { password: PASSWORD, code: freshCode() }
+  });
+  assert.equal(disabled.statusCode, 204);
+  assert.equal(factor.isEnabled(), false);
+});
+
 test("a completed sign-in clears the global wrong-code count, so scattered typos never add up to a lockout", async (t) => {
   const { h, freshCode } = await factorHarness(t);
   const typos = async (from: number) => {
@@ -598,6 +616,34 @@ test("a completed sign-in clears the global wrong-code count, so scattered typos
   assert.equal((await signIn(h, freshCode(), "192.0.2.10")).startsWith("orq_"), true);
   await typos(20); // 16 more: 32 in all, but the sign-in in between reset the count
   assert.equal((await signIn(h, freshCode(), "192.0.2.11")).startsWith("orq_"), true, "not globally locked");
+});
+
+test("the owner signing in between two global lockouts does not reset their doubling", async (t) => {
+  const { h, time, freshCode } = await factorHarness(t);
+  const lockAll = async (from: number) => {
+    const right = freshCode();
+    for (let i = 0; i < 10; i += 1) {
+      const ip = `203.0.113.${from + i}`;
+      const challenge = await passwordStep(h, ip);
+      for (let j = 0; j < 2; j += 1) assert.equal((await codeStep(h, challenge, "000000", ip)).statusCode, 401);
+    }
+    return codeStep(h, await passwordStep(h, "192.0.2.77"), right, "192.0.2.77");
+  };
+  assert.equal((await lockAll(10)).headers["retry-after"], String(15 * 60));
+  time.advance(15 * 60 * 1000);
+  assert.equal((await signIn(h, freshCode(), "192.0.2.10")).startsWith("orq_"), true);
+  assert.equal((await lockAll(30)).headers["retry-after"], String(30 * 60), "the second lockout is twice as long");
+});
+
+test("a flood of challenges from other addresses does not evict the owner's pending one", async (t) => {
+  const { h, freshCode } = await factorHarness(t);
+  const ownerIp = "192.0.2.50";
+  const pending = await passwordStep(h, ownerIp);
+  for (let i = 0; i < 20; i += 1) await passwordStep(h, "203.0.113.200");
+  for (let i = 0; i < 100; i += 1) {
+    for (let j = 0; j < 3; j += 1) await passwordStep(h, `10.0.0.${i}`);
+  }
+  assert.equal((await codeStep(h, pending, freshCode(), ownerIp)).statusCode, 200);
 });
 
 test("an expired challenge, another IP's challenge and one from before a password change are refused", async (t) => {
@@ -663,6 +709,21 @@ test("enabling: setup needs the password, the pending secret's code turns it on,
   const log = lines.join("");
   assert.ok(log.includes(authRoutes.secondFactorEnable), "the requests were logged");
   assert.ok(![secret, code, PASSWORD, ...recoveryCodes].some((value) => log.includes(value)), "no secret, code or password in the request log");
+});
+
+test("enabling answers the recovery codes even when signing the other devices out fails", async (t) => {
+  const { h, time, factor } = await factorHarness(t, { enable: false });
+  const caller = (await login(h, PASSWORD, "198.51.100.14")).json() as AuthIssuedTokenResponse;
+  t.mock.method(console, "error", () => undefined);
+  t.mock.method(h.store, "revokeDevicesExcept", async () => {
+    throw new Error("disk full");
+  });
+  const post = (url: string, payload: object) => h.remote.inject({ method: "POST", url, headers: bearer(caller.token), payload });
+  const { secret } = (await post(authRoutes.secondFactorSetup, { password: PASSWORD })).json() as AuthSecondFactorSetupResponse;
+  const enabled = await post(authRoutes.secondFactorEnable, { code: authenticatorCode(secret, time.now()) });
+  assert.equal(enabled.statusCode, 200);
+  assert.equal((enabled.json() as AuthRecoveryCodesResponse).recoveryCodes.length, 10);
+  assert.equal(factor.isEnabled(), true);
 });
 
 test("management proofs: a wrong one is 403 (never 401); new recovery codes replace the old; the socket needs no proof", async (t) => {

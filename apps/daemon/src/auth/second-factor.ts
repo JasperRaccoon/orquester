@@ -7,13 +7,16 @@
  *   UNUSABLE ({@link SecondFactorUnavailableError} from every check and change): the file is never
  *   moved aside or written over, so a damaged file can never turn the factor off (fail closed).
  * - A `code` is an authenticator code when it normalises to exactly six digits, else a recovery
- *   code. An accepted code is used up at once, in memory, before anything awaits: a TOTP code's step
- *   becomes `lastUsedStep` (that step and earlier ones are refused from then on), a recovery code is
- *   removed. So the same code can never succeed twice, however the checks interleave.
+ *   code. An accepted code is marked spent in memory at once, before anything awaits (a TOTP code's
+ *   step and earlier ones are refused from then on, a recovery code is refused), and its use is then
+ *   written: `lastUsedStep` moves up, the recovery code is removed. So the same code can never
+ *   succeed twice, however the checks interleave — and a code whose use could not be written stays
+ *   refused for this run while the check fails (fail closed).
  * - Recovery codes are kept as SHA-256 digests only (high-entropy codes behind a throttle need no
  *   slow hash); the secret is the one value in the file that authenticates, hence 0600.
- * - Writes are atomic, 0600 and serialized; a failed write rejects the change that asked for it.
- *   Whatever the file holds that this build does not know is written back verbatim.
+ * - Writes are atomic, durable, 0600 and serialized. Every change is computed in turn, written,
+ *   and only then takes effect in memory: a failed write rejects the change and leaves the factor as
+ *   the file has it. Whatever the file holds that this build does not know is written back verbatim.
  */
 
 import { createHash, randomInt, timingSafeEqual } from "node:crypto";
@@ -69,6 +72,9 @@ export class SecondFactorStore {
   private state: AuthSecondFactorFile = createDefaultAuthSecondFactorFile();
   private unavailable = false;
   private writes: Promise<void> = Promise.resolve();
+  /** Codes spent before their use is written (see the module comment); cleared with a new secret. */
+  private spentStep = -1;
+  private readonly spentDigests = new Set<string>();
 
   constructor(private readonly opts: SecondFactorStoreOptions = {}) {}
 
@@ -113,17 +119,35 @@ export class SecondFactorStore {
     return this.writes;
   }
 
-  private persist(): Promise<void> {
-    const file = this.opts.file;
-    if (!file || this.unavailable) return Promise.resolve();
-    const text = `${serializeAuthSecondFactorFile(this.state)}\n`;
-    const write = () => writeFileAtomic(file, text, 0o600, false);
-    const run = this.writes.then(write, write);
-    this.writes = run.catch(() => undefined);
-    return run.catch((error: unknown) => {
-      this.opts.logger?.error("Failed to persist auth-second-factor.json", error instanceof Error ? error.name : typeof error);
-      throw error;
-    });
+  /**
+   * Queue a change: in turn, `change` computes the next state from the current one (null: nothing
+   * to write), the file is written, and only then does memory take it. Resolves with `change`'s
+   * result; rejects with the write error, memory untouched.
+   */
+  private update<T>(change: (state: AuthSecondFactorFile) => { next: AuthSecondFactorFile | null; result: T }): Promise<T> {
+    const run = async (): Promise<T> => {
+      const { next, result } = change(this.state);
+      if (!next) return result;
+      const file = this.opts.file;
+      if (file) {
+        try {
+          await writeFileAtomic(file, `${serializeAuthSecondFactorFile(next)}\n`, 0o600, false, { durable: true });
+        } catch (error) {
+          this.opts.logger?.error("Failed to persist auth-second-factor.json", error instanceof Error ? error.name : typeof error);
+          throw error;
+        }
+      }
+      // A new secret (or none): the old one's spent codes mean nothing any more.
+      if (next.totp?.secret !== this.state.totp?.secret) {
+        this.spentStep = -1;
+        this.spentDigests.clear();
+      }
+      this.state = next;
+      return result;
+    };
+    const queued = this.writes.then(run, run);
+    this.writes = queued.then(() => undefined, () => undefined);
+    return queued;
   }
 
   private assertAvailable(): void {
@@ -165,7 +189,7 @@ export class SecondFactorStore {
   /**
    * Check `code` (an authenticator code or a recovery code) and use it up when it is right. False
    * when it is wrong or the factor is off. Throws {@link SecondFactorUnavailableError}, or the write
-   * error when the use could not be recorded (the code stays used for this run either way).
+   * error when the use could not be recorded (the code stays spent for this run either way).
    */
   async verify(code: string): Promise<boolean> {
     this.assertAvailable();
@@ -173,21 +197,28 @@ export class SecondFactorStore {
     if (!totp || typeof code !== "string") return false;
     const normalized = normalizeCode(code);
     if (/^\d{6}$/.test(normalized)) {
-      const step = matchTotp(totp.secret, normalized, this.now(), totp.lastUsedStep);
+      const step = matchTotp(totp.secret, normalized, this.now(), Math.max(totp.lastUsedStep, this.spentStep));
       if (step === null) return false;
-      this.state = { ...this.state, totp: { ...totp, lastUsedStep: step } };
-      await this.persist();
+      this.spentStep = step;
+      await this.update((state) => ({
+        next: state.totp?.secret === totp.secret && state.totp.lastUsedStep < step ? { ...state, totp: { ...state.totp, lastUsedStep: step } } : null,
+        result: undefined
+      }));
       return true;
     }
-    const given = Buffer.from(digestHex(normalized), "hex");
-    let match = -1;
+    const digest = digestHex(normalized);
+    const given = Buffer.from(digest, "hex");
+    let match = false;
     // Every stored digest is compared (no early exit).
-    this.state.recoveryCodes.forEach((record, index) => {
-      if (timingSafeEqual(Buffer.from(record.digest, "hex"), given)) match = index;
+    for (const record of this.state.recoveryCodes) {
+      if (timingSafeEqual(Buffer.from(record.digest, "hex"), given)) match = true;
+    }
+    if (!match || this.spentDigests.has(digest)) return false;
+    this.spentDigests.add(digest);
+    await this.update((state) => {
+      const recoveryCodes = state.recoveryCodes.filter((record) => record.digest !== digest);
+      return { next: recoveryCodes.length < state.recoveryCodes.length ? { ...state, recoveryCodes } : null, result: undefined };
     });
-    if (match < 0) return false;
-    this.state = { ...this.state, recoveryCodes: this.state.recoveryCodes.filter((_, index) => index !== match) };
-    await this.persist();
     return true;
   }
 
@@ -207,14 +238,20 @@ export class SecondFactorStore {
     const step = /^\d{6}$/.test(normalized) ? matchTotp(secret, normalized, this.now()) : null;
     if (step === null) return "invalid-code";
     const codes = Array.from({ length: RECOVERY_CODE_COUNT }, newRecoveryCode);
-    this.state = {
-      ...this.state,
-      totp: { secret, enabledAt: new Date(this.now()).toISOString(), lastUsedStep: step },
-      recoveryCodes: codes.map((value) => ({ digest: digestHex(normalizeCode(value)) })),
-      unreadableRecoveryCodes: []
-    };
-    await this.persist();
-    return codes;
+    const enabledAt = new Date(this.now()).toISOString();
+    return this.update<string[] | "enabled">((state) =>
+      state.totp
+        ? { next: null, result: "enabled" }
+        : {
+            next: {
+              ...state,
+              totp: { secret, enabledAt, lastUsedStep: step },
+              recoveryCodes: codes.map((value) => ({ digest: digestHex(normalizeCode(value)) })),
+              unreadableRecoveryCodes: []
+            },
+            result: codes
+          }
+    );
   }
 
   /** Replace every recovery code with ten new ones (shown once). Null when the factor is off. */
@@ -222,38 +259,42 @@ export class SecondFactorStore {
     this.assertAvailable();
     if (!this.state.totp) return null;
     const codes = Array.from({ length: RECOVERY_CODE_COUNT }, newRecoveryCode);
-    this.state = {
-      ...this.state,
-      recoveryCodes: codes.map((value) => ({ digest: digestHex(normalizeCode(value)) })),
-      unreadableRecoveryCodes: []
-    };
-    await this.persist();
-    return codes;
+    return this.update((state) =>
+      state.totp
+        ? {
+            next: { ...state, recoveryCodes: codes.map((value) => ({ digest: digestHex(normalizeCode(value)) })), unreadableRecoveryCodes: [] },
+            result: codes
+          }
+        : { next: null, result: null }
+    );
   }
 
   /** Turn the factor off (secret and recovery codes dropped). False when it already was. */
   async disable(): Promise<boolean> {
     this.assertAvailable();
     if (!this.state.totp) return false;
-    const { totp: _dropped, ...rest } = this.state;
-    this.state = { ...rest, recoveryCodes: [], unreadableRecoveryCodes: [] };
-    await this.persist();
-    return true;
+    return this.update((state) => {
+      if (!state.totp) return { next: null, result: false };
+      const { totp: _dropped, ...rest } = state;
+      return { next: { ...rest, recoveryCodes: [], unreadableRecoveryCodes: [] }, result: true };
+    });
   }
 
   /** Remember a correct-password-wrong-code attempt for Settings (the latest one wins). */
   async recordFailedChallenge(ip: string): Promise<void> {
     this.assertAvailable();
-    this.state = { ...this.state, lastFailedChallenge: { at: new Date(this.now()).toISOString(), ip: ip.slice(0, 200) } };
-    await this.persist();
+    const lastFailedChallenge = { at: new Date(this.now()).toISOString(), ip: ip.slice(0, 200) };
+    await this.update((state) => ({ next: { ...state, lastFailedChallenge }, result: undefined }));
   }
 
   /** Clear the Settings alert. */
   async dismissAlert(): Promise<void> {
     this.assertAvailable();
     if (!this.state.lastFailedChallenge) return;
-    const { lastFailedChallenge: _dropped, ...rest } = this.state;
-    this.state = rest;
-    await this.persist();
+    await this.update((state) => {
+      if (!state.lastFailedChallenge) return { next: null, result: undefined };
+      const { lastFailedChallenge: _dropped, ...rest } = state;
+      return { next: rest, result: undefined };
+    });
   }
 }
