@@ -320,6 +320,7 @@ func (a *Agent) openTarRead(ch *Channel, spec *wire.TarReadSpec) {
 		ch.OpenFailed(spawnError(err))
 		return
 	}
+	resetChildOOMScore(cmd.Process.Pid)
 	ch.SetHandlers(nil, nil, func(*wire.RPCError) { cancel() })
 	if err := ch.Opened(nil); err != nil {
 		cancel()
@@ -416,6 +417,7 @@ func (a *Agent) openTarWrite(ch *Channel, spec *wire.TarWriteSpec) {
 		ch.OpenFailed(spawnError(err))
 		return
 	}
+	resetChildOOMScore(cmd.Process.Pid)
 	if err := ch.Opened(nil); err != nil {
 		cancel()
 		_ = cmd.Wait()

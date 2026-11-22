@@ -59,6 +59,36 @@ export const WINDOWS_DATA_DIR = "C:\\orq\\agent";
 
 /** How long the bootstrap keeps retrying the `orq-agent` download (daemon briefly down, DNS not up yet). */
 const DOWNLOAD_DEADLINE_SECONDS = 15 * 60;
+/** Pairing over SSH: the owner is waiting on the result, so a daemon the machine can't reach fails sooner. */
+const UNATTENDED_DOWNLOAD_DEADLINE_SECONDS = 3 * 60;
+
+/**
+ * OOM protection (tailnet machines spec §4.9): the file name of every systemd drop-in Orquester
+ * writes for it, so removal finds exactly its own ({@link byoUnpairCleanupScript}).
+ */
+export const OOM_DROPIN_NAME = "orquester-oom.conf";
+/**
+ * Strongly negative, not -1000: -1000 makes a process unkillable, so a runaway leak in one of these
+ * services would leave the kernel nothing to free; at -900 it is still the last resort.
+ */
+export const OOM_SCORE_ADJUST = -900;
+/** The drop-in itself (a `[Service]` section, valid for system and user units). */
+export const OOM_DROPIN_LINES: readonly string[] = [
+  "# Written by Orquester: the kernel's OOM killer must not pick this service, or the machine",
+  "# drops off the network. Removed when the machine is removed from Orquester.",
+  "[Service]",
+  `OOMScoreAdjust=${OOM_SCORE_ADJUST}`
+];
+const SYSTEMD_SYSTEM_DIR = "/etc/systemd/system";
+const SYSTEMD_USER_CONF_DIR = "/etc/systemd/user.conf.d";
+/** `systemd-user.conf` `DefaultOOMScoreAdjust=` exists from systemd 250 on. */
+const MIN_SYSTEMD_FOR_USER_OOM = 250;
+
+/**
+ * Lines the pairing script prints in unattended mode (pairing over SSH), one fact each:
+ * `orq-probe: <key>=<value>`. Parsed by `machines/pairing/probe.ts`; never carries a secret.
+ */
+export const PAIRING_PROBE_PREFIX = "orq-probe:";
 
 const BOX_ID_PATTERN = /^[A-Za-z0-9-]{8,64}$/;
 /** Bootstrap tokens and Tailscale keys are URL-safe; anything else is refused before it reaches a script. */
@@ -324,9 +354,9 @@ fetch() {
    * backoff until {@link DOWNLOAD_DEADLINE_SECONDS}. `spent` runs on 401/403 before giving up: it
    * may `break` to keep what a restarted box already has (its token was spent on first connect).
    */
-  download(options: { what: string; path: string; out: string; spent: string; missing: string }): string {
+  download(options: { what: string; path: string; out: string; spent: string; missing: string; deadlineSeconds?: number }): string {
     return `say "downloading ${options.what}"
-end=$(($(date +%s) + ${DOWNLOAD_DEADLINE_SECONDS}))
+end=$(($(date +%s) + ${options.deadlineSeconds ?? DOWNLOAD_DEADLINE_SECONDS}))
 n=0
 while :; do
   code=$(fetch "$${ORQ_AGENT_ENV.daemonUrl}${options.path}" "${options.out}.download" 1) || code=000
@@ -347,8 +377,9 @@ done
   },
 
   /** Downloads `orq-agent` for `P` to `B` and checks that it runs. */
-  agent(): string {
+  agent(deadlineSeconds?: number): string {
     const download = posix.download({
+      ...(deadlineSeconds === undefined ? {} : { deadlineSeconds }),
       what: "orq-agent ($P)",
       path: "/api/boxes/agent/$P",
       out: "$B",
@@ -381,6 +412,245 @@ exec "$B" run
   }
 };
 
+/**
+ * OOM protection (tailnet machines spec §4.9) for a Linux VM bootstrapped as root under systemd:
+ * `tailscaled` and `orq-agent` get {@link OOM_DROPIN_NAME} drop-ins, so the kernel's OOM killer
+ * never picks them and the box stays reachable (`orq-agent` gives every process it starts the neutral
+ * score back, `apps/box-agent/internal/agent/oom_linux.go`, so its work stays killable). `orq-agent`'s
+ * is written before `install-service`,
+ * whose restart applies it; the running `tailscaled` gets the value at once (never restarted: the
+ * box may be reached through it). `sshd` needs nothing: see {@link posixMachineFixes}.
+ */
+function posixBoxOomProtection(): string {
+  return `if [ "$OS" = linux ] && [ "$ROOT" = 1 ] && [ "$SYSTEMD" = 1 ]; then
+  R=
+${posixOomHelpers()}
+  if [ "$(systemctl show -p LoadState --value tailscaled.service 2>/dev/null)" = loaded ]; then
+    oom_service tailscaled.service || say "could not protect tailscaled from the OOM killer"
+  fi
+  oom_dropin ${SYSTEMD_SYSTEM_DIR}/orq-agent.service.d || say "could not protect orq-agent from the OOM killer"
+fi
+`;
+}
+
+/**
+ * Shell functions writing OOM drop-ins as root: `$R` is empty when the script runs as root, else
+ * `sudo -n` (never a prompt). `oom_dropin DIR` writes {@link OOM_DROPIN_NAME} into a unit's drop-in
+ * dir, `oom_pid PID` applies {@link OOM_SCORE_ADJUST} to a running process, and `oom_service UNIT`
+ * does both for a system unit's main process (no restart).
+ */
+function posixOomHelpers(): string {
+  return `oom_lines() { printf '%s\\n' ${OOM_DROPIN_LINES.map(shQuote).join(" ")}; }
+oom_dropin() { $R mkdir -p "$1" && oom_lines | $R tee "$1/${OOM_DROPIN_NAME}" >/dev/null; }
+oom_pid() { [ -n "$1" ] && [ "$1" != 0 ] && printf '%s\\n' ${OOM_SCORE_ADJUST} | $R tee "/proc/$1/oom_score_adj" >/dev/null; }
+oom_service() {
+  oom_dropin "${SYSTEMD_SYSTEM_DIR}/$1.d" && $R systemctl daemon-reload || return 1
+  p=$(systemctl show -p MainPID --value "$1" 2>/dev/null) || p=0
+  [ -z "$p" ] || [ "$p" = 0 ] || oom_pid "$p"
+}`;
+}
+
+/**
+ * The pairing run's probes and fixes on the owner's machine (tailnet machines spec §4.2.5, §4.9),
+ * after `orq-agent` is downloaded and before `install-service`. Fixes use root or `sudo -n` only
+ * (never a prompt); what can't be fixed is said in the output, and in unattended mode each fact is
+ * also a {@link PAIRING_PROBE_PREFIX} line for the daemon. Sets `R` and `ELEVATE` for later steps.
+ *
+ * Linux:
+ * - **linger** (`loginctl enable-linger`), so the user service survives logout and starts at boot;
+ * - **`/dev/kvm`**: the user joins the device's group (often access comes only from the desktop
+ *   login's ACL); it applies to orq-agent after the machine restarts (the user manager keeps the
+ *   groups it started with);
+ * - **OOM protection**:
+ *   - `tailscaled`: a system drop-in, applied at once to the running daemon (never restarted:
+ *     this SSH session may run through it). Its Tailscale SSH sessions inherit the value.
+ *   - `sshd`: OpenSSH protects its listener itself (-1000) and gives each login session the value
+ *     it started with, so a unit-level `OOMScoreAdjust` would leak into every session: we only
+ *     check the listener (or the systemd socket that re-spawns it) and report it otherwise.
+ *   - `orq-agent` as root: a drop-in beside `install-service`'s own system unit (its uninstall
+ *     removes the whole drop-in dir).
+ *   - `orq-agent` as the user (a systemd user unit): the user manager is unprivileged and can't
+ *     lower a unit's score below its own. So, as root, the manager itself (`user@<uid>.service`)
+ *     gets the drop-in (and its running process the value), which makes the unit's own drop-in
+ *     take effect. Every user unit would then inherit the manager's score plus 100, so
+ *     `DefaultOOMScoreAdjust=` (systemd 250+, in `user.conf.d`) puts them back where they were:
+ *     the manager's stock score plus 100 (an unprivileged manager's default). The alternatives
+ *     were worse: a system unit with `User=` is not what `orq-agent install-service` installs or
+ *     uninstalls, and the user manager can't be restarted under a live desktop session.
+ *
+ * macOS: developer mode (`DevToolsSecurity`), and `xcode-select` pointing at Xcode.
+ */
+function posixMachineFixes(unattended: boolean): string {
+  const probe = unattended ? `printf '${PAIRING_PROBE_PREFIX} %s\\n' "$*" >&2` : ":";
+  const managerConf = [
+    "# Written by Orquester: user services keep their usual OOM score while the user manager",
+    "# (and orq-agent) are protected from the OOM killer. Removed with the machine."
+  ];
+  return `probe() { ${probe}; }
+U=$(id -un)
+if [ "$ROOT" = 1 ]; then R=; ELEVATE=1
+elif command -v sudo >/dev/null 2>&1 && sudo -n true </dev/null >/dev/null 2>&1; then R="sudo -n"; ELEVATE=1
+else R=; ELEVATE=0
+fi
+if [ "$ELEVATE" = 1 ]; then probe sudo=yes; else probe sudo=no; fi
+${posixOomHelpers()}
+if [ "$OS" = linux ]; then
+  if [ "$ROOT" = 0 ] && [ "$SYSTEMD" = 1 ] && command -v loginctl >/dev/null 2>&1; then
+    if [ -e "/var/lib/systemd/linger/$U" ] || [ "$(loginctl show-user "$U" -p Linger --value 2>/dev/null)" = yes ]; then
+      probe linger=on
+    elif [ "$ELEVATE" = 1 ] && $R loginctl enable-linger "$U" </dev/null >/dev/null 2>&1; then
+      say "turned on linger for $U: orq-agent keeps running after logout and starts at boot"
+      probe linger=enabled
+    else
+      say "linger is off for $U: run 'sudo loginctl enable-linger $U' so orq-agent keeps running after logout"
+      probe linger=off
+    fi
+  fi
+  if [ "$ROOT" = 0 ] && [ -c /dev/kvm ]; then
+    KG=$(stat -c %G /dev/kvm 2>/dev/null) || KG=kvm
+    case "$(stat -c %a /dev/kvm 2>/dev/null)" in
+      *[67]) probe kvm=ok ;;
+      *)
+        if id -nG "$U" 2>/dev/null | tr ' ' '\\n' | grep -qx "$KG"; then
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then probe kvm=ok; else probe kvm=pending; fi
+        elif [ "$KG" != root ] && [ "$ELEVATE" = 1 ] && { $R usermod -aG "$KG" "$U" || $R gpasswd -a "$U" "$KG"; } </dev/null >/dev/null 2>&1; then
+          say "added $U to the $KG group for /dev/kvm (orq-agent gets it after this machine restarts)"
+          probe kvm=added
+        else
+          say "$U is not in the $KG group, so orq-agent can't use /dev/kvm: run 'sudo usermod -aG $KG $U' and restart"
+          probe "kvm=missing:$KG"
+        fi ;;
+    esac
+  fi
+  if [ "$SYSTEMD" = 1 ]; then
+    if [ "$(systemctl show -p LoadState --value tailscaled.service 2>/dev/null)" = loaded ]; then
+      if [ "$ELEVATE" = 1 ] && oom_service tailscaled.service; then probe oom.tailscaled=applied; else probe oom.tailscaled=missing; fi
+    fi
+    S=absent
+    for u in ssh.service sshd.service; do
+      [ "$(systemctl show -p LoadState --value "$u" 2>/dev/null)" = loaded ] || continue
+      p=$(systemctl show -p MainPID --value "$u" 2>/dev/null) || p=0
+      if [ -n "$p" ] && [ "$p" != 0 ]; then
+        a=$(cat "/proc/$p/oom_score_adj" 2>/dev/null) || a=0
+        if [ "$a" -le -900 ] 2>/dev/null; then S=ok; else S=missing; fi
+        break
+      fi
+      if systemctl is-active -q "\${u%.service}.socket" 2>/dev/null; then S=ok; break; fi
+    done
+    probe "oom.sshd=$S"
+    if [ "$ROOT" = 1 ]; then
+      if oom_dropin ${SYSTEMD_SYSTEM_DIR}/orq-agent.service.d; then probe oom.orq-agent=applied; else probe oom.orq-agent=missing; fi
+    elif [ -n "\${XDG_RUNTIME_DIR:-}" ] && [ -d "\${XDG_RUNTIME_DIR:-}/systemd" ]; then
+      SV=$(systemctl --version 2>/dev/null | awk 'NR == 1 { print $2 }')
+      case "$SV" in '' | *[!0-9]*) SV=0 ;; esac
+      N=$(id -u)
+      M=$(systemctl show -p MainPID --value "user@$N.service" 2>/dev/null) || M=0
+      if [ "$ELEVATE" != 1 ]; then
+        probe oom.orq-agent=missing
+      elif [ "$SV" -lt ${MIN_SYSTEMD_FOR_USER_OOM} ] || [ -z "$M" ] || [ "$M" = 0 ]; then
+        probe oom.orq-agent=unsupported
+      else
+        MA=$(systemctl show -p OOMScoreAdjust --value "user@$N.service" 2>/dev/null) || MA=100
+        case "$MA" in '' | *[!0-9-]*) MA=100 ;; esac
+        # Already lowered by an earlier pairing: start from the stock score.
+        [ "$MA" -ge 0 ] || MA=100
+        DEF=$((MA + 100)); [ "$DEF" -le 1000 ] || DEF=1000
+        UD="$HOME/.config/systemd/user/orq-agent.service.d"
+        if $R mkdir -p ${SYSTEMD_USER_CONF_DIR} \\
+          && printf '%s\\n' ${managerConf.map(shQuote).join(" ")} '[Manager]' "DefaultOOMScoreAdjust=$DEF" | $R tee ${SYSTEMD_USER_CONF_DIR}/${OOM_DROPIN_NAME} >/dev/null \\
+          && systemctl --user daemon-reload \\
+          && oom_pid "$M" \\
+          && oom_dropin "${SYSTEMD_SYSTEM_DIR}/user@$N.service.d" \\
+          && $R systemctl daemon-reload \\
+          && (umask 022 && mkdir -p "$UD" && oom_lines >"$UD/${OOM_DROPIN_NAME}"); then
+          probe oom.orq-agent=applied
+        else
+          probe oom.orq-agent=missing
+        fi
+      fi
+    fi
+  fi
+fi
+if [ "$OS" = darwin ]; then
+  if DevToolsSecurity -status 2>/dev/null | grep -q 'currently enabled'; then
+    probe devtools=on
+  elif [ "$ELEVATE" = 1 ] && $R DevToolsSecurity -enable </dev/null >/dev/null 2>&1; then
+    say "turned on developer mode (DevToolsSecurity)"
+    probe devtools=enabled
+  else
+    say "developer mode is off: run 'sudo DevToolsSecurity -enable'"
+    probe devtools=off
+  fi
+  XP=$(xcode-select -p 2>/dev/null) || XP=
+  case "$XP" in
+    */Xcode*.app/Contents/Developer) probe xcode=ok ;;
+    *)
+      XA=
+      for x in /Applications/Xcode.app /Applications/Xcode*.app; do
+        if [ -d "$x" ]; then XA=$x; break; fi
+      done
+      if [ -z "$XA" ]; then
+        say "Xcode is not installed: iOS simulators need it (install it from the App Store)"
+        probe xcode=none
+      elif [ "$ELEVATE" = 1 ] && $R xcode-select -s "$XA" </dev/null >/dev/null 2>&1; then
+        say "pointed xcode-select at $XA"
+        probe xcode=fixed
+      else
+        say "xcode-select does not point at Xcode: run 'sudo xcode-select -s $XA'"
+        probe xcode=cli
+      fi ;;
+  esac
+fi
+`;
+}
+
+/**
+ * Removes what pairing added on a Linux machine (tailnet machines spec §4.2.7), run through
+ * `orq-agent` just before it uninstalls itself: the OOM drop-ins ({@link OOM_DROPIN_NAME}) for
+ * `tailscaled`, the user manager and the user unit, and the `user.conf.d` default, after which
+ * the running processes get their units' scores back. `orq-agent install-service`'s own system
+ * drop-in dir is removed by its uninstall. Linger and `kvm` group membership stay: they are fixes
+ * to the machine itself that other software may rely on, not Orquester's.
+ *
+ * Exits 3 and prints `orq-leftover: <path>` for each file it could not remove (no root or
+ * passwordless sudo); never prompts.
+ */
+export function byoUnpairCleanupScript(): string {
+  return `set -u
+R=; LEFT=0
+if [ "$(id -u)" != 0 ]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true </dev/null >/dev/null 2>&1; then R="sudo -n"; else R=none; fi
+fi
+N=$(id -u)
+UD="$HOME/.config/systemd/user/orq-agent.service.d"
+rm -f "$UD/${OOM_DROPIN_NAME}" && rmdir "$UD" 2>/dev/null
+CHANGED=0
+for f in ${SYSTEMD_SYSTEM_DIR}/tailscaled.service.d/${OOM_DROPIN_NAME} "${SYSTEMD_SYSTEM_DIR}/user@$N.service.d/${OOM_DROPIN_NAME}" ${SYSTEMD_USER_CONF_DIR}/${OOM_DROPIN_NAME}; do
+  if [ "$R" = none ]; then
+    [ -e "$f" ] || continue
+  else
+    $R test -e "$f" </dev/null || continue
+  fi
+  if [ "$R" != none ] && $R rm -f "$f" </dev/null; then
+    CHANGED=1
+    $R rmdir "$(dirname "$f")" </dev/null 2>/dev/null
+  else
+    printf 'orq-leftover: %s\\n' "$f"; LEFT=1
+  fi
+done
+if [ "$CHANGED" = 1 ]; then
+  $R systemctl daemon-reload </dev/null
+  for u in tailscaled.service "user@$N.service"; do
+    p=$(systemctl show -p MainPID --value "$u" 2>/dev/null) || p=0
+    a=$(systemctl show -p OOMScoreAdjust --value "$u" 2>/dev/null) || a=
+    if [ -n "$p" ] && [ "$p" != 0 ] && [ -n "$a" ]; then printf '%s\\n' "$a" | $R tee "/proc/$p/oom_score_adj" >/dev/null; fi
+  done
+fi
+[ "$LEFT" = 0 ] || exit 3
+exit 0
+`;
+}
+
 /** The second stage's variants (`boxRoutes.bootstrapScript(variant)`): VMs, and containers (no service manager). */
 const BOOTSTRAP_STAGE2_VARIANTS = ["posix", "container"] as const;
 type BootstrapStage2Variant = (typeof BOOTSTRAP_STAGE2_VARIANTS)[number];
@@ -401,6 +671,7 @@ function posixScript(options: PosixOptions): string {
     options.tailscale ? posixTailscale(options.container) : "",
     "",
     posix.agent(),
+    options.container ? "" : posixBoxOomProtection(),
     posix.start(options.container)
   ].join("\n");
 }
@@ -426,6 +697,7 @@ export function bootstrapSecondStage(variant: string): string | null {
     posix.platform(container),
     posix.fetch(),
     posix.agent(),
+    container ? "" : posixBoxOomProtection(),
     posix.start(container)
   ].join("\n");
 }
@@ -614,6 +886,12 @@ interface ByoPairingScriptInput {
   kind: "linux" | "macos";
   /** The owner's name for the machine (only shown in the script's messages). */
   name: string;
+  /**
+   * Pairing over SSH (`machines/pairing`): nobody is at a terminal, so the script never asks for a
+   * sudo password, gives up on an unreachable daemon sooner, and reports each probe as a
+   * {@link PAIRING_PROBE_PREFIX} line.
+   */
+  unattended?: boolean;
 }
 
 /** Where a bring-your-own machine keeps `orq-agent` when the pairing script runs as its user. */
@@ -630,7 +908,9 @@ const BYO_LINUX_USER_AGENT_PATH = "$HOME/.local/bin/orq-agent";
  * updates) — and `orq-agent install-service`: a LaunchAgent in the user's GUI session on macOS, a
  * systemd (user) service on Linux. The bootstrap token goes into a 0600 file in the data dir and
  * is exchanged for the machine's credential (also 0600) on its first connect. No tailnet join:
- * the machine dials the configured URL as it is.
+ * the machine dials the configured URL as it is. Before `install-service` it probes and fixes the
+ * machine ({@link posixMachineFixes}: linger, `/dev/kvm`, OOM protection; developer mode and
+ * Xcode on macOS) with root or `sudo -n` only.
  */
 export function byoPairingScript(input: ByoPairingScriptInput): string {
   const daemonUrl = normalizeDaemonUrl(input.daemonUrl);
@@ -656,7 +936,8 @@ export function byoPairingScript(input: ByoPairingScriptInput): string {
       ? `[ "$ROOT" = 0 ] || { rm -f "$TF"; die "run the pairing command as the user who stays logged in (not with sudo): orq-agent runs in that user's session"; }`
       : "",
     posix.fetch(),
-    posix.agent(),
+    posix.agent(input.unattended ? UNATTENDED_DOWNLOAD_DEADLINE_SECONDS : undefined),
+    posixMachineFixes(input.unattended === true),
     `case "$OS" in
   darwin) T="${BYO_MACOS_AGENT_PATH}" ;;
   *) if [ "$ROOT" = 1 ]; then T=${BYO_LINUX_ROOT_AGENT_PATH}; else T="${BYO_LINUX_USER_AGENT_PATH}"; fi ;;
@@ -665,8 +946,11 @@ esac
 cp "$B" "$T.new" && chmod 755 "$T.new" && mv -f "$T.new" "$T" || die "could not install orq-agent at $T"
 rm -f "$B"
 say "installed orq-agent at $T"
-if [ "$OS" = linux ] && [ "$ROOT" = 0 ] && command -v sudo >/dev/null 2>&1; then
-  if sudo -p 'orq-bootstrap: sudo password to link orq-agent into /usr/local/bin: ' ln -sf "$T" ${BYO_LINUX_ROOT_AGENT_PATH} </dev/null 2>/dev/null; then
+if [ "$OS" = linux ] && [ "$ROOT" = 0 ]; then
+  if [ "$ELEVATE" = 1 ] && $R ln -sf "$T" ${BYO_LINUX_ROOT_AGENT_PATH} </dev/null 2>/dev/null; then
+    say "linked ${BYO_LINUX_ROOT_AGENT_PATH}"
+  elif ${input.unattended ? "false" : "[ \"$ELEVATE\" = 0 ] && command -v sudo >/dev/null 2>&1"} \
+    && sudo -p 'orq-bootstrap: sudo password to link orq-agent into /usr/local/bin: ' ln -sf "$T" ${BYO_LINUX_ROOT_AGENT_PATH} </dev/null 2>/dev/null; then
     say "linked ${BYO_LINUX_ROOT_AGENT_PATH}"
   else
     say "orq-agent stays in $T (no sudo)"

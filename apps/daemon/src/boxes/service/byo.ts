@@ -34,11 +34,11 @@ import {
 } from "@orquester/api";
 import type { StoredBox } from "@orquester/config";
 
-import { byoPairingScript, normalizeDaemonUrl } from "../bootstrap/bootstrap.ts";
+import { byoPairingScript, byoUnpairCleanupScript, normalizeDaemonUrl } from "../bootstrap/bootstrap.ts";
 import type { BoxHub } from "../contracts.ts";
 import { hashSecret, secretMatches } from "../hub/auth.ts";
 import { BYO_REGION, byoMachineIdle } from "../providers/byo.ts";
-import type { BoxSetupLog } from "./box-exec.ts";
+import { runBoxCommand, type BoxSetupLog } from "./box-exec.ts";
 import { BoxError, errorLine } from "./errors.ts";
 import { newBoxId, type BoxClock, type BoxLifecycle, type StoredBoxProject } from "./lifecycle.ts";
 import { PROJECT_DELETED_FIELD } from "./registry.ts";
@@ -54,8 +54,25 @@ const PAIRING_CODE_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 const MAX_NAME_CHARS = 60;
 /** How long a removed machine gets to acknowledge the uninstall before its link is cut. */
 const UNINSTALL_ACK_MS = 15_000;
+/** How long a removed Linux machine gets to remove what pairing added ({@link byoUnpairCleanupScript}). */
+const UNPAIR_CLEANUP_MS = 20_000;
 
 const PAIRING_WAITING_REASON = "Waiting for the pairing command to run on the machine.";
+
+/** "Pair over SSH" (`machines/pairing`): what the daemon runs on the machine itself. */
+export interface ByoSshPairingRequest {
+  kind: "linux" | "macos";
+  name: string;
+  /** The URL the machine dials: the daemon's tailnet HTTPS address for a tailnet peer, else the configured route's. */
+  daemonUrl: string;
+  connectRoute: "public-url" | "tailscale";
+}
+
+/** The `pairing` record and the unattended pairing script, which carries the machine's bootstrap token (deliver it over stdin only). */
+export interface ByoSshPairing {
+  boxId: string;
+  script: string;
+}
 
 /** The pair route's answer: the script, or a refusal that says nothing about which codes exist. */
 export type PairingScriptOutcome =
@@ -193,6 +210,34 @@ export class ByoMachines {
     const name = machineName(request.name);
     // No route to this daemon: the machine could never connect.
     const route = this.deps.settings.route("byo");
+    const id = await this.insertPairingRecord(kind, name, route.mode, PAIRING_WAITING_REASON);
+    void this.deps.setupLog.append(id, `Machine "${name}" (${kind}) added; waiting for its pairing command.`);
+    return this.issuePairing(id, route.daemonUrl);
+  }
+
+  /**
+   * "Pair over SSH" (tailnet machines spec §4.2): the `pairing` record and its unattended script
+   * with a fresh bootstrap token, as if its one-time code had just been spent; no code exists.
+   * The caller runs the script on the machine over SSH (stdin only) and calls {@link remove} when
+   * that failed.
+   */
+  async addForSsh(request: ByoSshPairingRequest): Promise<ByoSshPairing> {
+    if (!this.deps.enabled()) throw new BoxError(409, "BOXES_DISABLED", "Ephemeral AI VMs is turned off in Settings → Plugins.");
+    const name = machineName(request.name);
+    const daemonUrl = normalizeDaemonUrl(request.daemonUrl);
+    const id = await this.insertPairingRecord(request.kind, name, request.connectRoute, "Pairing over SSH: installing orq-agent…");
+    void this.deps.setupLog.append(id, `Machine "${name}" (${request.kind}) added; pairing over SSH.`);
+    try {
+      const bootstrapToken = await this.deps.hub.issueBootstrapToken(id, PAIRING_BOOTSTRAP_TTL_MS);
+      const script = byoPairingScript({ boxId: id, daemonUrl, bootstrapToken, kind: request.kind, name, unattended: true });
+      return { boxId: id, script };
+    } catch (error) {
+      await this.remove(id).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async insertPairingRecord(kind: ByoMachineKind, name: string, connectRoute: string, stateReason: string): Promise<string> {
     const installationId = await this.deps.store.ensureInstallationId();
     let id = newBoxId();
     while (this.deps.store.get(id)) id = newBoxId();
@@ -218,18 +263,17 @@ export class ByoMachines {
       destroyedAt: null,
       lastSeenAt: null,
       state: "pairing",
-      stateReason: PAIRING_WAITING_REASON,
+      stateReason,
       destroyedReason: null,
       project: null,
       threadId: null,
       purposeNote: null,
-      connectRoute: route.mode,
+      connectRoute,
       setup: [],
       deviceHost: false
     };
     await this.deps.store.insert(record);
-    void this.deps.setupLog.append(id, `Machine "${name}" (${kind}) added; waiting for its pairing command.`);
-    return this.issuePairing(id, route.daemonUrl);
+    return id;
   }
 
   /** A new command for a machine still `pairing`; the previous code stops working. */
@@ -259,17 +303,33 @@ export class ByoMachines {
   /**
    * "Remove machine": a connected machine uninstalls its service and exits first; then its
    * credential is revoked and its record deleted. `uninstalled` is false when it was not connected
-   * (its owner removes the service by hand: `orq-agent uninstall-service`).
+   * (its owner removes the service by hand: `orq-agent uninstall-service`). A connected Linux
+   * machine first removes what pairing added (its OOM drop-ins, {@link byoUnpairCleanupScript});
+   * `leftovers` lists the files it could not remove (no passwordless sudo), absent when none.
    */
-  async remove(boxId: string): Promise<{ uninstalled: boolean }> {
+  async remove(boxId: string): Promise<{ uninstalled: boolean; leftovers?: string[] }> {
     const record = this.require(boxId);
     if (record.purpose === "project" || record.purpose === "temporary") {
       throw new BoxError(409, "BOX_IN_USE", `This machine is used by ${inUseBy(record)}: ${record.purpose === "project" ? "delete the project" : "release it"} first.`);
     }
     let uninstalled = false;
+    let leftovers: string[] = [];
     const connection = this.deps.hub.get(boxId);
     if (connection?.connected && this.beforeRemove) {
       await this.beforeRemove(boxId).catch((error) => this.deps.logger.warn(`Machine ${boxId}: cleaning up before its removal failed`, errorLine(error)));
+    }
+    if (connection?.connected && record.kind === "linux") {
+      try {
+        const result = await runBoxCommand(connection, { command: "sh", args: ["-c", byoUnpairCleanupScript()] }, { signal: AbortSignal.timeout(UNPAIR_CLEANUP_MS) });
+        leftovers = result.stdout
+          .split("\n")
+          .filter((line) => line.startsWith("orq-leftover: "))
+          .map((line) => line.slice("orq-leftover: ".length).trim())
+          .filter((path) => path.startsWith("/"));
+        if (result.code !== 0 && leftovers.length === 0) this.deps.logger.warn(`Machine ${boxId}: removing what pairing added failed (exit ${result.code ?? result.signal})`);
+      } catch (error) {
+        this.deps.logger.warn(`Machine ${boxId}: removing what pairing added failed`, errorLine(error));
+      }
     }
     if (connection?.connected) {
       try {
@@ -281,7 +341,7 @@ export class ByoMachines {
     }
     await this.deps.hub.revoke(boxId);
     await this.deps.store.remove([boxId]);
-    return { uninstalled };
+    return leftovers.length > 0 ? { uninstalled, leftovers } : { uninstalled };
   }
 
   /**
