@@ -28,9 +28,10 @@ const PATTERNS: ReadonlyArray<{ detail: string; test: RegExp }> = [
   { detail: "unknown", test: /No \S+ host key is known for|Host key verification failed/i },
   { detail: "resolve", test: /Could not resolve hostname|Name or service not known|nodename nor servname|Temporary failure in name resolution|No address associated with hostname|Unknown host/i },
   { detail: "auth", test: /Permission denied \(|Too many authentication failures|Authentication failed|no mutual signature|Load key .*: (invalid format|bad permissions|incorrect passphrase)|UNPROTECTED PRIVATE KEY FILE|Received disconnect from .*: 2: Too many/i },
+  { detail: "proxy", test: /stdio forwarding failed|channel \d+: open failed|proxy dialog failed|ProxyCommand/i },
   { detail: "refused", test: /Connection refused/i },
   { detail: "timeout", test: /Connection timed out|Operation timed out|timed out during banner|No route to host|Network is unreachable|Host is down|Host is unreachable/i },
-  { detail: "dropped", test: /Connection (closed|reset) by|kex_exchange_identification|banner exchange|Broken pipe|stdio forwarding failed|channel \d+: open failed|ProxyCommand|proxy dialog failed/i }
+  { detail: "dropped", test: /Connection (closed|reset) by|kex_exchange_identification|banner exchange|Broken pipe/i }
 ];
 
 /** `jasper` or `jasper (jasper.tail1234.ts.net:2222)` — what the owner recognizes. */
@@ -88,6 +89,12 @@ export function classifySshFailure(result: SshRunResult, context: SshFailureCont
         "ssh-unreachable",
         `${where(context)} didn't answer over SSH: it may be asleep or off, or offline from the tailnet.`,
         `Wake ${machineName} (open a Mac's lid, or press its power button) and check it is online in Tailscale, then pair again.`
+      );
+    case "proxy":
+      return problem(
+        "ssh-unreachable",
+        `The jump host or ProxyCommand that ~/.ssh/config uses to reach ${where(context)} couldn't connect to it.`,
+        `Check that ${machineName} is on and that \`ssh ${login(context)} true\` works on the Orquester server, then pair again.`
       );
     case "dropped":
       return problem("ssh-unreachable", `The SSH connection to ${where(context)} closed before login.`, `Check that SSH on ${machineName} accepts connections from the Orquester server (firewall, MaxStartups, a ProxyJump in ~/.ssh/config), then pair again.`);
