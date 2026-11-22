@@ -61,6 +61,28 @@ export type DeviceFormFactor = "phone" | "tablet" | "foldable";
 /** The Android system image every phase 1 AVD uses (API 35: API 37 needs 4 GB per emulator). */
 export const ANDROID_SYSTEM_IMAGE = "system-images;android-35;google_apis;x86_64";
 
+/** The CPU ABI of an Android system image: x86_64 on Linux and Windows hosts, arm64-v8a on Apple Silicon Macs. */
+export type AndroidAbi = "x86_64" | "arm64-v8a";
+export const ANDROID_ABIS: readonly AndroidAbi[] = ["x86_64", "arm64-v8a"];
+
+/** The ABI an `sdkmanager` system image id ends with (`…;google_apis;arm64-v8a`); null for another id. */
+export function androidImageAbi(systemImage: string): AndroidAbi | null {
+  const abi = systemImage.split(";").at(-1);
+  return ANDROID_ABIS.find((entry) => entry === abi) ?? null;
+}
+
+/**
+ * The profile's system image for a host of `abi`: the same API level and tag with that ABI
+ * (`system-images;android-35;google_apis;x86_64` → `…;arm64-v8a` on an Apple Silicon Mac). The
+ * image id is part of an AVD's and golden snapshot's identity, so x86_64 and arm64 artifacts never mix.
+ */
+export function androidSystemImageFor(profile: Pick<DeviceProfile, "systemImage">, abi: AndroidAbi): string {
+  const image = profile.systemImage ?? ANDROID_SYSTEM_IMAGE;
+  const parts = image.split(";");
+  if (androidImageAbi(image) === null || parts.length < 2) return image;
+  return [...parts.slice(0, -1), abi].join(";");
+}
+
 /**
  * A device model the owner or an agent can ask for. Hints for the hosts: an Android profile names
  * the `avdmanager --device` hardware profile; an iOS profile the `simctl` device type names, most
@@ -137,6 +159,15 @@ export const LOCAL_DEVICE_HOST_LABEL = "This machine";
 /** A box's device-host id: `box:<boxId>` (a BYO box too: its kind says which). */
 export function boxDeviceHostId(boxId: string): string {
   return `box:${boxId}`;
+}
+
+/**
+ * The second device host of a machine that runs both platforms: an Apple Silicon Mac's Android
+ * emulators, `box:<boxId>:android` (its iOS simulators keep {@link boxDeviceHostId}). Never a `/`:
+ * device keys are `<hostId>/<deviceId>`.
+ */
+export function boxAndroidDeviceHostId(boxId: string): string {
+  return `box:${boxId}:android`;
 }
 
 /**

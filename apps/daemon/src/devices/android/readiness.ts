@@ -27,6 +27,8 @@ export interface ReadinessProbe {
   /** `outdated`: made for an older config; it is made again on the profile's next open (not a blocker). */
   avds: { profile: string; label: string; created: boolean; snapshot: boolean; outdated?: boolean }[];
   tools: { name: string; version: string; installed: boolean }[];
+  /** The system image `packages.systemImage` is about (absent: {@link ANDROID_SYSTEM_IMAGE}; an Apple Silicon Mac's is arm64-v8a). */
+  systemImage?: string;
 }
 
 export const MIN_NODE_MAJOR = 22;
@@ -78,7 +80,7 @@ export function evaluateReadiness(probe: ReadinessProbe): DeviceReadinessCheck[]
     checks.push(missing("android-sdk", sdkLabel, `Not installed: ${absent}`, FIX_ACTIONS.sdk));
   }
   const imageLabel = "Android 15 system image";
-  checks.push(probe.packages.systemImage ? ok("system-image", imageLabel, ANDROID_SYSTEM_IMAGE, FIX_ACTIONS.systemImage) : missing("system-image", imageLabel, "Not installed (about 2.3 GB to download)", FIX_ACTIONS.systemImage));
+  checks.push(probe.packages.systemImage ? ok("system-image", imageLabel, probe.systemImage ?? ANDROID_SYSTEM_IMAGE, FIX_ACTIONS.systemImage) : missing("system-image", imageLabel, "Not installed (about 2.3 GB to download)", FIX_ACTIONS.systemImage));
 
   for (const avd of probe.avds) {
     const id = `avd:${avd.profile}`;

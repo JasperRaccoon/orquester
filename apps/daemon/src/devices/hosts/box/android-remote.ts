@@ -11,7 +11,7 @@
 
 import { posix } from "node:path";
 
-import type { BoxSizeOffer, DeviceCapacityBasis, DeviceProfile, DevicesSettings, DeviceScreen, MachineProblem } from "@orquester/api";
+import { ANDROID_SYSTEM_IMAGE, androidImageAbi, type AndroidAbi, type BoxSizeOffer, type DeviceCapacityBasis, type DeviceProfile, type DevicesSettings, type DeviceScreen, type MachineProblem } from "@orquester/api";
 
 import { ANDROID_CACHE_SOURCE, ANDROID_GOLDEN_SNAPSHOT, ANDROID_RENTED_GPU_MODES, BOX_DEVICES_DIR, BOX_GOLDEN_MARKER } from "../../../boxes/github/device-cache.ts";
 import { BLACKSMITH_LINUX_IMAGES, BLACKSMITH_LINUX_SIZES, blacksmithRunnerLabel } from "../../../boxes/github/workflow-template.ts";
@@ -115,6 +115,8 @@ export interface AndroidGpuProbe {
   nvidia: { version: string | null; usable: boolean } | null;
   /** DRM render nodes, their kernel driver, and whether the account can open them. */
   render: { node: string; driver: string; usable: boolean }[];
+  /** An Apple Silicon Mac's GPU (Metal; `machdep.cpu.brand_string` names the chip). Absent on Linux. */
+  apple?: { chip: string } | null;
 }
 
 export function parseAndroidProbe(stdout: string): AndroidBoxProbe {
@@ -187,14 +189,15 @@ function kilobytes(value: string | undefined): number | null {
 /** DRM drivers of real GPUs (Mesa renders on them with direct rendering); virtual and display-only ones are left out. */
 const HARDWARE_DRM_DRIVERS = new Set(["amdgpu", "radeon", "i915", "xe", "nouveau", "nvidia", "msm", "panfrost", "v3d"]);
 
-/** A GPU `-gpu host` can render on: NVIDIA's driver with its device nodes open, or a hardware render node the account can open. */
+/** A GPU `-gpu host` can render on: NVIDIA's driver with its device nodes open, a hardware render node the account can open, or an Apple Silicon Mac's (Metal). */
 export interface HostGpu {
-  kind: "nvidia" | "mesa";
+  kind: "nvidia" | "mesa" | "apple";
   /** "NVIDIA 550.54.14", "amdgpu (renderD128)": also what a failed `host` attempt is remembered by. */
   detail: string;
 }
 
 export function usableHostGpu(gpu: AndroidGpuProbe): HostGpu | null {
+  if (gpu.apple) return { kind: "apple", detail: `${gpu.apple.chip} (Metal)` };
   if (gpu.nvidia?.usable) return { kind: "nvidia", detail: `NVIDIA ${gpu.nvidia.version ?? "driver"}` };
   const node = gpu.render.find((entry) => entry.usable && HARDWARE_DRM_DRIVERS.has(entry.driver));
   return node ? { kind: "mesa", detail: `${node.driver} (${node.node})` } : null;
@@ -294,9 +297,16 @@ export interface BoxGoldenMarker {
   createdAt: string;
   /** `"cache"`: made by the device-cache workflow (`boxes/github/device-cache.ts`). */
   source?: string;
+  /** The system image's ABI it was saved from; absent: x86_64 (the device cache's and older markers). */
+  abi?: AndroidAbi;
 }
 
 export { BOX_GOLDEN_MARKER };
+
+/** The ABI of a (host-resolved) profile's system image. */
+export function profileAbi(profile: Pick<DeviceProfile, "systemImage">): AndroidAbi {
+  return androidImageAbi(profile.systemImage ?? ANDROID_SYSTEM_IMAGE) ?? "x86_64";
+}
 
 /**
  * A profile's AVD in the box: from the device cache (`cache`), made here (`built`) — both current —,
@@ -339,6 +349,8 @@ export async function boxGolden(x: DeviceExecutor, avdHome: string, profile: Dev
   if (!(await x.exists(posix.join(dir, "snapshots", BOX_GOLDEN_SNAPSHOT, "snapshot.pb")))) return null;
   const marker = await readMarker<BoxGoldenMarker>(x, posix.join(dir, BOX_GOLDEN_MARKER));
   if (!marker || marker.snapshot !== BOX_GOLDEN_SNAPSHOT || marker.configHash !== profileHash(profile) || marker.emulatorRevision !== emulatorRevision || typeof marker.gpu !== "string" || !marker.gpu) return null;
+  // x86_64 and arm64 snapshots never stand in for each other (the config hash names the image too).
+  if ((marker.abi ?? "x86_64") !== profileAbi(profile)) return null;
   return { snapshot: marker.snapshot, gpu: marker.gpu, source: marker.source === ANDROID_CACHE_SOURCE ? "cache" : "built" };
 }
 
