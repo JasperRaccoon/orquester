@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orquester VPS lifecycle tool: deploy, provision, verify, rollback, logs,
-# rotate-password. Targets: deploy/targets.conf (gitignored — copy
+# rotate-password, reset-2fa. Targets: deploy/targets.conf (gitignored — copy
 # deploy/targets.conf.example).
 # -E: without errtrace bash does not inherit the ERR trap into functions, and
 # everything below runs inside main()/cmd_* — the trap would be dead code.
@@ -29,6 +29,9 @@ commands:
                              otherwise built beside the live one first), restart, verify
   logs <target> [-n N]       tail the daemon journal (default 50 lines)
   rotate-password <target>   generate + install a new HTTP password (shown once)
+  reset-2fa <target> [--yes] turn the login second factor OFF (lost phone and recovery
+                             codes): deletes it on the server and restarts the daemon;
+                             asks for confirmation unless --yes
 
 targets: deploy/targets.conf — copy deploy/targets.conf.example and fill it in.
 EOF
@@ -205,6 +208,41 @@ echo \"\$new\"
 echo '============================================================'"
 }
 
+cmd_reset_2fa() {
+  local name="$1" yes="$2" s answer
+  load_target "$CONF" "$name"
+  build_ssh_args
+  s="$(sudo_word)"
+  info "=== reset-2fa $name ($T_USER@$T_HOST) ==="
+  # Nothing changes under --dry-run, so there is nothing to confirm.
+  if [ "$yes" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
+    [ -t 0 ] || die "reset-2fa: refusing to turn off the second factor without confirmation — run it in a terminal or pass --yes"
+    warn "this turns OFF two-step sign-in on '$name': the password alone will sign in again."
+    warn "it deletes the authenticator secret and every recovery code, and restarts the daemon."
+    warn "signed-in devices and API tokens stay valid. Set the factor up again in Settings → Server."
+    printf 'Type the target name (%s) to continue: ' "$name"
+    read -r answer || answer=""
+    [ "$answer" = "$name" ] || die "reset-2fa: not confirmed — nothing changed"
+  fi
+  # The daemon rewrites the factor file while it runs (lastUsedStep, failed-challenge
+  # state), so stop it before deleting — an rm before a plain restart could be undone
+  # by a write in between. An absent file means the second factor is off.
+  # auth-sessions.json and daemon.env are deliberately left alone.
+  remote_run "set -e
+f=/var/lib/orquester/daemon/auth-second-factor.json
+if ! ${s:+$s }test -e \"\$f\"; then
+  echo \"reset-2fa: no second factor is set up on this server (\$f is absent) — nothing to do, daemon not restarted\"
+  exit 0
+fi
+trap 'echo \"reset-2fa: FAILED — the daemon may be stopped. Check: ${s:+$s }systemctl status orquester; start it: ${s:+$s }systemctl start orquester\" >&2' ERR
+${s:+$s }systemctl stop orquester
+${s:+$s }rm -f \"\$f\"
+${s:+$s }systemctl start orquester
+curl -fsS --retry 600 --retry-delay 1 --retry-max-time 600 --retry-connrefused http://127.0.0.1:47831/health 2>/dev/null \
+  || curl -fsS --max-time 10 http://127.0.0.1:47831/health; echo
+echo 'reset-2fa: second factor removed and the daemon is healthy — the password alone signs in now'"
+}
+
 cmd_provision() {
   local name="$1"
   load_target "$CONF" "$name"
@@ -313,6 +351,13 @@ main() {
     rotate-password)
       [ $# -eq 1 ] || die "usage: ./deploy.sh rotate-password <target>"
       cmd_rotate_password "$1" ;;
+    reset-2fa)
+      if [ $# -eq 2 ] && [ "$2" = "--yes" ]; then
+        cmd_reset_2fa "$1" 1
+      else
+        [ $# -eq 1 ] || die "usage: ./deploy.sh reset-2fa <target> [--yes]"
+        cmd_reset_2fa "$1" 0
+      fi ;;
     logs)
       [ $# -ge 1 ] || die "usage: ./deploy.sh logs <target> [-n N]"
       target="$1"; shift
