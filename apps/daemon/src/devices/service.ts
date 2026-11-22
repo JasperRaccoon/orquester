@@ -40,7 +40,9 @@ import {
   DEVICES_POOL_EVENT,
   DEVICES_SETTINGS_EVENT,
   DEVICES_SETUP_EVENT,
+  DEVICE_STREAM_TICKET_TTL_MS,
   deviceProfile,
+  deviceRoutes,
   isDevicePlatform,
   validateDeviceActionInput,
   type DeviceActionEntry,
@@ -62,6 +64,9 @@ import {
   type DevicesStateResponse,
   type DeviceSummary,
   type DevicePortForward,
+  type DeviceStreamClient,
+  type DeviceStreamTicketRequest,
+  type DeviceStreamTicketResponse,
   type DeviceUserActionRequest,
   type DeviceUserActionResponse
 } from "@orquester/api";
@@ -94,6 +99,7 @@ import {
   userInput,
   withController
 } from "./leases.ts";
+import { streamRoutes } from "./direct/routes.ts";
 import { choosePlacement, hostCap, type PlacementHost } from "./pool.ts";
 import { DeviceForwards, storedForwards, type DeviceForwardLink, type DeviceForwardTarget, type DeviceMachine } from "./forwards.ts";
 import { boxAllowsDevices, machineIdOfBox, type DeviceMachineAccess } from "./machine-access.ts";
@@ -1221,6 +1227,30 @@ export class DeviceService implements DeviceToolsPort {
   /** The hub's session token the proxy adds upstream, or null (none, or unknown host). Never sent to clients. */
   hubToken(hostId: string): string | null {
     return this.hosts.get(hostId)?.hubToken?.() ?? null;
+  }
+
+  /**
+   * The owner's viewer asks how to stream a leased device (tailnet machines spec §4.5): the routes
+   * best first and, when the host's machine offers direct ones, a ticket for that device only
+   * (`DEVICE_STREAM_TICKET_TTL_MS`), bound to the asking page's `origin`. The hub token stays here.
+   */
+  streamTicket(hostId: string, request: DeviceStreamTicketRequest, context: { client: DeviceStreamClient; origin: string | null }): DeviceStreamTicketResponse {
+    const host = this.visibleHost(hostId);
+    if (!host) throw this.unknownHost(hostId);
+    const lease = this.leaseOnDevice(hostId, request.deviceId);
+    if (!lease) throw new DeviceError(DEVICE_ERROR_CODES.DEVICE_NOT_LEASED, "That device is not leased on this host.");
+    const device = lease.stream?.deviceParam ?? lease.deviceId ?? request.deviceId;
+    const expiresAt = this.nowMs() + DEVICE_STREAM_TICKET_TTL_MS;
+    const machineId = this.machineIdOf(host);
+    const direct = machineId !== null ? (host.directStream?.() ?? null) : null;
+    const routes = streamRoutes({ direct, machineId, client: context.client, daemonUrl: deviceRoutes.hub(hostId, "") });
+    const offersDirect = routes.some((route) => route.kind !== "daemon");
+    return {
+      routes,
+      ticket: offersDirect && direct ? direct.issueTicket({ device, expiresAt, origin: context.origin }) : "",
+      expiresAt,
+      ...(offersDirect && machineId !== null ? { machineId } : {})
+    };
   }
 
   /** How many proxied streams of a leased device are open now: its host may recycle an unwatched capture. */

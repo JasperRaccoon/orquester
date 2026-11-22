@@ -33,8 +33,9 @@ import type { StoredBox } from "@orquester/config";
 import type { BoxConnection } from "../../boxes/contracts.ts";
 import type { DaemonBoxes } from "../../boxes/wiring.ts";
 import { DeviceError, isDeviceError } from "../errors.ts";
+import { DirectStreamGate, type DirectStreamActivity } from "../direct/machine-gate.ts";
 import type { DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProvisionRequest, DeviceRentalQuote } from "../host.ts";
-import { byoRunsDevices, type DeviceMachineAccess } from "../machine-access.ts";
+import { byoRunsDevices, machineIdOfBox, type DeviceMachineAccess } from "../machine-access.ts";
 import type { DeviceToolchain } from "../toolchain/index.ts";
 import { BoxAndroidHost } from "./box/android-host.ts";
 import { androidRentalSpec } from "./box/android-remote.ts";
@@ -50,6 +51,8 @@ export interface BoxHostDeps {
   fetch?: typeof fetch;
   /** The machines registry's policies (absent: the boxes' own "Use for device simulators" decides). */
   machineAccess?: DeviceMachineAccess | null;
+  /** Where own machines' stream gates report the streams open on direct routes and the input they see (the hub proxy). */
+  directActivity?: DirectStreamActivity;
 }
 
 /** A box host of either platform: Macs run iOS simulators, Linux boxes with KVM Android emulators. */
@@ -146,6 +149,21 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
     const boxId = record.id;
     const hostId = boxDeviceHostId(boxId);
     const kind = role.kind;
+    // The owner's machines stream to the owner's viewer directly when it can reach them (tailnet machines spec §4.5).
+    const directGate =
+      kind === "byo"
+        ? new DirectStreamGate({
+            hostId,
+            machineName: () => {
+              const name = deps.boxes()?.registry.get(boxId)?.machineName;
+              return typeof name === "string" && name ? name : role.platform === "ios" ? "Your Mac" : "Your machine";
+            },
+            machineId: () => machineIdOfBox(boxId, access()),
+            connection: () => connection(boxId),
+            ...(deps.directActivity ? { activity: deps.directActivity } : {}),
+            logger
+          })
+        : undefined;
     if (role.platform === "android") {
       const host = new BoxAndroidHost({
         boxId,
@@ -158,6 +176,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
         settings: () => settings()!,
         activeLeases: () => ctx?.activeLeases(hostId) ?? [],
         ...(kind === "box" ? { destroyBox: destroyBoxOf(boxId) } : {}),
+        ...(directGate ? { directGate } : {}),
         logger
       });
       hosts.set(boxId, host);
@@ -175,6 +194,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
       settings: () => settings()!,
       activeLeases: () => ctx?.activeLeases(hostId) ?? [],
       ...(kind === "box" ? { destroyBox: destroyBoxOf(boxId) } : {}),
+      ...(directGate ? { directGate } : {}),
       logger,
       ...(deps.fetch ? { fetch: deps.fetch } : {})
     });

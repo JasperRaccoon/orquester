@@ -63,8 +63,9 @@ import { HUB_LAUNCHER, HubSupervisor } from "../../android/hub.ts";
 import { delay, processMatches } from "../../android/procs.ts";
 import { evaluateReadiness, FIX_ACTIONS, type ReadinessProbe } from "../../android/readiness.ts";
 import { emptyHostState, type EmulatorRecord, type HostStateFile, type HubRecord, parseHostState, planReattach, serializeHostState } from "../../android/state.ts";
+import type { DirectStreamGate } from "../../direct/machine-gate.ts";
 import { DeviceError, isDeviceError } from "../../errors.ts";
-import type { AgentDeviceCommand, DeviceBootRequest, DeviceBootResult, DeviceCommandResult, DeviceHost, DeviceHostProgress, DeviceHostState } from "../../host.ts";
+import type { AgentDeviceCommand, DeviceBootRequest, DeviceBootResult, DeviceCommandResult, DeviceDirectStream, DeviceHost, DeviceHostProgress, DeviceHostState } from "../../host.ts";
 import {
   acceptLicenses,
   adbPath,
@@ -154,6 +155,8 @@ export interface BoxAndroidHostDeps {
   /** Rented hosts: destroy the box. */
   destroyBox?(): Promise<void>;
   logger: Pick<Console, "info" | "warn" | "error">;
+  /** An own machine: the stream gate for the viewer's direct routes (tailnet machines spec §4.5). */
+  directGate?: DirectStreamGate;
 }
 
 type Phase = "pending" | "preparing" | "ready" | "needs-setup" | "failed" | "stopped";
@@ -226,6 +229,7 @@ export class BoxAndroidHost implements DeviceHost {
     this.kind = deps.kind;
     this.label = deps.label;
     this.x = boxExecutor(() => this.link());
+    deps.directGate?.onChange(() => this.emitChange());
   }
 
   get boxId(): string {
@@ -304,7 +308,11 @@ export class BoxAndroidHost implements DeviceHost {
     if (this.kind !== "byo") return [];
     const machine = this.machineName();
     if (!this.deps.connection()?.connected && this.deps.record()?.state === "ready") return [unreachableProblem(machine, "linux")];
-    return this.probe ? androidProbeProblems(this.probe, machine) : [];
+    return [...(this.probe ? androidProbeProblems(this.probe, machine) : []), ...(this.deps.directGate?.problems() ?? [])];
+  }
+
+  directStream(): DeviceDirectStream | null {
+    return this.hub?.status() === "running" ? (this.deps.directGate?.stream() ?? null) : null;
   }
 
   /** The machine's own name ("jasper"), for problem messages. */
@@ -453,6 +461,8 @@ export class BoxAndroidHost implements DeviceHost {
       this.setDetail("Starting the device hub…");
       await this.x.exec(adbPath(layout.sdk), ["start-server"], { env: this.env!, timeoutMs: 30_000 });
       await this.ensureHub(probe);
+      // The viewer's direct routes (best effort: without them it streams through the daemon).
+      void this.deps.directGate?.ensure({ nodePath: probe.nodePath!, root: layout.devices, hubStateDir: layout.hubState, env: gateEnv(boxBaseEnv(probe)) });
       this.step("hub", "Starting the device hub", "done", 88);
 
       this.working = "agent-device";
@@ -1046,6 +1056,7 @@ export class BoxAndroidHost implements DeviceHost {
 
   /** An idle own machine: stop the hub and the agent-device daemon in it (the next prepare starts them). */
   async stopHelpers(): Promise<void> {
+    await this.deps.directGate?.stop();
     await this.hub?.stop().catch(() => undefined);
     await this.agent?.stop().catch(() => undefined);
     await this.agentForward?.close().catch(() => undefined);
@@ -1079,6 +1090,7 @@ export class BoxAndroidHost implements DeviceHost {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.stopTimers();
+    await this.deps.directGate?.dispose();
     await this.hub?.forget().catch(() => undefined);
     this.agent?.forget();
     await this.agentForward?.close().catch(() => undefined);
@@ -1302,4 +1314,9 @@ function provisioningDetail(record: StoredBox): string {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The stream gate's environment: the probed PATH (and locale), defined values only. */
+function gateEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
