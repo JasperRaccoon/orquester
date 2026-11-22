@@ -365,6 +365,7 @@ import { hashPassword, loadDaemonConfig, migrateHttpPassword } from "./daemon-co
 import { registerTemporaryBoxRoutes, TemporaryBoxTools } from "./boxes/temporary/index.ts";
 // boxes: every box module wired over the daemon's services.
 import { createDaemonBoxes, type DaemonBoxes } from "./boxes/wiring.ts";
+import { createDaemonMachines, type DaemonMachines } from "./machines/wiring.ts";
 
 const daemonId = randomUUID();
 
@@ -906,6 +907,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await plugins.start();
   // boxes: the box records load (a reattached box terminal finds its box) and the plugin switch is followed.
   await boxes.start().catch((error) => console.error("Box service start failed", error instanceof Error ? error.message : error));
+  // Machines (tailnet machines spec §4.1): tailnet peers and paired machines with the owner's
+  // policy, after the box records loaded. Its agent tool follows whether any machine is visible.
+  const machines: DaemonMachines = createDaemonMachines({
+    baseDir: paths.baseDir,
+    boxes,
+    broadcaster,
+    agentToolsChanged: () => {
+      void services.sessionToolsRefresher
+        ?.refresh(null)
+        .catch((error) => console.warn("session-tools: machine tools refresh failed", error instanceof Error ? error.message : String(error)));
+    },
+    logger: console
+  });
+  await machines.start().catch((error) => console.error("Machines start failed", error instanceof Error ? error.message : error));
   // Secret files (the "Secret files" plugin, spec 2026-10-19): one vault per repo per workspace,
   // synced to every clone while the plugin is on. A store it cannot load leaves it read-only (503).
   const secretVaults = new SecretVaultStore({ dir: secretFilesDir(paths.baseDir), logger: console });
@@ -1701,6 +1716,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxRegistry: boxes.registry,
     boxWiring: boxes,
     devices,
+    machines,
     gptImage,
     storage: { scans: storageScans, guard: storageGuard }
   };
@@ -1784,6 +1800,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     devicesAvailable: () => devices.toolsAvailable(),
     // GPT Image: generate_image only while the plugin is on and a Codex account can make images.
     imagesAvailable: () => gptImage.toolsAvailable(),
+    // Machines: list_machines only while at least one machine is visible to agents.
+    machinesAvailable: () => machines.registry.anyAgentVisible(),
     // Knowledge Graph: the plugin's view of each chat (on or off, worker or not, what it sees).
     knowledgeForSession: (threadId) => knowledge.knowledgeForSession(threadId),
     api: () => services.internalApi,
@@ -2033,6 +2051,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Devices: before the plugins (no switch is followed any more). Setups and boots in flight are
     // cancelled; devices keep running and a restart reattaches.
     await devices.stop().catch((error) => console.error("Device service stop failed", error instanceof Error ? error.message : error));
+    // Machines: polling stops and queued machines.json writes land.
+    await machines.stop().catch((error) => console.error("Machines stop failed", error instanceof Error ? error.message : error));
     // GPT Image: stops following the plugin and the accounts.
     gptImage.stop();
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
@@ -2275,6 +2295,8 @@ interface Services {
   boxWiring?: DaemonBoxes;
   /** Device simulators: the device service (while the plugin is on) and its routes. Optional: route tests build a partial `services`. */
   devices?: DaemonDevices;
+  /** Machines: the registry of tailnet and paired machines (`machineRoutes`). Optional: route tests build a partial `services`. */
+  machines?: DaemonMachines;
   /** GPT Image: the plugin's service (settings routes). Optional: route tests build a partial `services`. */
   gptImage?: GptImageService;
   /** Host storage: the scan service and the action guard (Storage routes). Optional: route tests build a partial `services`. */
@@ -5171,6 +5193,8 @@ export function createServer(
   services.boxes?.registerRoutes(app);
   // Devices (`deviceRoutes`): both transports, the hub proxy too (the desktop app's relay reaches it here).
   services.devices?.registerRoutes(app);
+  // Machines (`machineRoutes`): both transports; agents see only visible machines, owner-only writes.
+  services.machines?.registerRoutes(app);
   // GPT Image (`gptImageRoutes.settings`): both transports like the plugin routes (the bearer hook gates HTTP).
   if (services.gptImage) registerGptImageRoutes(app, { service: services.gptImage });
 

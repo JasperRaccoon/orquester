@@ -26,6 +26,7 @@ import {
   type SetBoxConnectionRequest,
   type SetBoxProviderCredentialsRequest
 } from "@orquester/api";
+import type { StoredBox } from "@orquester/config";
 
 import type { BoxProviderAdapter, BoxProviderRegistry, ProviderCredentials, TailscaleKeys } from "../contracts.ts";
 import type { DeviceCacheWarmRequest, DeviceCacheWarmRun, DeviceCacheWarmStatus } from "../providers/blacksmith.ts";
@@ -386,8 +387,12 @@ export class BoxSettings implements BoxConnectivity {
 
   // ---- offers and kinds --------------------------------------------------------------------------
 
-  /** A provider's offers for a kind, cached {@link OFFERS_TTL_MS} (a failed fetch is not cached). */
-  async offers(id: string, kind: unknown): Promise<BoxOffersResponse> {
+  /**
+   * A provider's offers for a kind, cached {@link OFFERS_TTL_MS} (a failed fetch is not cached).
+   * `machineAllowed` (an agent's request): only the owner's machines it may use are offered
+   * (tailnet machines spec §4.1: a Hidden machine, or one with Commands and SSH off, is unknown to it).
+   */
+  async offers(id: string, kind: unknown, machineAllowed?: (boxId: string) => boolean): Promise<BoxOffersResponse> {
     const adapter = this.adapter(id);
     if (typeof kind !== "string" || !(BOX_KINDS as readonly string[]).includes(kind)) {
       throw new BoxError(400, "BOX_INVALID_REQUEST", "`kind` must be a box kind.");
@@ -398,7 +403,7 @@ export class BoxSettings implements BoxConnectivity {
     }
     if (adapter.id === "byo") {
       // The machines free right now (never cached: they come and go with their connections).
-      const offers = byoOffers(this.deps.store.list(), boxKind, (boxId) => this.deps.connected?.(boxId) ?? false);
+      const offers = byoOffers(this.byoRecords(machineAllowed), boxKind, (boxId) => this.deps.connected?.(boxId) ?? false);
       return { provider: adapter.id, kind: boxKind, ...offers, fetchedAt: new Date(this.deps.clock.now()).toISOString() };
     }
     const key = `${adapter.id}\u0000${boxKind}`;
@@ -452,13 +457,20 @@ export class BoxSettings implements BoxConnectivity {
     }
   }
 
-  async kinds(): Promise<BoxKindAvailability[]> {
+  /** The box records, less the owner's machines `machineAllowed` refuses (an agent's view). */
+  private byoRecords(machineAllowed?: (boxId: string) => boolean): StoredBox[] {
+    const records = this.deps.store.list();
+    return machineAllowed ? records.filter((record) => record.provider !== "byo" || machineAllowed(record.id)) : records;
+  }
+
+  /** Every kind's providers; `machineAllowed` as in {@link offers}. */
+  async kinds(machineAllowed?: (boxId: string) => boolean): Promise<BoxKindAvailability[]> {
     return Promise.all(
       BOX_KINDS.map(async (kind): Promise<BoxKindAvailability> => {
         // The owner's machines count only while one of the kind is free, and come after every
         // rented provider: they are never the default pick unless nothing else is connected.
         const freeMachine = (adapter: BoxProviderAdapter) =>
-          adapter.id !== "byo" || byoOffers(this.deps.store.list(), kind, (boxId) => this.deps.connected?.(boxId) ?? false).sizes.length > 0;
+          adapter.id !== "byo" || byoOffers(this.byoRecords(machineAllowed), kind, (boxId) => this.deps.connected?.(boxId) ?? false).sizes.length > 0;
         const renting = [...this.deps.providers.values()].filter(
           (adapter) => adapter.kinds.includes(kind) && this.configured(adapter.id) && freeMachine(adapter)
         );

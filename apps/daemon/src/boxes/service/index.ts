@@ -42,6 +42,7 @@ import { resolvePlacement } from "./placement.ts";
 import { BoxProjects } from "./projects.ts";
 import { BoxReconciler } from "./reconciler.ts";
 import { projectDeleted, StoreBoxRegistry } from "./registry.ts";
+import type { MachineAccessPort } from "../../machines/ports.ts";
 import { registerBoxRoutes } from "./routes.ts";
 import { BoxSettings, type BlacksmithSetupDriver, type BoxHostingAccounts, type TailscaleCredentials } from "./settings.ts";
 import { BoxStore, type BoxRecordStore } from "./store.ts";
@@ -121,6 +122,12 @@ export interface BoxService {
   projects: BoxProjects;
   settings: BoxSettings;
   enabled(): boolean;
+  /**
+   * Machines (tailnet machines spec §4.1.6): the owner's per-machine policy, read by the box routes
+   * so an agent is offered only the machines it may run commands on. Null (the default): every one.
+   */
+  setMachineAccess(access: Pick<MachineAccessPort, "allowsBox"> | null): void;
+  machineAccess(): Pick<MachineAccessPort, "allowsBox"> | null;
   registerRoutes(app: FastifyInstance): void;
   /** Load the stores, follow the plugin switch; the reconciler runs while it is on or any box is not destroyed. */
   start(): Promise<void>;
@@ -387,6 +394,8 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     return registry.summarize(final)!;
   };
 
+  let machineAccess: Pick<MachineAccessPort, "allowsBox"> | null = null;
+
   const service: BoxService = {
     registry,
     byo,
@@ -394,6 +403,10 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     projects,
     settings,
     enabled: () => enabled,
+    setMachineAccess: (access) => {
+      machineAccess = access;
+    },
+    machineAccess: () => machineAccess,
     registerRoutes: (app) => registerBoxRoutes(app, service),
 
     async start() {

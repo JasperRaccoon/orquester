@@ -5,7 +5,8 @@
  * Graph plugin) for a chat that can see at least one knowledge collection the knowledge line
  * naming them, (boxes) the machines line while the box tools are advertised, and (Device
  * simulators plugin) the devices line while the device tools are advertised, and (GPT Image plugin)
- * the images line while `generate_image` is advertised. Every chat tool is
+ * the images line while `generate_image` is advertised, and (machines) the machines line while a machine is
+ * visible to agents. Every chat tool is
  * on in every chat, so nothing here names tools that are off. Detail stays in tool descriptions.
  * Without boxes or devices, the worst case stays under 2 048 bytes, plus exactly
  * {@link KNOWLEDGE_LINE_MAX_BYTES} when the knowledge line is present (asserted by
@@ -60,6 +61,13 @@ const DEVICES_LINE =
 const IMAGES_LINE =
   "Images: to make or edit a picture call generate_image (GPT Image on the user's ChatGPT plan; recent:1 or paths to edit); never write image API scripts.";
 
+/**
+ * Tailnet machines spec §4.1.8: the one line added while at least one of the owner's machines is
+ * visible to agents. It names no machine: Hidden ones are never mentioned, and list_machines shows
+ * only the visible ones.
+ */
+const MACHINES_LINE = "Owner's machines: list_machines shows the ones you may use (OS, state, SSH alias); use one only when the task needs it.";
+
 const KNOWLEDGE_LINE_PREFIX = "Knowledge: ";
 const KNOWLEDGE_LINE_SUFFIX = ". Search it (knowledge_search) before deciding on these topics.";
 /** A name is clipped to this many code points in the line (collection names are ≤ 60 already). */
@@ -108,6 +116,8 @@ export interface OrquesterInstructionsInput {
   devices?: boolean;
   /** GPT Image: `generate_image` is advertised to it (the images line is added). */
   images?: boolean;
+  /** Machines: `list_machines` is advertised to it (a machine is visible to agents; the machines line is added). */
+  machines?: boolean;
   /**
    * Knowledge Graph: the names of the collections the chat can see while the plugin is on; absent
    * or empty = no knowledge line.
@@ -122,6 +132,7 @@ export function composeOrquesterInstructions(input: OrquesterInstructionsInput):
   if (input.boxes === true) lines.push(BOXES_LINE);
   if (input.devices === true) lines.push(DEVICES_LINE);
   if (input.images === true) lines.push(IMAGES_LINE);
+  if (input.machines === true) lines.push(MACHINES_LINE);
   const knowledge = knowledgeLine(input.knowledgeCollections ?? []);
   if (knowledge !== null) lines.push(knowledge);
   return lines.join("\n");

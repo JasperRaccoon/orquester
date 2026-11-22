@@ -48,7 +48,9 @@ export const TOOLSET_IDS = [
   // Device simulators plugin: iOS simulators and Android emulators (devices spec §9).
   "devices",
   // GPT Image plugin: generate and edit images on a ChatGPT plan (GPT Image design 2026-11-10 §6).
-  "images"
+  "images",
+  // The owner's tailnet and paired machines (tailnet machines spec 2026-11-22 §4.1.8).
+  "machines"
 ] as const;
 export type ToolsetId = (typeof TOOLSET_IDS)[number];
 
@@ -217,6 +219,13 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
     id: "images",
     label: "Images",
     tools: [act("generate_image")]
+  },
+  // Machines: advertised only while at least one of the owner's machines is visible to agents
+  // (`session-tools/manifest.ts`); Hidden machines never appear in it.
+  {
+    id: "machines",
+    label: "Your machines",
+    tools: [read("list_machines")]
   }
 ];
 

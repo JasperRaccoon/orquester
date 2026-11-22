@@ -23,6 +23,8 @@ import { imagesFamily } from "../tools/images.ts";
 // Knowledge Graph plugin: the shared knowledge base for agent chats (its spec, "Agent tools").
 import { knowledgeFamily } from "../tools/knowledge.ts";
 import { lineageFamily } from "../tools/lineage.ts";
+// The owner's tailnet and paired machines: list_machines (tailnet machines spec 2026-11-22 §4.1.8).
+import { machinesFamily } from "../tools/machines.ts";
 import { messagesFamily } from "../tools/messages.ts";
 import { notifyFamily } from "../tools/notify.ts";
 import { outputFamily } from "../tools/output.ts";
@@ -92,6 +94,8 @@ export const CATALOG: readonly AnyOrquesterTool[] = buildCatalog([
   devicesFamily,
   // GPT Image: chat-only, advertised while the plugin is on and a Codex account can make images.
   imagesFamily,
+  // Machines: chat-only, advertised while one of the owner's machines is visible to agents.
+  machinesFamily,
   // Workflow steps: chat-only, every chat (it refuses any chat that is not a reporting step).
   stepReportFamily
 ]);
