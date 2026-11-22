@@ -600,6 +600,7 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   close_device: "Closed a device",
   // machines (tailnet machines spec 2026-11-22 §4.1.8)
   list_machines: "Listed the owner's machines",
+  wake_machine: "Woke one of the owner's machines",
 
   // --- Legacy in-chat names (design 2026-10-14 §5, §6) ----------------------
   // Older builds' toolset request (every chat tool is on now).

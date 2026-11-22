@@ -117,3 +117,21 @@ test("pairing and waking without their features answer a named problem; removing
   const after = (await app.inject({ method: "GET", url: machineRoutes.machine(JASPER) })).json();
   assert.deepEqual([after.machine.state, after.machine.visibility, after.machine.boxId], ["not-paired", "hidden", null]);
 });
+
+test("an agent's wake asks the wake for an agent's senders; the owner's for any of their machines", async (t) => {
+  const { app, registry, asAgent } = await harness(t);
+  const asked: { machineId: string; agent: boolean }[] = [];
+  registry.setWake({
+    canWake: () => ({ canWake: true }),
+    wake: async (machineId, options) => {
+      asked.push({ machineId, agent: options?.agent === true });
+      return { sent: true, via: "ts:nMINIPC0000CNTRL" };
+    }
+  });
+  assert.equal((await asAgent("POST", machineRoutes.wake(JASPER))).statusCode, 200);
+  assert.equal((await app.inject({ method: "POST", url: machineRoutes.wake(JASPER) })).statusCode, 200);
+  assert.deepEqual(asked, [
+    { machineId: JASPER, agent: true },
+    { machineId: JASPER, agent: false }
+  ]);
+});
