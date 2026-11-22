@@ -183,7 +183,7 @@ function takenProblem(dnsName: string | null, port: number, by: string | null, n
 
 function changeProblem(result: Exclude<ChangeResult, { ok: true }>, operatorCommand: string): MachineProblem {
   if (result.reason === "permission") {
-    return { code: "tailscale-not-operator", message: result.message, fix: `Run \`${operatorCommand}\` once on this server (or "Allow without sudo" here), then try again.` };
+    return { code: "tailscale-not-operator", message: result.message, fix: `Run \`${operatorCommand}\` once on this server (or "Allow without sudo" in Settings → Server), then try again.` };
   }
   if (/serve is not enabled|https.*(not enabled|disabled)|certificate|cert/i.test(result.message)) {
     const link = /https:\/\/login\.tailscale\.com\/\S+/.exec(result.message)?.[0] ?? ADMIN_DNS_URL;

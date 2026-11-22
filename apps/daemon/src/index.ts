@@ -2077,8 +2077,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     await devices.stop().catch((error) => console.error("Device service stop failed", error instanceof Error ? error.message : error));
     // GPT Image: stops following the plugin and the accounts.
     gptImage.stop();
-    // Tailnet: the 30 s check stops (serve routes stay as they are); a change in flight lands first.
-    await tailnet.stop().catch((error) => console.error("Tailnet service stop failed", error instanceof Error ? error.message : error));
+    // Tailnet: the 30 s check stops (serve routes stay as they are). Not awaited: a `tailscale serve`
+    // change in flight may take its 30 s timeout, longer than the shutdown backstop.
+    void tailnet.stop().catch((error) => console.error("Tailnet service stop failed", error instanceof Error ? error.message : error));
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
