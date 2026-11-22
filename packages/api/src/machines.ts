@@ -210,7 +210,9 @@ export type MachineProblemCode =
   /** No connected machine (nor the daemon host) can send a magic packet to it, or WoL is off on its NICs. */
   | "wake-unavailable"
   /** The pairing bootstrap ran over SSH but failed; the message carries its last meaningful line (never secrets). */
-  | "pair-bootstrap-failed";
+  | "pair-bootstrap-failed"
+  /** A `tailscale serve` change on the daemon host failed for another reason; the message carries Tailscale's line. */
+  | "tailscale-serve-failed";
 
 export const MACHINE_PROBLEM_CODES: readonly MachineProblemCode[] = [
   "tailscale-unavailable",
@@ -232,7 +234,8 @@ export const MACHINE_PROBLEM_CODES: readonly MachineProblemCode[] = [
   "oom-protection-missing",
   "serve-port-taken",
   "wake-unavailable",
-  "pair-bootstrap-failed"
+  "pair-bootstrap-failed",
+  "tailscale-serve-failed"
 ];
 
 export function isMachineProblemCode(value: unknown): value is MachineProblemCode {

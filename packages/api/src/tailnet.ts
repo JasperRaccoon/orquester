@@ -94,3 +94,6 @@ export interface TailnetChangedPayload {
 }
 
 export type TailnetErrorCode = "TAILNET_PROBLEM" | "TAILNET_INVALID_REQUEST" | "TAILNET_PREVIEW_NOT_FOUND";
+
+// Which addresses are tailnet ones (§4.7.5): by interface or Tailscale's IPv6 range, never 100.64/10 alone.
+export * from "./tailnet-address.ts";
