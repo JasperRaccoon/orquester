@@ -300,3 +300,15 @@ func TestUnixChannelRefusesARelativePathAndAMissingSocket(t *testing.T) {
 		}
 	}
 }
+
+// A build without the desktop-session helper refuses a desktop-session exec
+// instead of running it in its own session.
+func TestExecInTheDesktopSessionIsRefusedWithoutTheHelper(t *testing.T) {
+	d := newTestDaemon(t)
+	d.send(map[string]any{"t": "open", "ch": 10, "spec": map[string]any{"kind": "exec", "command": "true", "args": []string{}, "session": "desktop"}})
+	failed := d.expect("open-failed", isMsg("open-failed", 10))
+	info, _ := failed["error"].(map[string]any)
+	if info["code"] != "NO_DESKTOP_SESSION" {
+		t.Fatalf("open failed for the wrong reason: %v", failed)
+	}
+}

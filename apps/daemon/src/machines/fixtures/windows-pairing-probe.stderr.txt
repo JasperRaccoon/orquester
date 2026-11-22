@@ -1,0 +1,10 @@
+# Captured 2026-11-22: the probe section of the unattended Windows pairing script (bootstrap.ts
+# byoWindowsPairingScript, from "$Me = ..." to the desktop probe) run read-only over SSH on the
+# owner's mini PC (Windows 10 Pro 22H2, Win32-OpenSSH, cmd.exe login shell, Spanish locale, code
+# page 850) as `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -` with the
+# script on stdin. Its stdout was empty; this is its stderr, verbatim (no identifiers to redact).
+# The full script was also parsed there (Parser::ParseInput): no errors, one statement.
+orq-probe: sudo=yes
+orq-probe: whpx=on
+orq-probe: autologon=on
+orq-probe: desktop=signed-in

@@ -16,12 +16,18 @@
  *   "Use your machine" card (same family, same rules, never grantable) naming the machine; the
  *   approved machine is lent to the chat until its time limit, `destroy_box` or the chat closing,
  *   then given back (never destroyed). It is used only when asked for by provider, or when no
- *   rented provider rents the kind.
+ *   rented provider rents the kind. Machines (tailnet machines spec 2026-11-22 §4.1): the daemon
+ *   offers an agent only machines it may run commands on (a Hidden one is unknown to it), a machine
+ *   the owner set to Free use with Commands and SSH on is lent without a card, and `list_boxes`
+ *   shows an owner's machine only while the daemon lists it to the chat.
  * - **Ownership** is the daemon's: the temporary-box routes and the `DaemonApi` box operations reach
  *   only the calling chat's own boxes (`boxes/temporary/tools.ts`).
- * - **Nothing is copied into a box**: the agent moves what it needs with `box_upload` /
- *   `box_download` (streamed by the daemon, never through JSON; paths inside the chat's project,
- *   spelled as host paths, whose files are in the project's own box for a box project).
+ * - **Nothing is copied into a box**: the agent moves what it needs itself — over plain `ssh`, `scp`
+ *   and `rsync` with the box's `orq-<name>` alias (agent SSH, spec 2026-11-22 §4.3: `create_box`
+ *   and `list_boxes` return `ssh_alias` and the exact `ssh_command`; the daemon tunnels it through
+ *   its connection to the box, `boxes/agent-ssh/`), or with `box_upload` / `box_download`
+ *   (streamed by the daemon, never through JSON; paths inside the chat's project, spelled as host
+ *   paths, whose files are in the project's own box for a box project), which stay available.
  * - **Lending** (spec docs/superpowers/specs/2026-11-03-lend-accounts-to-boxes-design.md §8, §9):
  *   `box_lend_accounts` uses subscription quota and exposes tokens to the box, so it opens a `spend`
  *   card like `create_box`. The accounts, box and minutes are resolved BEFORE the card and pinned;
@@ -42,6 +48,7 @@ import {
   boxRoutes,
   isBoxLendAgent,
   isBoxProviderId,
+  machineRoutes,
   SYSTEM_ACCOUNT_ID,
   TEMPORARY_BOX_DEFAULT_LIFETIME_MINUTES,
   TEMPORARY_BOX_MAX_LIFETIME_MINUTES,
@@ -65,6 +72,7 @@ import {
   type LendAccountsPreviewResponse,
   type LendAccountsRequest,
   type LendAccountsResponse,
+  type MachinesResponse,
   type TemporaryBoxesResponse
 } from "@orquester/api";
 
@@ -197,8 +205,14 @@ function boxView(box: BoxSummary): Record<string, unknown> {
     hourly_usd: box.hourlyUsd,
     estimated_cost_usd: Math.round(box.estimatedCostUsd * 100) / 100,
     deadline: box.deadlineAt,
-    purpose: box.purposeNote
+    purpose: box.purposeNote,
+    ...sshView(box)
   };
+}
+
+/** The box's `orq-<name>` alias for this chat and the command that opens a shell with it, when it has one. */
+function sshView(box: BoxSummary): Record<string, unknown> {
+  return box.sshAlias && box.sshCommand ? { ssh_alias: box.sshAlias, ssh_command: box.sshCommand } : {};
 }
 
 async function getJson<T>(api: DaemonApi, path: string, notFound: { code: string; message: string }): Promise<T> {
@@ -377,6 +391,19 @@ function planPins(plan: BoxPlan): Record<string, string> {
   };
 }
 
+/**
+ * Machines (tailnet machines spec §4.1.3): whether the plan borrows one of the owner's machines that
+ * is Free use with Commands and SSH on — then no card is shown. Asked of the daemon with the chat's
+ * principal: a machine it does not list (Hidden, or unknown) or a failed read means a card (fail closed).
+ */
+async function freeUseMachine(api: DaemonApi, plan: BoxPlan): Promise<boolean> {
+  if (plan.provider.id !== BYO_PROVIDER_ID) return false;
+  const res = await api.request("GET", machineRoutes.list);
+  if (res.status >= 400) return false;
+  const machine = (res.body as MachinesResponse).machines.find((entry) => entry.boxId === plan.size.id);
+  return machine?.visibility === "free" && machine.capabilities.commands;
+}
+
 /** Destroy a box `create_box` gave up on (best effort: the reconciler catches what this misses). */
 async function abandon(api: DaemonApi, boxId: string, reason: "agent" | "provisioning-failed"): Promise<void> {
   try {
@@ -390,7 +417,7 @@ const createBox = defineTool({
   name: "create_box",
   title: "Rent a temporary box",
   description:
-    "Rent a cloud machine for this chat when the host can't do the job (more CPU or RAM, another OS, a GPU, isolation). It COSTS the owner money: every box needs their approval on a card (up to 30 min); if denied, don't retry — ask. Then waits until ready (minutes; Windows and macOS longer). Orquester copies nothing in: send what you need with box_upload (e.g. a git bundle), run with box_exec, fetch results with box_download. Destroy it with destroy_box once done; it is also destroyed at its time limit and when this chat closes.",
+    "Rent a cloud machine for this chat when the host can't do the job (CPU, RAM, another OS, a GPU, isolation). It COSTS the owner money: each box needs their approval card (up to 30 min); if denied, don't retry: ask. Waits until ready (minutes). It starts empty. Work on it from bash with the result's ssh_command (ssh orq-<name>; scp and rsync the same way); box_exec, box_upload and box_download also work. destroy_box when done; it is also destroyed at its time limit and when this chat closes.",
   input: {
     kind: z.enum(BOX_KINDS as unknown as [BoxKind, ...BoxKind[]]),
     provider: z
@@ -399,7 +426,7 @@ const createBox = defineTool({
       .min(1)
       .max(40)
       .optional()
-      .describe('A connected provider id; default: the cheapest for the kind. "byo": one of the owner\'s own paired machines (free; still needs approval).'),
+      .describe('A connected provider id; default: the cheapest for the kind. "byo": one of the owner\'s own paired machines (free; card unless free use).'),
     size: z.string().trim().min(1).max(200).optional().describe("A size id; default: the cheapest."),
     region: z.string().trim().min(1).max(200).optional().describe("A region id; default: the first the size is offered in."),
     lifetime_minutes: z
@@ -414,8 +441,14 @@ const createBox = defineTool({
   audiences: ["chat"],
   toolset: "boxes",
   tier: "act",
-  spendFamily: "boxes",
-  scope: async (_args, ctx) => ownBoxScope(ctx, "none", true),
+  // A spend card for every call, but for one of the owner's Free-use machines (looked up by `scope`).
+  spendFamily: (_args, scope) => (scope.resolved && scope.resolved.spendFamily === undefined ? undefined : "boxes"),
+  async scope(args, ctx) {
+    const claim = ownBoxScope(ctx, "none", true);
+    if (ctx.caller.kind !== "thread" || (args.provider !== undefined && args.provider !== BYO_PROVIDER_ID)) return claim;
+    const plan = await planBox(ctx.api, args);
+    return (await freeUseMachine(ctx.api, plan)) ? { ...claim, resolved: { tier: "act" } } : claim;
+  },
   async approval(args, ctx) {
     const caller = threadCaller(ctx.caller, "create_box");
     const plan = await planBox(ctx.api, args);
@@ -425,7 +458,12 @@ const createBox = defineTool({
   resultKind: "json",
   async run(args, ctx) {
     threadCaller(ctx.caller, "create_box");
-    const pins = ctx.approval?.pins;
+    let pins = ctx.approval?.pins;
+    if (!pins) {
+      // No card: only one of the owner's Free-use machines, checked again now (fail closed).
+      const plan = await planBox(ctx.api, args);
+      if (await freeUseMachine(ctx.api, plan)) pins = planPins(plan);
+    }
     // Fail closed: a box is rented only as a card showed it.
     if (!pins || !isBoxProviderId(pins.provider) || !pins.size || !pins.region || !pins.lifetimeMinutes) {
       throw new ToolError("PERMISSION_DENIED", "create_box needs the owner's approval on its card.");
@@ -464,6 +502,7 @@ const createBox = defineTool({
       arch: box.arch,
       hourly_usd: box.hourlyUsd,
       deadline: box.deadlineAt,
+      ...sshView(box),
       note:
         box.provider === BYO_PROVIDER_ID
           ? "The owner's own machine, lent to this chat: it is not empty, so touch only what the task needs. destroy_box gives it back (nothing is deleted); so do its deadline and this chat closing."
@@ -475,7 +514,8 @@ const createBox = defineTool({
 const listBoxes = defineTool({
   name: "list_boxes",
   title: "List this chat's boxes",
-  description: "This chat's temporary boxes: id, kind, provider, state, OS/arch, $/h, estimated cost so far, deadline; lent_accounts: logins it borrowed on any VM.",
+  description:
+    "This chat's temporary boxes: id, kind, provider, state, OS/arch, $/h, cost so far, deadline, ssh_command; lent_accounts: logins it borrowed on any VM.",
   input: {},
   audiences: ["chat"],
   toolset: "boxes",
@@ -490,7 +530,15 @@ const listBoxes = defineTool({
     const noRental = (boxes.body as { code?: unknown } | null)?.code === "BOXES_DISABLED";
     if (boxes.status >= 400 && !noRental) throw daemonError(boxes);
     if (lends.status >= 400) throw daemonError(lends);
-    return { boxes: noRental ? [] : (boxes.body as TemporaryBoxesResponse).boxes.map(boxView), lent_accounts: (lends.body as AccountLendsResponse).lends.map(lentView) };
+    let listed = noRental ? [] : (boxes.body as TemporaryBoxesResponse).boxes;
+    if (listed.some((box) => box.provider === BYO_PROVIDER_ID)) {
+      // Machines (tailnet machines spec §4.1.3): an owner's machine shows only while the daemon lists
+      // it to this chat (never a Hidden one); a failed read shows none of them.
+      const machines = await api.request("GET", machineRoutes.list);
+      const visible = new Set(machines.status < 400 ? (machines.body as MachinesResponse).machines.map((machine) => machine.boxId) : []);
+      listed = listed.filter((box) => box.provider !== BYO_PROVIDER_ID || visible.has(box.id));
+    }
+    return { boxes: listed.map(boxView), lent_accounts: (lends.body as AccountLendsResponse).lends.map(lentView) };
   }
 });
 

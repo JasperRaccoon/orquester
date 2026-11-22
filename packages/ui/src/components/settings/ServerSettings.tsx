@@ -7,6 +7,7 @@ import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { Badge, FormField, Notice, SettingRow, SettingsPage, SettingsSection } from "./primitives";
 import { AuthSessionsSettings } from "./AuthSessionsSettings";
+import { TailnetSettings } from "./TailnetSettings";
 import { SecondFactorSettings } from "./SecondFactorSettings";
 
 /** The editable slice of daemon.json, as the form holds it. */
@@ -329,6 +330,9 @@ export const ServerSettings: React.FC = () => {
           </div>
         )}
       </SettingsSection>
+
+      {/* Tailscale's https://….ts.net address for the remote transport, and shared dev-server previews. */}
+      <TailnetSettings />
 
       {(!isLocal || saved?.httpEnabled || passwordSet) && (
         <>

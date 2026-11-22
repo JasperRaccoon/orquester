@@ -40,7 +40,8 @@ function apiFor(port: DeviceToolsPort | null): FakeDaemonApi {
     deviceAction: (device: string | undefined, input: Parameters<DeviceToolsPort["toolAction"]>[2], opts?: DeviceCallOptions) =>
       run(opts, (p, id, signal) => p.toolAction(id, device, input, signal)),
     deviceInstall: (input: Parameters<DeviceToolsPort["toolInstall"]>[1], opts?: DeviceCallOptions) => run(opts, (p, id, signal) => p.toolInstall(id, input, signal)),
-    deviceClose: (input: Parameters<DeviceToolsPort["toolClose"]>[1], opts?: DeviceCallOptions) => run(opts, (p, id) => p.toolClose(id, input))
+    deviceClose: (input: Parameters<DeviceToolsPort["toolClose"]>[1], opts?: DeviceCallOptions) => run(opts, (p, id) => p.toolClose(id, input)),
+    deviceForward: (input: Parameters<DeviceToolsPort["toolForward"]>[1], opts?: DeviceCallOptions) => run(opts, (p, id) => p.toolForward(id, input))
   });
   return api;
 }
@@ -74,7 +75,7 @@ async function androidService(): Promise<TestDeviceService> {
 
 test("the device tools are chat-only; schemas refuse bad and unknown arguments", async () => {
   const api = apiFor(null);
-  for (const name of ["list_devices", "open_device", "device_action", "device_install", "close_device"]) {
+  for (const name of ["list_devices", "open_device", "device_action", "device_install", "device_forward_port", "close_device"]) {
     const external = await call(api, name, {}, { caller: { kind: "external" } });
     assert.ok(!external.ok && external.code === "TOOL_NOT_FOUND", name);
   }
@@ -242,6 +243,63 @@ test("research hosts: list_devices marks them, and open_device reaches one by na
     assert.equal(opened.value.notice, research.researchNotice);
     assert.match(String(opened.value.quick_start), /\.ipa/);
     assert.doesNotMatch(String(opened.value.quick_start), /simulator/);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("list_devices names each host's machine, owner, capacity basis and problems; open_device runs on a named host; device_forward_port adds, lists and removes", async () => {
+  const jasper = new FakeDeviceHost("box:jasper", "byo", ["android"], "jasper (your Linux machine)");
+  jasper.boxInfo = { boxId: "jasper", provider: "byo", hourlyUsd: 0, startedAt: "2026-11-22T00:00:00.000Z", deadlineAt: null };
+  jasper.problemList = [{ code: "linger-off", message: "jasper stops orq-agent when jasper logs out.", fix: "sudo loginctl enable-linger jasper" }];
+  jasper.runImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+  const local = new FakeDeviceHost();
+  const listens: number[] = [];
+  const t = await startTestDeviceService({
+    factories: [new FakeHostFactory("local", ["android"], [local]), new FakeHostFactory("byo", ["android"], [jasper])],
+    settings: { android: { enabled: true } },
+    deps: {
+      threadProject: () => PROJECT,
+      forwardLink: {
+        projectMachine: () => ({ kind: "host" }),
+        connect: async () => Promise.reject(new Error("no Metro")),
+        listen: async (_machine, port) => {
+          listens.push(port);
+          return { port, alive: async () => true, close: async () => undefined };
+        }
+      }
+    }
+  });
+  try {
+    const api = apiFor(t.service);
+    const listed = await call(api, "list_devices", {});
+    assert.ok(listed.ok, JSON.stringify(listed));
+    const hosts = listed.value.hosts as Record<string, unknown>[];
+    const own = hosts.find((host) => host.id === "box:jasper")!;
+    assert.equal(own.machine, "jasper (your Linux machine)");
+    assert.equal(own.machine_id, "box:jasper");
+    assert.equal(own.owner, "own machine");
+    assert.deepEqual(own.problems, [{ problem: "jasper stops orq-agent when jasper logs out.", fix: "sudo loginctl enable-linger jasper" }]);
+    assert.equal(hosts.find((host) => host.id === "local")!.owner, "this host");
+
+    const opened = await call(api, "open_device", { platform: "android", host: "box:jasper" });
+    assert.ok(opened.ok, JSON.stringify(opened));
+    assert.equal(local.booted.length, 0, "the named host, not this one (placement's first choice)");
+    const device = opened.value.device as string;
+    assert.match(device, /^box:jasper\//);
+
+    const added = await call(api, "device_forward_port", { device, action: "add", device_port: 3000 });
+    assert.ok(added.ok, JSON.stringify(added));
+    assert.deepEqual(added.value.forwards, [{ device_port: 3000, project_port: 3000 }]);
+    assert.deepEqual(listens, [3000]);
+    const listedForwards = await call(api, "device_forward_port", { device, action: "list" });
+    assert.ok(listedForwards.ok);
+    assert.deepEqual(listedForwards.value.forwards, [{ device_port: 3000, project_port: 3000 }]);
+    const removed = await call(api, "device_forward_port", { device, action: "remove", device_port: 3000 });
+    assert.ok(removed.ok);
+    assert.deepEqual(removed.value.forwards, []);
+    const missing = await call(api, "device_forward_port", { device, action: "add" });
+    assert.ok(!missing.ok && missing.code === "INVALID_ARGUMENT");
   } finally {
     await t.cleanup();
   }

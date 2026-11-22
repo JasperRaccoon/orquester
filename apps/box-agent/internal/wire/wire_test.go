@@ -94,6 +94,9 @@ func TestControlMessages(t *testing.T) {
 					t.Errorf("%s[%d] spec: %v", kind, i, err)
 				}
 			}
+			if event, ok := msg.(*Event); ok && event.Name == NicsEventName {
+				roundTrip(t, kind+" "+event.Name, event.Data, &NicsEvent{})
+			}
 		}
 	}
 	for _, t2 := range []string{"hello", "welcome", "reject", "ping", "pong", "req", "res", "event", "open", "opened", "open-failed", "eof", "exit", "resize", "signal", "credit", "close"} {

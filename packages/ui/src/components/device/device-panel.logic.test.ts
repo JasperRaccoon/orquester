@@ -246,6 +246,37 @@ describe("picker", () => {
       assert.doesNotMatch(`${ios.note} ${ios.rows[0]!.badge}`, /rent/i);
     }
   });
+  describe("hosts on the owner's machines", () => {
+    const jasper = (overrides: Partial<DeviceHostSummary> = {}) =>
+      host({ id: "box:jasper", kind: "byo", label: "jasper (your Linux machine)", platforms: ["android"], capacity: { used: 1, total: 12 }, ...overrides });
+    const localNotSetUp = host({ status: "needs-setup", readiness: { ready: false, checkedAt: null, checks: [{ id: "kvm", label: "KVM", state: "missing", detail: null }] } });
+
+    it("a ready Linux machine opens Android even though this host is not set up, and nothing says it needs setup", () => {
+      const android = pickerGroups({ profiles, hosts: [localNotSetUp, jasper()], settings: settings(), chatLeases: 0, macHourlyUsd: null, rentable: [] }).filter((group) => group.platform === "android");
+      assert.deepEqual(android.map((group) => group.title), ["jasper (your Linux machine)"]);
+      assert.ok(android[0]!.rows.every((row) => row.enabled && row.hostId === "box:jasper" && row.badge !== "Needs setup"));
+    });
+
+    it("groups devices by host, labelled by machine name, with each host's problems", () => {
+      const linger = { code: "linger-off" as const, message: "jasper stops orq-agent when jasper logs out.", fix: "sudo loginctl enable-linger jasper" };
+      const groups = pickerGroups({ profiles, hosts: [host(), jasper({ problems: [linger] })], settings: settings(), chatLeases: 0, macHourlyUsd: null, rentable: ["android"] });
+      const android = groups.filter((group) => group.platform === "android");
+      assert.deepEqual(android.map((group) => [group.title, group.hostId ?? null]), [
+        ["This machine", null],
+        ["jasper (your Linux machine)", "box:jasper"],
+        ["Any free host", null]
+      ]);
+      assert.deepEqual(android[1]!.problems, [linger]);
+      assert.ok(android[2]!.rows.every((row) => row.enabled && row.hostId === undefined));
+    });
+
+    it("an offline machine says why and does not open", () => {
+      const asleep = { code: "machine-asleep" as const, message: "jasper is asleep or offline, so its emulators can't be used." };
+      const [group] = pickerGroups({ profiles, hosts: [jasper({ status: "unreachable", problems: [asleep] })], settings: settings(), chatLeases: 0, macHourlyUsd: null, rentable: [] }).filter((entry) => entry.platform === "android");
+      assert.ok(group!.rows.every((row) => !row.enabled && row.reason === asleep.message));
+    });
+  });
+
   describe("research hosts", () => {
     const research = (overrides: Partial<DeviceHostSummary> = {}) =>
       host({ id: "vphone:b1", kind: "byo", label: "Studio Mac", platforms: ["ios"], research: true, notice: "Research — real iOS in a VM", capacity: { used: 0, total: 2 }, ...overrides });

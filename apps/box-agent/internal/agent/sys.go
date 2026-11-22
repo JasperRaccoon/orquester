@@ -26,7 +26,11 @@ func probe(name string, args ...string) (string, bool) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return out.String(), false
+	}
+	resetChildOOMScore(cmd.Process.Pid)
+	if err := cmd.Wait(); err != nil {
 		return out.String(), false
 	}
 	return out.String(), true

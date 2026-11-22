@@ -150,9 +150,32 @@ export interface BootWaitDeps {
   serial: string;
   /** The process to watch: a boot fails at once when it exits. */
   alive: () => Promise<boolean>;
+  /** Why the boot cannot finish though the process lives on (its log's {@link emulatorLogFailure}); null while it can. */
+  failed?: () => Promise<string | null>;
   signal: AbortSignal;
   timeoutMs: number;
   pollMs?: number;
+}
+
+/**
+ * Why an emulator whose QEMU keeps running will never boot, from its log; null when nothing says so.
+ * A renderer that does not start (`-gpu host` without an X display it can open: "Failed to open
+ * display", "Could not start renderer") leaves QEMU idle until the boot times out.
+ */
+export function emulatorLogFailure(log: string): string | null {
+  if (!/Could not start renderer/.test(log)) return null;
+  const cause = log.split(/\r?\n/).find((line) => /Failed to open display|Failed to get EGL display/.test(line));
+  return `the emulator could not start its renderer${cause ? ` (${cause.replace(/^\S+\s*\|\s*/, "").trim()})` : ""}`;
+}
+
+/**
+ * The emulator's log: `logPath`, and `<logPath>.err` beside it when there is one (a Windows box
+ * starts it with `Start-Process`, which cannot send stdout and stderr to one file, and the
+ * renderer's errors go to stderr).
+ */
+export async function readEmulatorLog(executor: Pick<DeviceExecutor, "readText">, logPath: string): Promise<string> {
+  const [out, err] = await Promise.all([executor.readText(logPath), executor.readText(`${logPath}.err`)]);
+  return [out, err].filter((text): text is string => text !== null && text !== "").join("\n");
 }
 
 /** Resolves once `sys.boot_completed` is 1; rejects when the emulator exits, the signal aborts or time runs out. */
@@ -161,6 +184,8 @@ export async function waitForBootCompleted(deps: BootWaitDeps): Promise<void> {
   while (true) {
     deps.signal.throwIfAborted();
     if (!(await deps.alive())) throw new Error("exited during boot");
+    const failure = deps.failed ? await deps.failed() : null;
+    if (failure) throw new Error(failure);
     const result = await deps.exec(deps.adb, ["-s", deps.serial, "shell", "getprop", "sys.boot_completed"], { env: deps.env, timeoutMs: 5_000, signal: deps.signal });
     if (result.exitCode === 0 && result.stdout.trim() === "1") return;
     if (Date.now() > deadline) throw new Error(`did not finish booting within ${Math.round(deps.timeoutMs / 1000)} s`);

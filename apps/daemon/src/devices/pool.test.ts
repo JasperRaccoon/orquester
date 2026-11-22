@@ -72,6 +72,16 @@ test("placement modes and a named host", () => {
   assert.deepEqual(choosePlacement({ platform: "android", hosts: [host("local", { draining: true })], settings: settings(), canProvision: false }), { kind: "not-ready", hostId: "local", missing: [] });
 });
 
+test("the owner's own machines are placed on before rented hosts, however full", () => {
+  const own = host("box:jasper", { kind: "byo", platforms: ["android"], used: 4, total: 6 });
+  const rented = host("box:rented", { platforms: ["android"], used: 7, total: 8 });
+  assert.deepEqual(choosePlacement({ platform: "android", hosts: [rented, own], settings: settings((s) => void (s.pool.placement = "pool-only")), canProvision: true }), { kind: "host", hostId: "box:jasper" });
+  assert.deepEqual(
+    choosePlacement({ platform: "android", hosts: [rented, { ...own, used: 6 }], settings: settings((s) => void (s.pool.placement = "pool-only")), canProvision: true }),
+    { kind: "host", hostId: "box:rented" }
+  );
+});
+
 test("a research host (vphone) takes only a request that names it", () => {
   const research = host("vphone:mac1", { kind: "byo", research: true });
   assert.deepEqual(choosePlacement({ platform: "ios", hosts: [research], settings: settings(), canProvision: false }), { kind: "not-ready", hostId: null, missing: [] });
@@ -135,6 +145,12 @@ test("decidePool placement: local first up to its capacity, then best fit (the m
   const decision = decide({ hosts, requests: [req("r1"), req("r2"), req("r3"), req("r4")] });
   assert.deepEqual(placed(decision), { r1: "local", r2: "box:b", r3: "box:b", r4: "box:a" });
   assert.deepEqual(decision.scaleUp.filter((entry) => entry.reason === "demand"), []);
+});
+
+test("decidePool placement: an own machine takes requests before a rented host with more load", () => {
+  const hosts = [poolHost("box:rented", { used: 7 }), poolHost("box:jasper", { kind: "byo", total: 2, hourlyUsd: 0, destroyable: false })];
+  const decision = decide({ hosts, requests: [req("r1"), req("r2"), req("r3")] });
+  assert.deepEqual(placed(decision), { r1: "box:jasper", r2: "box:jasper", r3: "box:rented" });
 });
 
 test("decidePool placement modes: pool-only skips this host, local-only never rents", () => {

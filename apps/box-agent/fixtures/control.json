@@ -136,6 +136,65 @@
         "kvm": false
       },
       "procs": []
+    },
+    {
+      "t": "hello",
+      "protocol": 1,
+      "agentVersion": "0.2.0+def5678",
+      "auth": {
+        "kind": "credential",
+        "boxId": "box3",
+        "credential": "Y3JlZA"
+      },
+      "sys": {
+        "os": "linux",
+        "arch": "x64",
+        "libc": "glibc",
+        "hostname": "orq-box1",
+        "osRelease": "Ubuntu 24.04.1 LTS",
+        "user": "dev",
+        "isRoot": false,
+        "canElevate": true,
+        "home": "/home/dev",
+        "shell": "/bin/bash",
+        "tmux": true,
+        "docker": false,
+        "cpus": 8,
+        "memBytes": 16777216000,
+        "gpus": [
+          "NVIDIA L4"
+        ],
+        "agentPath": "/usr/local/bin/orq-agent",
+        "dataDir": "/var/lib/orq-agent",
+        "container": false,
+        "kvm": true
+      },
+      "procs": [],
+      "capabilities": [
+        "ssh-server",
+        "desktop-session"
+      ],
+      "sshHostKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOrqAgentHostKeyFixture",
+      "nics": [
+        {
+          "name": "enp5s0",
+          "mac": "aa:bb:cc:dd:ee:01",
+          "ipv4": "192.168.2.21",
+          "prefixLength": 24,
+          "broadcast": "192.168.50.255",
+          "wired": true,
+          "wolEnabled": true
+        },
+        {
+          "name": "wlp4s0",
+          "mac": "aa:bb:cc:dd:ee:02",
+          "ipv4": null,
+          "prefixLength": null,
+          "broadcast": null,
+          "wired": false,
+          "wolEnabled": null
+        }
+      ]
     }
   ],
   "welcome": [
@@ -262,6 +321,23 @@
           {
             "path": "/srv/p/c.ts",
             "type": "delete"
+          }
+        ]
+      }
+    },
+    {
+      "t": "event",
+      "name": "sys.nics",
+      "data": {
+        "nics": [
+          {
+            "name": "enp5s0",
+            "mac": "aa:bb:cc:dd:ee:01",
+            "ipv4": "192.168.2.21",
+            "prefixLength": 24,
+            "broadcast": "192.168.50.255",
+            "wired": true,
+            "wolEnabled": true
           }
         ]
       }

@@ -94,6 +94,36 @@ type DetachedProcInfo struct {
 	Lost *string `json:"lost,omitempty"`
 }
 
+// Agent capabilities (BoxAgentCapability): optional features a build lists in Hello.Capabilities.
+const (
+	// CapabilitySSHServer: the built-in SSH server serves "ssh" channels and takes "ssh.keys".
+	CapabilitySSHServer = "ssh-server"
+	// CapabilityDesktopSession: Windows, exec with Session "desktop" runs in the interactive session.
+	CapabilityDesktopSession = "desktop-session"
+	// CapabilityWakeSender: "net.wake" sends a Wake-on-LAN magic packet onto one of the box's LANs.
+	CapabilityWakeSender = "wake-sender"
+)
+
+// NicsEventName is the box → host event carrying a NicsEvent (BOX_NICS_EVENT).
+const NicsEventName = "sys.nics"
+
+// Nic is one network interface for Wake-on-LAN (BoxNic).
+type Nic struct {
+	Name         string  `json:"name"`
+	MAC          string  `json:"mac"`
+	IPv4         *string `json:"ipv4"`
+	PrefixLength *int    `json:"prefixLength"`
+	Broadcast    *string `json:"broadcast"`
+	Wired        bool    `json:"wired"`
+	// WolEnabled: wake-on-magic-packet is on; nil when the OS would not say.
+	WolEnabled *bool `json:"wolEnabled"`
+}
+
+// NicsEvent is the "sys.nics" payload: the whole list, sent when it changes after hello.
+type NicsEvent struct {
+	Nics []Nic `json:"nics"`
+}
+
 type Hello struct {
 	T            string             `json:"t"`
 	Protocol     int                `json:"protocol"`
@@ -101,6 +131,12 @@ type Hello struct {
 	Auth         Auth               `json:"auth"`
 	Sys          SysInfo            `json:"sys"`
 	Procs        []DetachedProcInfo `json:"procs"`
+	// Capabilities: optional features this build supports (Capability* constants).
+	Capabilities []string `json:"capabilities,omitempty"`
+	// SSHHostKey: with CapabilitySSHServer, the built-in server's host public key ("ssh-ed25519 AAAA…").
+	SSHHostKey string `json:"sshHostKey,omitempty"`
+	// Nics: Wake-on-LAN details at connect; changes follow as NicsEventName events.
+	Nics []Nic `json:"nics,omitempty"`
 }
 
 type ForwardSpec struct {

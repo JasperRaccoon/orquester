@@ -99,7 +99,7 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const chatNames = new Set(chat.map((tool) => tool.name));
   for (const workflowOwned of [false, true]) {
     for (const knowledgeCollections of [[], ["SEO", "Ads"]]) {
-      assert.deepEqual(strays(composeOrquesterInstructions({ workflowOwned, knowledgeCollections, images: true }), chatNames, known), []);
+      assert.deepEqual(strays(composeOrquesterInstructions({ workflowOwned, knowledgeCollections, images: true, machines: true }), chatNames, known), []);
     }
   }
   assert.deepEqual(strays(KNOWLEDGE_WORKER_INSTRUCTIONS, chatNames, known), []);
@@ -127,9 +127,14 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const deviceRows = chat.filter((tool) => groups.get(tool.name) === "devices");
   // GPT Image: advertised only while the plugin can make images, so outside the base budget.
   const imageRows = chat.filter((tool) => groups.get(tool.name) === "images");
+  // Machines and tailnet previews (tailnet machines spec 2026-11-22 §4.1, §4.7.4): advertised only
+  // while a machine is visible to agents / Tailscale on the daemon host can serve HTTPS, so outside
+  // the base budget, each on its own allowance.
+  const machineRows = chat.filter((tool) => groups.get(tool.name) === "machines");
+  const tailnetRows = chat.filter((tool) => groups.get(tool.name) === "tailnet");
   // report_step_result (workflow outcomes, spec 2026-11-10 §5.2): every chat gets it, on its own allowance.
   const reportRows = chat.filter((tool) => tool.name === "report_step_result");
-  const baseRows = chat.filter((tool) => !boxRows.includes(tool) && !knowledgeRows.includes(tool) && !deviceRows.includes(tool) && !imageRows.includes(tool) && !reportRows.includes(tool));
+  const baseRows = chat.filter((tool) => !boxRows.includes(tool) && !knowledgeRows.includes(tool) && !deviceRows.includes(tool) && !imageRows.includes(tool) && !machineRows.includes(tool) && !tailnetRows.includes(tool) && !reportRows.includes(tool));
   const added = (rows: readonly Tool[]) => rows.reduce((sum, row) => sum + total([row]) - 1, 0);
   // 56 KiB, plus 4 KiB for the workflow gate and step-report tools (spec 2026-11-10 §8) and 3 KiB for
   // desktop_action (desktop agents spec 2026-11-10 §2.5), which every chat sees.
@@ -137,6 +142,8 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   assert.ok(added(boxRows) <= 7_937, `box tools: ${added(boxRows)} bytes`);
   assert.ok(total(workerRows) <= 1_280, `worker tools/list: ${total(workerRows)} bytes`);
   assert.ok(added(imageRows) <= 2_560, `image tools: ${added(imageRows)} bytes`);
+  assert.ok(added(machineRows) <= 1_536, `machine tools: ${added(machineRows)} bytes`);
+  assert.ok(added(tailnetRows) <= 1_536, `tailnet tools: ${added(tailnetRows)} bytes`);
   assert.equal(reportRows.length, 1);
   assert.ok(added(reportRows) <= 768, `report_step_result: ${added(reportRows)} bytes`);
 });

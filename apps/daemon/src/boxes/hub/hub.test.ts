@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
-import { boxRoutes, type BoxControlMessage } from "@orquester/api";
+import { BOX_NICS_EVENT, boxRoutes, type BoxControlMessage } from "@orquester/api";
 import { boxSocketPath } from "@orquester/config";
 
 import { bootstrapSecondStage } from "../bootstrap/bootstrap.ts";
@@ -289,6 +289,29 @@ describe("box hub authentication", () => {
     box.send({ t: "open", ch: 1, spec: { kind: "ssh-agent" } });
     const refused = expectT(await box.next(), "open-failed");
     assert.equal(refused.error.code, "UNKNOWN_CHANNEL");
+    box.close();
+    await box.closed;
+  });
+
+  test("the NICs a box reports in its hello, then in sys.nics events, are its connection's (malformed entries dropped)", async () => {
+    records.add("box-nics-0001");
+    const token = await hub.issueBootstrapToken("box-nics-0001", 60_000);
+    const box = await FakeBox.connect(url);
+    const wired = { name: "enp6s0", mac: "02:00:5e:10:00:01", ipv4: "192.168.50.21", prefixLength: 24, broadcast: "192.168.50.255", wired: true, wolEnabled: null };
+    box.hello({ kind: "bootstrap", token }, { nics: [wired, { name: "bad", mac: "not-a-mac", ipv4: null, prefixLength: null, broadcast: null, wired: true, wolEnabled: null }] });
+    expectT(await box.next(), "welcome");
+    const connection = await hub.waitConnected("box-nics-0001");
+    assert.deepEqual(connection.nics, [wired]);
+
+    const changed = new Promise<void>((resolve) => {
+      const off = connection.onEvent(BOX_NICS_EVENT, () => {
+        off();
+        resolve();
+      });
+    });
+    box.send({ t: "event", name: BOX_NICS_EVENT, data: { nics: [{ ...wired, ipv4: null, prefixLength: null, broadcast: null, wolEnabled: true }] } });
+    await changed;
+    assert.deepEqual(connection.nics, [{ ...wired, ipv4: null, prefixLength: null, broadcast: null, wolEnabled: true }]);
     box.close();
     await box.closed;
   });

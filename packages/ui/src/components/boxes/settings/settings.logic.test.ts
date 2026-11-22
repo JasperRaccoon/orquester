@@ -23,7 +23,6 @@ import {
 import { ApiError } from "../../../lib/api-client.ts";
 import {
   byoMachines,
-  canHostDevices,
   canRemoveMachine,
   machineNameProblem,
   pairingPhase
@@ -438,15 +437,13 @@ describe("bring-your-own machines", () => {
     assert.match(boxTitle(machine()), /Mac mini/);
   });
 
-  test("byo: names, removal and the device toggle", () => {
+  test("byo: names and removal", () => {
     assert.ok(machineNameProblem("  "));
     assert.ok(machineNameProblem("x".repeat(61)));
     assert.ok(machineNameProblem("Mac\nmini"));
     assert.equal(machineNameProblem("Mac mini"), null);
     assert.equal(canRemoveMachine(machine()), true);
     assert.equal(canRemoveMachine(machine({ purpose: "project" })), false);
-    assert.equal(canHostDevices(machine({ state: "pairing" })), false);
-    assert.equal(canHostDevices(machine({ state: "offline" })), true);
   });
 
   test("byo: the pairing dialog follows the live box — waiting, downloaded, connected, expired, cancelled", () => {

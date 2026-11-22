@@ -41,6 +41,8 @@ test("the device relay checks the token, the plugin, the host and its lease befo
   const handed: { hostId: string; hubPath: string; search: string }[] = [];
   const proxy: HubProxy = {
     async handleHttp() {},
+    directViewers() {},
+    directInput() {},
     handleWebSocket(socket, _request, target) {
       handed.push({ hostId: target.hostId, hubPath: target.hubPath, search: target.search });
       socket.close(1000, "handed");

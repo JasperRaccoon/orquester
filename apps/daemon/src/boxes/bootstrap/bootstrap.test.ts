@@ -8,8 +8,17 @@ import { join } from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 
+import { parseProbeLines } from "../../machines/pairing/probe.ts";
 import type { BootstrapInput } from "../contracts.ts";
-import { bootstrapSecondStage, buildBootstrap, byoPairingScript, normalizeDaemonUrl } from "./bootstrap.ts";
+import {
+  bootstrapSecondStage,
+  buildBootstrap,
+  byoPairingScript,
+  byoUnpairCleanupScript,
+  byoWindowsPairingCommand,
+  normalizeDaemonUrl,
+  OOM_DROPIN_LINES
+} from "./bootstrap.ts";
 
 const TOKEN = "obt_test-TOKEN.value_0123456789abcdef";
 // Split so secret scanners do not read the fake key as a real one.
@@ -101,8 +110,11 @@ test("the POSIX scripts parse under dash, bash and busybox sh", () => {
     scripts.push(boot.posixScript, boot.containerCommand[2]!, cloudInitScript(boot.cloudInit), boot.stagedPosixScript!);
   }
   for (const kind of ["linux", "macos"] as const) {
-    scripts.push(byoPairingScript({ boxId: BOX_ID, daemonUrl: "https://orq.example.com", bootstrapToken: TOKEN, kind, name: "Mac 'mini' $(x)" }));
+    for (const unattended of [false, true]) {
+      scripts.push(byoPairingScript({ boxId: BOX_ID, daemonUrl: "https://orq.example.com", bootstrapToken: TOKEN, kind, name: "Mac 'mini' $(x)", unattended }));
+    }
   }
+  scripts.push(byoUnpairCleanupScript());
   const shells = [["dash", "-n"], ["bash", "-n"], ["busybox", "sh", "-n"]].filter(([shell]) => has(shell!));
   assert.ok(shells.length > 0, "at least one POSIX shell to check with");
   for (const script of new Set(scripts)) {
@@ -505,4 +517,191 @@ test("the pairing script refuses bad input and puts the macOS agent under Applic
   assert.throws(() => byoPairingScript({ ...ok, boxId: "x;rm" }), /box id/);
   const script = byoPairingScript({ ...ok, name: "Mac 'mini' $(reboot)" });
   assert.ok(script.includes('T="$HOME/Library/Application Support/Orquester/orq-agent"'));
+});
+
+test("the Windows pairing script is one ASCII PowerShell statement whose only secret is written to the token file", () => {
+  for (const unattended of [false, true]) {
+    const script = byoPairingScript({ boxId: BOX_ID, daemonUrl: "https://orq.example.com/base/", bootstrapToken: TOKEN, kind: "windows", name: "Mini PC 'x' $(Stop-Computer) ünïcode", unattended });
+    // `-Command -` runs its input statement by statement: the whole script is one block, closed by a blank line.
+    assert.ok(script.startsWith("& {\n") && script.endsWith("\n}\n\n"));
+    // The console code page is not UTF-8: nothing but ASCII may reach it.
+    assert.match(script, /^[\x09\x0a\x20-\x7e]*$/);
+    assert.equal(script.split(TOKEN).length, 2, "the token appears once");
+    assert.ok(script.includes(`[IO.File]::WriteAllText($TokenFile, '${TOKEN}')`));
+    assert.ok(script.includes("$DaemonUrl = 'https://orq.example.com/base'"));
+    assert.ok(script.includes('"$DaemonUrl/api/boxes/agent/win32-x64"'));
+    assert.ok(!script.includes("$(Stop-Computer)"), "the machine's name cannot inject PowerShell");
+    assert.ok(script.includes(`$Unattended = ${unattended ? "$true" : "$false"}`));
+    // Winlogon is read value by value: the stored password never enters the script's memory.
+    assert.ok(!/DefaultPassword/i.test(script.replace(/# .*$/gm, "")));
+  }
+  assert.throws(() => byoPairingScript({ boxId: BOX_ID, daemonUrl: "https://orq.example.com", bootstrapToken: "short", kind: "windows", name: "PC" }), /token/);
+  const url = "https://orq.example.com/api/boxes/pair/AbCdEfGhIjKlMnOpQrStUvWx";
+  assert.equal(byoWindowsPairingCommand(url), `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm '${url}' | iex"`);
+  assert.throws(() => byoWindowsPairingCommand("https://orq.example.com/x';Stop-Computer;'"), /characters/);
+});
+
+// ---------------------------------------------------------------------------
+// Pairing over SSH: probes, fixes and OOM protection (tailnet machines spec §4.2.5, §4.9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Root on a sandboxed machine: `sudo` runs only the commands the fixes use, with `/etc` and `/proc`
+ * paths moved under `<dir>/root`, and refuses everything when `allow` is false. `systemctl` and
+ * `loginctl` answer as Ubuntu 24.04 with systemd 255 would (user manager pid 4444 at 100,
+ * tailscaled pid 4242, sshd socket-activated). Every call is logged.
+ */
+async function machineShims(box: Sandbox, allow: boolean): Promise<string> {
+  const root = join(box.dir, "root");
+  const write = async (name: string, body: string) => {
+    await writeFile(join(box.bin, name), `#!/bin/sh\n${body}\n`);
+    await chmod(join(box.bin, name), 0o755);
+  };
+  await write(
+    "sudo",
+    `echo "sudo $*" >>"${box.log}"
+${allow ? "" : "exit 1"}
+[ "$1" = -n ] && shift
+r() { case "$1" in /etc/* | /proc/*) printf '%s%s' "${root}" "$1" ;; *) printf '%s' "$1" ;; esac; }
+cmd=$1; shift
+case "$cmd" in
+  true) exit 0 ;;
+  mkdir) [ "$1" = -p ] && shift; exec mkdir -p "$(r "$1")" ;;
+  tee) t=$(r "$1"); mkdir -p "$(dirname "$t")"; exec tee "$t" ;;
+  rm) [ "$1" = -f ] && shift; exec rm -f "$(r "$1")" ;;
+  rmdir) exec rmdir "$(r "$1")" ;;
+  test) exec test "$1" "$(r "$2")" ;;
+  systemctl | loginctl) exec "$cmd" "$@" ;;
+  usermod | gpasswd | ln) exit 0 ;;
+  *) echo "unexpected sudo $cmd" >>"${box.log}"; exit 1 ;;
+esac`
+  );
+  await write(
+    "systemctl",
+    `echo "systemctl $*" >>"${box.log}"
+case "$*" in
+  --version) echo "systemd 255 (255.4-1ubuntu8.18)" ;;
+  "show -p LoadState --value tailscaled.service" | "show -p LoadState --value ssh.service") echo loaded ;;
+  "show -p LoadState --value "*) echo not-found ;;
+  "show -p MainPID --value tailscaled.service") echo 4242 ;;
+  "show -p MainPID --value user@1000.service") echo 4444 ;;
+  "show -p MainPID --value "*) echo 0 ;;
+  "show -p OOMScoreAdjust --value user@1000.service") echo 100 ;;
+  "show -p OOMScoreAdjust --value "*) echo 0 ;;
+  "is-active -q ssh.socket") exit 0 ;;
+  "is-active "*) exit 3 ;;
+esac
+exit 0`
+  );
+  await write(
+    "loginctl",
+    `echo "loginctl $*" >>"${box.log}"
+case "$1" in show-user) echo no ;; esac
+exit 0`
+  );
+  await mkdir(join(box.dir, "run", "systemd"), { recursive: true });
+  return root;
+}
+
+const hasSystemd = spawnSync("test", ["-d", "/run/systemd/system"]).status === 0;
+const OOM_DROPIN = `${OOM_DROPIN_LINES.join("\n")}\n`;
+
+test("unattended pairing with passwordless sudo turns on linger and protects tailscaled, the user manager and orq-agent from the OOM killer", { skip: !hasSystemd && "needs systemd's /run/systemd/system" }, async (t) => {
+  const daemon = await startFakeDaemon(t);
+  const box = await sandbox(t);
+  const root = await machineShims(box, true);
+  const scriptPath = join(box.dir, "pair.sh");
+  await writeFile(scriptPath, byoPairingScript({ boxId: BOX_ID, daemonUrl: daemon.url, bootstrapToken: TOKEN, kind: "linux", name: "jasper", unattended: true }));
+
+  const { code, output } = await runScript(box, ["sh", scriptPath], { env: { XDG_RUNTIME_DIR: join(box.dir, "run") } });
+  assert.equal(code, 0, output);
+  assert.equal((await readResult(box)).cmd, "install-service");
+  assert.ok(!output.includes(TOKEN), "the token is not in the output");
+
+  const facts = parseProbeLines(output);
+  assert.equal(facts.get("sudo"), "yes");
+  assert.ok(["on", "enabled"].includes(facts.get("linger") ?? ""), output);
+  assert.equal(facts.get("oom.tailscaled"), "applied");
+  assert.equal(facts.get("oom.sshd"), "ok", "socket-activated sshd is respawned by systemd");
+  assert.equal(facts.get("oom.orq-agent"), "applied");
+  const log = await readFile(box.log, "utf8");
+  if (facts.get("linger") === "enabled") assert.match(log, /^sudo -n loginctl enable-linger \S+$/m);
+
+  // tailscaled and the user manager: a system drop-in, applied to the running process (no restart).
+  assert.equal(await readFile(join(root, "etc/systemd/system/tailscaled.service.d/orquester-oom.conf"), "utf8"), OOM_DROPIN);
+  assert.equal(await readFile(join(root, "etc/systemd/system/user@1000.service.d/orquester-oom.conf"), "utf8"), OOM_DROPIN);
+  assert.equal((await readFile(join(root, "proc/4242/oom_score_adj"), "utf8")).trim(), "-900");
+  assert.equal((await readFile(join(root, "proc/4444/oom_score_adj"), "utf8")).trim(), "-900");
+  assert.ok(!/systemctl (--user )?restart (tailscaled|ssh|user@)/.test(log), "nothing the session runs through is restarted");
+  // Other user services keep the unprivileged manager's default (its stock 100 + 100), set before the manager is lowered.
+  assert.match(await readFile(join(root, "etc/systemd/user.conf.d/orquester-oom.conf"), "utf8"), /^\[Manager\]\nDefaultOOMScoreAdjust=200$/m);
+  assert.ok(log.indexOf("user.conf.d/orquester-oom.conf") < log.indexOf("/proc/4444/oom_score_adj"));
+  // orq-agent's own user unit drop-in, in place before install-service restarts the unit.
+  assert.equal(await readFile(join(box.home, ".config/systemd/user/orq-agent.service.d/orquester-oom.conf"), "utf8"), OOM_DROPIN);
+
+  if (has("systemd-analyze")) {
+    const units = join(box.dir, "units");
+    await mkdir(join(units, "orq-check.service.d"), { recursive: true });
+    await writeFile(join(units, "orq-check.service"), "[Unit]\nDescription=check\n[Service]\nExecStart=/bin/true\n");
+    await writeFile(join(units, "orq-check.service.d", "orquester-oom.conf"), OOM_DROPIN);
+    const verify = spawnSync("systemd-analyze", ["verify", join(units, "orq-check.service")], { encoding: "utf8", env: { ...process.env, SYSTEMD_UNIT_PATH: `${units}:` } });
+    assert.equal(verify.status, 0, verify.stderr);
+    assert.ok(!verify.stderr.includes("orquester-oom.conf"), verify.stderr);
+  }
+});
+
+test("unattended pairing without passwordless sudo changes nothing outside the user's files and reports each gap", { skip: !hasSystemd && "needs systemd's /run/systemd/system" }, async (t) => {
+  const daemon = await startFakeDaemon(t);
+  const box = await sandbox(t);
+  const root = await machineShims(box, false);
+  const scriptPath = join(box.dir, "pair.sh");
+  await writeFile(scriptPath, byoPairingScript({ boxId: BOX_ID, daemonUrl: daemon.url, bootstrapToken: TOKEN, kind: "linux", name: "jasper", unattended: true }));
+
+  const { code, output } = await runScript(box, ["sh", scriptPath], { env: { XDG_RUNTIME_DIR: join(box.dir, "run") } });
+  assert.equal(code, 0, output);
+  const facts = parseProbeLines(output);
+  assert.equal(facts.get("sudo"), "no");
+  assert.equal(facts.get("oom.tailscaled"), "missing");
+  assert.equal(facts.get("oom.orq-agent"), "missing");
+  await assert.rejects(stat(root), { code: "ENOENT" });
+  // Without the manager lowered first, the unit's own drop-in would not take effect: none is written.
+  await assert.rejects(stat(join(box.home, ".config/systemd/user/orq-agent.service.d")), { code: "ENOENT" });
+  assert.ok(!(await readFile(box.log, "utf8")).split("\n").some((line) => line.startsWith("sudo ") && !line.startsWith("sudo -n ")), "sudo never prompts");
+});
+
+test("removing a machine deletes the drop-ins pairing wrote and gives the running services their scores back", async (t) => {
+  const box = await sandbox(t);
+  const root = await machineShims(box, true);
+  for (const dir of ["etc/systemd/system/tailscaled.service.d", "etc/systemd/system/user@1000.service.d", "etc/systemd/user.conf.d", "proc/4242", "proc/4444"]) {
+    await mkdir(join(root, dir), { recursive: true });
+  }
+  await writeFile(join(root, "etc/systemd/system/tailscaled.service.d/orquester-oom.conf"), OOM_DROPIN);
+  // Someone else's drop-in beside ours stays.
+  await writeFile(join(root, "etc/systemd/system/tailscaled.service.d/override.conf"), "[Service]\nNice=1\n");
+  await writeFile(join(root, "etc/systemd/system/user@1000.service.d/orquester-oom.conf"), OOM_DROPIN);
+  await writeFile(join(root, "etc/systemd/user.conf.d/orquester-oom.conf"), "[Manager]\nDefaultOOMScoreAdjust=200\n");
+  const userDropins = join(box.home, ".config/systemd/user/orq-agent.service.d");
+  await mkdir(userDropins, { recursive: true });
+  await writeFile(join(userDropins, "orquester-oom.conf"), OOM_DROPIN);
+
+  const { code, output } = await runScript(box, ["sh", "-c", byoUnpairCleanupScript()]);
+  assert.equal(code, 0, output);
+  await assert.rejects(stat(join(root, "etc/systemd/system/tailscaled.service.d/orquester-oom.conf")), { code: "ENOENT" });
+  assert.ok((await stat(join(root, "etc/systemd/system/tailscaled.service.d/override.conf"))).isFile());
+  await assert.rejects(stat(join(root, "etc/systemd/system/user@1000.service.d")), { code: "ENOENT" });
+  await assert.rejects(stat(join(root, "etc/systemd/user.conf.d")), { code: "ENOENT" });
+  await assert.rejects(stat(userDropins), { code: "ENOENT" });
+  assert.equal((await readFile(join(root, "proc/4444/oom_score_adj"), "utf8")).trim(), "100");
+  assert.equal((await readFile(join(root, "proc/4242/oom_score_adj"), "utf8")).trim(), "0");
+});
+
+test("a rented Linux VM protects tailscaled and orq-agent before install-service; containers have no service manager to protect with", () => {
+  const vm = buildBootstrap(input({ tailscaleAuthKey: TS_KEY }));
+  for (const script of [vm.posixScript, cloudInitScript(vm.cloudInit), bootstrapSecondStage("posix")!]) {
+    const protect = script.indexOf("oom_dropin /etc/systemd/system/orq-agent.service.d");
+    assert.ok(protect > 0 && protect < script.indexOf('exec "$B" install-service'));
+    assert.ok(script.includes("oom_service tailscaled.service"));
+  }
+  assert.ok(!vm.containerCommand[2]!.includes("oom_"));
+  assert.ok(!bootstrapSecondStage("container")!.includes("oom_"));
 });

@@ -60,6 +60,7 @@ func startProcess(s *startSpec) (process, error) {
 		if err != nil {
 			return nil, spawnError(err)
 		}
+		resetChildOOMScore(cmd.Process.Pid)
 		p.ptmx = ptmx
 		p.in = ptmx
 		p.out = ptmx
@@ -97,6 +98,7 @@ func startProcess(s *startSpec) (process, error) {
 		stderrR.Close()
 		return nil, spawnError(err)
 	}
+	resetChildOOMScore(cmd.Process.Pid)
 	p.in, p.out, p.errOut = stdinW, stdoutR, stderrR
 	return p, nil
 }

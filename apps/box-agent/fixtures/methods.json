@@ -272,6 +272,44 @@
           "uninstall": true
         }
       }
+    ],
+    "ssh.keys": [
+      {
+        "params": {
+          "keys": []
+        }
+      },
+      {
+        "params": {
+          "keys": [
+            {
+              "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIChatKeyFixture",
+              "comment": "orquester chat=t-1 box=box1",
+              "expiresAt": 1729000000000
+            },
+            {
+              "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMachineKeyFixture",
+              "comment": "orquester box=box1",
+              "expiresAt": null
+            }
+          ]
+        }
+      }
+    ],
+    "net.wake": [
+      {
+        "params": {
+          "mac": "02:00:5e:10:00:01",
+          "broadcast": "192.168.50.255"
+        }
+      },
+      {
+        "params": {
+          "mac": "02:00:5e:10:00:02",
+          "broadcast": "192.168.50.255",
+          "port": 9
+        }
+      }
     ]
   },
   "boxToHost": {

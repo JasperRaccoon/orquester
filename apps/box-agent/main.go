@@ -10,6 +10,10 @@
 //	orq-agent rpc <method> [json]
 //	orq-agent status
 //	orq-agent version
+//	orq-agent sftp-server                   internal: the SSH server's sftp subsystem, as the work user
+//	orq-agent install-desktop-helper --user NAME [--data-dir DIR] [--dry-run]  Windows: the desktop-session helper's logon task
+//	orq-agent uninstall-desktop-helper [--data-dir DIR] [--dry-run]           Windows: remove that task
+//	orq-agent desktop-helper [--data-dir DIR]   Windows, internal: run in the desktop session for the service (started by that task)
 //
 // Config comes from env (ORQ_DAEMON_URL, ORQ_BOX_ID, ORQ_BOOTSTRAP_TOKEN[_FILE],
 // ORQ_DATA_DIR, ORQ_GITHUB_OIDC, ORQ_WORK_USER), then `<dataDir>/agent.env`.
@@ -41,7 +45,7 @@ func main() {
 }
 
 func usage() int {
-	fmt.Fprintln(os.Stderr, "usage: orq-agent run|install-service|uninstall-service|token|git-credential|mcp-bridge|rpc|status|version …")
+	fmt.Fprintln(os.Stderr, "usage: orq-agent run|install-service|uninstall-service|install-desktop-helper|uninstall-desktop-helper|token|git-credential|mcp-bridge|rpc|status|version …")
 	return 2
 }
 
@@ -92,6 +96,47 @@ func parseServiceArgs(args []string) (agent.ServiceOptions, error) {
 	return opts, nil
 }
 
+// parseDesktopHelperArgs reads install-desktop-helper's and uninstall-desktop-helper's flags:
+// [--user NAME] [--data-dir DIR] [--dry-run]; anything else is refused.
+func parseDesktopHelperArgs(args []string, withUser bool) (agent.DesktopHelperOptions, error) {
+	var opts agent.DesktopHelperOptions
+	value := func(i int, name string) (string, error) {
+		if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "--") {
+			return "", fmt.Errorf("--%s needs a value", name)
+		}
+		return args[i+1], nil
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		var err error
+		switch {
+		case arg == "--dry-run":
+			opts.DryRun = true
+		case arg == "--data-dir":
+			opts.DataDir, err = value(i, "data-dir")
+			i++
+		case strings.HasPrefix(arg, "--data-dir="):
+			if opts.DataDir = strings.TrimPrefix(arg, "--data-dir="); opts.DataDir == "" {
+				err = errors.New("--data-dir needs a directory")
+			}
+		case withUser && arg == "--user":
+			opts.User, err = value(i, "user")
+			i++
+		case withUser && strings.HasPrefix(arg, "--user="):
+			opts.User = strings.TrimPrefix(arg, "--user=")
+		default:
+			err = fmt.Errorf("unknown argument %q", arg)
+		}
+		if err != nil {
+			return opts, err
+		}
+	}
+	if withUser && opts.User == "" {
+		return opts, errors.New("--user is required")
+	}
+	return opts, nil
+}
+
 func run(args []string) int {
 	if len(args) == 0 {
 		return usage()
@@ -116,6 +161,25 @@ func run(args []string) int {
 			return fail(err)
 		}
 		return 0
+	case "install-desktop-helper", "uninstall-desktop-helper":
+		install := command == "install-desktop-helper"
+		opts, err := parseDesktopHelperArgs(args, install)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "orq-agent %s: %v\nusage: orq-agent install-desktop-helper --user NAME [--data-dir DIR] [--dry-run]\n       orq-agent uninstall-desktop-helper [--data-dir DIR] [--dry-run]\n", command, err)
+			return 2
+		}
+		if install {
+			err = agent.InstallDesktopHelperCommand(opts, os.Stdout)
+		} else {
+			err = agent.UninstallDesktopHelperCommand(opts, os.Stdout)
+		}
+		if err != nil {
+			return fail(err)
+		}
+		return 0
+	case "desktop-helper":
+		dataDir, _ := flagValue(args, "data-dir")
+		return agent.DesktopHelperCommand(version, dataDir)
 	case "token":
 		return tokenCommand(args)
 	case "git-credential":
@@ -137,6 +201,11 @@ func run(args []string) int {
 		}
 		out, _ := json.Marshal(status)
 		fmt.Println(string(out))
+		return 0
+	case "sftp-server":
+		if err := agent.ServeSFTP(os.Stdin, os.Stdout); err != nil {
+			return fail(err)
+		}
 		return 0
 	case "version", "--version":
 		fmt.Println(version)

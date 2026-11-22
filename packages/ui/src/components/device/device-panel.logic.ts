@@ -8,12 +8,14 @@ import {
   DEVICE_PLATFORM_LABELS,
   deviceRoutes,
   isActiveDeviceLease,
+  LOCAL_DEVICE_HOST_LABEL,
   type DeviceController,
   type DeviceHostSummary,
   type DeviceLeaseSummary,
   type DevicePlatform,
   type DeviceProfile,
-  type DevicesSettings
+  type DevicesSettings,
+  type MachineProblem
 } from "@orquester/api";
 
 // ---------------------------------------------------------------------------
@@ -343,18 +345,23 @@ export interface PickerRow {
   action: "open" | "queue";
   /** A tooltip for an enabled row (what queueing means). */
   hint: string | null;
-  /** Opens on this host (a research host, which opens only by name). */
+  /** Opens on this host (one of the owner's machines, or a research host, which opens only by name); absent: placement picks. */
   hostId?: string;
 }
 
 export interface PickerGroup {
+  /** Unique among the groups: the host's id, or `<platform>:any` for the hosts placement picks. */
+  key: string;
   platform: DevicePlatform;
+  /** The host's machine name ("jasper (your Linux machine)", "This machine"), or the platform for hosts placement picks. */
   title: string;
   /** One line under the title: the host's state ("No Mac host — opening an iPhone rents one (~$4.80/h)"). */
   note: string | null;
   rows: PickerRow[];
-  /** A research host's own group. */
+  /** The host every row opens on (an own machine's or a research host's group); absent: placement picks. */
   hostId?: string;
+  /** What the host's probes found wrong, each with its fix. */
+  problems?: readonly MachineProblem[];
 }
 
 export interface PickerInput {
@@ -373,7 +380,7 @@ function hourly(value: number | null): string {
   return value != null && value > 0 ? ` (~$${value.toFixed(2)}/h)` : "";
 }
 
-/** A row's identity among every group's rows (the same profile opens on several research hosts). */
+/** A row's identity among every group's rows (the same profile opens on several hosts). */
 export function pickerRowKey(row: Pick<PickerRow, "hostId"> & { profile: Pick<DeviceProfile, "id"> }): string {
   return row.hostId ? `${row.hostId}/${row.profile.id}` : row.profile.id;
 }
@@ -394,6 +401,7 @@ function researchGroup(host: DeviceHostSummary, profile: DeviceProfile, input: P
     badge = "Full";
   }
   return {
+    key: host.id,
     platform: "ios",
     title: host.label,
     note: host.notice ?? null,
@@ -402,95 +410,196 @@ function researchGroup(host: DeviceHostSummary, profile: DeviceProfile, input: P
   };
 }
 
-/** The picker's groups: Android on this host, iPhone & iPad on Mac hosts, then each research host, each row explaining a disabled Open. */
+/** What every row of a group says: open now (on `hostId`), queue in the pool, or why not. */
+interface GroupState {
+  note: string | null;
+  reason: string | null;
+  badge: string;
+  queueHint: string | null;
+  /** Rows open on this host (absent: placement picks, as a queued open does). */
+  hostId?: string;
+}
+
+const isOwn = (host: DeviceHostSummary): boolean => host.kind === "local" || host.kind === "byo";
+
+/** The picker's order of own hosts: ready ones first, this host before paired machines, then by name. */
+function ownOrder(a: DeviceHostSummary, b: DeviceHostSummary): number {
+  const ready = (host: DeviceHostSummary) => (host.status === "ready" ? 0 : 1);
+  return ready(a) - ready(b) || (a.kind === "local" ? -1 : 0) - (b.kind === "local" ? -1 : 0) || a.label.localeCompare(b.label);
+}
+
+function missingText(host: DeviceHostSummary): string[] {
+  return host.readiness.checks.filter((check) => check.state !== "ok").map((check) => check.label);
+}
+
+/** One of the owner's hosts (this host, or a paired machine): its rows open on it by name, or queue when it is full. */
+function ownHostState(host: DeviceHostSummary, platform: DevicePlatform, input: PickerInput): GroupState {
+  const label = DEVICE_PLATFORM_LABELS[platform];
+  const local = host.kind === "local";
+  const where = local ? "This host" : host.label;
+  const rents = input.settings?.pool.placement !== "local-only" && (input.rentable === undefined || input.rentable.includes(platform));
+  const { used, total } = host.capacity;
+  switch (host.status) {
+    case "ready":
+      if (total === 0 && (!local || input.settings?.pool.placement === "local-only")) {
+        // Kept on this host, which runs none (or an own machine with no room now): it can never open here.
+        return {
+          note: null,
+          reason: local
+            ? `This host has no room for an ${label} device (too little free memory, or Settings allow none here), and Settings keep devices on this host.`
+            : `${host.label} has no room for a device right now (too little free memory or disk).`,
+          badge: "No room",
+          queueHint: null
+        };
+      }
+      if (used >= total) {
+        // Open queues it in the pool (a stand-in answers at once): it opens when a slot frees up, or elsewhere.
+        return {
+          note: total > 0 ? `${used} of ${total} in use — a new device waits for a slot` : "This host runs no devices — a new device waits for a rented host",
+          reason: null,
+          badge: "Full",
+          queueHint:
+            total > 0
+              ? `All ${total} slot${total === 1 ? " is" : "s are"} on ${local ? "this host" : host.label} in use — it opens when one frees up${rents ? ", or on a rented host if the fleet allows" : ""}.`
+              : "This host runs no devices — it opens on a rented host if the fleet allows."
+        };
+      }
+      // This host is placement's first choice anyway (unless the fleet is pool-only): its rows need not name it.
+      return {
+        note: total > 0 ? `${local ? "Runs on this host" : "Ready"} · ${used} of ${total} in use` : local ? "Runs on this host" : "Ready",
+        reason: null,
+        badge: "Ready",
+        queueHint: null,
+        ...(local && input.settings?.pool.placement !== "pool-only" ? {} : { hostId: host.id })
+      };
+    case "starting":
+      return { note: `${where} is starting · the device opens when it's ready`, reason: null, badge: "Starting", queueHint: null, hostId: host.id };
+    case "installing":
+      return { note: null, reason: `Installing the ${label} tools on ${local ? "this host" : host.label} — this takes a few minutes.`, badge: "Installing…", queueHint: null };
+    case "needs-setup": {
+      const missing = missingText(host);
+      // A paired machine sets itself up when a device opens (its helpers, its tools); this host's install is the owner's (it accepts the SDK licence).
+      if (!local && host.readiness.checks.every((check) => check.state === "ok" || check.fixActionId !== undefined)) {
+        return { note: host.statusDetail ?? "Prepares itself when a device opens", reason: null, badge: "Needs setup", queueHint: null, hostId: host.id };
+      }
+      const what = local ? "This host" : host.label;
+      return {
+        note: null,
+        reason:
+          missing.length > 0
+            ? `${what} needs setup: ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? "…" : ""}. ${local ? "Install it in Settings → Devices." : "Check Settings → Devices."}`
+            : `${host.statusDetail ?? `${what} needs setup.`} ${local ? "Install it in Settings → Devices." : "Check Settings → Devices."}`,
+        badge: "Needs setup",
+        queueHint: null
+      };
+    }
+    case "failed":
+      return { note: null, reason: `${host.statusDetail ?? `${where} failed.`} Check Settings → Devices.`, badge: "Failed", queueHint: null };
+    case "unreachable":
+      return { note: null, reason: host.problems?.find((problem) => problem.code === "machine-asleep")?.message ?? host.statusDetail ?? `${where} is offline.`, badge: "Offline", queueHint: null };
+    case "disabled":
+      return { note: null, reason: `${label} on ${local ? "this host" : host.label} is off. Turn it on in Settings → Devices.`, badge: "Off", queueHint: null };
+    case "stopping":
+      return { note: null, reason: `${where} is being turned off.`, badge: "Stopping", queueHint: null };
+  }
+}
+
+/**
+ * Rows placement picks a host for (the owner's machines first, then rented ones): renting one when
+ * the daemon can, or a rented host already running. Null when there is nothing to offer beyond the
+ * own hosts' groups.
+ */
+function automaticState(platform: DevicePlatform, hosts: readonly DeviceHostSummary[], ownGroups: number, input: PickerInput): GroupState | null {
+  const mac = platform === "ios";
+  const rented = hosts.filter((host) => host.kind === "box");
+  const ready = rented.filter((host) => host.status === "ready" && (host.capacity.total === 0 || host.capacity.used < host.capacity.total));
+  const starting = rented.find((host) => host.status === "starting" || host.status === "installing");
+  const placementOk = input.settings?.pool.placement !== "local-only";
+  // An older daemon says nothing of rentals: iOS assumes it can rent a Mac (as before), Android does not.
+  const canRent = placementOk && (input.rentable ? input.rentable.includes(platform) : mac);
+  const rentWithoutAsking = input.settings?.pool.rentWithoutAsking === true;
+  const word = mac ? "Mac host" : "Android host";
+  if (ready.length > 0) {
+    return { note: `${ready.length === 1 ? `A rented ${word} is` : `${ready.length} rented ${word}s are`} running · opens in seconds`, reason: null, badge: "Ready", queueHint: null };
+  }
+  if (starting) return { note: `A rented ${word} is starting · the device opens when it's ready`, reason: null, badge: "Host starting", queueHint: null };
+  if (canRent) {
+    const price = mac ? hourly(input.macHourlyUsd) : "";
+    return {
+      note: ownGroups > 0 ? `Uses a free one of your machines first, else rents a ${word}${price}` : mac ? `No Mac host — opening an iPhone rents one${price}` : `No Android host — opening one rents a ${word}${price}`,
+      reason: null,
+      badge: rentWithoutAsking ? (mac ? "Rents a Mac" : "Rents a host") : "Asks to rent",
+      queueHint: null
+    };
+  }
+  if (ownGroups > 0) return null;
+  return {
+    note: null,
+    reason: mac
+      ? "No Mac host, and renting one isn't set up. Check Settings → Devices."
+      : "No Android host is set up: install Android on this host, or turn Device simulators on for one of your machines. Check Settings → Devices.",
+    badge: "Needs setup",
+    queueHint: null
+  };
+}
+
+function groupRows(profiles: readonly DeviceProfile[], state: GroupState, fullReason: string | null): PickerRow[] {
+  const reason = state.reason ?? fullReason;
+  return profiles.map((profile) => ({
+    profile,
+    enabled: reason === null,
+    reason,
+    badge: state.reason === null && fullReason !== null ? "Limit reached" : state.badge,
+    action: reason === null && state.queueHint ? "queue" : "open",
+    hint: reason === null ? state.queueHint : null,
+    ...(reason === null && state.hostId ? { hostId: state.hostId } : {})
+  }));
+}
+
+/**
+ * The picker's groups, by host: per platform each of the owner's hosts by its machine name (this
+ * host, paired machines; rows open on it, or queue when it is full), then the hosts placement picks
+ * (rented ones, or renting one), then each research host; each row explains a disabled Open. This
+ * host is left out while it is not ready and another host of the platform is: it is never "needs
+ * setup" in front of a ready machine.
+ */
 export function pickerGroups(input: PickerInput): PickerGroup[] {
   const max = input.settings?.maxLeasesPerChat ?? 3;
   const full = input.chatLeases >= max;
-  const fullReason = `This chat already has ${input.chatLeases} device${input.chatLeases === 1 ? "" : "s"} (the limit is ${max}). Release one first.`;
+  const fullReason = full ? `This chat already has ${input.chatLeases} device${input.chatLeases === 1 ? "" : "s"} (the limit is ${max}). Release one first.` : null;
   const groups: PickerGroup[] = [];
   for (const platform of ["android", "ios"] as const) {
-    const enabledInSettings = input.settings?.[platform].enabled ?? false;
     const offered = input.settings?.[platform].profiles;
     const profiles = input.profiles.filter((profile) => profile.platform === platform && (!offered || offered.includes(profile.id)));
     if (profiles.length === 0) continue;
-    const hosts = input.hosts.filter((host) => host.platforms.includes(platform) && host.research !== true);
-    let note: string | null = null;
-    let reason: string | null = null;
-    let badge = "Ready";
-    let queueHint: string | null = null;
-    if (!enabledInSettings) {
-      reason = `${DEVICE_PLATFORM_LABELS[platform]} is off. Turn it on in Settings → Devices.`;
-      badge = "Off";
-    } else if (platform === "android") {
-      const local = hosts.find((host) => host.kind === "local");
-      if (!local || local.status === "needs-setup" || local.status === "failed") {
-        const missing = local?.readiness.checks.filter((check) => check.state !== "ok").map((check) => check.label) ?? [];
-        reason = missing.length > 0 ? `This host needs setup: ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? "…" : ""}. Install it in Settings → Devices.` : "This host needs setup. Install it in Settings → Devices.";
-        badge = local?.status === "failed" ? "Failed" : "Needs setup";
-      } else if (local.status === "installing") {
-        reason = "Installing the Android tools — this takes a few minutes.";
-        badge = "Installing…";
-      } else if (local.status === "disabled") {
-        reason = "Android on this host is off. Turn it on in Settings → Devices.";
-        badge = "Off";
-      } else if (local.capacity.total === 0 && input.settings?.pool.placement === "local-only") {
-        // Kept on this host, which runs none: the pool can never place it.
-        reason = "This host has no room for an Android device (too little free memory, or Settings allow none here), and Settings keep devices on this host.";
-        badge = "No room";
-      } else if (local.capacity.used >= local.capacity.total) {
-        // Open queues it in the pool (a stand-in answers at once): it opens when a slot frees up, or on a rented host.
-        const { used, total } = local.capacity;
-        const rents = input.settings?.pool.placement !== "local-only";
-        note = total > 0 ? `Runs on this host · ${used} of ${total} in use — a new device waits for a slot` : "This host runs no devices — a new device waits for a rented host";
-        queueHint =
-          total > 0
-            ? `All ${total} slot${total === 1 ? " is" : "s are"} in use — it opens when one frees up${rents ? ", or on a rented host if the fleet allows" : ""}.`
-            : "This host runs no devices — it opens on a rented host if the fleet allows.";
-        badge = "Full";
-      } else {
-        note = local.capacity.total > 0 ? `Runs on this host · ${local.capacity.used} of ${local.capacity.total} in use` : "Runs on this host";
-      }
-    } else {
-      const ready = hosts.filter((host) => host.status === "ready" && (host.capacity.total === 0 || host.capacity.used < host.capacity.total));
-      const starting = hosts.find((host) => host.status === "starting" || host.status === "installing");
-      if (ready.length > 0) {
-        note = `${ready.length === 1 ? "A Mac host is" : `${ready.length} Mac hosts are`} running · opens in seconds`;
-      } else if (starting) {
-        note = "A Mac host is starting · the device opens when it's ready";
-        badge = "Host starting";
-      } else if (input.rentable && !input.rentable.includes("ios")) {
-        if (hosts.length === 0) {
-          reason = "No Mac host, and renting one isn't set up. Check Settings → Devices.";
-          badge = "Needs setup";
-        } else {
-          // An own Mac that is full or needs setup: Open queues on it, or sets it up.
-          note = "No Mac host is free · the device opens when one is";
-          badge = "Waits for a Mac";
-        }
-      } else {
-        note = `No Mac host — opening an iPhone rents one${hourly(input.macHourlyUsd)}`;
-        badge = input.settings?.pool.rentWithoutAsking ? "Rents a Mac" : "Asks to rent";
-      }
+    const title = platform === "android" ? "Android" : DEVICE_PLATFORM_LABELS.ios;
+    if (!(input.settings?.[platform].enabled ?? false)) {
+      const state: GroupState = { note: null, reason: `${DEVICE_PLATFORM_LABELS[platform]} is off. Turn it on in Settings → Devices.`, badge: "Off", queueHint: null };
+      groups.push({ key: `${platform}:any`, platform, title, note: null, rows: groupRows(profiles, state, fullReason) });
+      continue;
     }
-    if (!reason && full) reason = fullReason;
-    groups.push({
-      platform,
-      title: platform === "android" ? "Android" : DEVICE_PLATFORM_LABELS.ios,
-      note,
-      rows: profiles.map((profile) => ({
-        profile,
-        enabled: reason === null,
-        reason,
-        badge: reason === fullReason ? "Limit reached" : badge,
-        action: reason === null && queueHint ? "queue" : "open",
-        hint: reason === null ? queueHint : null
-      }))
-    });
+    const hosts = input.hosts.filter((host) => host.platforms.includes(platform) && host.research !== true);
+    const anotherReady = (host: DeviceHostSummary) => hosts.some((other) => other.id !== host.id && other.status === "ready");
+    const own = hosts.filter(isOwn).filter((host) => !(host.kind === "local" && host.status !== "ready" && anotherReady(host))).sort(ownOrder);
+    for (const host of own) {
+      const state = ownHostState(host, platform, input);
+      groups.push({
+        key: host.id,
+        platform,
+        title: host.kind === "local" ? LOCAL_DEVICE_HOST_LABEL : host.label,
+        note: state.note,
+        rows: groupRows(profiles, state, fullReason),
+        ...(state.hostId ? { hostId: state.hostId } : {}),
+        ...(host.problems && host.problems.length > 0 ? { problems: host.problems } : {})
+      });
+    }
+    const automatic = automaticState(platform, hosts, own.length, input);
+    if (automatic) groups.push({ key: `${platform}:any`, platform, title: own.length > 0 ? "Any free host" : title, note: automatic.note, rows: groupRows(profiles, automatic, fullReason) });
   }
   const offered = input.settings?.ios.profiles;
   const iphone = input.profiles.find((profile) => profile.platform === "ios" && (!offered || offered.includes(profile.id)));
   if (iphone) {
-    for (const host of input.hosts) if (host.research === true && host.platforms.includes("ios")) groups.push(researchGroup(host, iphone, input, full ? fullReason : null));
+    for (const host of input.hosts) if (host.research === true && host.platforms.includes("ios")) groups.push(researchGroup(host, iphone, input, fullReason));
   }
   return groups;
 }

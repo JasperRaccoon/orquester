@@ -114,9 +114,12 @@ export function isBoxPurpose(value: unknown): value is BoxPurpose {
 
 /** The provider id of the owner's own machines (Devices phase 3 §2.1). */
 export const BYO_PROVIDER_ID = "byo" satisfies BoxProviderId;
-/** The kinds a bring-your-own machine can be. */
-export type ByoMachineKind = "linux" | "macos";
-export const BYO_MACHINE_KINDS: readonly ByoMachineKind[] = ["linux", "macos"];
+/**
+ * The kinds a bring-your-own machine can be. `windows` (tailnet machines spec 2026-11-22 §4.2.6)
+ * pairs with a PowerShell command in an elevated PowerShell, or over SSH.
+ */
+export type ByoMachineKind = "linux" | "macos" | "windows";
+export const BYO_MACHINE_KINDS: readonly ByoMachineKind[] = ["linux", "macos", "windows"];
 /** How long a pairing command works. */
 export const BYO_PAIRING_TTL_MINUTES = 30;
 
@@ -261,6 +264,17 @@ export interface BoxSummary {
   byo?: BoxByoInfo;
   /** Accounts lent to this box right now (lending spec 2026-11-03). Absent: none, or an older daemon. */
   lentAccounts?: BoxLentAccount[];
+  /**
+   * The `orq-<name>` SSH alias the caller may use for this box (agent SSH, tailnet machines spec
+   * 2026-11-22 §4.3.5; `list_boxes` and `create_box` return it). Absent: none for this caller.
+   */
+  sshAlias?: string;
+  /**
+   * The exact command that opens a shell on it with {@link sshAlias} where the caller runs:
+   * `ssh orq-<name>` when the alias resolves without `-F` (the owner's opt-in `Include`), else
+   * `ssh -F <absolute path of its config> orq-<name>`. Present exactly when `sshAlias` is.
+   */
+  sshCommand?: string;
 }
 
 /** The agents whose accounts can be lent to a box. */
@@ -552,6 +566,11 @@ export interface BoxLocalTailscale {
   suggestedUrl: string | null;
   /** The command that serves Orquester on `servePort` (null when Tailscale is not installed). */
   serveCommand: string | null;
+  /**
+   * The daemon's user is Tailscale's operator, so `tailscale serve` changes need no sudo (tailnet
+   * machines spec 2026-11-22 §4.7.2). Absent: not checked (older daemons).
+   */
+  operatorOk?: boolean;
 }
 
 /** Body for `PUT boxRoutes.connection`; secret fields are write-only. */
@@ -720,7 +739,8 @@ export const boxRoutes = {
   /** `POST` → `ByoPairingResponse`: a new pairing command for a `pairing` machine (the old one stops working). */
   byoPairing: (id: string): string => `/api/boxes/byo/${encodeURIComponent(id)}/pairing`,
   /**
-   * REMOTE, NOT behind the daemon's user auth: `GET` → the pairing script (`text/x-shellscript`) for
+   * REMOTE, NOT behind the daemon's user auth: `GET` → the pairing script (`text/x-shellscript`;
+   * a Windows machine's PowerShell script as `text/plain`) for
    * a one-time pairing code. The code is spent by the first fetch and expires after
    * `BYO_PAIRING_TTL_MINUTES`; failures are rate-limited per client. Answers 404 for any code that
    * is not live.
@@ -787,12 +807,17 @@ export interface UpdateByoMachineRequest {
 export interface RemoveByoMachineResponse {
   /** False when the machine was not connected: run `orq-agent uninstall-service` on it by hand. */
   uninstalled: boolean;
+  /** Files pairing added that the machine could not remove (no passwordless sudo); absent when none. */
+  leftovers?: string[];
 }
 
 /** A pairing command, shown once (only a hash of its code is kept). */
 export interface ByoPairingResponse {
   box: BoxSummary;
-  /** `curl -fsSL <daemon>/api/boxes/pair/<code> | sh`. */
+  /**
+   * `curl -fsSL <daemon>/api/boxes/pair/<code> | sh`; Windows:
+   * `powershell -NoProfile -ExecutionPolicy Bypass -Command "… irm '<daemon>/api/boxes/pair/<code>' | iex"`.
+   */
   command: string;
   expiresAt: string;
 }

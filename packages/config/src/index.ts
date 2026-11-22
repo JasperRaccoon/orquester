@@ -405,6 +405,70 @@ export function devicePoolPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "device-pool.json");
 }
 
+// Machines (spec 2026-11-22-tailnet-machines-and-agent-ssh-design.md; schema in `machines.ts`).
+
+/** The owner's policy per tailnet or paired machine (`machines.json`, {@link parseMachinesFile}). */
+export function machinesStorePath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "machines.json");
+}
+
+/**
+ * Orquester's own `tailscale serve` routes on the daemon host (`tailnet.json`, {@link parseTailnetFile}):
+ * the daemon's HTTPS route and the shared dev-server previews. Ports and targets only, no secret.
+ */
+export function tailnetStorePath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "tailnet.json");
+}
+
+// Agent SSH (same spec §4.3): keys, the managed ssh config and the ProxyCommand socket.
+
+/**
+ * `<appdir>/daemon/ssh` (0700): machine-level SSH keys, one per Free-use machine alias that every
+ * chat may use (`<dir>/<alias>`, private key 0600, `.pub` beside it). Per-chat keys live in
+ * {@link agentChatThreadSshDir}.
+ */
+export function machineSshDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "ssh");
+}
+
+/** A machine-level alias's private key (`<alias>.pub` beside it); `alias` is an `orq-<name>` slug. */
+export function machineSshKeyPath(baseDir: string, alias: string): string {
+  return joinPath(machineSshDir(baseDir), alias);
+}
+
+/**
+ * The Unix socket the ProxyCommand helper of every `orq-<name>` alias connects to (`@orquester/api`
+ * `agent-ssh.ts`: one JSON request line, one JSON answer line, then raw SSH bytes). Like the box
+ * relay sockets it is unauthenticated local control (spec §7.3).
+ */
+export function sshProxySocketPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "ssh-proxy.sock");
+}
+
+/** The directory under `~/.ssh` Orquester owns: one `<name>.conf` per alias, and `known_hosts`. */
+export const MANAGED_SSH_CONFIG_DIR_NAME = "orquester";
+
+/** `<home>/.ssh/orquester`: Orquester's ssh config files (0700). Nothing else in `~/.ssh` is written, save the opt-in Include. */
+export function managedSshConfigDir(homeDir: string): string {
+  return joinPath(homeDir, ".ssh", MANAGED_SSH_CONFIG_DIR_NAME);
+}
+
+/** `<home>/.ssh/orquester/<name>.conf`: the `Host orq-<name>` block; `name` is the alias without `orq-`. */
+export function managedSshConfigPath(homeDir: string, name: string): string {
+  return joinPath(managedSshConfigDir(homeDir), `${name}.conf`);
+}
+
+/** Pinned host keys of every alias, under `HostKeyAlias orq-<name>` (the configs' `UserKnownHostsFile`). */
+export function managedSshKnownHostsPath(homeDir: string): string {
+  return joinPath(managedSshConfigDir(homeDir), "known_hosts");
+}
+
+/**
+ * The one line `~/.ssh/config` gets when the owner opts in (`agentPrefs.sshConfigInclude`).
+ * Without it agents use `ssh -F ~/.ssh/orquester/<name>.conf orq-<name>`.
+ */
+export const SSH_CONFIG_INCLUDE_LINE = `Include ~/.ssh/${MANAGED_SSH_CONFIG_DIR_NAME}/*.conf`;
+
 /** Parent of every desktop's runtime dir (sockets, cookies, logs); mode 0700. */
 export function desktopsRuntimeDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "desktops");
@@ -714,6 +778,20 @@ export function agentChatThreadMetaPath(baseDir: string, threadId: string): stri
 /** The durable domain-event log. Not rotated — it is the record (§3.1). */
 export function agentChatThreadEventsPath(baseDir: string, threadId: string): string {
   return joinPath(agentChatThreadDir(baseDir, threadId), "events.ndjson");
+}
+
+/**
+ * Agent SSH (spec 2026-11-22 §4.3): the chat's SSH keys, one per box or machine it may reach
+ * (`ssh/<alias>`, private key 0600, `<alias>.pub` beside it; the directory 0700). Deleted when the
+ * chat closes.
+ */
+export function agentChatThreadSshDir(baseDir: string, threadId: string): string {
+  return joinPath(agentChatThreadDir(baseDir, threadId), "ssh");
+}
+
+/** One chat's private key for `alias` (an `orq-<name>` slug); the public key is `<path>.pub`. */
+export function agentChatThreadSshKeyPath(baseDir: string, threadId: string, alias: string): string {
+  return joinPath(agentChatThreadSshDir(baseDir, threadId), alias);
 }
 
 /** Attachment bytes. Never in an event and never inline on the wire (§5.1). */
@@ -1349,6 +1427,13 @@ export const agentPrefsSchema = z.object({
    * with its own cache lifetime (an API key's 5 minutes, a subscription's hour). An absent entry
    * means "use the default"; an unreadable one is dropped.
    */
+  /**
+   * Agent SSH (spec 2026-11-22 §4.3.4, Settings → Agents): whether the daemon keeps one
+   * `SSH_CONFIG_INCLUDE_LINE` in the daemon user's `~/.ssh/config` so a bare `ssh orq-<name>`
+   * works. **Off** by default: that file is the owner's. Lives here because these are the
+   * daemon-read, host-wide agent settings; the per-alias files are written either way.
+   */
+  sshConfigInclude: z.boolean().default(false),
   claudeIdleCompactionByAccount: z
     .record(z.string(), z.unknown())
     .catch({})
@@ -3461,3 +3546,5 @@ export * from "./knowledge-cluster-labels.ts";
 export * from "./knowledge-concept-summaries.ts";
 export * from "./knowledge-concept-families.ts";
 export * from "./devices.ts";
+export * from "./machines.ts";
+export * from "./tailnet.ts";

@@ -225,7 +225,7 @@ test("GPT Image: generate_image and its instruction line only while images are a
 
 test("devices: the device tools and their instruction line only while devices are available", () => {
   const chat = catalogFor("chat");
-  const DEVICE_TOOLS = ["list_devices", "open_device", "device_action", "device_install", "close_device"];
+  const DEVICE_TOOLS = ["list_devices", "open_device", "device_action", "device_install", "device_forward_port", "close_device"];
   const off = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [] });
   const on = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [], devicesAvailable: true });
   const owned = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [], devicesAvailable: true });
@@ -242,4 +242,14 @@ test("devices: the device tools and their instruction line only while devices ar
   assert.ok(Buffer.byteLength(deviceLines[0]!, "utf8") <= 160, "documented Devices guidance budget");
   // Gated independently of the box tools.
   assert.ok(!on.tools.includes("create_box"));
+});
+
+test("machines: list_machines and its one instruction line only while a machine is visible to agents", () => {
+  const chat = catalogFor("chat");
+  const off = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [], boxesAvailable: true, devicesAvailable: true });
+  const on = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [], machinesAvailable: true });
+  assert.ok(!off.tools.includes("list_machines"));
+  assert.doesNotMatch(off.instructions, /list_machines/);
+  assert.ok(on.tools.includes("list_machines"), "it is Read, so a workflow-owned chat keeps it");
+  assert.equal(on.instructions.split("\n").filter((line) => line.includes("list_machines")).length, 1);
 });

@@ -132,7 +132,8 @@ const deny = (code: GateDenyCode, message: string): GateDecision => ({ kind: "de
 const SPEND_WORDS: Readonly<Record<SpendFamily, { planning: string; reason: string }>> = {
   boxes: { planning: "rents a machine that costs money", reason: "renting a machine that costs money" },
   devices: { planning: "rents a machine that costs money", reason: "renting a machine that costs money" },
-  accounts: { planning: "lends account logins that use subscription quota", reason: "lending account logins that use subscription quota" }
+  accounts: { planning: "lends account logins that use subscription quota", reason: "lending account logins that use subscription quota" },
+  machines: { planning: "turns on one of the owner's machines", reason: "waking one of your machines set to Ask first" }
 };
 
 const WORKFLOW_OWNED = "This chat runs inside an automated workflow, where nobody can approve";

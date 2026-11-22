@@ -25,6 +25,7 @@ import {
 } from "@orquester/config";
 
 import { sessionToolNameOfData, sessionToolReferences } from "./agent-chat/session-tools.ts";
+import type { MachineProblem } from "./machines.ts";
 
 export type {
   DevicePlacementMode,
@@ -59,6 +60,28 @@ export type DeviceFormFactor = "phone" | "tablet" | "foldable";
 
 /** The Android system image every phase 1 AVD uses (API 35: API 37 needs 4 GB per emulator). */
 export const ANDROID_SYSTEM_IMAGE = "system-images;android-35;google_apis;x86_64";
+
+/** The CPU ABI of an Android system image: x86_64 on Linux and Windows hosts, arm64-v8a on Apple Silicon Macs. */
+export type AndroidAbi = "x86_64" | "arm64-v8a";
+export const ANDROID_ABIS: readonly AndroidAbi[] = ["x86_64", "arm64-v8a"];
+
+/** The ABI an `sdkmanager` system image id ends with (`…;google_apis;arm64-v8a`); null for another id. */
+export function androidImageAbi(systemImage: string): AndroidAbi | null {
+  const abi = systemImage.split(";").at(-1);
+  return ANDROID_ABIS.find((entry) => entry === abi) ?? null;
+}
+
+/**
+ * The profile's system image for a host of `abi`: the same API level and tag with that ABI
+ * (`system-images;android-35;google_apis;x86_64` → `…;arm64-v8a` on an Apple Silicon Mac). The
+ * image id is part of an AVD's and golden snapshot's identity, so x86_64 and arm64 artifacts never mix.
+ */
+export function androidSystemImageFor(profile: Pick<DeviceProfile, "systemImage">, abi: AndroidAbi): string {
+  const image = profile.systemImage ?? ANDROID_SYSTEM_IMAGE;
+  const parts = image.split(";");
+  if (androidImageAbi(image) === null || parts.length < 2) return image;
+  return [...parts.slice(0, -1), abi].join(";");
+}
 
 /**
  * A device model the owner or an agent can ask for. Hints for the hosts: an Android profile names
@@ -139,6 +162,15 @@ export function boxDeviceHostId(boxId: string): string {
 }
 
 /**
+ * The second device host of a machine that runs both platforms: an Apple Silicon Mac's Android
+ * emulators, `box:<boxId>:android` (its iOS simulators keep {@link boxDeviceHostId}). Never a `/`:
+ * device keys are `<hostId>/<deviceId>`.
+ */
+export function boxAndroidDeviceHostId(boxId: string): string {
+  return `box:${boxId}:android`;
+}
+
+/**
  * - `disabled` — its platform is off in Settings → Devices.
  * - `needs-setup` — a readiness check is missing or failed; nothing runs until it is fixed.
  * - `installing` — a setup job is fixing it.
@@ -177,6 +209,24 @@ export interface DeviceCapacity {
   used: number;
   /** How many it may run at once (the host's formula, clamped by Settings). */
   total: number;
+  /** What the last probe measured `total` from (tailnet machines spec 2026-11-22 §4.4.4). Absent: a fixed formula. */
+  basis?: DeviceCapacityBasis;
+}
+
+/** The hypervisor an Android host's emulators use: Linux KVM, Windows WHPX, macOS Hypervisor.framework. */
+export type DeviceHostAccel = "kvm" | "whpx" | "hvf";
+
+/** The probe's numbers behind a host's capacity. */
+export interface DeviceCapacityBasis {
+  cpus: number;
+  /** Free RAM when probed. */
+  freeMemBytes: number;
+  /** Free disk under the device dirs; null when unknown. */
+  freeDiskBytes: number | null;
+  /** The usable hypervisor; null when none (no Android there). */
+  accel: DeviceHostAccel | null;
+  /** ISO time of the probe. */
+  probedAt: string;
 }
 
 /** A host that is a rented (or paired) box. */
@@ -238,6 +288,13 @@ export interface DeviceHostSummary {
   notice?: string;
   /** Absent: the host did not say (the panel assumes no iOS H.264). */
   stream?: DeviceHostStreamInfo;
+  /**
+   * The machine (`machines.ts` id) this host runs on: a paired machine's `ts:`/`box:` id. Absent for
+   * rented hosts and this host.
+   */
+  machineId?: string;
+  /** Environment problems the probes found, each with its fix (KVM permission, linger, Xcode path, …). */
+  problems?: MachineProblem[];
 }
 
 /** How a vphone research host's id starts: `vphone:<boxId>`. */
@@ -665,6 +722,101 @@ export interface DevicePoolSummary {
 }
 
 // ---------------------------------------------------------------------------
+// Direct stream routes (tailnet machines spec 2026-11-22 §4.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * How the owner's viewer reaches a host's hub, best first: `tailnet` — the machine's own
+ * `https://<machine>.ts.net:<port>` (its `tailscale serve`); `lan` — plain `http`/`ws` to a LAN
+ * address (desktop app only: no mixed-content block there); `daemon` — today's hub proxy
+ * ({@link deviceRoutes.hub}), always available.
+ */
+export type DeviceStreamRouteKind = "tailnet" | "lan" | "daemon";
+
+/** One route: `url` is the hub's base URL on it (hub paths are appended to it). */
+export interface DeviceStreamRoute {
+  kind: DeviceStreamRouteKind;
+  url: string;
+}
+
+/**
+ * Which client asks: only the desktop app is offered `lan` routes (plain `http`/`ws` to a LAN
+ * address; an HTTPS page would block them as mixed content). Absent: a browser.
+ */
+export type DeviceStreamClient = "desktop" | "browser";
+
+/** `POST deviceRoutes.streamTicket(hostId)`: a ticket for one device on the host (the owner's viewer only). */
+export interface DeviceStreamTicketRequest {
+  /** The hub's device id on that host. */
+  deviceId: string;
+  client?: DeviceStreamClient;
+}
+
+/**
+ * The routes to try, in order, and a short-lived host- and device-scoped ticket for the direct ones
+ * (the hub token never leaves the daemon). Before presenting `ticket` on a direct route, the client
+ * fetches {@link DEVICE_HOST_IDENTITY_PATH} there and goes on only if it returns `machineId`.
+ */
+export interface DeviceStreamTicketResponse {
+  routes: DeviceStreamRoute[];
+  ticket: string;
+  /** Epoch ms after which the hub refuses the ticket. */
+  expiresAt: number;
+  /** The machine the direct routes must identify as; absent when only the `daemon` route is offered. */
+  machineId?: string;
+}
+
+/** How long a stream ticket lasts. */
+export const DEVICE_STREAM_TICKET_TTL_MS = 120_000;
+/** The query parameter a direct route's stream and WebSocket requests carry the ticket in. */
+export const DEVICE_STREAM_TICKET_PARAM = "ticket";
+
+/**
+ * The hub's public identity endpoint on its tailnet- and LAN-facing listener (no auth, no ticket):
+ * `GET` → {@link DeviceHostIdentity}.
+ */
+export const DEVICE_HOST_IDENTITY_PATH = "/.well-known/orquester/device-host";
+
+/** What {@link DEVICE_HOST_IDENTITY_PATH} answers. */
+export interface DeviceHostIdentity {
+  hostId: string;
+  /** The machine id the hub runs on; null on a host that is no machine (rented boxes, this host). */
+  machineId: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Port forwards to a device's machine (tailnet machines spec 2026-11-22 §4.6)
+// ---------------------------------------------------------------------------
+
+/** Metro's port: forwarded automatically when a device opens for a chat whose project runs Metro. */
+export const DEVICE_METRO_PORT = 8081;
+
+/**
+ * A listener on the device machine's `localhost:devicePort` that pipes to the chat's project at
+ * `targetPort` (through `orq-agent`'s host channel). Android emulators also get `adb reverse
+ * tcp:<devicePort> tcp:<devicePort>`. Closed when the device closes, the chat ends or the machine
+ * is released.
+ */
+export interface DevicePortForward {
+  devicePort: number;
+  targetPort: number;
+  /** Added by Orquester (Metro), not by an agent or the owner. */
+  auto: boolean;
+}
+
+/** `POST deviceRoutes.forwards(leaseId)`. */
+export interface AddDevicePortForwardRequest {
+  devicePort: number;
+  /** Default: `devicePort`. */
+  targetPort?: number;
+}
+
+/** `GET`/`POST deviceRoutes.forwards(leaseId)`, `DELETE deviceRoutes.forward(leaseId, devicePort)`: the lease's forwards now. */
+export interface DevicePortForwardsResponse {
+  forwards: DevicePortForward[];
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -772,6 +924,12 @@ export const deviceRoutes = {
   setup: (platform: DevicePlatform): string => `/api/devices/setup/${platform}`,
   /** GET → {@link DevicePoolResponse}. */
   pool: "/api/devices/pool",
+  /** POST {@link DeviceStreamTicketRequest} → {@link DeviceStreamTicketResponse} (people only; never agents). */
+  streamTicket: (hostId: string): string => `${HOSTS}/${enc(hostId)}/stream-ticket`,
+  /** GET → {@link DevicePortForwardsResponse}; POST {@link AddDevicePortForwardRequest} → {@link DevicePortForwardsResponse}. */
+  forwards: (leaseId: string): string => `${LEASES}/${enc(leaseId)}/forwards`,
+  /** DELETE → {@link DevicePortForwardsResponse}. */
+  forward: (leaseId: string, devicePort: number): string => `${LEASES}/${enc(leaseId)}/forwards/${enc(String(devicePort))}`,
   /** The hub proxy: `path` is the hub's own path (`api/devices`, `vendor/serve-emu/ws`, …). */
   hub: (hostId: string, path: string): string => `${HOSTS}/${enc(hostId)}/hub/${path.replace(/^\/+/, "")}`,
   /** The WebSocket relay to a hub path (append `?token=` on HTTP; see `ApiClient.deviceSocketUrl`). */
@@ -1027,6 +1185,13 @@ export function parseDeviceCacheWarmRequest(value: unknown): DeviceParseResult<D
 export function parseDeviceControllerRequest(value: unknown): DeviceParseResult<DeviceControllerRequest> {
   if (!isRecord(value) || !isDeviceController(value.controller)) return { ok: false, message: "`controller` must be agent or user." };
   return { ok: true, value: { controller: value.controller } };
+}
+
+/** The body of POST {@link deviceRoutes.streamTicket}. */
+export function parseDeviceStreamTicketRequest(value: unknown): DeviceParseResult<DeviceStreamTicketRequest> {
+  if (!isRecord(value) || typeof value.deviceId !== "string" || value.deviceId === "" || value.deviceId.length > 200) return { ok: false, message: "`deviceId` must name the device." };
+  if (value.client !== undefined && value.client !== "desktop" && value.client !== "browser") return { ok: false, message: "`client` must be desktop or browser." };
+  return { ok: true, value: { deviceId: value.deviceId, ...(value.client !== undefined ? { client: value.client } : {}) } };
 }
 
 /** The body of POST {@link deviceRoutes.userAction}. */

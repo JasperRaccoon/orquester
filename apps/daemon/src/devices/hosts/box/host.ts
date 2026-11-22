@@ -43,12 +43,14 @@ import {
   type DevicePlatform,
   type DeviceReadinessCheck,
   type DevicesSettings,
-  type DeviceSummary
+  type DeviceSummary,
+  type MachineProblem
 } from "@orquester/api";
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
 import type { BoxConnection, BoxHostForward } from "../../../boxes/contracts.ts";
 import { DEVICE_TOOL_VERSIONS, SIMSLIM_INSTALL_SCRIPT, SIMSLIM_RELEASE } from "../../../boxes/github/device-cache.ts";
+import type { DirectStreamGate } from "../../direct/machine-gate.ts";
 import { DeviceError, isDeviceError } from "../../errors.ts";
 import type { DeviceToolchain } from "../../toolchain/index.ts";
 import type {
@@ -56,6 +58,7 @@ import type {
   DeviceBootRequest,
   DeviceBootResult,
   DeviceCommandResult,
+  DeviceDirectStream,
   DeviceHost,
   DeviceHostProgress,
   DeviceHostState
@@ -85,7 +88,9 @@ import {
   type RemoteProbe,
   type RemoteResult
 } from "./remote.ts";
+import { macProblems, unreachableProblem } from "./problems.ts";
 import { SimPool, poolSimulatorName, profileOfPoolSimulator, type PoolSim } from "./sim-pool.ts";
+import { NO_LOAD, type MachineDeviceLoad } from "./shared-load.ts";
 import { simulatorCapacity } from "./simslim-capacity.ts";
 import {
   ORQ_SLIM_PROFILE_JSON,
@@ -176,6 +181,10 @@ export interface BoxDeviceHostDeps {
   destroyBox?(): Promise<void>;
   logger: Pick<Console, "info" | "warn" | "error">;
   fetch?: typeof fetch;
+  /** What the machine's other device host holds now (an Apple Silicon Mac's Android emulators, `shared-load.ts`); absent: nothing else runs there. */
+  siblingLoad?(): MachineDeviceLoad;
+  /** An own Mac: the stream gate for the viewer's direct routes (tailnet machines spec §4.5). */
+  directGate?: DirectStreamGate;
 }
 
 /** Pool simulators per profile on a rented host. */
@@ -208,6 +217,8 @@ export class BoxDeviceHost implements DeviceHost {
   /** The readiness check being worked on while preparing. */
   private working: string | null = null;
   private probe: RemoteProbe | null = null;
+  /** When {@link probe} was taken (the capacity basis's `probedAt`). */
+  private probedAt: string | null = null;
   private layoutCache: RemoteLayout | null = null;
   private toolVersions: { hub: string | null; agent: string | null } | null = null;
   private hub: HubRuntime | null = null;
@@ -246,6 +257,7 @@ export class BoxDeviceHost implements DeviceHost {
     this.kind = deps.kind;
     this.label = deps.label;
     this.platforms = ["ios"];
+    deps.directGate?.onChange(() => this.emitChange());
   }
 
   get boxId(): string {
@@ -309,14 +321,48 @@ export class BoxDeviceHost implements DeviceHost {
   capacity(): DeviceCapacity {
     const leased = this.deps.activeLeases().length;
     if (!this.platformEnabled()) return { used: leased, total: 0 };
+    const other = this.deps.siblingLoad?.();
     const { total } = simulatorCapacity({
       settingCap: this.deps.settings().ios.maxSimulatorsPerHost,
       hostBytes: this.hostBytes,
       slim: this.slim !== null,
       top: this.top,
-      leased
+      leased,
+      ...(other ? { otherBytes: other.bytes } : {})
     });
-    return { used: leased, total };
+    const probe = this.probe;
+    // What memory decides it from: the probe's numbers (simulators need no hypervisor of their own).
+    const basis =
+      probe && this.probedAt && probe.cpus !== null && probe.memFreeBytes !== null
+        ? { cpus: probe.cpus, freeMemBytes: probe.memFreeBytes, freeDiskBytes: probe.diskFreeBytes, accel: probe.vm === false ? ("hvf" as const) : null, probedAt: this.probedAt }
+        : null;
+    return { used: leased, total, ...(basis ? { basis } : {}) };
+  }
+
+  /** What this host's simulators hold of the Mac now (its active leases × the per-simulator budget): the Mac's Android host counts it. */
+  deviceLoad(): MachineDeviceLoad {
+    const devices = this.deps.activeLeases().length;
+    if (devices === 0) return NO_LOAD;
+    const { perSimBytes } = simulatorCapacity({ settingCap: this.deps.settings().ios.maxSimulatorsPerHost, hostBytes: this.hostBytes, slim: this.slim !== null, top: this.top, leased: devices });
+    return { devices, bytes: devices * perSimBytes };
+  }
+
+  /** The machine's other device host changed what it holds: capacity may have changed. */
+  siblingChanged(): void {
+    this.emitChange();
+  }
+
+  /** An own Mac's environment problems, each with its fix: asleep or offline, Xcode's path, developer mode. */
+  problems(): MachineProblem[] {
+    if (this.kind !== "byo") return [];
+    const record = this.deps.record();
+    const name = typeof record?.machineName === "string" && record.machineName ? record.machineName : "Your Mac";
+    if (!this.deps.connection()?.connected && record?.state === "ready") return [unreachableProblem(name, "macos")];
+    return [...(this.probe ? macProblems({ xcodePath: this.probe.xcodePath, devTools: this.probe.devTools }, name) : []), ...(this.deps.directGate?.problems() ?? [])];
+  }
+
+  directStream(): DeviceDirectStream | null {
+    return this.hub ? (this.deps.directGate?.stream() ?? null) : null;
   }
 
   box(): DeviceHostBoxInfo | null {
@@ -437,6 +483,8 @@ export class BoxDeviceHost implements DeviceHost {
       this.step("hub", "Starting the device hub", "running", 50);
       this.setDetail("Starting the device hub…");
       await this.ensureHub(link, probe, layout, signal);
+      // The viewer's direct routes (best effort: without them it streams through the daemon).
+      void this.deps.directGate?.ensure({ nodePath: probe.nodePath!, root: layout.root, hubStateDir: layout.hubState, env: remoteEnv(probe) });
       this.step("hub", "Starting the device hub", "done", 70);
 
       this.working = "agent-device";
@@ -498,7 +546,10 @@ export class BoxDeviceHost implements DeviceHost {
   private async probeBox(link: BoxConnection, signal?: AbortSignal): Promise<RemoteProbe> {
     const result = await execRemote(link, { command: "/bin/sh", args: ["-c", PROBE_SCRIPT] }, { ...(signal ? { signal } : {}), timeoutMs: this.timing.commandMs });
     const probe = parseProbe(result.stdout);
+    const before = this.probe === null ? null : JSON.stringify(this.problems());
     this.probe = probe;
+    this.probedAt = new Date().toISOString();
+    if (before !== null && before !== JSON.stringify(this.problems())) this.emitChange();
     await this.readToolVersions(link);
     return probe;
   }
@@ -1082,6 +1133,7 @@ export class BoxDeviceHost implements DeviceHost {
     const link = this.deps.connection();
     const probe = this.probe;
     this.simPool?.stop();
+    await this.deps.directGate?.stop();
     await this.closeHub();
     await this.closeAgent();
     if (link?.connected) {
@@ -1108,6 +1160,7 @@ export class BoxDeviceHost implements DeviceHost {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.simPool?.stop();
+    await this.deps.directGate?.dispose();
     await this.closeHub();
     await this.closeAgent();
     if (this.configPath) await removeAgentDeviceConfig(this.configPath).catch(() => undefined);

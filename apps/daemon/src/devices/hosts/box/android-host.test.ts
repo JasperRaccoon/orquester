@@ -124,7 +124,7 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     assert.ok(steps.includes("tools:skipped") && steps.includes("android-sdk:skipped"));
     // Nothing installed: no npm, sdkmanager, avdmanager or apt.
     assert.ok(!h.box.execs.some((args) => /npm ci|npm install|sdkmanager|avdmanager|apt-get install/.test(args.join(" "))), h.box.execs.map((a) => a.join(" ")).join("\n"));
-    assert.deepEqual(host.capacity(), { used: 0, total: 0 });
+    assert.deepEqual({ used: host.capacity().used, total: host.capacity().total }, { used: 0, total: 0 });
     // The hub, through its forward, wants its token.
     const origin = host.hubOrigin()!;
     const token = host.hubToken()!;
@@ -153,7 +153,7 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     const h = await harness({ cacheGpu: "swangle_indirect" });
     const host = h.make();
     await host.prepare(h.box.connection, signal());
-    assert.deepEqual(host.capacity(), { used: 0, total: 8 }, "the fake box's 16 CPUs and 64 GiB provide eight slots");
+    assert.deepEqual({ used: host.capacity().used, total: host.capacity().total }, { used: 0, total: 8 }, "the fake box's 16 CPUs and 64 GiB provide eight slots");
     const [a, b] = await Promise.all(
       ["lease-a", "lease-b"].map(async (id) => {
         h.leases.push(lease(id));
@@ -205,6 +205,31 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     await host.teardown();
   });
 
+  it("an own machine's -gpu host snapshot boots on the probed X display; when the renderer fails or the display goes, cold in software", async () => {
+    const h = await harness({ cacheGpu: "host", probeLines: ["nvidia=595.99.02", "nvidia_dev=1", "x_display=:0"] }, { provider: "byo", purpose: "machine" });
+    const host = h.make({ kind: "byo" });
+    await host.prepare(h.box.connection, signal());
+    const bootLease = async (id: string) => {
+      h.leases.push(lease(id));
+      await host.boot({ leaseId: id, profile, fresh: true }, signal());
+    };
+    await bootLease("on-gpu");
+    assert.match((await h.box.emulatorArgs())[0]!, /-gpu host .*-snapshot orq-golden/);
+    assert.deepEqual(await h.box.emulatorDisplays(), ["DISPLAY=:0"]);
+    // The renderer does not start (the emulator logs it, QEMU idles unbooted): no wait for the boot timeout.
+    await h.box.failRenderer();
+    await bootLease("renderer-failed");
+    assert.match((await h.box.emulatorArgs())[2]!, /-gpu swangle_indirect .*-no-snapshot-load -no-snapshot-save$/);
+    assert.deepEqual((await h.box.emulatorDisplays()).slice(1), ["DISPLAY=:0", "DISPLAY="]);
+    // Logged out: no display to render through, so no host attempt at all.
+    h.box.probeLines.splice(h.box.probeLines.indexOf("x_display=:0"), 1);
+    await host.refreshReadiness();
+    await bootLease("logged-out");
+    assert.equal((await h.box.emulatorArgs()).length, 4);
+    assert.match((await h.box.emulatorArgs())[3]!, /-gpu swangle_indirect .*-no-snapshot-load -no-snapshot-save$/);
+    await host.teardown();
+  });
+
   it("reattaches after a daemon restart: the same hub and token, the leased emulator kept, an orphan stopped", async () => {
     const h = await harness();
     const first = h.make();
@@ -252,12 +277,18 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     await host.dispose();
   });
 
-  it("an own machine caps capacity at its owner's setting; refuses boots while tearing down", async () => {
-    const h = await harness({ cpus: 32 }, { provider: "byo", purpose: "machine" });
+  it("an own machine's capacity comes from its probe (CPUs, memory, disk), not a fixed setting; refuses boots while tearing down", async () => {
+    const GiB = 1024 ** 3;
+    const h = await harness({ cpus: 32, diskFreeBytes: 12 * GiB }, { provider: "byo", purpose: "machine" });
     h.settings.android.maxLocalDevices = 3;
     const host = h.make({ kind: "byo" });
     await host.prepare(h.box.connection, signal());
-    assert.equal(host.capacity().total <= 3, true);
+    // 32 CPUs and 64 GiB would run 16; 12 GiB of disk (4 kept free, 2 per emulator) runs 4.
+    const capacity = host.capacity();
+    assert.equal(capacity.total, 4);
+    assert.equal(capacity.basis?.cpus, 32);
+    assert.equal(capacity.basis?.freeDiskBytes, 12 * GiB);
+    assert.equal(capacity.basis?.accel, "kvm");
     assert.equal(host.cacheState(), "unknown");
     const teardown = host.teardown();
     await assert.rejects(host.boot({ leaseId: "late", profile, fresh: true }, signal()), /being turned off/);

@@ -1,6 +1,6 @@
 /**
- * Bring-your-own machines (Devices phase 3 §2.1): the owner's own always-on Mac or Linux machine,
- * paired once with a one-line command (`service/byo.ts`). Nothing is rented, so this adapter makes
+ * Bring-your-own machines (Devices phase 3 §2.1): the owner's own always-on Mac, Linux or Windows
+ * machine, paired once with a one-line command or over SSH (`service/byo.ts`). Nothing is rented, so this adapter makes
  * no call anywhere: it costs nothing, has no credentials and no deadline, lists no managed
  * instances (the reconciler never sweeps or destroys a machine), and `create` refuses — a machine
  * is paired, never created. Its offers are the machines themselves ({@link byoOffers}), built by
@@ -22,7 +22,7 @@ export const byoAdapter: BoxProviderAdapter = {
   website: "",
   credentialsUrl: "",
   credentialFields: [],
-  accountNote: "Your own always-on Mac or Linux machine, paired with a one-line command. Free; Orquester never deletes it.",
+  accountNote: "Your own always-on Mac, Linux or Windows machine, paired with a one-line command. Free; Orquester never deletes it.",
   maxLifetimeMinutes: null,
   validate: async () => ({ ok: true }),
   offers: async (): Promise<ProviderOffers> => ({ sizes: [], regions: [BYO_REGION], images: [], priceSource: "table" }),
@@ -47,7 +47,7 @@ export function byoMachineIdle(record: StoredBox, connected: boolean): boolean {
 /** "Mac mini (macOS, arm64)". */
 export function byoMachineLabel(record: StoredBox): string {
   const name = record.machineName ?? record.name;
-  const details = [record.os === "darwin" ? "macOS" : record.os === "linux" ? "Linux" : null, record.arch ?? null].filter(Boolean);
+  const details = [record.os === "darwin" ? "macOS" : record.os === "linux" ? "Linux" : record.os === "win32" ? "Windows" : null, record.arch ?? null].filter(Boolean);
   return details.length > 0 ? `${name} (${details.join(", ")})` : name;
 }
 

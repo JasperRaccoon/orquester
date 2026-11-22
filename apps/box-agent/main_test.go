@@ -50,3 +50,21 @@ func TestServiceCommandsRejectUnknownFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestDesktopHelperCommandsRefuseMissingUsersAndUnknownFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"install-desktop-helper", "--dry-run"},
+		{"install-desktop-helper", "--user"},
+		{"install-desktop-helper", "--user", "u", "--bogus"},
+		{"uninstall-desktop-helper", "--user", "u"},
+		{"uninstall-desktop-helper", "--data-dir="},
+	} {
+		if code := run(args); code != 2 {
+			t.Errorf("%q: exit %d", args, code)
+		}
+	}
+	if opts, err := parseDesktopHelperArgs([]string{"--user", `PC\user`, "--data-dir=C:\\orq\\agent", "--dry-run"}, true); err != nil ||
+		opts.User != `PC\user` || opts.DataDir != `C:\orq\agent` || !opts.DryRun {
+		t.Fatalf("%+v, %v", opts, err)
+	}
+}

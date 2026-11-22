@@ -7,7 +7,7 @@
  * config-changes routes are the sync module's.)
  */
 
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import {
   type AddByoMachineRequest,
@@ -79,7 +79,20 @@ export function registerBoxRoutes(app: FastifyInstance, service: BoxService): vo
 
   app.get(boxRoutes.list, read((): BoxesResponse => service.boxesResponse()));
 
-  app.get(boxRoutes.kinds, guarded(async (): Promise<BoxKindsResponse> => ({ kinds: await service.settings.kinds() })));
+  /**
+   * Machines (tailnet machines spec §4.1): an agent's request (any principal but the owner's) is
+   * offered only the owner's machines it may run commands on; a Hidden one is as unknown as a
+   * machine never paired. Undefined: the owner, who sees every machine.
+   */
+  const machineFilter = (request: FastifyRequest): ((boxId: string) => boolean) | undefined => {
+    const principal = request.principal;
+    if (!principal || principal.kind === "user") return undefined;
+    return (boxId) => service.machineAccess()?.allowsBox(boxId, "commands") ?? true;
+  };
+
+  app.get(boxRoutes.kinds, (request, reply) =>
+    guarded(async (): Promise<BoxKindsResponse> => ({ kinds: await service.settings.kinds(machineFilter(request)) }))(request, reply)
+  );
 
   app.get(boxRoutes.providers, read((): BoxProvidersResponse => service.settings.providersResponse()));
 
@@ -141,7 +154,7 @@ export function registerBoxRoutes(app: FastifyInstance, service: BoxService): vo
     guarded((): Promise<BoxProviderInfo> => service.settings.deleteCredentials(request.params.id))(request, reply)
   );
   app.get<{ Params: { id: string }; Querystring: { kind?: string } }>("/api/boxes/providers/:id/offers", (request, reply) =>
-    guarded((): Promise<BoxOffersResponse> => service.settings.offers(request.params.id, request.query.kind))(request, reply)
+    guarded((): Promise<BoxOffersResponse> => service.settings.offers(request.params.id, request.query.kind, machineFilter(request)))(request, reply)
   );
   app.post<{ Params: { id: string } }>("/api/boxes/providers/:id/windows-image", (request, reply) =>
     accepted(() => service.settings.prepareWindowsImage(request.params.id))(request, reply)

@@ -21,6 +21,10 @@
  * - Calls for one project box run one at a time. A project box's forwards are dropped once it is
  *   destroyed, or no longer the box of the project they were made for (a bring-your-own machine
  *   given back to its owner, or lent to another project): the box is told to stop listening.
+ * - **Box-bound forwards** (`open(…, { bind: "box" })`, devices' port forwards to a device host:
+ *   `devices/forwards.ts`) share the box's one list but belong to no project: they go only when the
+ *   box is destroyed (or are closed by their owner). `exactPort` listens on the preferred port or
+ *   fails (an iOS simulator reaches only the Mac's own `localhost:<port>`).
  */
 
 import { randomBytes, randomInt } from "node:crypto";
@@ -75,8 +79,8 @@ interface Entry {
   readonly projectBoxId: string;
   readonly boxPort: number;
   readonly target: string;
-  /** The project it was made for: the project box's record named it then. */
-  readonly projectPath: string;
+  /** The project it was made for: the project box's record named it then; null for a box-bound forward. */
+  readonly projectPath: string | null;
   /** A fresh stream to the temporary box's port. */
   readonly upstream: () => Promise<Duplex>;
 }
@@ -95,19 +99,22 @@ export class ProjectBoxForwards {
     deps.hub.handleChannel("host-tcp", (context, spec, stream) => this.serve(context.boxId, spec, stream));
     this.unsubscribe = [
       deps.registry.onChange((boxId) => {
-        const [entry] = this.byBox.get(boxId)?.values() ?? [];
-        if (!entry) return;
+        if (!this.byBox.has(boxId)) return;
         const record = deps.registry.get(boxId);
         // Destroyed: the hub dropped its list on revoke.
-        if (!record || record.state === "destroyed") this.forget(boxId);
-        else if (projectOf(record) !== entry.projectPath) {
-          // Its machine is not this project's box any more: no target is served from now on, and it stops listening.
+        if (!record || record.state === "destroyed") {
           this.forget(boxId);
-          void this.serial(boxId, async () => {
-            this.forget(boxId);
-            await this.publish(boxId);
-          }).catch(() => undefined);
+          return;
         }
+        // Its machine is not this project's box any more: no target of that project is served from
+        // now on, and the box stops listening for them (box-bound forwards stay).
+        const stale = (): Entry[] => [...(this.byBox.get(boxId)?.values() ?? [])].filter((entry) => entry.projectPath !== null && entry.projectPath !== projectOf(record));
+        if (stale().length === 0) return;
+        for (const entry of stale()) this.drop(entry);
+        void this.serial(boxId, async () => {
+          for (const entry of stale()) this.drop(entry);
+          await this.publish(boxId);
+        }).catch(() => undefined);
       }),
       deps.hub.onConnectionChange((boxId, connected) => {
         if (connected && this.byBox.has(boxId)) void this.serial(boxId, () => this.recheck(boxId));
@@ -123,9 +130,12 @@ export class ProjectBoxForwards {
    * Listen on the project box (`preferredPort` when it is free there) and pipe each connection to
    * `upstream()`. Rejects with a {@link ProjectBoxForwardError} when the box is not connected or no
    * port could be listened on, and with a `BOX_DESTROYED` {@link BoxFsUnavailableError} when it is no
-   * project's box any more.
+   * project's box any more. `bind: "box"`: a forward of the box itself, not of its project (it stays
+   * while the box lives); `exactPort`: `preferredPort` or nothing.
    */
-  open(projectBoxId: string, preferredPort: number, upstream: () => Promise<Duplex>): Promise<ProjectBoxForward> {
+  open(projectBoxId: string, preferredPort: number, upstream: () => Promise<Duplex>, options: { bind?: "project" | "box"; exactPort?: boolean } = {}): Promise<ProjectBoxForward> {
+    const boxBound = options.bind === "box";
+    const exact = options.exactPort === true;
     return this.serial(projectBoxId, async () => {
       const connection = this.deps.hub.get(projectBoxId);
       if (!connection?.connected) throw notConnected();
@@ -137,13 +147,17 @@ export class ProjectBoxForwards {
       }
       for (const port of this.byBox.get(projectBoxId)?.keys() ?? []) taken.add(port);
       let failure = "no free port was found";
-      for (let attempt = 0; attempt < MAX_LISTEN_ATTEMPTS; attempt += 1) {
+      if (exact && (preferredPort < MIN_PREFERRED_PORT || taken.has(preferredPort))) {
+        throw new ProjectBoxForwardError("PROJECT_BOX_LISTEN_FAILED", preferredPort < MIN_PREFERRED_PORT ? `port ${preferredPort} is a privileged port` : `port ${preferredPort} is already in use there`);
+      }
+      for (let attempt = 0; attempt < (exact ? 1 : MAX_LISTEN_ATTEMPTS); attempt += 1) {
         const boxPort = attempt === 0 && preferredPort >= MIN_PREFERRED_PORT && !taken.has(preferredPort) ? preferredPort : freePort(taken);
         taken.add(boxPort);
         // Read where it is added: a later record change finds the entry and drops it.
         const record = this.deps.registry.get(projectBoxId);
-        const projectPath = record && record.state !== "destroyed" && record.state !== "destroying" ? projectOf(record) : null;
-        if (projectPath === null) throw new BoxFsUnavailableError("BOX_DESTROYED", projectBoxId, "This project's box was destroyed (or its machine given back); nothing can be forwarded into it.");
+        const live = record !== undefined && record.state !== "destroyed" && record.state !== "destroying";
+        const projectPath = live && !boxBound ? projectOf(record) : null;
+        if (!live || (!boxBound && projectPath === null)) throw new BoxFsUnavailableError("BOX_DESTROYED", projectBoxId, "This project's box was destroyed (or its machine given back); nothing can be forwarded into it.");
         const entry: Entry = { projectBoxId, boxPort, target: `fwd-${randomBytes(18).toString("base64url")}`, projectPath, upstream };
         this.add(entry);
         const outcome = (await this.publish(projectBoxId)).find((candidate) => candidate.boxPort === boxPort);

@@ -6,6 +6,8 @@ import test from "node:test";
 
 import { boxesStorePath } from "@orquester/config";
 
+import { byoUnpairCleanupScript } from "../bootstrap/bootstrap.ts";
+import type { BoxExecOptions } from "../contracts.ts";
 import { byoAdapter } from "../providers/byo.ts";
 import { localBoxConnection } from "../testing.ts";
 import { BoxError } from "./errors.ts";
@@ -68,7 +70,7 @@ test("Add your machine: a pairing record and a one-time command; only the code's
   // An idle machine is not a running box.
   assert.equal(service.boxesResponse().totals.activeCount, 0);
 
-  await assert.rejects(service.byo.add({ kind: "windows" as never, name: "x" }), (error: BoxError) => error.code === "BOX_INVALID_REQUEST");
+  await assert.rejects(service.byo.add({ kind: "freebsd" as never, name: "x" }), (error: BoxError) => error.code === "BOX_INVALID_REQUEST");
   await assert.rejects(service.byo.add({ kind: "linux", name: " " }), (error: BoxError) => error.code === "BOX_INVALID_REQUEST");
 });
 
@@ -93,6 +95,38 @@ test("the pairing code is spent by the first fetch and its script carries the bo
 
   const again = await service.byo.pairingScript(code, "203.0.113.5");
   assert.deepEqual(again.ok ? null : again.status, 404, "single use");
+});
+
+test("a Windows machine pairs with a PowerShell one-liner whose code fetches a PowerShell script carrying its token", async (t) => {
+  const { service, hub } = await setup(t);
+  const pairing = await service.byo.add({ kind: "windows", name: "Mini PC" });
+  const match = /^powershell -NoProfile -ExecutionPolicy Bypass -Command "\[Net\.ServicePointManager\]::SecurityProtocol = 'Tls12'; irm 'https:\/\/orq\.example\.test\/api\/boxes\/pair\/([A-Za-z0-9_-]{24})' \| iex"$/.exec(pairing.command);
+  assert.ok(match, pairing.command);
+  const fetched = await service.byo.pairingScript(match[1]!, "203.0.113.5");
+  assert.ok(fetched.ok);
+  if (!fetched.ok) return;
+  assert.equal(fetched.contentType, "text/plain; charset=utf-8", "irm hands a text answer to iex as a string");
+  assert.ok(fetched.script.startsWith("& {\n"), "one PowerShell statement");
+  assert.ok(fetched.script.includes(`'${hub.tokens.get(pairing.box.id)!}'`));
+  assert.ok(fetched.script.includes(`$BoxId = '${pairing.box.id}'`));
+  assert.ok(fetched.script.includes("$Unattended = $false"), "the copy-paste variant prints no probe lines");
+
+  const ssh = await service.byo.addForSsh({ kind: "windows", name: "Mini PC", daemonUrl: "https://orq-host.tail1234.ts.net:10000", connectRoute: "tailscale" });
+  assert.ok(ssh.script.includes("$Unattended = $true"));
+  assert.ok(ssh.script.includes(hub.tokens.get(ssh.boxId)!));
+});
+
+test("pairing over SSH: a pairing record with no code, and an unattended script carrying a fresh bootstrap token for the given URL", async (t) => {
+  const { service, hub } = await setup(t);
+  const { boxId, script } = await service.byo.addForSsh({ kind: "linux", name: "jasper", daemonUrl: "https://orq-host.tail1234.ts.net:10000", connectRoute: "tailscale" });
+  const record = service.registry.get(boxId)!;
+  assert.equal(record.state, "pairing");
+  assert.equal(record.machineName, "jasper");
+  assert.equal(record.connectRoute, "tailscale");
+  assert.equal(record.pairingCodeHash, undefined, "nothing can be fetched with a code");
+  assert.ok(script.includes(hub.tokens.get(boxId)!));
+  assert.ok(script.includes("ORQ_DAEMON_URL='https://orq-host.tail1234.ts.net:10000'"));
+  assert.ok(script.includes("orq-probe:"), "the unattended variant reports its probes");
 });
 
 test("an expired, unknown or malformed code answers the same 404; failures are throttled per client", async (t) => {
@@ -277,10 +311,19 @@ test("Remove machine: a connected one uninstalls its service first; its credenti
   const pairing = await service.byo.add({ kind: "linux", name: "Box" });
   const id = pairing.box.id;
   const connection = localBoxConnection({ boxId: id });
+  // What pairing added is removed through orq-agent first (bootstrap.test.ts runs the script itself);
+  // here the machine answers that one file needed a sudo it doesn't have.
+  const execs: BoxExecOptions[] = [];
+  const exec = connection.exec.bind(connection);
+  connection.exec = (options) => {
+    execs.push(options);
+    return exec({ command: "sh", args: ["-c", "echo 'orq-leftover: /etc/systemd/system/tailscaled.service.d/orquester-oom.conf'; exit 3"] });
+  };
   hub.connect(id, connection);
   await until(service, id, () => service.registry.get(id)?.state === "ready");
 
-  assert.deepEqual(await service.byo.remove(id), { uninstalled: true });
+  assert.deepEqual(await service.byo.remove(id), { uninstalled: true, leftovers: ["/etc/systemd/system/tailscaled.service.d/orquester-oom.conf"] });
+  assert.deepEqual(execs.map((options) => [options.command, options.args?.[1]]), [["sh", byoUnpairCleanupScript()]]);
   assert.deepEqual(
     connection.calls.find((call) => call.method === "agent.shutdown")?.params,
     { reason: "removed", uninstall: true }

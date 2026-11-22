@@ -77,6 +77,16 @@ import {
 } from "./session-profiles.ts";
 import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-profile.ts";
 import type { ProjectBoxInfo, ProjectLocationRequest } from "./boxes.ts";
+import {
+  machineRoutes,
+  type MachineResponse,
+  type MachinesResponse,
+  type PairMachineOverSshRequest,
+  type PairMachineOverSshResponse,
+  type RemoveMachineResponse,
+  type UpdateMachineRequest,
+  type WakeMachineResponse
+} from "./machines.ts";
 export * from "./agent-chat/index.ts";
 export * from "./auth.ts";
 export * from "./saved-prompts.ts";
@@ -97,6 +107,10 @@ export * from "./gpt-image.ts";
 export * from "./devices.ts";
 export * from "./boxes.ts";
 export * from "./box-protocol.ts";
+// Tailnet machines, agent SSH and the daemon's own Tailscale (spec 2026-11-22-tailnet-machines-and-agent-ssh-design.md).
+export * from "./machines.ts";
+export * from "./agent-ssh.ts";
+export * from "./tailnet.ts";
 // boxes: temporary boxes for agent chats (routes behind the box MCP tools).
 export * from "./box-tools.ts";
 export * from "./agent-tools.ts";
@@ -2288,6 +2302,16 @@ export interface OrquesterApi {
   listProjects(workspace: string): Promise<ProjectSummary[]>;
   usage(force?: boolean): Promise<UsageResponse>;
   usageHistory(range: string, timeZone: string, force?: boolean): Promise<UsageHistoryResponse>;
+  /** Machines (`machineRoutes`): tailnet peers and paired machines with the owner's policy. */
+  listMachines(): Promise<MachinesResponse>;
+  getMachine(id: string): Promise<MachineResponse>;
+  /** Owner only. */
+  updateMachine(id: string, request: UpdateMachineRequest): Promise<MachineResponse>;
+  /** Owner only: unpairs a paired machine; resets an unpaired peer's policy. */
+  removeMachine(id: string): Promise<RemoveMachineResponse>;
+  /** Owner only; call again with `acceptHostKeyFingerprint` after a `confirm-host-key` answer. */
+  pairMachineOverSsh(id: string, request: PairMachineOverSshRequest): Promise<PairMachineOverSshResponse>;
+  wakeMachine(id: string): Promise<WakeMachineResponse>;
 }
 
 export interface HttpApiClientOptions {
@@ -2358,6 +2382,30 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   info(): Promise<ServerInfoResponse> {
     return this.get("/api/info");
+  }
+
+  listMachines(): Promise<MachinesResponse> {
+    return this.get(machineRoutes.list);
+  }
+
+  getMachine(id: string): Promise<MachineResponse> {
+    return this.get(machineRoutes.machine(id));
+  }
+
+  updateMachine(id: string, request: UpdateMachineRequest): Promise<MachineResponse> {
+    return this.send("PATCH", machineRoutes.machine(id), request);
+  }
+
+  removeMachine(id: string): Promise<RemoveMachineResponse> {
+    return this.delete(machineRoutes.machine(id));
+  }
+
+  pairMachineOverSsh(id: string, request: PairMachineOverSshRequest): Promise<PairMachineOverSshResponse> {
+    return this.post(machineRoutes.pairSsh(id), request);
+  }
+
+  wakeMachine(id: string): Promise<WakeMachineResponse> {
+    return this.post(machineRoutes.wake(id));
   }
 
   daemonConfig(): Promise<DaemonConfig> {

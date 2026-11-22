@@ -21,7 +21,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createWriteStream } from "node:fs";
-import { mkdir, open, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rm, stat, statfs } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { Readable } from "node:stream";
@@ -175,6 +175,9 @@ export class LocalAndroidHost implements DeviceHost {
   private installing = false;
   private servicesStarting: Promise<void> | null = null;
   private memAvailable: number | null = null;
+  /** Free disk under the devices dir, and when it and {@link memAvailable} were last sampled. */
+  private diskFree: number | null = null;
+  private sampledAt: string | null = null;
   private timers: ReturnType<typeof setInterval>[] = [];
   private disposed = false;
   private tearingDown = false;
@@ -353,7 +356,11 @@ export class LocalAndroidHost implements DeviceHost {
   }
 
   capacity(): DeviceCapacity {
-    return { used: this.leasedCount(), total: this.capacityNumbers().total };
+    const basis =
+      this.sampledAt !== null
+        ? { cpus: this.threads, freeMemBytes: this.memAvailable ?? 0, freeDiskBytes: this.diskFree, accel: this.kvm !== null ? ("kvm" as const) : null, probedAt: this.sampledAt }
+        : null;
+    return { used: this.leasedCount(), total: this.capacityNumbers().total, ...(basis ? { basis } : {}) };
   }
 
   private capacityNumbers() {
@@ -367,6 +374,10 @@ export class LocalAndroidHost implements DeviceHost {
   private async sample(): Promise<void> {
     const before = this.capacityNumbers().total;
     this.memAvailable = await readMemAvailable();
+    this.diskFree = await statfs(this.layout.devices)
+      .then((fs) => fs.bavail * fs.bsize)
+      .catch(() => this.diskFree);
+    this.sampledAt = new Date().toISOString();
     if (this.capacityNumbers().total !== before) this.changed();
   }
 

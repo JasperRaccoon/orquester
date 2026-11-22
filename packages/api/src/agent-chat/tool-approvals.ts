@@ -51,8 +51,9 @@ export type BoundaryFamily = (typeof BOUNDARY_FAMILIES)[number];
 
 // boxes: the `spend` kind's families (Ephemeral AI VMs spec §13.2) — `boxes`: renting a temporary box (`create_box`);
 // `devices`: renting a device host for a device an agent opens (`open_device`, devices spec §6.3);
-// `accounts`: lending account logins to a box, which spends subscription quota (`box_lend_accounts`).
-export const SPEND_FAMILIES = ["boxes", "devices", "accounts"] as const;
+// `accounts`: lending account logins to a box, which spends subscription quota (`box_lend_accounts`);
+// `machines`: an agent waking one of the owner's Ask-first machines (`wake_machine`, tailnet machines spec §4.8).
+export const SPEND_FAMILIES = ["boxes", "devices", "accounts", "machines"] as const;
 export type SpendFamily = (typeof SPEND_FAMILIES)[number];
 
 /** Every card family (`toolset`: legacy, see {@link ApprovalKind}). */

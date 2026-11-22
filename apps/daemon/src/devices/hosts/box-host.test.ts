@@ -13,6 +13,7 @@ import type { CreateDeviceHostBoxRequest, DeviceHostPreparer } from "../../boxes
 import type { DaemonBoxes } from "../../boxes/wiring.ts";
 import { isDeviceError } from "../errors.ts";
 import type { DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProgress } from "../host.ts";
+import { FakeMachineAccess } from "../testing.ts";
 import type { DeviceToolchain } from "../toolchain/index.ts";
 import { createBoxHostFactory, deviceHostOfRecord } from "./box-host.ts";
 import { FakeMacBox } from "./box/testing.ts";
@@ -201,6 +202,25 @@ describe("box device host factory", () => {
     assert.equal(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux" })), null);
     assert.deepEqual(deviceHostOfRecord(record("d", { kind: "linux" })), { kind: "box", platform: "android" });
     assert.equal(deviceHostOfRecord(record("d", { kind: "windows" })), null);
+    // An own Windows machine runs Android (WHPX is its probe's to check), paired as one or reported win32.
+    assert.deepEqual(deviceHostOfRecord(record("e", { provider: "byo", purpose: "machine", deviceHost: true, kind: "windows", os: null })), { kind: "byo", platform: "android" });
+    assert.deepEqual(deviceHostOfRecord(record("e", { provider: "byo", purpose: "machine", deviceHost: true, kind: "linux", os: "win32" })), { kind: "byo", platform: "android" });
+    assert.equal(deviceHostOfRecord(record("e", { provider: "byo", purpose: "machine", deviceHost: false, kind: "windows", os: "win32" })), null);
+  });
+
+  it("an own Windows machine is one Android host, streamed through the daemon (no direct gate)", async () => {
+    settings = { ...settings, android: { ...settings.android, enabled: true } };
+    boxes.records.set("w", record("w", { provider: "byo", purpose: "machine", deviceHost: true, kind: "windows", os: "win32", machineName: "minipc" }));
+    await factory.start(context());
+    assert.deepEqual([...added.keys()], ["box:w"]);
+    const host = added.get("box:w")!;
+    assert.deepEqual({ kind: host.kind, platforms: host.platforms, label: host.label }, { kind: "byo", platforms: ["android"], label: "minipc (your Windows machine)" });
+    assert.equal(host.directStream, undefined);
+    // Never connected: offline, with the fix.
+    assert.equal(host.state().status, "unreachable");
+    assert.deepEqual(host.problems?.().map((problem) => problem.code), ["machine-asleep"]);
+    boxes.set({ ...boxes.records.get("w")!, deviceHost: false });
+    assert.deepEqual([...added.keys()], []);
   });
 
   it("adopts rented device hosts and own Macs at start, and follows their boxes", async () => {
@@ -235,6 +255,58 @@ describe("box device host factory", () => {
 
     await factory.stop();
     assert.equal(boxes.preparer, null);
+  });
+
+  it("follows the machines registry: a Hidden machine or one with Device simulators off is no device host, whatever the box's own flag", async () => {
+    const access = new FakeMachineAccess();
+    access.set("b", { visibility: "hidden" });
+    access.set("c", { visibility: "free" });
+    boxes.records.set("b", record("b", { provider: "byo", purpose: "machine", deviceHost: true }));
+    boxes.records.set("c", record("c", { provider: "byo", purpose: "machine", deviceHost: false }));
+    boxes.mac("b");
+    boxes.mac("c");
+    factory = createBoxHostFactory({ appDir, boxes: () => boxes.wiring(), toolchain: { toolBin: () => process.execPath } as unknown as DeviceToolchain, logger: quiet, fetch: boxes.fetch, machineAccess: access });
+    await factory.start(context());
+    assert.deepEqual([...added.keys()], ["box:c"]);
+
+    access.set("b", { visibility: "ask" });
+    access.set("c", { visibility: "free", capabilities: { devices: false, commands: true, chats: true } });
+    access.changed();
+    assert.deepEqual([...added.keys()], ["box:b"]);
+  });
+
+  it("an Apple Silicon Mac is an iOS host and an Android host that share it; an Intel Mac runs iOS only", async () => {
+    boxes.records.set("b", record("b", { provider: "byo", purpose: "machine", deviceHost: true, machineName: "Studio", arch: "arm64" }));
+    boxes.records.set("c", record("c", { provider: "byo", purpose: "machine", deviceHost: true, machineName: "Old", arch: "x64" }));
+    boxes.mac("b");
+    boxes.mac("c");
+    await factory.start(context());
+    assert.deepEqual([...added.keys()].sort(), ["box:b", "box:b:android", "box:c"]);
+    const android = added.get("box:b:android")!;
+    assert.deepEqual({ kind: android.kind, platforms: android.platforms, box: android.box?.()?.boxId }, { kind: "byo", platforms: ["android"], box: "b" });
+
+    const ios = added.get("box:b")!;
+    const intel = added.get("box:c")!;
+    // Ready, with the Macs' RAM read (24 GB: three stock simulators).
+    await eventually(() => [ios, intel].every((host) => host.state().status === "ready" && host.capacity().total === 3), "both Macs' iOS hosts ready");
+    // Two emulators leased on the same Mac: their memory comes off the simulators' room.
+    leases = [{ id: "A1", hostId: "box:b:android" } as StoredDeviceLease, { id: "A2", hostId: "box:b:android" } as StoredDeviceLease];
+    assert.equal(ios.capacity().total, 1);
+    assert.equal(intel.capacity().total, 3);
+
+    // Android is off in Settings → Devices: the Mac never starts preparing it (no SDK download); turned on, it does.
+    assert.equal(android.state().status, "disabled");
+    const probes = () => boxes.macs.get("b")!.log.filter((line) => line === "sh probe").length;
+    boxes.setConnected("b", false);
+    boxes.setConnected("b", true);
+    assert.equal(probes(), 0);
+    settings = { ...settings, android: { ...settings.android, enabled: true } };
+    factory.settingsChanged?.(settings);
+    await eventually(() => probes() > 0 && android.state().status !== "starting", "the Mac's Android host prepared");
+
+    // Device simulators off for the Mac: both of its hosts go.
+    boxes.set({ ...boxes.records.get("b")!, deviceHost: false });
+    assert.deepEqual([...added.keys()], ["box:c"]);
   });
 
   it("quotes a rental from Settings → Devices and the month's spending", async () => {

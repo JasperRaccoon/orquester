@@ -267,6 +267,9 @@ export function toolApprovalChangeSentence(card: CardFacts): string {
         return "Approving puts a login without a refresh token for this account on the VM shown, so the chat can use it. Anything running there can use its subscription quota until the token expires, even after the chat ends. Its refresh token stays on this server.";
       }
       return "Approving puts logins without refresh tokens for these accounts on the VM shown. Anything running there can use their subscription quota until each token expires, even after the lend ends. Their refresh tokens stay on this server. You can end a lend at any time, from this chat or Settings.";
+    // machines: waking an Ask-first machine (tailnet machines §4.8).
+    case "machines":
+      return "Approving has another of your machines on the same network send this machine a Wake-on-LAN packet, so it turns on. The agent gets nothing else on it: using it afterwards follows its settings in Settings → Machines.";
     default:
       return "This approval comes from a newer Orquester than this client knows: check it on an updated client before approving.";
   }

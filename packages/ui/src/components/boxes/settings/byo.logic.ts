@@ -1,11 +1,11 @@
 /**
  * Settings → Plugins → Ephemeral AI VMs: the "Your machines" card (Devices
- * phase 3 §2.1) — the owner's own always-on Mac or Linux machines, paired with
+ * phase 3 §2.1) — the owner's own always-on Mac, Linux or Windows machines, paired with
  * a one-line command, their live status, "Use for device simulators", and
  * removal. Pure: the component renders what these return.
  */
 
-import { BOX_KIND_LABELS, type BoxSummary, type ByoMachineKind } from "@orquester/api";
+import { BOX_KIND_LABELS, type BoxKind, type BoxSummary, type ByoMachineKind } from "@orquester/api";
 
 import type { Tone } from "../../settings/primitives";
 
@@ -53,13 +53,27 @@ export function byoSubline(box: BoxSummary): string {
   return [BOX_KIND_LABELS[box.kind], box.arch].filter(Boolean).join(" · ");
 }
 
+/** A machine record's pairing kind (records of other kinds pair as Linux). */
+export function byoKindOf(kind: BoxKind): ByoMachineKind {
+  return kind === "macos" || kind === "windows" ? kind : "linux";
+}
+
+/** How the owner removes the service by hand from a machine that could not uninstall itself. */
+export function manualUninstallText(kind: BoxKind): string {
+  return kind === "windows"
+    ? "In an administrator PowerShell on the PC, run `C:\\orq\\agent\\orq-agent.exe uninstall-service` to remove its service and desktop helper."
+    : "Run `orq-agent uninstall-service` on the machine to remove its service.";
+}
+
 /** What happens when the machine is removed, for the confirmation. */
 export function removeMachineText(box: BoxSummary): string {
   if (box.state === "pairing") return "Its pairing command stops working.";
   if (box.connected) {
-    return "Its orq-agent removes its service and stops; its credential is revoked. Nothing else on the machine changes.";
+    return box.kind === "windows"
+      ? "Its orq-agent removes its service, its desktop helper and C:\\orq\\agent, then stops; its credential is revoked. Nothing else on the PC changes."
+      : "Its orq-agent removes its service and stops; its credential is revoked. Nothing else on the machine changes.";
   }
-  return "It is offline, so it can't uninstall itself: its credential is revoked now. Run `orq-agent uninstall-service` on the machine to remove the service.";
+  return `It is offline, so it can't uninstall itself: its credential is revoked now. ${manualUninstallText(box.kind)}`;
 }
 
 /** Remove is offered while nothing uses the machine (a project or chat must give it back first). */
@@ -67,13 +81,11 @@ export function canRemoveMachine(box: BoxSummary): boolean {
   return box.purpose === "machine";
 }
 
-/** "Use for device simulators" can be switched on a paired machine of a kind that can host devices. */
-export function canHostDevices(box: BoxSummary): boolean {
-  return box.state !== "pairing";
-}
-
 /** What to tell the owner about where the pairing command runs. */
 export function pairingHint(kind: ByoMachineKind): string {
+  if (kind === "windows") {
+    return "Open PowerShell with Run as administrator on the PC and paste it. orq-agent installs as a Windows service, plus a helper in the signed-in user's desktop for programs that need the screen or GPU; turn on automatic sign-in so the helper is back after a restart.";
+  }
   return kind === "macos"
     ? "Run it in Terminal on the Mac, as the user who stays logged in (not with sudo): orq-agent runs in that user's session, which Simulator needs."
     : "Run it in a terminal on the machine. As root it installs a system service; as yourself, a user service (it tells you how to keep it running after you log out).";
@@ -96,7 +108,7 @@ export type PairingPhase =
 export function pairingPhase(box: BoxSummary | undefined, expiresAt: string, now: number): PairingPhase {
   if (!box) return { kind: "gone" };
   if (box.state !== "pairing") {
-    return { kind: "connected", detail: [box.os === "darwin" ? "macOS" : box.os === "linux" ? "Linux" : null, box.arch].filter(Boolean).join(", ") };
+    return { kind: "connected", detail: [box.os === "darwin" ? "macOS" : box.os === "linux" ? "Linux" : box.os === "win32" ? "Windows" : null, box.arch].filter(Boolean).join(", ") };
   }
   // The daemon drops the expiry once the script was fetched (the code is spent).
   if (box.byo && box.byo.pairingExpiresAt === null) return { kind: "downloaded" };

@@ -9,6 +9,7 @@
 import type { Duplex, Readable, Writable } from "node:stream";
 
 import type {
+  BoxAgentCapability,
   BoxAgentConfig,
   BoxArch,
   BoxBoxToHostMethods,
@@ -21,6 +22,7 @@ import type {
   BoxMethodName,
   BoxMethodParams,
   BoxMethodResult,
+  BoxNic,
   BoxOs,
   BoxPathMap,
   BoxProviderCredentialField,
@@ -54,6 +56,8 @@ export interface BoxExecOptions {
   /** Survive disconnects; reattach with {@link BoxConnection.attach}. */
   detach?: { procId: string; bufferBytes?: number };
   shell?: boolean;
+  /** `desktop`: run in the interactive desktop session (Windows, `desktop-session` capability; else the open fails with `NO_DESKTOP_SESSION`). */
+  session?: "desktop";
   signal?: AbortSignal;
 }
 
@@ -106,6 +110,18 @@ export interface BoxConnection {
   readonly paths: BoxPathMap;
   readonly connected: boolean;
   readonly agentVersion: string;
+  /**
+   * Optional `orq-agent` features as of the latest hello (`box-protocol.ts`); check before using
+   * one. Absent or empty: none (an older `orq-agent`, or a connection that is not told, like a relay client's).
+   */
+  readonly capabilities?: readonly BoxAgentCapability[];
+  /** With `ssh-server`: the built-in SSH server's host public key from the latest hello (`ssh-ed25519 AAAA…`). */
+  readonly sshHostKey?: string | null;
+  /**
+   * The NICs `orq-agent` reported for Wake-on-LAN: the latest hello's, then each `sys.nics` event's
+   * (`BOX_NICS_EVENT`, applied before its `onEvent` listeners run). Null or absent: not reported.
+   */
+  readonly nics?: readonly BoxNic[] | null;
   /** Detached processes as of the latest hello. */
   detachedProcs(): BoxDetachedProcInfo[];
 
@@ -232,8 +248,10 @@ export interface ProviderCreateRequest {
   tags: Record<string, string>;
   bootstrap: BoxBootstrap;
   /**
-   * Public key for providers that refuse to create Linux instances without one. Orquester never
-   * uses SSH to reach a box; the matching private key is discarded.
+   * Public key for providers that refuse to create Linux instances without one (it lands in the
+   * provider's default user, usually root); the matching private key is discarded, so no one logs
+   * in with it. Agents' SSH to a box (`boxes/agent-ssh/`) uses separate per-chat keys installed
+   * over the box's `BoxConnection` once it is ready, and is tunnelled through that connection too.
    */
   sshPublicKey: string;
   /** Windows: an administrator password to set where the provider asks for one. */

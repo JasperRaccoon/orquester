@@ -32,7 +32,8 @@ import type {
   DeviceScreen,
   DeviceStreamInfo,
   DeviceSummary,
-  DevicesSettings
+  DevicesSettings,
+  MachineProblem
 } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
@@ -118,6 +119,20 @@ export interface DeviceActionOutcome {
   details?: Record<string, unknown>;
 }
 
+/**
+ * The direct routes of an owner's machine (tailnet machines spec §4.5): its stream gate
+ * (`direct/machine-gate.ts`) in front of the hub, and how to sign tickets for it. The secret
+ * stays inside; only tickets leave.
+ */
+export interface DeviceDirectStream {
+  /** `https://<machine>.ts.net:<port>`: the gate behind the machine's own `tailscale serve`; null while not served. */
+  tailnetUrl: string | null;
+  /** `http://<LAN IPv4>:<port>` per LAN address the machine reports (the desktop app's route). */
+  lanUrls: string[];
+  /** A ticket for one device (the hub's `device` parameter) until `expiresAt`, bound to the page `origin` when known. */
+  issueTicket(input: { device: string; expiresAt: number; origin: string | null }): string;
+}
+
 /** The status line a host reports for its summary. */
 export interface DeviceHostState {
   status: DeviceHostStatus;
@@ -167,6 +182,8 @@ export interface DeviceHost {
    * request and strips any client-supplied one. Null when the hub needs none. Never sent to clients.
    */
   hubToken?(): string | null;
+  /** An owner's machine: its direct stream routes while its stream gate runs; null or absent: only the daemon's proxy. */
+  directStream?(): DeviceDirectStream | null;
   /** What the host's hub can stream for iOS: serve-sim H.264 fails in Apple VMs (no H.264 encoder). */
   streamCapabilities?(): { iosH264: boolean };
   /** A viewer is watching one of its devices (the service relays `viewerActive`): a host may keep or end stream sessions by it. */
@@ -192,6 +209,11 @@ export interface DeviceHost {
   installApp?(lease: StoredDeviceLease, uploadedPath: string, signal: AbortSignal): Promise<{ appId: string | null; summary: string }>;
   /** Phase 3: a research host (vphone VMs). Placement never picks it unless asked by id; its notice is shown with it. */
   research?(): { notice: string } | null;
+  /**
+   * The owner's own machine: environment problems its probes found (KVM permission, linger, Xcode
+   * path, developer mode, asleep), each with its fix. Absent or empty: none.
+   */
+  problems?(): MachineProblem[];
 
   listDevices(signal?: AbortSignal): Promise<DeviceSummary[]>;
   /** Boot (or attach to) a device; resolves once the OS finished booting. */
@@ -340,6 +362,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
   const pool = host.pool?.() ?? null;
   const research = host.research?.() ?? null;
   const stream = host.streamCapabilities?.() ?? null;
+  const problems = host.problems?.() ?? [];
   return {
     id: host.id,
     kind: host.kind,
@@ -352,6 +375,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
     ...(box ? { box } : {}),
     ...(pool ? { pool } : {}),
     ...(research ? { research: true, notice: research.notice } : {}),
-    ...(stream ? { stream: { iosH264: stream.iosH264 === true } } : {})
+    ...(stream ? { stream: { iosH264: stream.iosH264 === true } } : {}),
+    ...(problems.length > 0 ? { problems } : {})
   };
 }

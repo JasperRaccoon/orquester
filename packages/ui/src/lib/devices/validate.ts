@@ -12,6 +12,11 @@ import {
   DEVICE_LEASE_STATES,
   isDeviceController,
   isDevicePlatform,
+  isMachineProblemCode,
+  type DeviceCapacityBasis,
+  type DeviceHostAccel,
+  type DevicePortForward,
+  type MachineProblem,
   type DeviceActionEntry,
   type DeviceActionEventPayload,
   type DeviceActionKind,
@@ -63,8 +68,29 @@ function point(value: unknown): DevicePoint | undefined {
   return isRecord(value) && num(value.x) && num(value.y) ? { x: value.x, y: value.y } : undefined;
 }
 
+const ACCELS: readonly DeviceHostAccel[] = ["kvm", "whpx", "hvf"];
+
+function capacityBasis(value: unknown): DeviceCapacityBasis | null {
+  if (!isRecord(value) || !num(value.cpus) || !num(value.freeMemBytes) || !str(value.probedAt)) return null;
+  return {
+    cpus: value.cpus,
+    freeMemBytes: value.freeMemBytes,
+    freeDiskBytes: num(value.freeDiskBytes) ? value.freeDiskBytes : null,
+    accel: oneOf(ACCELS, value.accel) ? value.accel : null,
+    probedAt: value.probedAt
+  };
+}
+
 function capacity(value: unknown): DeviceCapacity {
-  return isRecord(value) && num(value.used) && num(value.total) ? { used: value.used, total: value.total } : { used: 0, total: 0 };
+  if (!isRecord(value) || !num(value.used) || !num(value.total)) return { used: 0, total: 0 };
+  const basis = capacityBasis(value.basis);
+  return { used: value.used, total: value.total, ...(basis ? { basis } : {}) };
+}
+
+/** A problem with a code this client knows (a newer daemon's other codes are dropped). */
+function sanitizeProblem(value: unknown): MachineProblem | null {
+  if (!isRecord(value) || !isMachineProblemCode(value.code) || !str(value.message)) return null;
+  return { code: value.code, message: value.message, ...(str(value.fix) ? { fix: value.fix } : {}), ...(str(value.machineId) ? { machineId: value.machineId } : {}) };
 }
 
 function sanitizeReadinessCheck(value: unknown): DeviceReadinessCheck | null {
@@ -119,6 +145,9 @@ function sanitizeDeviceHost(value: unknown): DeviceHostSummary | null {
   if (str(value.notice)) host.notice = value.notice;
   const stream = value.stream;
   if (isRecord(stream)) host.stream = { iosH264: stream.iosH264 === true };
+  if (str(value.machineId)) host.machineId = value.machineId;
+  const problems = listOf(value.problems, sanitizeProblem);
+  if (problems && problems.length > 0) host.problems = problems;
   return host;
 }
 
@@ -270,6 +299,15 @@ export function sanitizeDevicesState(value: unknown): DevicesStateResponse | nul
 }
 
 /** `{hosts}` (a route answer or a `devices.hosts` event). */
+/** A lease's port forwards (`deviceRoutes.forwards` answers); null when the answer is no list. */
+export function sanitizeForwardsResponse(value: unknown): DevicePortForward[] | null {
+  if (!isRecord(value)) return null;
+  const port = (entry: unknown): entry is number => num(entry) && Number.isInteger(entry) && entry >= 1 && entry <= 65_535;
+  return listOf(value.forwards, (entry) =>
+    isRecord(entry) && port(entry.devicePort) && port(entry.targetPort) ? { devicePort: entry.devicePort, targetPort: entry.targetPort, auto: entry.auto === true } : null
+  );
+}
+
 export function sanitizeHostsPayload(value: unknown): DeviceHostSummary[] | null {
   return isRecord(value) ? listOf(value.hosts, sanitizeDeviceHost) : null;
 }

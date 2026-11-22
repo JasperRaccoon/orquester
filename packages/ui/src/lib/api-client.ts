@@ -134,7 +134,20 @@ import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, storageRoutes, agentProfileRout
 import { accountLendRoutes, boxRoutes, type AccountLendsResponse } from "@orquester/api";
 // Devices: the Device simulators plugin's routes and payloads (answers validated by `lib/devices/validate.ts`).
 import { deviceRoutes } from "@orquester/api";
+// Machines: tailnet and paired machines (answers validated by `lib/machines/store.ts`).
+import {
+  machineRoutes,
+  type MachineResponse,
+  type MachinesResponse,
+  type PairMachineOverSshRequest,
+  type PairMachineOverSshResponse,
+  type RemoveMachineResponse,
+  type UpdateMachineRequest,
+  type WakeMachineResponse
+} from "@orquester/api";
 import { selfUpdateRoutes, type SelfUpdateStartResponse, type SelfUpdateStatusResponse } from "@orquester/api";
+import { TAILNET_CONFIRM_PARAM, tailnetRoutes, type TailnetHttpsStatus, type TailnetPreviewShare } from "@orquester/api";
+import { parseTailnetHttpsStatus, parseTailnetPreviewResponse, parseTailnetPreviews } from "./tailnet/validate";
 import type {
   DeviceActionsResponse,
   DeviceCacheWarmResponse,
@@ -152,7 +165,11 @@ import type {
   DeviceSetupRequest,
   DeviceSetupResponse,
   DeviceUserActionRequest,
-  DeviceUserActionResponse
+  DeviceUserActionResponse,
+  AddDevicePortForwardRequest,
+  DevicePortForwardsResponse,
+  DeviceStreamTicketRequest,
+  DeviceStreamTicketResponse
 } from "@orquester/api";
 // The Knowledge Graph plugin's routes and payloads (answers validated by `lib/knowledge/validate.ts`).
 import { knowledgeRoutes } from "@orquester/api";
@@ -541,6 +558,58 @@ export class ApiClient {
   /** Ask the host updater to update and restart the server; a 409 `SELF_UPDATE_BUSY` / `SELF_UPDATE_UNAVAILABLE` throws. */
   startSelfUpdate(): Promise<SelfUpdateStartResponse> {
     return this.send("POST", selfUpdateRoutes.status);
+  }
+
+  // --- Tailnet (`tailnetRoutes`, spec 2026-11-22 §4.7): answers validated by `tailnet/validate.ts`;
+  // a refusal's `{ problem }` (409 TAILNET_PROBLEM) is read with `problemOfError`. ---
+
+  private async tailnetStatus(method: TransportMethod, path: string, signal?: AbortSignal, query?: Record<string, string>): Promise<TailnetHttpsStatus> {
+    const status = parseTailnetHttpsStatus(await this.send<unknown>(method, path, { signal, ...(query ? { query } : {}) }));
+    if (!status) throw new Error("The server answered with an unreadable tailnet status.");
+    return status;
+  }
+
+  /** The daemon's tailnet HTTPS address, read fresh from its `tailscale`. */
+  getTailnetHttps(signal?: AbortSignal): Promise<TailnetHttpsStatus> {
+    return this.tailnetStatus("GET", tailnetRoutes.https, signal);
+  }
+
+  /** Serve the daemon at `https://<host>.ts.net:<port>` (or adopt the route already serving it). */
+  enableTailnetHttps(): Promise<TailnetHttpsStatus> {
+    return this.tailnetStatus("POST", tailnetRoutes.https);
+  }
+
+  /**
+   * Remove Orquester's own tailnet route to the daemon. While boxes or paired machines dial it this
+   * throws 409 `TAILNET_CONFIRM_REQUIRED` (read with `confirmUsersOfError`) unless `confirm` is set.
+   */
+  disableTailnetHttps(options: { confirm?: boolean } = {}): Promise<TailnetHttpsStatus> {
+    return this.tailnetStatus("DELETE", tailnetRoutes.https, undefined, options.confirm ? { [TAILNET_CONFIRM_PARAM]: "true" } : undefined);
+  }
+
+  /** `sudo -n tailscale set --operator=<daemon user>` on the server, so serve changes need no sudo. */
+  setTailnetOperator(): Promise<TailnetHttpsStatus> {
+    return this.tailnetStatus("POST", tailnetRoutes.operator);
+  }
+
+  async listTailnetPreviews(signal?: AbortSignal): Promise<TailnetPreviewShare[]> {
+    const previews = parseTailnetPreviews(await this.send<unknown>("GET", tailnetRoutes.previews, { signal }));
+    if (!previews) throw new Error("The server answered with an unreadable preview list.");
+    return previews;
+  }
+
+  /** Share a dev-server port of the server as `https://<host>.ts.net:<port>`. */
+  async shareTailnetPreview(port: number): Promise<TailnetPreviewShare> {
+    const preview = parseTailnetPreviewResponse(await this.send<unknown>("POST", tailnetRoutes.previews, { body: { port } }));
+    if (!preview) throw new Error("The server answered with an unreadable preview.");
+    return preview;
+  }
+
+  /** Stop sharing a port; resolves to the shares left. */
+  async stopTailnetPreview(port: number): Promise<TailnetPreviewShare[]> {
+    const previews = parseTailnetPreviews(await this.send<unknown>("DELETE", tailnetRoutes.preview(port)));
+    if (!previews) throw new Error("The server answered with an unreadable preview list.");
+    return previews;
   }
 
   /** Public auth metadata: whether a sign-in is required (and a username with it). */
@@ -1051,6 +1120,31 @@ export class ApiClient {
     return this.send("GET", secretFilesRoutes.compare, { query: { workspace, repoKey, projectPath, path }, signal });
   }
 
+  // --- Machines (`machineRoutes`; answers are validated by `lib/machines/store.ts`) ---
+
+  listMachines(signal?: AbortSignal): Promise<MachinesResponse> {
+    return this.send("GET", machineRoutes.list, { signal });
+  }
+
+  /** Visibility, capabilities or SSH overrides (owner only). */
+  updateMachine(id: string, req: UpdateMachineRequest): Promise<MachineResponse> {
+    return this.send("PATCH", machineRoutes.machine(id), { body: req });
+  }
+
+  /** Unpair a paired machine, or reset an unpaired one's policy. */
+  removeMachine(id: string): Promise<RemoveMachineResponse> {
+    return this.send("DELETE", machineRoutes.machine(id));
+  }
+
+  /** "Pair over SSH"; called again with `acceptHostKeyFingerprint` after a `confirm-host-key` answer. */
+  pairMachineOverSsh(id: string, req: PairMachineOverSshRequest): Promise<PairMachineOverSshResponse> {
+    return this.send("POST", machineRoutes.pairSsh(id), { body: req });
+  }
+
+  wakeMachine(id: string): Promise<WakeMachineResponse> {
+    return this.send("POST", machineRoutes.wake(id));
+  }
+
   // --- Devices (`deviceRoutes`; answers are validated by `lib/devices/store.ts`) ---
 
   /** Everything the Device panel and Settings → Devices start from (`enabled: false` while the plugin is off). */
@@ -1102,6 +1196,24 @@ export class ApiClient {
   /** The panel's buttons that are not hub input: rotate (Android), restart the app, appearance, power off. */
   deviceUserAction(leaseId: string, req: DeviceUserActionRequest): Promise<DeviceUserActionResponse> {
     return this.send("POST", deviceRoutes.userAction(leaseId), { body: req });
+  }
+
+  /** The routes to stream a leased device by, best first, and a ticket for its machine's direct ones. */
+  deviceStreamTicket(hostId: string, req: DeviceStreamTicketRequest, signal?: AbortSignal): Promise<DeviceStreamTicketResponse> {
+    return this.send("POST", deviceRoutes.streamTicket(hostId), { body: req, signal });
+  }
+
+  /** A lease's port forwards from the device to its chat's project (Metro is added by itself). */
+  deviceForwards(leaseId: string, signal?: AbortSignal): Promise<DevicePortForwardsResponse> {
+    return this.send("GET", deviceRoutes.forwards(leaseId), { signal });
+  }
+
+  addDeviceForward(leaseId: string, req: AddDevicePortForwardRequest): Promise<DevicePortForwardsResponse> {
+    return this.send("POST", deviceRoutes.forwards(leaseId), { body: req });
+  }
+
+  removeDeviceForward(leaseId: string, devicePort: number): Promise<DevicePortForwardsResponse> {
+    return this.send("DELETE", deviceRoutes.forward(leaseId, devicePort));
   }
 
   deviceLeaseActions(leaseId: string, signal?: AbortSignal): Promise<DeviceActionsResponse> {

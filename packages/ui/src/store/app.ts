@@ -197,10 +197,15 @@ import { KNOWLEDGE_CHANNEL, KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { applyKnowledgeEvent, loadKnowledge, resetKnowledge } from "../lib/knowledge/store";
 // The Device simulators plugin's module store (hosts, leases, settings; loaded while the plugin is on).
 import { DEVICES_CHANNEL, DEVICES_PLUGIN_ID } from "@orquester/api";
+import { TAILNET_CHANNEL } from "@orquester/api";
+import { applyTailnetEvent, resetTailnet } from "../lib/tailnet/store";
 import { STORAGE_EVENTS_CHANNEL } from "@orquester/api";
 import { authErrorCodes, isSecondFactorChallenge } from "@orquester/api";
 import { applyStorageEvent } from "../components/system/storage/storage-status";
 import { applyDevicesEvent, loadDevices, resetDevices, setDevicesPluginOn } from "../lib/devices/store";
+// Machines: tailnet and paired machines (Settings → Machines loads them; no plugin needed).
+import { MACHINES_CHANNEL } from "@orquester/api";
+import { applyMachinesEvent, resetMachines } from "../lib/machines/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -266,7 +271,9 @@ const DEFAULT_AGENT_PREFS: AgentPrefs = {
   switchAccountOnUsageLimit: false,
   // Idle Claude compaction: offered when you return, T3 Code's default.
   claudeIdleCompaction: "onReturn",
-  claudeIdleCompactionByAccount: {}
+  claudeIdleCompactionByAccount: {},
+  // Agent SSH: the `Include` line in ~/.ssh/config is opt-in (that file is the owner's).
+  sshConfigInclude: false
 };
 
 /**
@@ -2248,6 +2255,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     resetSavedPrompts();
     resetRepoIdentities();
     resetSecretFiles();
+    // Tailnet: another daemon's tailnet address and previews.
+    resetTailnet();
     // boxes: another daemon's boxes.
     resetBoxes();
     resetKnowledge();
@@ -4136,6 +4145,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (devicesOn(get().plugins)) applyDevicesEvent(event);
       return;
     }
+    // Machines: the owner's whole list on every change (validated in its module store).
+    if (event.channel === MACHINES_CHANNEL) {
+      applyMachinesEvent(event);
+      return;
+    }
+    // Tailnet: the daemon's tailnet HTTPS status and shared previews (Settings → Server), validated in their module store.
+    if (event.channel === TAILNET_CHANNEL) {
+      applyTailnetEvent(event);
+      return;
+    }
     if (event.channel === KNOWLEDGE_CHANNEL) {
       // Knowledge status and collections live in their own module store (validated); held only
       // while the plugin is on.
@@ -4312,6 +4331,12 @@ useAppStore.subscribe((state, previous) => {
   if (state.plugins === null) resetBoxes();
   if (on === boxesOn(previous.plugins)) return;
   if (on && state.api) void loadBoxes(state.api).catch(() => undefined);
+});
+
+// Machines: a connection switch (its plugins list goes) forgets the other daemon's machines;
+// Settings → Machines loads them again.
+useAppStore.subscribe((state, previous) => {
+  if (state.plugins === null && previous.plugins !== null) resetMachines();
 });
 
 // Devices: wired like the secret files — hosts, leases and settings load when the plugin turns on

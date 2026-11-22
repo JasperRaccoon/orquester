@@ -21,7 +21,7 @@ if (args.includes("-race")) {
 }
 const result = spawnSync(go, args, { cwd, stdio: "inherit", env: { ...process.env, CGO_ENABLED: cgo } });
 if (result.error) {
-  console.error(`orq-agent: cannot run the Go toolchain (${go}): ${result.error.message}. Install Go ≥ 1.24 or set GO=/path/to/go.`);
+  console.error(`orq-agent: cannot run the Go toolchain (${go}): ${result.error.message}. Install Go ≥ the "go" line in go.mod (1.26) or set GO=/path/to/go.`);
   process.exit(1);
 }
 process.exit(result.status ?? 1);

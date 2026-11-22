@@ -41,6 +41,8 @@ var requestHandlers = map[string]requestHandler{
 	"agent.ensurePaths": handleEnsurePaths,
 	"agent.update":      handleAgentUpdate,
 	"agent.shutdown":    handleAgentShutdown,
+	"ssh.keys":          handleSSHKeys,
+	"net.wake":          handleNetWake,
 }
 
 func decodeParams[T any](raw json.RawMessage) (*T, error) {

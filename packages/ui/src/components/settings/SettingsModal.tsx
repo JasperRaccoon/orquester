@@ -8,6 +8,7 @@ import {
   Gauge,
   Github,
   MessageSquare,
+  Network,
   Palette,
   Puzzle,
   Search,
@@ -32,6 +33,7 @@ import { DevicesSettings } from "./DevicesSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { GitHostingSettings } from "./GitHostingSettings";
 import { HostStatusSettings } from "./HostStatusSettings";
+import { MachinesSettings } from "./MachinesSettings";
 import { PluginsSettings } from "./PluginsSettings";
 import { ServerSettings } from "./ServerSettings";
 import { SettingsPageTitleContext } from "./primitives";
@@ -50,6 +52,7 @@ type SectionId =
   | "plugins"
   | "server"
   | "system"
+  | "machines"
   | "devices";
 
 type GroupId = "personal" | "agents" | "integrations" | "server";
@@ -101,8 +104,8 @@ const SECTIONS: SectionDef[] = [
     group: "personal",
     label: "Agent chat",
     icon: <MessageSquare size={15} />,
-    desc: "Composer behaviour, resuming interrupted turns, usage limits",
-    keywords: ["composer", "steer", "queue", "enter", "skills", "slash", "continue", "restart", "resume", "interrupted", "usage", "limit", "failover", "account"],
+    desc: "Composer behaviour, resuming interrupted turns, usage limits, SSH aliases",
+    keywords: ["composer", "steer", "queue", "enter", "skills", "slash", "continue", "restart", "resume", "interrupted", "usage", "limit", "failover", "account", "ssh", "include", "alias"],
     render: () => <ChatSettings />
   },
   {
@@ -209,6 +212,16 @@ const SECTIONS: SectionDef[] = [
     desc: "CPU, memory, disk, processes and listening ports",
     keywords: ["system", "cpu", "memory", "ram", "disk", "processes", "ports", "kill", "resources"],
     render: () => <HostStatusSettings />
+  },
+  {
+    // Tailnet machines (spec 2026-11-22 §4.1, §6): a core section — discovery needs no plugin.
+    id: "machines",
+    group: "server",
+    label: "Machines",
+    icon: <Network size={15} />,
+    desc: "Your tailnet and paired machines, and what agents may do on each",
+    keywords: ["machine", "machines", "tailnet", "tailscale", "pair", "ssh", "wake", "hidden", "visibility", "byo", "own machine"],
+    render: () => <MachinesSettings />
   },
   {
     // Device simulators plugin (devices spec §10.5).

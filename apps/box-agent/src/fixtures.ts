@@ -14,6 +14,7 @@ import {
   BOX_HEARTBEAT_MS,
   BOX_MAX_FRAME_PAYLOAD,
   BOX_PROTOCOL_VERSION,
+  BOX_NICS_EVENT,
   BOX_WINDOWS_PATH_PREFIX,
   encodeDataFrame,
   type BoxBoxToHostMethods,
@@ -22,6 +23,8 @@ import {
   type BoxControlMessage,
   type BoxFsChangeEvent,
   type BoxHostToBoxMethods,
+  type BoxNic,
+  type BoxNicsEvent,
   type BoxStream,
   type BoxSysInfo
 } from "@orquester/api";
@@ -74,6 +77,20 @@ const sysWindows: BoxSysInfo = {
   kvm: false
 };
 
+const nicWired: BoxNic = {
+  name: "enp5s0",
+  mac: "aa:bb:cc:dd:ee:01",
+  ipv4: "192.168.2.21",
+  prefixLength: 24,
+  broadcast: "192.168.50.255",
+  wired: true,
+  wolEnabled: true
+};
+
+const nicWifi: BoxNic = { name: "wlp4s0", mac: "aa:bb:cc:dd:ee:02", ipv4: null, prefixLength: null, broadcast: null, wired: false, wolEnabled: null };
+
+const nicsEvent: BoxNicsEvent = { nics: [nicWired] };
+
 const fsChange: BoxFsChangeEvent = {
   watchId: "w-1",
   changes: [
@@ -124,6 +141,17 @@ const controlFixture: ByT = {
       auth: { kind: "github-oidc", boxId: "box2", jwt: "eyJ.eyJ.sig" },
       sys: { ...sysLinux, os: "darwin", arch: "arm64", libc: null, kvm: false },
       procs: []
+    },
+    {
+      t: "hello",
+      protocol: 1,
+      agentVersion: "0.2.0+def5678",
+      auth: { kind: "credential", boxId: "box3", credential: "Y3JlZA" },
+      sys: sysLinux,
+      procs: [],
+      capabilities: ["ssh-server", "desktop-session"],
+      sshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOrqAgentHostKeyFixture",
+      nics: [nicWired, nicWifi]
     }
   ],
   welcome: [
@@ -156,7 +184,10 @@ const controlFixture: ByT = {
     { t: "res", id: 10, ok: true, result: undefined },
     { t: "res", id: 8, ok: false, error: { code: "ENOENT", message: "no such file" } }
   ],
-  event: [{ t: "event", name: "fs.change", data: fsChange }],
+  event: [
+    { t: "event", name: "fs.change", data: fsChange },
+    { t: "event", name: BOX_NICS_EVENT, data: nicsEvent }
+  ],
   open: [
     { t: "open", ch: 2, spec: { kind: "exec", command: "ls", args: ["-la"] } },
     { t: "open", ch: 1, spec: { kind: "host-tcp", target: "session-tools", boxPort: 47999 } }
@@ -202,7 +233,8 @@ const channelsFixture: ByKind = {
       detach: { procId: "proc-1", bufferBytes: 1048576 },
       shell: false
     },
-    { kind: "exec", command: "echo hi && exit 3", args: [], shell: true, pty: { cols: 100, rows: 30 }, detach: { procId: "proc-2" } }
+    { kind: "exec", command: "echo hi && exit 3", args: [], shell: true, pty: { cols: 100, rows: 30 }, detach: { procId: "proc-2" } },
+    { kind: "exec", command: "emulator.exe", args: ["-avd", "pixel-9", "-gpu", "host"], session: "desktop" }
   ],
   attach: [{ kind: "attach", procId: "proc-1", fromOffset: 0 }, { kind: "attach", procId: "proc-1", fromOffset: 4096 }],
   tcp: [{ kind: "tcp", port: 3000 }, { kind: "tcp", host: "10.0.0.2", port: 5432 }],
@@ -217,7 +249,8 @@ const channelsFixture: ByKind = {
   "tar-write": [{ kind: "tar-write", path: "/srv/q" }, { kind: "tar-write", path: "/srv/q", compression: "gzip" }],
   "ssh-agent": [{ kind: "ssh-agent" }],
   "gh-api": [{ kind: "gh-api" }],
-  "mcp-bridge": [{ kind: "mcp-bridge", serverId: "github" }]
+  "mcp-bridge": [{ kind: "mcp-bridge", serverId: "github" }],
+  ssh: [{ kind: "ssh" }]
 };
 
 type MethodSamples<M> = { [K in keyof M]: { params: M[K] extends [infer P, unknown] ? P : never; result: M[K] extends [unknown, infer R] ? R : never }[] };
@@ -283,6 +316,22 @@ const hostToBox: MethodSamples<BoxHostToBoxMethods> = {
   "agent.shutdown": [
     { params: { reason: "destroyed" }, result: undefined },
     { params: { reason: "removed", uninstall: true }, result: undefined }
+  ],
+  "ssh.keys": [
+    { params: { keys: [] }, result: undefined },
+    {
+      params: {
+        keys: [
+          { publicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIChatKeyFixture", comment: "orquester chat=t-1 box=box1", expiresAt: 1729000000000 },
+          { publicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMachineKeyFixture", comment: "orquester box=box1", expiresAt: null }
+        ]
+      },
+      result: undefined
+    }
+  ],
+  "net.wake": [
+    { params: { mac: "02:00:5e:10:00:01", broadcast: "192.168.50.255" }, result: undefined },
+    { params: { mac: "02:00:5e:10:00:02", broadcast: "192.168.50.255", port: 9 }, result: undefined }
   ]
 };
 

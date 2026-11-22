@@ -59,6 +59,12 @@
  * output before the buffer's start is lost and reported as `droppedBytes`.
  * Offsets count stdout and stderr bytes together, in emission order.
  *
+ * ## Capabilities
+ *
+ * Optional features an `orq-agent` build supports are listed in `hello.capabilities`
+ * ({@link BoxAgentCapability}). The daemon uses a feature only when its capability is listed: an
+ * older agent decodes leniently, so it would silently ignore a new field rather than refuse it.
+ *
  * ## Secrets
  *
  * Tokens travel only inside `hello`/`welcome`, `token.*` and `git.credential`
@@ -217,6 +223,93 @@ export interface BoxDetachedProcInfo {
   lost?: string;
 }
 
+/**
+ * Optional `orq-agent` features (tailnet machines spec 2026-11-22):
+ * - `ssh-server` — the built-in SSH server (§4.3 Phase 2): it serves `ssh` channels, takes
+ *   `ssh.keys`, and `hello.sshHostKey` is its host key;
+ * - `desktop-session` — Windows: the desktop-session helper is installed, so an `exec` with
+ *   `session: "desktop"` runs in the interactive desktop session (§4.2.6);
+ * - `wake-sender` — `net.wake` sends a Wake-on-LAN magic packet onto one of the box's own LANs (§4.8).
+ * Receivers ignore values they do not know.
+ */
+export type BoxAgentCapability = "ssh-server" | "desktop-session" | "wake-sender";
+export const BOX_AGENT_CAPABILITIES: readonly BoxAgentCapability[] = ["ssh-server", "desktop-session", "wake-sender"];
+
+/**
+ * One network interface for Wake-on-LAN (tailnet machines spec 2026-11-22 §4.8). `orq-agent` lists
+ * interfaces with a hardware address that are up or wired (no loopback, no tunnels).
+ */
+export interface BoxNic {
+  /** OS interface name (`enp5s0`, `en0`, `Ethernet`). */
+  name: string;
+  /** `aa:bb:cc:dd:ee:ff`, lowercase. */
+  mac: string;
+  /** Its first IPv4 address; null when it has none. */
+  ipv4: string | null;
+  /** The IPv4 subnet's prefix length (24); null with no IPv4. */
+  prefixLength: number | null;
+  /** The IPv4 broadcast address; null with no IPv4. */
+  broadcast: string | null;
+  /** Ethernet rather than Wi-Fi (only wired NICs wake reliably). */
+  wired: boolean;
+  /** Wake-on-magic-packet is enabled (ethtool `Wake-on: g`, macOS `womp`, Windows power setting); null when unknown. */
+  wolEnabled: boolean | null;
+}
+
+/** `sys.nics` event payload: the whole NIC list, sent when it changes after `hello`. */
+export interface BoxNicsEvent {
+  nics: BoxNic[];
+}
+
+/** Box → host event name of {@link BoxNicsEvent}. */
+export const BOX_NICS_EVENT = "sys.nics";
+
+/** A MAC address as {@link BoxNic.mac} spells it: six lowercase hex pairs joined by `:`. */
+export const BOX_NIC_MAC_PATTERN = /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/;
+const BOX_NIC_IPV4_PATTERN = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+
+/**
+ * A NIC list from `hello.nics` or a {@link BOX_NICS_EVENT}, read leniently: entries that are not a
+ * well-formed {@link BoxNic} (or name a malformed MAC or address) are dropped; an address with a
+ * malformed companion field reads as no address. Null when `value` is not a list at all (not reported).
+ */
+export function parseBoxNics(value: unknown): BoxNic[] | null {
+  if (!Array.isArray(value)) return null;
+  const nics: BoxNic[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const raw = entry as Record<string, unknown>;
+    const mac = typeof raw.mac === "string" ? raw.mac.toLowerCase() : "";
+    if (!BOX_NIC_MAC_PATTERN.test(mac)) continue;
+    const ipv4 = typeof raw.ipv4 === "string" && BOX_NIC_IPV4_PATTERN.test(raw.ipv4) ? raw.ipv4 : null;
+    const prefix = typeof raw.prefixLength === "number" && Number.isInteger(raw.prefixLength) && raw.prefixLength >= 0 && raw.prefixLength <= 32 ? raw.prefixLength : null;
+    const addressed = ipv4 !== null && prefix !== null;
+    const broadcast = addressed && typeof raw.broadcast === "string" && BOX_NIC_IPV4_PATTERN.test(raw.broadcast) ? raw.broadcast : null;
+    nics.push({
+      name: typeof raw.name === "string" ? raw.name.slice(0, 64) : "",
+      mac,
+      ipv4: addressed ? ipv4 : null,
+      prefixLength: addressed ? prefix : null,
+      broadcast,
+      wired: raw.wired === true,
+      wolEnabled: typeof raw.wolEnabled === "boolean" ? raw.wolEnabled : null
+    });
+  }
+  return nics;
+}
+
+/**
+ * `net.wake` params (`wake-sender` capability): send the standard Wake-on-LAN magic packet (6 × 0xFF,
+ * then the MAC 16 times) as an IPv4 UDP broadcast. `broadcast` must be the broadcast address of one
+ * of the box's own IPv4 interfaces (the box refuses any other); `port` 9 or 7, absent: both.
+ */
+export interface BoxNetWakeParams {
+  /** The machine to wake, `aa:bb:cc:dd:ee:ff`. */
+  mac: string;
+  broadcast: string;
+  port?: 7 | 9;
+}
+
 export interface BoxHello {
   t: "hello";
   protocol: number;
@@ -224,6 +317,15 @@ export interface BoxHello {
   auth: BoxAuth;
   sys: BoxSysInfo;
   procs: BoxDetachedProcInfo[];
+  /** Optional features this build supports. Absent: none (builds that predate it). */
+  capabilities?: BoxAgentCapability[];
+  /**
+   * With `ssh-server`: the built-in server's persistent host public key in `authorized_keys` form
+   * (`ssh-ed25519 AAAA…`); the daemon pins it for the box's `orq-<name>` alias.
+   */
+  sshHostKey?: string;
+  /** NICs for Wake-on-LAN at connect; later changes arrive as {@link BOX_NICS_EVENT}. Absent: not reported. */
+  nics?: BoxNic[];
 }
 
 export interface BoxAgentConfig {
@@ -315,7 +417,9 @@ export const BOX_RPC_NAMESPACES = [
   "git", // git credentials (box → host)
   "sync", // config and transcript sync (both)
   "tooling", // plugin tooling installs (host → box)
-  "mcp" // MCP bridge bookkeeping (both)
+  "mcp", // MCP bridge bookkeeping (both)
+  "ssh", // the built-in SSH server's authorized keys (host → box)
+  "net" // sending onto the box's LAN: Wake-on-LAN (host → box)
 ] as const;
 
 export interface BoxFsStat {
@@ -352,6 +456,18 @@ export interface BoxStats {
   uptimeSeconds: number;
 }
 
+/**
+ * A key the built-in SSH server accepts (Phase 2): held in memory only, never written to disk.
+ * `comment` is the `agentSshKeyComment` tag (`agent-ssh.ts`).
+ */
+export interface BoxSshAuthorizedKey {
+  /** `authorized_keys` form: `ssh-ed25519 AAAA…` (no options, no comment). */
+  publicKey: string;
+  comment: string;
+  /** Epoch ms after which the server refuses it; null: until replaced. */
+  expiresAt: number | null;
+}
+
 /** Core host → box methods: `method → [params, result]`. */
 export interface BoxHostToBoxMethods {
   "fs.stat": [{ path: string; followSymlinks?: boolean }, BoxFsStat | null];
@@ -385,6 +501,13 @@ export interface BoxHostToBoxMethods {
    * the installed service (`orq-agent uninstall-service`), so nothing starts it again.
    */
   "agent.shutdown": [{ reason: string; uninstall?: boolean }, void];
+  /**
+   * With `ssh-server`: replace the built-in SSH server's whole set of authorized keys (an empty
+   * list revokes every key at once). Sent after every `welcome` and on every change.
+   */
+  "ssh.keys": [{ keys: BoxSshAuthorizedKey[] }, void];
+  /** With `wake-sender`: send a Wake-on-LAN magic packet onto one of the box's LANs ({@link BoxNetWakeParams}). */
+  "net.wake": [BoxNetWakeParams, void];
 }
 
 /** Core box → host methods. */
@@ -440,6 +563,15 @@ export type BoxChannelSpec =
       detach?: { procId: string; bufferBytes?: number };
       /** Run inside a shell (`sh -c` / `powershell -Command`): `command` is the whole command line and `args` must be empty. */
       shell?: boolean;
+      /**
+       * `desktop` (Windows, `desktop-session` capability): run in the interactive desktop session
+       * through the desktop-session helper (GPU and desktop access) instead of the service session,
+       * as the signed-in desktop user with that user's environment and PATH. No helper connected:
+       * `orq-agent` starts its logon task and waits up to 20 s, then the open fails with
+       * `NO_DESKTOP_SESSION` (whose message names the cause). A `detach`ed one survives daemon
+       * disconnects but not an `orq-agent` restart. Absent: the service session.
+       */
+      session?: "desktop";
     }
   /** Host → box: reattach to a detached process, replaying output from `fromOffset`. Input works as for `exec`. */
   | { kind: "attach"; procId: string; fromOffset: number }
@@ -469,7 +601,13 @@ export type BoxChannelSpec =
    */
   | { kind: "gh-api" }
   /** Box → host: a stdio MCP server bridged to the host (`orq-agent mcp-bridge <serverId>`). */
-  | { kind: "mcp-bridge"; serverId: string };
+  | { kind: "mcp-bridge"; serverId: string }
+  /**
+   * Host → box (`ssh-server` capability): one SSH connection's raw bytes to `orq-agent`'s built-in
+   * SSH server, which listens on no network port (agent SSH Phase 2). Streams 0/1 carry the SSH
+   * transport; the box closes after its last stream-1 `eof`, like `tcp`.
+   */
+  | { kind: "ssh" };
 
 export type BoxChannelKind = BoxChannelSpec["kind"];
 

@@ -48,7 +48,11 @@ export const TOOLSET_IDS = [
   // Device simulators plugin: iOS simulators and Android emulators (devices spec §9).
   "devices",
   // GPT Image plugin: generate and edit images on a ChatGPT plan (GPT Image design 2026-11-10 §6).
-  "images"
+  "images",
+  // The owner's tailnet and paired machines (tailnet machines spec 2026-11-22 §4.1.8).
+  "machines",
+  // Tailnet previews: share a dev-server port on the daemon host's tailnet (tailnet machines spec §4.7.4).
+  "tailnet"
 ] as const;
 export type ToolsetId = (typeof TOOLSET_IDS)[number];
 
@@ -78,7 +82,7 @@ const admin = (name: string): ToolsetToolSpec => ({ name, tier: "admin" });
  * Every toolset, with its tools in catalog order (spec §9.1), advertised to every chat
  * (the `boxes` ones while boxes can be rented, the `knowledge` ones while the Knowledge Graph
  * plugin is on, the `devices` ones while a device platform is on, the `images` one while GPT Image
- * can make images).
+ * can make images, the `tailnet` ones while Tailscale on the daemon host can serve HTTPS).
  */
 export const TOOLSETS: readonly ToolsetSpec[] = [
   {
@@ -209,7 +213,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "devices",
     label: "Devices",
-    tools: [read("list_devices"), act("open_device"), act("device_action"), act("device_install"), act("close_device")]
+    tools: [read("list_devices"), act("open_device"), act("device_action"), act("device_install"), act("device_forward_port"), act("close_device")]
   },
   // GPT Image: advertised only while the plugin is on and a Codex account can make images
   // (`session-tools/manifest.ts`). No card: it cannot cost money.
@@ -217,6 +221,21 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
     id: "images",
     label: "Images",
     tools: [act("generate_image")]
+  },
+  // Machines: advertised only while at least one of the owner's machines is visible to agents
+  // (`session-tools/manifest.ts`); Hidden machines never appear in it. `wake_machine` is Act: an
+  // Ask-first machine raises a `spend` card (every permission mode), a Free-use one none.
+  {
+    id: "machines",
+    label: "Your machines",
+    tools: [read("list_machines"), act("wake_machine")]
+  },
+  // Tailnet previews: advertised only while Tailscale on the daemon host can serve HTTPS
+  // (`session-tools/manifest.ts`). No card: only tailnet members reach a share, and it ends with the chat.
+  {
+    id: "tailnet",
+    label: "Tailnet previews",
+    tools: [act("share_preview"), act("unshare_preview")]
   }
 ];
 
