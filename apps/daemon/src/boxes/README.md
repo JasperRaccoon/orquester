@@ -61,6 +61,11 @@ Known behaviour and provider limits:
   releases it back to `purpose: "machine"`. Only "Remove machine" deletes the record (after
   `agent.shutdown` with `uninstall`). A project on one needs the host paths creatable there
   (root or passwordless sudo on macOS), like any box.
+- **Wake-on-LAN goes through another paired machine.** A box connection carries the NICs
+  `orq-agent` reports (hello `nics`, then `sys.nics`); the machines registry keeps a paired
+  machine's wired ones in `machines.json`, so they are known while it sleeps. A wake is a
+  `net.wake` to a connected machine on the same subnet whose `orq-agent` lists `wake-sender`;
+  orq-agent broadcasts only onto its own interfaces' broadcast addresses (`machines/wake.ts`).
 
 - **Plugin MCP servers run in the box.** A box chat's MCP servers from the account config, a
   profile's server list and Orquester's own tools are planned per server (bridged to the host or
