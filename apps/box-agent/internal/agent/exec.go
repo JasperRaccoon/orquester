@@ -52,9 +52,10 @@ func (a *Agent) handleOpen(l *Link, ch *Channel, raw json.RawMessage) {
 		a.openTarRead(ch, s)
 	case *wire.TarWriteSpec:
 		a.openTarWrite(ch, s)
+	case *wire.SSHSpec:
+		a.openSSH(ch)
 	default:
-		// host-tcp, ssh-agent, gh-api and mcp-bridge are opened by the box, never by the daemon;
-		// ssh needs the built-in SSH server, which this build does not have (no CapabilitySSHServer).
+		// host-tcp, ssh-agent, gh-api and mcp-bridge are opened by the box, never by the daemon.
 		ch.OpenFailed(rpcErr("UNKNOWN_CHANNEL", "the box does not accept "+kind+" channels"))
 	}
 }
