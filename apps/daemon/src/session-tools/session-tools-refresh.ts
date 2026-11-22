@@ -105,6 +105,8 @@ export interface SessionToolsRefreshDeps {
   devicesAvailable?(): boolean;
   /** GPT Image: whether `generate_image` is usable now (plugin on, a Codex account can make images). Absent: never. */
   imagesAvailable?(): boolean;
+  /** Tailnet previews: whether `share_preview` can work now (Tailscale on the daemon host serves HTTPS). Absent: never. */
+  tailnetAvailable?(): boolean;
   /**
    * Knowledge Graph plugin: its view of one chat (thread id = session id) — on or off, worker or
    * not, what it sees (`knowledge/visibility.ts` `createKnowledgeForSession`). Read fresh for every
@@ -385,6 +387,8 @@ export class SessionToolsRefresher {
       devicesAvailable: this.deps.devicesAvailable?.() === true,
       // GPT Image: generate_image only while an account can make images.
       imagesAvailable: this.deps.imagesAvailable?.() === true,
+      // Tailnet previews: share_preview only while Tailscale can serve HTTPS.
+      tailnetAvailable: this.deps.tailnetAvailable?.() === true,
       ...(knowledge ? { knowledge } : {})
     });
     return { ...manifest, seq: this.nextSeq(), epoch: this.epoch };

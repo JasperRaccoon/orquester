@@ -59,6 +59,8 @@ export interface ManifestInput {
   devicesAvailable?: boolean;
   /** GPT Image: whether `generate_image` is usable (the plugin is on and a Codex account can make images); absent = no. */
   imagesAvailable?: boolean;
+  /** Tailnet previews: whether `share_preview` can work (Tailscale on the daemon host serves HTTPS); absent = no. */
+  tailnetAvailable?: boolean;
   /** Knowledge Graph: the plugin's view of this chat; absent = the plugin is off. */
   knowledge?: ManifestKnowledge;
 }
@@ -92,7 +94,8 @@ const BOX_CHAT_TOOLS: readonly string[] = ["list_boxes", "box_lend_accounts", "b
  * chat pays for tools it cannot use, but for {@link BOX_CHAT_TOOLS} in a chat running in a box; (devices) less the `devices` toolset likewise. Knowledge Graph:
  * the `knowledge` toolset only while the plugin is on, without the entry tools
  * ({@link KNOWLEDGE_SEARCH_TOOLS}) for a chat that sees no collection, and never the worker tools; a
- * worker session gets ONLY the worker tools. GPT Image: the `images` toolset only while it can make images.
+ * worker session gets ONLY the worker tools. GPT Image: the `images` toolset only while it can make images. Tailnet
+ * previews: the `tailnet` toolset only while Tailscale on the daemon host can serve HTTPS.
  */
 function advertisedChatTools(
   catalog: readonly AnyOrquesterTool[],
@@ -101,7 +104,8 @@ function advertisedChatTools(
   knowledge?: ManifestKnowledge,
   devicesAvailable = false,
   inBox = false,
-  imagesAvailable = false
+  imagesAvailable = false,
+  tailnetAvailable = false
 ): string[] {
   if (knowledge?.worker === true) return catalog.filter((tool) => KNOWLEDGE_WORKER_TOOLS.includes(tool.name)).map((tool) => tool.name);
   const knowledgeTool = (tool: AnyOrquesterTool): boolean => {
@@ -117,6 +121,7 @@ function advertisedChatTools(
         (boxesAvailable || tool.toolset !== "boxes" || (inBox && BOX_CHAT_TOOLS.includes(tool.name))) &&
         (devicesAvailable || tool.toolset !== "devices") &&
         (imagesAvailable || tool.toolset !== "images") &&
+        (tailnetAvailable || tool.toolset !== "tailnet") &&
         knowledgeTool(tool)
     )
     .map((tool) => tool.name);
@@ -173,7 +178,7 @@ function denyFor(thread: ManifestThread, servers: readonly DaemonPointingServer[
 /** The manifest of one thread. */
 export function buildSessionToolsManifest(input: ManifestInput): SessionToolsManifest {
   const knowledge = input.knowledge;
-  const tools = advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true, knowledge, input.devicesAvailable === true, input.thread.inBox === true, input.imagesAvailable === true);
+  const tools = advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true, knowledge, input.devicesAvailable === true, input.thread.inBox === true, input.imagesAvailable === true, input.tailnetAvailable === true);
   const instructions =
     knowledge?.worker === true
       ? KNOWLEDGE_WORKER_INSTRUCTIONS

@@ -105,6 +105,8 @@ import {
   DAEMON_STOPPING_EVENT,
   ORQUESTER_PROTOCOL_VERSION,
   ORQUESTER_SERVICE,
+  TAILNET_CHANGED_EVENT,
+  TAILNET_CHANNEL,
   type DaemonStoppingPayload
 } from "@orquester/api";
 import { isBinOnPath, RegistryService } from "./registry";
@@ -153,7 +155,7 @@ import { realClock } from "./workflows/factory.ts";
 // umcp:t5 begin
 import { registerReplySubscriptionRoutes } from "./agent-chat/lineage-routes.ts";
 import { ReplyRouter } from "./agent-chat/replies.ts";
-import { agentChatReplyOutboxFile, selfUpdateRequestPath } from "@orquester/config";
+import { agentChatReplyOutboxFile, selfUpdateRequestPath, tailnetStorePath } from "@orquester/config";
 // umcp:t5 end
 import { registerSecretRequestRoutes, SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 // umcp:t3 begin
@@ -365,6 +367,11 @@ import { hashPassword, loadDaemonConfig, migrateHttpPassword } from "./daemon-co
 import { registerTemporaryBoxRoutes, TemporaryBoxTools } from "./boxes/temporary/index.ts";
 // boxes: every box module wired over the daemon's services.
 import { createDaemonBoxes, type DaemonBoxes } from "./boxes/wiring.ts";
+// Tailscale on the daemon host (tailnet machines spec 2026-11-22 §4.7): one LocalTailscale for the
+// boxes and the daemon-level tailnet service (Settings → Server's HTTPS address, previews).
+import { createLocalTailscale } from "./boxes/tailscale/local.ts";
+import { registerTailnetRoutes } from "./tailnet/routes.ts";
+import { createTailnetService, type TailnetService } from "./tailnet/service.ts";
 
 const daemonId = randomUUID();
 
@@ -774,8 +781,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // voxl, the optional H.264 desktop streamer (spec 2026-11-10 §5): this host's binary, which VM
   // desktops get a copy of.
   const voxlProbe = new VoxlProbe({ baseDir: paths.baseDir, env: () => env });
+  // Tailscale on this host: the boxes' Connection card and the tailnet service below share it (and
+  // so its one queue of `tailscale serve` changes).
+  const localTailscale = createLocalTailscale({ daemonHttp: () => ({ host: config.transports.http.host, port: config.transports.http.port }) });
   const boxes: DaemonBoxes = createDaemonBoxes({
     voxlStatus: () => voxlProbe.status(),
+    localTailscale,
     baseDir: paths.baseDir,
     keysDir: resolved.keysDir,
     home: resolved.vars.userhome,
@@ -794,6 +805,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   // boxes: end
+  // Tailnet (spec 2026-11-22 §4.7): the daemon's tailnet HTTPS address with its 30 s repair, the
+  // operator grant and shared previews, whether or not the boxes plugin is on. It compares serve
+  // routes with where the HTTP transport actually listens (`httpListening`, set by startHttp).
+  let httpListening: { host: string; port: number } | null = null;
+  const tailnet: TailnetService = createTailnetService({
+    local: localTailscale,
+    file: tailnetStorePath(paths.baseDir),
+    writeJson: writeJsonFile,
+    listening: () => httpListening,
+    // A box project's port is shared through its host forward.
+    hostPortFor: (projectPath, port) => boxes.previewHostPort(projectPath, port),
+    publish: (payload) => broadcaster.publish(TAILNET_CHANNEL, TAILNET_CHANGED_EVENT, payload),
+    logger: console
+  });
 
   // boxes: a box project's terminals run in its box; the host manager stays the only writer of
   // `sessions.json` (box terminals and chat tabs contribute their records to it).
@@ -1702,6 +1727,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxWiring: boxes,
     devices,
     gptImage,
+    tailnet,
     storage: { scans: storageScans, guard: storageGuard }
   };
   // umcp:t3 begin
@@ -1746,6 +1772,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentChat.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
     if (!rolledBack) devices.chatClosed(id);
   });
+  // Tailnet: a closed chat's shared previews stop being shared.
+  agentChat.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
+    if (!rolledBack) tailnet.chatClosed(id);
+  });
   await devices.start().catch((error) => console.error("Device service start failed", error instanceof Error ? error.message : error));
   // GPT Image: follows the plugin switch and the Codex accounts (their plans) from now on.
   await gptImage.start().catch((error) => console.error("GPT Image start failed", error instanceof Error ? error.message : error));
@@ -1784,6 +1814,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     devicesAvailable: () => devices.toolsAvailable(),
     // GPT Image: generate_image only while the plugin is on and a Codex account can make images.
     imagesAvailable: () => gptImage.toolsAvailable(),
+    // Tailnet previews: share_preview only while Tailscale on this host can serve HTTPS.
+    tailnetAvailable: () => tailnet.toolsAvailable(),
     // Knowledge Graph: the plugin's view of each chat (on or off, worker or not, what it sees).
     knowledgeForSession: (threadId) => knowledge.knowledgeForSession(threadId),
     api: () => services.internalApi,
@@ -1812,6 +1844,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // GPT Image: likewise when the plugin toggles or the Codex accounts change what can make images.
   gptImage.onToolsChange(() => {
     void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: image tool refresh failed", error instanceof Error ? error.message : String(error)));
+  });
+  // Tailnet previews: likewise when Tailscale on this host starts or stops being able to serve HTTPS.
+  tailnet.onToolsChange(() => {
+    void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: tailnet tools refresh failed", error instanceof Error ? error.message : String(error)));
   });
   // A changed MCP server config (agent profile) is read afresh by the next manifest.
   const agentProfileSink = {
@@ -1966,6 +2002,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     });
     await app.listen({ host: config.transports.http.host, port: config.transports.http.port });
     httpServer = app;
+    // Tailnet: the address actually bound (the serve route must point at it).
+    const bound = app.server.address();
+    httpListening = { host: config.transports.http.host, port: bound && typeof bound === "object" ? bound.port : config.transports.http.port };
     console.log(
       `http transport on ${config.transports.http.host}:${config.transports.http.port}${serveWeb ? (webFallback ? ` (+web, missing assets from ${webFallback})` : " (+web)") : ""}`
     );
@@ -1974,6 +2013,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (httpServer) {
       const server = httpServer;
       httpServer = null;
+      httpListening = null;
       // close() waits for open connections to end first; long-lived WebSocket
       // clients would otherwise hold it open until the stop timeout. Force-drop
       // lingering sockets so close() resolves promptly (clients reconnect).
@@ -1996,6 +2036,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const httpStarted = performance.now();
   await startHttp();
   bootPhase("http", httpStarted);
+  // Tailnet: the first check now that the HTTP transport listens (adopts or repairs the serve route), then every 30 s.
+  await tailnet.start().catch((error) => console.error("Tailnet service start failed", error instanceof Error ? error.message : error));
   await workflowsReady;
   // Agent profile change detection (fs watchers on each installed agent's config), after boot.
   agentProfile.start();
@@ -2035,6 +2077,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     await devices.stop().catch((error) => console.error("Device service stop failed", error instanceof Error ? error.message : error));
     // GPT Image: stops following the plugin and the accounts.
     gptImage.stop();
+    // Tailnet: the 30 s check stops (serve routes stay as they are); a change in flight lands first.
+    await tailnet.stop().catch((error) => console.error("Tailnet service stop failed", error instanceof Error ? error.message : error));
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
@@ -2277,6 +2321,8 @@ interface Services {
   devices?: DaemonDevices;
   /** GPT Image: the plugin's service (settings routes). Optional: route tests build a partial `services`. */
   gptImage?: GptImageService;
+  /** Tailnet: the daemon's tailnet HTTPS address, operator grant and previews (`tailnetRoutes`). Optional: route tests build a partial `services`. */
+  tailnet?: TailnetService;
   /** Host storage: the scan service and the action guard (Storage routes). Optional: route tests build a partial `services`. */
   storage?: { scans: StorageScanService; guard: StorageGuard };
 }
@@ -5173,6 +5219,8 @@ export function createServer(
   services.devices?.registerRoutes(app);
   // GPT Image (`gptImageRoutes.settings`): both transports like the plugin routes (the bearer hook gates HTTP).
   if (services.gptImage) registerGptImageRoutes(app, { service: services.gptImage });
+  // Tailnet (`tailnetRoutes`): both transports (the bearer hook gates HTTP); owner-only but for previews.
+  if (services.tailnet) registerTailnetRoutes(app, { service: services.tailnet });
 
   // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
   // transports; the bearer hook above gates HTTP. Secret values are write-only.

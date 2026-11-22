@@ -77,7 +77,7 @@ import {
   registerBoxConfigChangeRoutes
 } from "./sync/index.ts";
 import { createTailscaleKeys, type TailscaleCredentials as TailscaleApiCredentials } from "./tailscale/keys.ts";
-import { createLocalTailscale, type DaemonHttpAddress } from "./tailscale/local.ts";
+import { createLocalTailscale, type DaemonHttpAddress, type LocalTailscale } from "./tailscale/local.ts";
 import { createBoxGuiInstaller, type BoxGuiInstaller } from "./remote/gui/index.ts";
 import type { TemporaryBoxes } from "./temporary/contract.ts";
 import { ProjectBoxForwards } from "./temporary/project-forwards.ts";
@@ -121,6 +121,8 @@ export interface DaemonBoxesDeps {
   guiInstaller?: BoxGuiInstaller;
   /** The host's voxl (spec 2026-11-10 §5), copied into VMs for their desktops (absent: VM desktops use RFB). */
   voxlStatus?: () => Promise<DesktopVoxlStatus>;
+  /** The daemon's one `LocalTailscale` (shared with the daemon-level tailnet service); absent: one of its own. */
+  localTailscale?: LocalTailscale;
 }
 
 /** What `attach` needs once the daemon's session list, browser tabs and chat services exist. */
@@ -158,6 +160,11 @@ export interface DaemonBoxes {
   attach(attachment: DaemonBoxesAttachment): Promise<void>;
   /** The Browser tab's URL suggestions: box projects get their box's listening ports. */
   browserSuggestions(projectPath: string, sniffed: string[]): Promise<string[]>;
+  /**
+   * Tailnet previews (tailnet machines spec §4.7.4): the host loopback port forwarding to `port` of
+   * a box project's box (the dev-server forward, made on first use); null for a host project.
+   */
+  previewHostPort(projectPath: string, port: number): Promise<number | null>;
   /** The daemon's workspaces root moved. */
   workspacesChanged(): void;
   registerRoutes(app: FastifyInstance, mode: "local" | "remote"): void;
@@ -280,7 +287,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       tooling,
       blacksmith: createBlacksmithSetupDriver(),
       agentBuilds: builds,
-      localTailscale: createLocalTailscale({ daemonHttp: deps.daemonHttp }),
+      localTailscale: deps.localTailscale ?? createLocalTailscale({ daemonHttp: deps.daemonHttp }),
       daemonHttp: deps.daemonHttp
     }
   );
@@ -572,6 +579,12 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
 
     async browserSuggestions(projectPath, sniffed) {
       return forwards ? forwards.suggestions(projectPath, sniffed) : sniffed;
+    },
+
+    async previewHostPort(projectPath, port) {
+      if (registry.locate(projectPath).kind !== "box") return null;
+      if (!forwards) throw new Error("The project's box forwards aren't set up yet.");
+      return forwards.hostPortFor(projectPath, port);
     },
 
     workspacesChanged() {
