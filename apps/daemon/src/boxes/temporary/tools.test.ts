@@ -227,6 +227,43 @@ test("waitReady: resolves on the change that makes the box ready; fails on destr
   assert.ok(!foreign.ok && foreign.code === "BOX_NOT_FOUND");
 });
 
+test("agent SSH: the ready answer and the owner chat's list carry its alias and command; another chat's and a person's do not", async () => {
+  const boxes = new FakeTemporaryBoxes().add(boxSummary({ id: "box-a", threadId: "chat-a" })).add(boxSummary({ id: "box-b", threadId: "chat-b" }));
+  const tools = new TemporaryBoxTools({ clock: new ManualClock(), isChatOpen: () => true, logger: { warn: () => {}, error: () => {} } });
+  const issued = new Map<string, { alias: string; command: string }>();
+  let settles = 0;
+  tools.connect({
+    boxes,
+    hub: { get: () => undefined },
+    ssh: {
+      aliasFor: (threadId, boxId) => issued.get(`${threadId}/${boxId}`) ?? null,
+      settled: async (threadId, boxId) => {
+        settles += 1;
+        // Issued while the box became ready: the answer waits for it.
+        issued.set("chat-a/box-a", { alias: "orq-box-a", command: "ssh -F /h/.ssh/orquester/box-a.conf orq-box-a" });
+        return issued.get(`${threadId}/${boxId}`) ?? null;
+      }
+    }
+  });
+  boxes.update("box-a", { state: "provisioning" });
+  const waiting = tools.waitReady("box-a", 60_000, { principal: agent() });
+  boxes.update("box-a", { state: "ready" });
+  const ready = await waiting;
+  assert.ok(ready.ok);
+  assert.equal(settles, 1);
+  assert.equal(ready.value.sshAlias, "orq-box-a");
+  assert.equal(ready.value.sshCommand, "ssh -F /h/.ssh/orquester/box-a.conf orq-box-a");
+
+  const mine = tools.list(agent());
+  assert.ok(mine.ok);
+  assert.deepEqual(mine.value.map((box) => [box.id, box.sshAlias]), [["box-a", "orq-box-a"]]);
+  const theirs = tools.list(agent("chat-b"));
+  assert.ok(theirs.ok);
+  assert.deepEqual(theirs.value.map((box) => [box.id, box.sshAlias]), [["box-b", undefined]]);
+  const person = tools.list(USER);
+  assert.ok(person.ok && person.value.every((box) => box.sshAlias === undefined));
+});
+
 test("operations need a ready, connected box", async () => {
   const { tools, boxes, connection } = world();
   boxes.update("box-a", { state: "unreachable" });

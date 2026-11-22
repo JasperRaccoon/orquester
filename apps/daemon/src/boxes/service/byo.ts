@@ -169,9 +169,18 @@ function inUseBy(record: StoredBox): string {
 
 export class ByoMachines {
   private readonly throttle: PairingThrottle;
+  private beforeRemove: ((boxId: string) => Promise<void>) | null = null;
 
   constructor(private readonly deps: ByoMachinesDeps) {
     this.throttle = new PairingThrottle(() => deps.clock.now());
+  }
+
+  /**
+   * Run before a connected machine is told to uninstall (agent SSH: the keys Orquester added to
+   * it go while it can still be reached). A failure is logged; the removal goes on.
+   */
+  setBeforeRemove(hook: (boxId: string) => Promise<void>): void {
+    this.beforeRemove = hook;
   }
 
   /** "Add your machine": the `pairing` record and its one-time command. */
@@ -259,6 +268,9 @@ export class ByoMachines {
     }
     let uninstalled = false;
     const connection = this.deps.hub.get(boxId);
+    if (connection?.connected && this.beforeRemove) {
+      await this.beforeRemove(boxId).catch((error) => this.deps.logger.warn(`Machine ${boxId}: cleaning up before its removal failed`, errorLine(error)));
+    }
     if (connection?.connected) {
       try {
         await connection.request("agent.shutdown", { reason: "removed", uninstall: true }, { timeoutMs: UNINSTALL_ACK_MS });

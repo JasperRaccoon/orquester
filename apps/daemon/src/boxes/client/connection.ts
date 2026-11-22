@@ -16,6 +16,7 @@ import {
   BOX_STREAM_FROM_BOX,
   BOX_STREAM_STDERR,
   BOX_STREAM_TO_BOX,
+  type BoxAgentCapability,
   type BoxChannelSpec,
   type BoxDetachedProcInfo,
   type BoxForwardSpec,
@@ -39,6 +40,10 @@ export interface LinkInfo {
   paths: BoxPathMap;
   agentVersion: string;
   procs: BoxDetachedProcInfo[];
+  /** The latest hello's `capabilities` (absent: none, or not told — the relay does not carry them). */
+  capabilities?: BoxAgentCapability[];
+  /** The latest hello's `sshHostKey` (with `ssh-server`). */
+  sshHostKey?: string;
 }
 
 /** A Readable fed by one inbound stream, returning credit as it drains. */
@@ -376,6 +381,12 @@ export class LinkedBoxConnection implements BoxConnection {
   }
   get connected(): boolean {
     return this.mux !== null && !this.mux.isShutDown;
+  }
+  get capabilities(): readonly BoxAgentCapability[] {
+    return this.info.capabilities ?? [];
+  }
+  get sshHostKey(): string | null {
+    return this.info.sshHostKey ?? null;
   }
 
   detachedProcs(): BoxDetachedProcInfo[] {

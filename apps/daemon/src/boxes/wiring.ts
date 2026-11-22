@@ -9,8 +9,9 @@
  *    load (a reattached box terminal finds its box), the plugin switch is followed.
  * 3. `attach(...)` — once the session list, the browser tabs, the temporary-box tools and the agent
  *    chat exist: the token broker, account lends, dev-server forwards, the agent host's view of box
- *    projects, the MCP bridge, the Template command runner, and the temporary-box tools (connected
- *    only while the plugin is on, so the box tools are hidden while it is off).
+ *    projects, the MCP bridge, the Template command runner, agent SSH (`agent-ssh/`: the chats'
+ *    `orq-<name>` aliases and their proxy socket), and the temporary-box tools (connected only while
+ *    the plugin is on, so the box tools are hidden while it is off).
  * 4. Routes, per transport: {@link DaemonBoxes.registerRoutes}.
  * 5. `stop()` at shutdown.
  *
@@ -29,6 +30,7 @@ import { agentAccountsDir, boxMcpSettingsPath, boxPendingTerminalKillsPath, type
 import type { FastifyInstance } from "fastify";
 
 import type { AccountsService } from "../accounts.ts";
+import type { MachineSshAccessPort } from "../machines/ports.ts";
 import type { AgentAccountsService } from "../agent-accounts.ts";
 import { registerBoxHostRoutes } from "../agent-chat/box-host-routes.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
@@ -39,6 +41,7 @@ import type { PluginsService } from "../plugins/plugins-service.ts";
 import { createTsRustToolingPlugin } from "../plugins/ts-rust/box-tooling.ts";
 import type { RegistryService } from "../registry.ts";
 import type { ISessionManager, SessionIndexContributor } from "../sessions";
+import { AgentSsh, createMachineSshAccess, type AgentSshAliasInfo } from "./agent-ssh/index.ts";
 import { buildBootstrap } from "./bootstrap/bootstrap.ts";
 import { nodeCredentialFiles } from "./broker/credentials.ts";
 import { createAgentTokenBroker } from "./broker/broker.ts";
@@ -121,6 +124,8 @@ export interface DaemonBoxesDeps {
   guiInstaller?: BoxGuiInstaller;
   /** The host's voxl (spec 2026-11-10 §5), copied into VMs for their desktops (absent: VM desktops use RFB). */
   voxlStatus?: () => Promise<DesktopVoxlStatus>;
+  /** Agent SSH: the `agentPrefs.sshConfigInclude` setting (Settings → Agent chat), read at start. */
+  sshConfigInclude?: () => Promise<boolean>;
 }
 
 /** What `attach` needs once the daemon's session list, browser tabs and chat services exist. */
@@ -153,6 +158,12 @@ export interface DaemonBoxes {
   gitRoute: ReturnType<typeof createBoxGitRouteResolver>;
   /** The workflow engine's box sandbox. */
   workflowSandbox: { registry: BoxRegistry; hub: BoxHubServer; tooling: BoxToolingProvisionerHandle };
+  /** Agent SSH: the opt-in `Include` line follows the setting (`PUT /api/config/app`). */
+  agentSsh: Pick<AgentSsh, "setIncludeEnabled">;
+  /** Agent SSH for the machines registry: the machine-level aliases of Free-use machines (`machines/ports.ts`). */
+  machineSshAccess: MachineSshAccessPort;
+  /** A machine-level alias of a paired machine's box as agents type it, for `list_machines`; null when it has none. */
+  machineSshAlias(boxId: string): AgentSshAliasInfo | null;
   /** Load the records and follow the plugin switch. Before `sessions.reattach()`. */
   start(): Promise<void>;
   attach(attachment: DaemonBoxesAttachment): Promise<void>;
@@ -316,6 +327,24 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
   const forgotten = new Set<string>();
   const templatesStarting = new Set<string>();
 
+  // Agent SSH (spec 2026-11-22 §4.3): built after `projectForwards`, so a project box's re-listen on
+  // connect is queued before the aliases' checks of their forwards. Chats are known from `attach` on.
+  const agentSsh = new AgentSsh({
+    baseDir: deps.baseDir,
+    home: deps.home,
+    hub,
+    registry,
+    projectForwards,
+    chats: {
+      // Asked only after `chatsLoaded()` below (before it, every chat counts as open).
+      isOpen: (threadId) => agentChat?.chat.has(threadId) ?? true,
+      projectPath: (threadId) => agentChat?.chat.get(threadId)?.projectPath || null
+    },
+    includeSetting: deps.sshConfigInclude ?? (async () => false),
+    logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? ""), info: (message, meta) => logger.log(`[boxes] ${message}`, meta ?? "") }
+  });
+  boxes.byo.setBeforeRemove((boxId) => agentSsh.machineRemoving(boxId));
+
   /** The box service as the temporary-box tools see it (`boxes/temporary/contract.ts`). */
   const temporaryBoxes: TemporaryBoxes = {
     createTemporaryBox: (input) =>
@@ -349,7 +378,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
           hub,
           registry,
           projectForwards,
-          browserRunsInBox: (projectPath) => boxBrowsers?.runsInBox(projectPath) ?? false
+          browserRunsInBox: (projectPath) => boxBrowsers?.runsInBox(projectPath) ?? false,
+          ssh: agentSsh
         });
       }
       for (const record of registry.list()) keepConfigInSync(record.id);
@@ -436,6 +466,9 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     desktops,
     gitRoute,
     workflowSandbox: { registry, hub, tooling },
+    agentSsh,
+    machineSshAccess: createMachineSshAccess(agentSsh),
+    machineSshAlias: (boxId) => agentSsh.machineAlias(boxId),
 
     wrapSessions(createHost, chatIndex) {
       const host = createHost(composeIndexContributors(chatIndex, terminals.indexContributor()));
@@ -502,7 +535,9 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       });
       registry.setLendRuntime(accountLends.runtimeOf);
       const onChatClosed = ({ id, rolledBack }: { id: string; rolledBack?: boolean }): void => {
-        if (!rolledBack) accountLends.chatClosed(id);
+        if (rolledBack) return;
+        accountLends.chatClosed(id);
+        void agentSsh.chatClosed(id);
       };
       attachment.agentChat.chat.lifecycle.on("closed", onChatClosed);
       unsubscribers.push(() => void attachment.agentChat.chat.lifecycle.off("closed", onChatClosed));
@@ -534,6 +569,13 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
 
       // Agent chats in box projects run their CLI in the box (spec §8.5).
       attachment.agentChat.setBoxes({ registry, tooling });
+
+      // Agent SSH: aliases are read back and reconciled, and the proxy socket opens.
+      await agentSsh.start().catch((error) => logger.warn("[boxes] Agent SSH did not start", errorText(error)));
+      // `startDaemon` awaits the session reattach (which loads the chat tabs) before `attach`: once
+      // it succeeded, chats closed while the daemon was down lose their aliases now. If it failed,
+      // no chat is taken for closed.
+      if (attachment.sessionsLoaded()) await agentSsh.chatsLoaded().catch((error) => logger.warn("[boxes] Agent SSH: dropping closed chats' aliases failed", errorText(error)));
 
       // boxes: the Browser tab of a Linux box project runs its Chromium in the box.
       const vmBrowsers = new BoxBrowsers({
@@ -620,6 +662,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
         disconnectTools();
         disconnectTools = null;
       }
+      await agentSsh.stop().catch((error) => logger.warn("[boxes] Agent SSH stop failed", errorText(error)));
       await boxes.stop().catch((error) => logger.error("[boxes] Box service stop failed", errorText(error)));
       await forwards?.dispose().catch((error) => logger.warn("[boxes] Closing dev-server forwards failed", errorText(error)));
       projectForwards.dispose();
