@@ -2,7 +2,9 @@
  * A fake Linux box for Android box-host tests: `localBoxConnection()` (box ops run on this machine)
  * over a throwaway device root holding a scripted SDK and tools that behave like the real ones
  * where the host looks: `emulator` starts a `qemu-system-x86_64` process (a copy of `sleep`) and
- * records its arguments; `adb` answers `sys.boot_completed`, `emu kill` and the rest; the hub CLI
+ * records its arguments and `DISPLAY` (with `-gpu host` it logs the real emulator's renderer
+ * failure when told to, and lives on unbooted as the real one does); `adb` answers
+ * `sys.boot_completed`, `emu kill` and the rest; the hub CLI
  * serves `/healthz` and a token-gated `/api/devices` and publishes its 0600 state file; agent-device
  * starts a detached daemon with `daemon.json`. The probe's answer is canned (KVM, ffmpeg and Java
  * need not exist here). For tests only.
@@ -25,9 +27,10 @@ import { isolatedDeviceBox } from "./local-namespace.ts";
 import { ANDROID_PROBE_SCRIPT, BOX_GOLDEN_MARKER, BOX_GOLDEN_SNAPSHOT } from "./android-remote.ts";
 
 const FAKE_EMULATOR = `#!/bin/sh
-# Fake emulator: record the arguments, refuse a snapshot boot when told to, become "qemu".
+# Fake emulator: record the arguments and DISPLAY, refuse a snapshot boot when told to, become "qemu".
 root=$(cd "$(dirname "$0")/../.." && pwd)
 printf '%s\\n' "$*" >> "$root/emulator-args.log"
+printf 'DISPLAY=%s\\n' "\${DISPLAY:-}" >> "$root/emulator-env.log"
 port=
 prev=
 for arg in "$@"; do
@@ -38,6 +41,10 @@ case " $* " in
   *" -snapshot "*) if [ -f "$root/fail-snapshot" ]; then echo "snapshot load failed" >&2; exit 1; fi ;;
 esac
 echo $$ > "$root/emu-$port.pid"
+rm -f "$root/emu-$port.stuck"
+case " $* " in
+  *" -gpu host "*) if [ -f "$root/fail-renderer" ]; then echo "ERROR        | Could not start renderer"; touch "$root/emu-$port.stuck"; fi ;;
+esac
 exec "$root/android-sdk/emulator/qemu/qemu-system-x86_64" 600
 `;
 
@@ -51,7 +58,7 @@ shift 2
 case "$1" in
   shell)
     case "$*" in
-      *sys.boot_completed*) echo 1 ;;
+      *sys.boot_completed*) [ -f "$root/emu-\${serial#emulator-}.stuck" ] || echo 1 ;;
     esac
     exit 0 ;;
   emu)
@@ -140,6 +147,8 @@ export interface FakeLinuxBoxOptions {
   memAvailableBytes?: number;
   /** The probe's free disk under the device dir (default: not reported). */
   diskFreeBytes?: number;
+  /** More probe lines (`nvidia=…`, `x_display=:0`): the box's `probeLines`, which tests may change. */
+  probeLines?: readonly string[];
 }
 
 export interface FakeLinuxBox {
@@ -150,7 +159,13 @@ export interface FakeLinuxBox {
   /** Every exec's env values (secrets must never appear). */
   envValues: string[];
   emulatorArgs(): Promise<string[]>;
+  /** Each emulator start's `DISPLAY=…`, in order. */
+  emulatorDisplays(): Promise<string[]>;
   failSnapshotLoads(): Promise<void>;
+  /** `-gpu host` emulators log "Could not start renderer" and never boot. */
+  failRenderer(): Promise<void>;
+  /** Extra lines of the next probes. */
+  probeLines: string[];
   cleanup(): Promise<void>;
 }
 
@@ -210,7 +225,8 @@ export async function createFakeLinuxBox(options: FakeLinuxBoxOptions = {}): Pro
     "sudo=0",
     `cpus=${options.cpus ?? 16}`,
     ...(options.diskFreeBytes !== undefined ? [`disk_free_kb=${Math.floor(options.diskFreeBytes / 1024)}`] : [])
-  ].join("\n");
+  ];
+  const probeLines = [...(options.probeLines ?? [])];
   const execs: string[][] = [];
   const envValues: string[] = [];
   const connection = isolatedDeviceBox({ root, boxId: "linux-box", provider: options.provider ?? "blacksmith" });
@@ -218,7 +234,7 @@ export async function createFakeLinuxBox(options: FakeLinuxBoxOptions = {}): Pro
   connection.exec = (spec: BoxExecOptions): BoxProcess => {
     execs.push([spec.command, ...(spec.args ?? [])]);
     envValues.push(...Object.values(spec.env ?? {}));
-    if (spec.command === "/bin/sh" && spec.args?.[1] === ANDROID_PROBE_SCRIPT) return exec({ command: "/bin/sh", args: ["-c", 'printf "%s\\n" "$1"', "probe", probe] });
+    if (spec.command === "/bin/sh" && spec.args?.[1] === ANDROID_PROBE_SCRIPT) return exec({ command: "/bin/sh", args: ["-c", 'printf "%s\\n" "$1"', "probe", [...probe, ...probeLines].join("\n")] });
     if (basename(spec.command) === "cat" && spec.args?.length === 1 && spec.args[0] === "/proc/meminfo") {
       const memory = `MemAvailable: ${Math.floor((options.memAvailableBytes ?? 64 * 1024 ** 3) / 1024)} kB`;
       return exec({ command: "/bin/sh", args: ["-c", 'printf "%s\\n" "$1"', "memory", memory] });
@@ -231,7 +247,10 @@ export async function createFakeLinuxBox(options: FakeLinuxBoxOptions = {}): Pro
     execs,
     envValues,
     emulatorArgs: async () => (await readFile(join(root, "emulator-args.log"), "utf8").catch(() => "")).split("\n").filter(Boolean),
+    emulatorDisplays: async () => (await readFile(join(root, "emulator-env.log"), "utf8").catch(() => "")).split("\n").filter(Boolean),
     failSnapshotLoads: () => writeFile(join(root, "fail-snapshot"), ""),
+    failRenderer: () => writeFile(join(root, "fail-renderer"), ""),
+    probeLines,
     async cleanup() {
       // Anything still running from this root (fake qemu, hub, agent-device daemon) goes.
       await new Promise<void>((resolve) => execFile("pkill", ["-f", root], () => resolve()));

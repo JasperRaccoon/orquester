@@ -14,15 +14,17 @@
  * 4. the SDK, system image and the profiles' AVDs (skipped when the cache restored them);
  * 5. the first profile's golden snapshot `orq-golden` (the cache's, or made here: cold boot, settle,
  *    guest settings, dp cutout, named save; GPU modes tried in order, the working one recorded — an
- *    own machine with a usable GPU tries `-gpu host` first, and a `host` boot that fails or renders
- *    in software is remembered in `android-host.json` for that GPU and emulator, so later goldens
- *    go straight to the software modes);
+ *    own machine with a usable GPU and an X display it can open tries `-gpu host` first (launched
+ *    with that `DISPLAY`), and a `host` boot that fails, renders in software or draws a blank
+ *    screen is remembered in `android-host.json` for that GPU and emulator, so later goldens go
+ *    straight to the software modes);
  * 6. the hub (detached through `hub-launcher.mjs`, uploaded; `--require-token`, the token read
  *    from its 0600 state file in the box, never argv or logs) and the agent-device daemon, both
  *    forwarded to this machine; the local 0600 `--config`; agent-device on this machine.
  *
  * Leases: a read-only instance of the profile's AVD from `orq-golden` with that snapshot's GPU mode
- * (cold boot when the snapshot does not load), `sys.boot_completed`, then the lease boot settings;
+ * (cold boot when the snapshot does not load; a `host` snapshot boots cold in software when the X
+ * display is gone or its renderer does not start), `sys.boot_completed`, then the lease boot settings;
  * `release` stops it (`adb emu kill` → signals, only to the verified process).
  */
 
@@ -54,7 +56,7 @@ import type { BoxConnection, BoxHostForward } from "../../../boxes/contracts.ts"
 import { DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
 import { AgentDeviceDaemon } from "../../android/agent-device-daemon.ts";
 import { avdHardware, avdName } from "../../android/avd-config.ts";
-import { allocateEmulatorPorts, findQemuPid, type KvmMode, serialOf, signalLauncher, spawnEmulator, stopEmulator, verifyEmulator, waitForBootCompleted, type EmulatorLaunch } from "../../android/emulator.ts";
+import { allocateEmulatorPorts, emulatorLogFailure, findQemuPid, type KvmMode, serialOf, signalLauncher, spawnEmulator, stopEmulator, verifyEmulator, waitForBootCompleted, type EmulatorLaunch } from "../../android/emulator.ts";
 import { adbServerPort, androidLayoutAt, appdirMarker, buildAndroidEnv, type AndroidLayout } from "../../android/env.ts";
 import { lastLine } from "../../android/exec.ts";
 import type { DeviceExecutor } from "../../android/executor.ts";
@@ -94,8 +96,9 @@ import {
   boxAndroidCapacity,
   boxGpuModes,
   gpuSignature,
+  FRAME_BYTES_SCRIPT,
   HOST_GPU_MODE,
-  rendersInSoftware,
+  hostRenderProblem,
   usableHostGpu,
   boxAndroidRoot,
   boxAvdState,
@@ -652,7 +655,7 @@ export class BoxAndroidHost implements DeviceHost {
               sdk: layout.sdk,
               avdHome: layout.avd,
               logs: layout.logs,
-              env: this.env!,
+              env: gpu === HOST_GPU_MODE && hostGpu ? { ...this.env!, ...hostGpu.env } : this.env!,
               kvm,
               reservePorts: () => this.reservePorts(),
               track: async (record) => {
@@ -700,10 +703,18 @@ export class BoxAndroidHost implements DeviceHost {
     return boxGpuModes(this.kind, this.probe ? usableHostGpu(this.probe.gpu) : null, typeof failed === "string" ? failed : null, emulatorRevision);
   }
 
-  /** A `host` golden boot must render on the GPU: the emulator silently falls back to SwiftShader for a GPU it blocklists. */
+  /** A `host` golden boot must render on the GPU ({@link hostRenderProblem}): the emulator silently falls back to SwiftShader for a GPU it blocklists. */
   private async checkHardwareRender(serial: string, signal: AbortSignal): Promise<void> {
-    const dump = await this.x.exec(adbPath(this.layout().sdk), ["-s", serial, "shell", "dumpsys SurfaceFlinger"], { env: this.env!, signal, timeoutMs: 30_000 });
-    if (dump.exitCode === 0 && rendersInSoftware(dump.stdout)) throw new Error("-gpu host fell back to software rendering (the emulator does not accept this GPU or its driver)");
+    const adb = adbPath(this.layout().sdk);
+    const dump = await this.x.exec(adb, ["-s", serial, "shell", "dumpsys SurfaceFlinger"], { env: this.env!, signal, timeoutMs: 30_000 });
+    const frame = await this.x.exec(adb, ["-s", serial, "shell", FRAME_BYTES_SCRIPT], { env: this.env!, signal, timeoutMs: 30_000 });
+    const problem = hostRenderProblem(dump.exitCode === 0 ? dump.stdout : "", frame.exitCode === 0 ? frame.stdout : "");
+    if (problem) throw new Error(problem);
+  }
+
+  /** The software GPU mode a `host` lease falls back to. */
+  private softwareGpuMode(): string {
+    return boxGpuModes(this.kind, null, null, null)[0]!;
   }
 
   /** Remember (or, with null, forget) the GPU and emulator `-gpu host` failed on, in the box's state file. */
@@ -858,17 +869,21 @@ export class BoxAndroidHost implements DeviceHost {
     }
     signal.throwIfAborted();
     progress("start-device", `Starting ${profile.label}`);
+    // A `host` snapshot renders through the X display it was made with: none now (logged out), boot cold in software.
+    if (golden?.gpu === HOST_GPU_MODE && !(this.probe && usableHostGpu(this.probe.gpu))) golden = null;
     const gpu = golden?.gpu ?? this.gpuModes(await this.emulatorRevision())[0]!;
     let record: EmulatorRecord;
     try {
       try {
         record = await this.launch(profile, request.leaseId, golden ? { gpu, snapshot: golden.snapshot } : { gpu, coldBoot: true }, signal, progress);
       } catch (error) {
-        if (signal.aborted || !golden || isDeviceError(error)) throw error;
-        // The snapshot did not load (another emulator build, a broken restore): boot it cold.
-        this.deps.logger.warn(`[devices] ${profile.id} on ${this.id} did not boot from ${golden.snapshot} (${errorText(error)}); booting it cold`);
+        if (signal.aborted || isDeviceError(error) || (!golden && gpu !== HOST_GPU_MODE)) throw error;
+        // The snapshot did not load (another emulator build, a broken restore), or the GPU renderer
+        // did not start (the display went away): boot it cold, in software instead of on the GPU.
+        const retry = gpu === HOST_GPU_MODE ? this.softwareGpuMode() : gpu;
+        this.deps.logger.warn(`[devices] ${profile.id} on ${this.id} did not boot${golden ? ` from ${golden.snapshot}` : ""} with -gpu ${gpu} (${errorText(error)}); booting it cold with -gpu ${retry}`);
         progress("start-device", `Starting ${profile.label} (cold boot)`);
-        record = await this.launch(profile, request.leaseId, { gpu, coldBoot: true }, signal, progress);
+        record = await this.launch(profile, request.leaseId, { gpu: retry, coldBoot: true }, signal, progress);
       }
     } catch (error) {
       if (signal.aborted) throw new DeviceError("CANCELLED", "The device was released before it finished starting.");
@@ -905,7 +920,17 @@ export class BoxAndroidHost implements DeviceHost {
     let pgid: number | null = null;
     try {
       await this.x.remove(logPath);
-      pgid = (await spawnEmulator({ sdk: layout.sdk, env, kvm: this.kvmMode(), launch: { avd: avdName(profile.id), consolePort: ports.consolePort, grpcPort: ports.grpcPort, ...launch }, logPath, executor: this.x })).pgid;
+      const hostGpu = launch.gpu === HOST_GPU_MODE && this.probe ? usableHostGpu(this.probe.gpu) : null;
+      pgid = (
+        await spawnEmulator({
+          sdk: layout.sdk,
+          env: hostGpu ? { ...env, ...hostGpu.env } : env,
+          kvm: this.kvmMode(),
+          launch: { avd: avdName(profile.id), consolePort: ports.consolePort, grpcPort: ports.grpcPort, ...launch },
+          logPath,
+          executor: this.x
+        })
+      ).pgid;
       let pid: number | null = null;
       for (let tries = 0; tries < 100 && pid === null; tries++) {
         pid = await findQemuPid(pgid, this.x);
@@ -943,6 +968,7 @@ export class BoxAndroidHost implements DeviceHost {
         env,
         serial,
         alive: async () => (await verifyEmulator(this.x, qemu, marker, identity)) !== null,
+        failed: async () => emulatorLogFailure((await this.x.readText(logPath)) ?? ""),
         signal,
         timeoutMs: this.timing.bootMs,
         pollMs: 1_000
