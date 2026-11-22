@@ -98,7 +98,7 @@ The owner picked **A**, and chose **web Settings** (not server-only) for enrollm
 
 - New path helper `authSecondFactorPath(baseDir)` and a tolerant zod schema in `packages/config`
   (own module, like `auth-sessions.ts`), version 1:
-  `{ version: 1, totp?: { secret, enabledAt, lastUsedStep }, recoveryCodes: [{ digest }] }`;
+  `{ version: 1, totp?: { secret, enabledAt, lastUsedStep }, recoveryCodes: [{ digest }], lastFailedChallenge?: { at, ip } }`;
   unknown keys preserved and written back.
 - Separate from `daemon.json` so the config GET sanitizer, socket config PUT and
   `deploy.sh rotate-password` never touch the secret, and separate from `auth-sessions.json`,
@@ -129,19 +129,49 @@ The owner picked **A**, and chose **web Settings** (not server-only) for enrollm
      completed sign-in (correct code) or the lockout lapsing does;
    - global (all IPs, defeats an attacker spreading guesses over many addresses): 20 wrong codes →
      **all** code entry locked 15 min, doubling up to 24 h. Trade-off accepted: someone with the
-     password can stop new devices signing in for a while, but existing sessions keep working, and
-     a global lockout is itself a sign the password has leaked (log it as a warning);
+     password can stop new devices signing in for a while, but existing sessions keep working (see
+     "Keeping the signed-in owner in"), and the owner is told (see "Telling the owner");
    - plus the per-challenge cap of 5 attempts (step 3).
    The password step itself still runs through `guarded()` / `passwordThrottle` as today. Errors:
    401 `INVALID_CODE`, 401 `CHALLENGE_EXPIRED` (unknown/expired/exhausted → client restarts at the
    password step), 429 as today.
 5. A restart drops pending challenges; the user re-enters the password.
 
+### Keeping the signed-in owner in (hard requirement)
+
+The owner, already signed in, must never lose access because someone else is attacking the login.
+Every lockout above guards **only the public sign-in steps** (`login`, `login/second-factor`):
+
+- Bearer-authenticated requests, `/events`, every WebSocket and `/mcp` never consult the password
+  or code counters. (They keep today's separate bearer throttle, which only counts *invalid
+  tokens* from an IP, so an attacker's wrong passwords or codes cannot trip it for the owner.)
+- The management routes (`setup`, `enable`, `recovery-codes`, `disable`, token minting) are
+  reachable only with a live session, so an attacker without one cannot call them. They check the
+  password and code with the per-IP limits only and **ignore the global code lockout**, so the owner
+  can turn the factor off, regenerate codes, or rotate the password (socket / `deploy.sh`) in the
+  middle of an attack.
+- A global lockout never revokes, expires or pauses any existing session or API token.
+- Tests: during a global code lockout, an existing session's API request, WebSocket connect and
+  `disable` call all still succeed.
+
+### Telling the owner
+
+A correct password followed by a wrong code means the password has leaked, so the owner is told:
+
+- On the first wrong code of a challenge, and on every global lockout: a warning in the daemon log
+  (IP, no code) and a push notification to the owner's subscribed devices through the existing
+  `PushService` ("Someone entered your Orquester password from <ip> but not a valid code. Change
+  your password."), at most one per 15 minutes.
+- The "Two-step sign-in" row in Settings shows the last such event ("Wrong code after a correct
+  password from <ip>, <time>") until dismissed, with a pointer to rotating the password. Kept in the
+  second-factor file as `lastFailedChallenge: { at, ip }`.
+
 ### Management routes (all gated by the bearer hook)
 
 | Route | Body | Result |
 |---|---|---|
-| `GET /api/auth/second-factor` | — | `{ enabled, enabledAt, recoveryCodesRemaining }` |
+| `GET /api/auth/second-factor` | — | `{ enabled, enabledAt, recoveryCodesRemaining, lastFailedChallenge }` |
+| `POST /api/auth/second-factor/dismiss-alert` | — | 204; clears `lastFailedChallenge` |
 | `POST /api/auth/second-factor/setup` | `{ password }` | `{ secret, otpauthUri }`; pending secret held in memory for 10 min, tied to the caller's session; 409 if already enabled |
 | `POST /api/auth/second-factor/enable` | `{ code }` (TOTP from the pending secret) | `{ recoveryCodes: string[] }` shown once; persists; **revokes every other device session** |
 | `POST /api/auth/second-factor/recovery-codes` | `{ password, code }` | `{ recoveryCodes }`, old ones invalid |
