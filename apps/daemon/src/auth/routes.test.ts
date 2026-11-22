@@ -600,6 +600,23 @@ test("a completed sign-in clears the global wrong-code count, so scattered typos
   assert.equal((await signIn(h, freshCode(), "192.0.2.11")).startsWith("orq_"), true, "not globally locked");
 });
 
+test("the owner signing in between two global lockouts does not reset their doubling", async (t) => {
+  const { h, time, freshCode } = await factorHarness(t);
+  const lockAll = async (from: number) => {
+    const right = freshCode();
+    for (let i = 0; i < 10; i += 1) {
+      const ip = `203.0.113.${from + i}`;
+      const challenge = await passwordStep(h, ip);
+      for (let j = 0; j < 2; j += 1) assert.equal((await codeStep(h, challenge, "000000", ip)).statusCode, 401);
+    }
+    return codeStep(h, await passwordStep(h, "192.0.2.77"), right, "192.0.2.77");
+  };
+  assert.equal((await lockAll(10)).headers["retry-after"], String(15 * 60));
+  time.advance(15 * 60 * 1000);
+  assert.equal((await signIn(h, freshCode(), "192.0.2.10")).startsWith("orq_"), true);
+  assert.equal((await lockAll(30)).headers["retry-after"], String(30 * 60), "the second lockout is twice as long");
+});
+
 test("an expired challenge, another IP's challenge and one from before a password change are refused", async (t) => {
   const { h, time, freshCode } = await factorHarness(t);
   const ip = "198.51.100.6";

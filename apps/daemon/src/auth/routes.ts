@@ -230,8 +230,9 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
       if (ok) {
         codeThrottle.recordSuccess(ip);
         // Only the owner can produce a right code, so a completed sign-in also clears the global
-        // count: their own typos, spread over months, must not add up to a lockout.
-        if (scope === "sign-in") globalCodeThrottle.recordSuccess(EVERY_IP);
+        // count: their own typos, spread over months, must not add up to a lockout. Its strikes
+        // stay, so an attack that resumes afterwards still meets a doubled lockout.
+        if (scope === "sign-in") globalCodeThrottle.clearFails(EVERY_IP);
       } else {
         codeThrottle.recordFailure(ip, true);
         if (scope === "sign-in") {
