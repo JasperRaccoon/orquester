@@ -118,6 +118,7 @@ import { DesktopManager } from "./desktops/manager.ts";
 import { registerDesktopWsRoutes } from "./desktops/ws-routes.ts";
 import { VoxlProbe } from "./desktops/voxl.ts";
 import { registerAuthRoutes } from "./auth/routes.ts";
+import { SecondFactorStore } from "./auth/second-factor.ts";
 import { AuthSessionStore } from "./auth/sessions.ts";
 import { LoginThrottle, clientIp } from "./auth/throttle.ts";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
@@ -305,6 +306,7 @@ import {
   agentAccountsFile,
   appConfigPath,
   authSessionsPath,
+  authSecondFactorPath,
   browserProfilesDir,
   browsersIndexPath,
   createDefaultAppConfig,
@@ -1630,6 +1632,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const authSessions = new AuthSessionStore({ file: authSessionsPath(paths.baseDir), logger: console });
   await authSessions.load();
   await authSessions.syncPassword(config.transports.http.passwordHash);
+  // The login second factor: absent file → off; a file it cannot use → on and unusable (fail closed).
+  const secondFactor = new SecondFactorStore({ file: authSecondFactorPath(paths.baseDir), logger: console });
+  await secondFactor.load();
   // Device simulators (devices spec 2026-10-27): the device service exists while the plugin is on
   // (`devices/wiring.ts`); it follows the plugin from `devices.start()` below. Chats are read from
   // their tab records (loaded by the reattach above; a failed reattach releases nothing).
@@ -1678,6 +1683,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const services: Services = {
     buildInfo,
     authSessions,
+    secondFactor,
     secretRequests,
     registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, usagePricing, usageHistory, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
@@ -2268,6 +2274,11 @@ interface Services {
    * tests build a partial `services` (each app then gets an empty in-memory store).
    */
   authSessions?: AuthSessionStore;
+  /**
+   * The login second factor (`auth/second-factor.ts`), shared by both transports. Optional: route
+   * tests build a partial `services` (each app then gets an in-memory store with the factor off).
+   */
+  secondFactor?: SecondFactorStore;
   // boxes: which paths live in a box project (boxes/service). Absent: every path is a host path
   // (route tests). Read per request.
   boxRegistry?: BoxRegistry;
@@ -2327,6 +2338,7 @@ export function createServer(
   // IP must not reset it.
   const passwordThrottle = new LoginThrottle();
   const authSessions = services.authSessions ?? new AuthSessionStore();
+  const secondFactor = services.secondFactor ?? new SecondFactorStore();
 
   // Open streams (event stream, WebSockets) by the session that authenticated them: a request
   // re-checks its bearer every time, but a stream outlives that check, so revoking a session
@@ -2424,7 +2436,8 @@ export function createServer(
       path !== undefined &&
       (path.startsWith("/api") || path.startsWith("/events") || path.startsWith("/mcp")) &&
       path !== authRoutes.info &&
-      path !== authRoutes.login;
+      path !== authRoutes.login &&
+      path !== authRoutes.secondFactorLogin;
     // A path that does not even decode is refused unless authenticated.
     const needsAuth = decodedPath === undefined || gated(rawPath) || gated(decodedPath) || gated(routePath);
     if (!options.authRequired || !needsAuth) {
@@ -2478,13 +2491,17 @@ export function createServer(
   if (options.mode === "remote") registerRemoteFieldStripping(app);
   // umcp:t2 end
 
-  // Public `info` (whether auth is needed — never the hash, a salt or the username) and `login`;
+  // Public `info` (whether auth is needed — never the hash, a salt or the username), `login` and `secondFactorLogin`;
   // the session and token management routes behind the bearer hook (auth/routes.ts).
   registerAuthRoutes(app, {
     mode: options.mode,
     store: authSessions,
     passwordThrottle,
-    credentials: () => ({ username: config.transports.http.username, passwordHash: config.transports.http.passwordHash })
+    credentials: () => ({ username: config.transports.http.username, passwordHash: config.transports.http.passwordHash }),
+    secondFactor,
+    // Route tests build a partial `services` without push.
+    push: push ? { notifySignInAlert: (body) => push.notifySignInAlert(body) } : undefined,
+    logger: console
   });
 
   // Public liveness only. Daemon id / version / mode / transports are not
