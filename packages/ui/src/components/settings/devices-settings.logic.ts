@@ -1,11 +1,14 @@
 /**
  * Settings → Devices, pure (testable without a DOM): how number fields read and validate, the
  * patches the page sends (each one `parseDevicesSettingsPatch` accepts), the readiness summary,
- * the live setup job, Mac host costs and the pinned tools.
+ * the live setup job, Mac host costs, the pinned tools, and the device hosts list (owner, capacity
+ * and its basis, placement order, problems).
  */
 
 import {
+  DEVICE_PLATFORM_LABELS,
   DEVICE_PROFILES,
+  type DeviceCapacity,
   type DeviceHostSummary,
   type DevicePlacementMode,
   type DevicePlatform,
@@ -14,7 +17,8 @@ import {
   type DeviceSetupJob,
   type DeviceSetupStepState,
   type DevicesSettings,
-  type DevicesSettingsPatch
+  type DevicesSettingsPatch,
+  type MachineProblem
 } from "@orquester/api";
 
 import { costForMinutes, formatCountdown, formatHourlyRate, formatUsd } from "../../lib/boxes/format";
@@ -240,3 +244,91 @@ export const PLACEMENT_HINTS: Readonly<Record<DevicePlacementMode, string>> = {
   "prefer-local": "Devices run here first and spill to rented pool hosts.",
   "pool-only": "Every device runs on a rented pool host."
 };
+
+// ---------------------------------------------------------------------------
+// Device hosts (tailnet machines spec §4.4.7)
+// ---------------------------------------------------------------------------
+
+export type DeviceHostOwner = "this-host" | "own" | "rented";
+
+export interface DeviceHostRow {
+  id: string;
+  label: string;
+  owner: DeviceHostOwner;
+  /** "This host", "Your machine", "Rented (blacksmith)". */
+  ownerText: string;
+  /** "Android", "iPhone & iPad". */
+  platformsText: string;
+  status: DeviceHostSummary["status"];
+  statusDetail: string | null;
+  /** "2 of 12 devices · from 24 CPUs, 61 GB free memory, 410 GB free disk, KVM". */
+  capacityText: string;
+  /** Where placement tries it: 1 first; null when placement never picks it on its own. */
+  order: number | null;
+  /** One line about its place ("Used first", "Only when asked for by name"). */
+  placementText: string;
+  problems: readonly MachineProblem[];
+}
+
+const GiB = 1024 ** 3;
+
+/** "24 CPUs, 61 GB free memory, 410 GB free disk, KVM": what the probe measured capacity from; null without a probe. */
+export function capacityBasisText(capacity: DeviceCapacity): string | null {
+  const basis = capacity.basis;
+  if (!basis) return null;
+  const parts = [`${basis.cpus} CPU${basis.cpus === 1 ? "" : "s"}`, `${Math.round(basis.freeMemBytes / GiB)} GB free memory`];
+  if (basis.freeDiskBytes !== null) parts.push(`${Math.round(basis.freeDiskBytes / GiB)} GB free disk`);
+  if (basis.accel) parts.push(basis.accel === "hvf" ? "Hypervisor.framework" : basis.accel.toUpperCase());
+  return parts.join(", ");
+}
+
+const OWNER_RANK: Readonly<Record<DeviceHostOwner, number>> = { "this-host": 0, own: 1, rented: 2 };
+
+/**
+ * Every device host as Settings → Devices lists it, in placement order: this host first (unless
+ * the fleet is pool-only), then the owner's own machines, then rented hosts (within each, placement
+ * packs the busiest host with room first). Research hosts open only by name.
+ */
+export function deviceHostRows(hosts: readonly DeviceHostSummary[], settings: DevicesSettings | null): DeviceHostRow[] {
+  const mode = settings?.pool.placement ?? "prefer-local";
+  const ownerOf = (host: DeviceHostSummary): DeviceHostOwner => (host.kind === "local" ? "this-host" : host.kind === "byo" ? "own" : "rented");
+  const placed = (host: DeviceHostSummary): boolean => {
+    if (host.research === true) return false;
+    const owner = ownerOf(host);
+    return mode === "local-only" ? owner === "this-host" : mode === "pool-only" ? owner !== "this-host" : true;
+  };
+  const sorted = [...hosts].sort((a, b) => Number(a.research === true) - Number(b.research === true) || OWNER_RANK[ownerOf(a)] - OWNER_RANK[ownerOf(b)] || a.label.localeCompare(b.label));
+  const ranks = [...new Set(sorted.filter(placed).map((host) => OWNER_RANK[ownerOf(host)]))];
+  return sorted.map((host) => {
+    const owner = ownerOf(host);
+    const order = placed(host) ? ranks.indexOf(OWNER_RANK[owner]) + 1 : null;
+    const basis = capacityBasisText(host.capacity);
+    const devices = `${host.capacity.used} of ${host.capacity.total} device${host.capacity.total === 1 ? "" : "s"}`;
+    return {
+      id: host.id,
+      label: host.label,
+      owner,
+      ownerText: owner === "this-host" ? "This host" : owner === "own" ? "Your machine" : `Rented${host.box?.provider ? ` (${host.box.provider})` : ""}`,
+      platformsText: host.platforms.map((platform) => DEVICE_PLATFORM_LABELS[platform]).join(", "),
+      status: host.status,
+      statusDetail: host.statusDetail,
+      capacityText: basis ? `${devices} · from ${basis}` : devices,
+      order,
+      placementText:
+        host.research === true
+          ? "Only when asked for by name"
+          : order === null
+            ? mode === "local-only"
+              ? "Not used: devices stay on this host (Fleet → Placement)"
+              : "Not used: devices run on pool hosts only (Fleet → Placement)"
+            : order === 1
+              ? "Used first"
+              : owner === "own"
+                ? "Used when this host is full"
+                : ranks.length > 2
+                  ? "Used when your machines are full"
+                  : "Used when the hosts above are full",
+      problems: host.problems ?? []
+    };
+  });
+}

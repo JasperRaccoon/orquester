@@ -26,6 +26,7 @@ import { logLocalDeviceAction } from "../../lib/devices/local-actions";
 import { runDeviceUserAction, setDeviceController } from "../../lib/devices/store";
 import { DeviceAgentOverlay } from "./DeviceAgentOverlay";
 import { DeviceActionLog } from "./DeviceActionLog";
+import { DevicePortForwards } from "./DevicePortForwards";
 import type { ActionLogRow } from "./action-log.logic";
 import { gestureSummary } from "./action-log.logic";
 import {
@@ -570,6 +571,7 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
         </div>
         {layout === "bar" ? <div className="shrink-0 px-2 pb-2">{toolbar}</div> : null}
       </div>
+      <DevicePortForwards api={props.api} lease={lease} onNotice={props.onNotice} />
       <DeviceActionLog
         rows={props.logRows}
         open={props.logOpen}
