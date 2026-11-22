@@ -77,6 +77,16 @@ import {
 } from "./session-profiles.ts";
 import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-profile.ts";
 import type { ProjectBoxInfo, ProjectLocationRequest } from "./boxes.ts";
+import {
+  machineRoutes,
+  type MachineResponse,
+  type MachinesResponse,
+  type PairMachineOverSshRequest,
+  type PairMachineOverSshResponse,
+  type RemoveMachineResponse,
+  type UpdateMachineRequest,
+  type WakeMachineResponse
+} from "./machines.ts";
 export * from "./agent-chat/index.ts";
 export * from "./auth.ts";
 export * from "./saved-prompts.ts";
@@ -2292,6 +2302,16 @@ export interface OrquesterApi {
   listProjects(workspace: string): Promise<ProjectSummary[]>;
   usage(force?: boolean): Promise<UsageResponse>;
   usageHistory(range: string, timeZone: string, force?: boolean): Promise<UsageHistoryResponse>;
+  /** Machines (`machineRoutes`): tailnet peers and paired machines with the owner's policy. */
+  listMachines(): Promise<MachinesResponse>;
+  getMachine(id: string): Promise<MachineResponse>;
+  /** Owner only. */
+  updateMachine(id: string, request: UpdateMachineRequest): Promise<MachineResponse>;
+  /** Owner only: unpairs a paired machine; resets an unpaired peer's policy. */
+  removeMachine(id: string): Promise<RemoveMachineResponse>;
+  /** Owner only; call again with `acceptHostKeyFingerprint` after a `confirm-host-key` answer. */
+  pairMachineOverSsh(id: string, request: PairMachineOverSshRequest): Promise<PairMachineOverSshResponse>;
+  wakeMachine(id: string): Promise<WakeMachineResponse>;
 }
 
 export interface HttpApiClientOptions {
@@ -2362,6 +2382,30 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   info(): Promise<ServerInfoResponse> {
     return this.get("/api/info");
+  }
+
+  listMachines(): Promise<MachinesResponse> {
+    return this.get(machineRoutes.list);
+  }
+
+  getMachine(id: string): Promise<MachineResponse> {
+    return this.get(machineRoutes.machine(id));
+  }
+
+  updateMachine(id: string, request: UpdateMachineRequest): Promise<MachineResponse> {
+    return this.send("PATCH", machineRoutes.machine(id), request);
+  }
+
+  removeMachine(id: string): Promise<RemoveMachineResponse> {
+    return this.delete(machineRoutes.machine(id));
+  }
+
+  pairMachineOverSsh(id: string, request: PairMachineOverSshRequest): Promise<PairMachineOverSshResponse> {
+    return this.post(machineRoutes.pairSsh(id), request);
+  }
+
+  wakeMachine(id: string): Promise<WakeMachineResponse> {
+    return this.post(machineRoutes.wake(id));
   }
 
   daemonConfig(): Promise<DaemonConfig> {

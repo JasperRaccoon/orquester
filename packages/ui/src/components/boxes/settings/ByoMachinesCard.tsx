@@ -1,19 +1,18 @@
 import React, { useEffect, useState } from "react";
-import { Check, CheckCircle2, Copy, Laptop, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, CheckCircle2, Copy, Laptop, Loader2, Network, Plus, RefreshCw, Trash2 } from "lucide-react";
 import type { BoxSummary, ByoMachineKind, ByoPairingResponse } from "@orquester/api";
 
 import { copyText } from "../../../lib/clipboard";
 import { useAppStore } from "../../../store/app";
 import { boxesErrorText } from "../../../lib/boxes/errors";
 import { useNow } from "../../../lib/boxes/hooks";
-import { addByoMachine, newByoPairing, removeByoMachine, updateByoMachine, useBoxes, useBoxesLoaded } from "../../../lib/boxes/store";
-import { Button, ConfirmDialog, Input, Modal, ModalCloseButton, Switch } from "../../ui";
+import { addByoMachine, newByoPairing, removeByoMachine, useBoxes, useBoxesLoaded } from "../../../lib/boxes/store";
+import { Button, ConfirmDialog, Input, Modal, ModalCloseButton } from "../../ui";
 import { Badge, EmptyState, FormField, Notice, SegmentedControl, SettingsSection } from "../../settings/primitives";
 import {
   byoMachines,
   byoStatusView,
   byoSubline,
-  canHostDevices,
   canRemoveMachine,
   machineNameProblem,
   pairingHint,
@@ -33,8 +32,9 @@ const TICK_MS = 15_000;
 /**
  * "Your machines" (Devices phase 3 §2.1): the owner's own always-on Mac or
  * Linux machines. "Add your machine" shows a one-line pairing command and
- * follows it live (waiting → connected); each machine can be marked for device
- * simulators, or removed (it uninstalls its own service when connected).
+ * follows it live (waiting → connected); each machine can be removed (it
+ * uninstalls its own service when connected). What agents may do on a paired
+ * machine — device simulators included — is set in Settings → Machines.
  */
 export const ByoMachinesCard: React.FC = () => {
   const boxes = useBoxes();
@@ -78,14 +78,15 @@ export const ByoMachinesCard: React.FC = () => {
 
 const MachineRow: React.FC<{ box: BoxSummary; now: number; onPairing: (pairing: ByoPairingResponse) => void }> = ({ box, now, onPairing }) => {
   const api = useAppStore((s) => s.api);
-  const [busy, setBusy] = useState<"remove" | "pairing" | "devices" | null>(null);
+  const openSettings = useAppStore((s) => s.openSettings);
+  const [busy, setBusy] = useState<"remove" | "pairing" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
   const status = byoStatusView(box, now);
   const name = box.byo?.name ?? box.sizeLabel;
 
-  const run = async (kind: "remove" | "pairing" | "devices", action: () => Promise<void>, fallback: string) => {
+  const run = async (kind: "remove" | "pairing", action: () => Promise<void>, fallback: string) => {
     if (!api) return;
     setBusy(kind);
     setError(null);
@@ -129,19 +130,18 @@ const MachineRow: React.FC<{ box: BoxSummary; now: number; onPairing: (pairing: 
           )}
         </div>
       </div>
-      {canHostDevices(box) && (
-        <label className="flex items-center gap-2 text-xs text-neutral-400">
-          <Switch
-            checked={box.deviceHost === true}
-            disabled={busy !== null}
-            label={`Use ${name} for device simulators`}
-            onChange={(deviceHost) =>
-              void run("devices", () => updateByoMachine(api!, box.id, { deviceHost }), "Could not change the setting.")
-            }
-          />
-          Use for device simulators
-          <span className="text-neutral-600">({box.kind === "macos" ? "iOS Simulator" : "Android emulator, needs KVM"})</span>
-        </label>
+      {box.state !== "pairing" && (
+        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-neutral-500">
+          Device simulators, and what agents may do on {name}, are set in Settings → Machines.
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 text-neutral-300 underline-offset-2 hover:underline"
+            aria-label={`Open ${name} in Settings → Machines`}
+            onClick={() => openSettings("machines")}
+          >
+            <Network size={12} /> Machines
+          </button>
+        </p>
       )}
       {notice && <p className="text-xs text-neutral-400">{notice}</p>}
       {error && <p className="text-xs text-danger">{error}</p>}

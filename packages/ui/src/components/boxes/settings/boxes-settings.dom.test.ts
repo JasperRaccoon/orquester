@@ -468,7 +468,8 @@ describe("the Ephemeral AI VMs settings section", () => {
     assert.ok(buttonNamed("Done"), "the live pairing completed");
     await click(buttonNamed("Done"));
     assert.ok(text().includes("Online"));
-    assert.ok(document.querySelector('[role="switch"][aria-label="Use Mac mini for device simulators"]'));
+    assert.equal(document.querySelector('[role="switch"][aria-label="Use Mac mini for device simulators"]'), null, "the device switch lives in Settings → Machines");
+    assert.ok(document.querySelector('[aria-label="Open Mac mini in Settings → Machines"]'));
   });
 
   it("a pairing can be cancelled from the dialog", async () => {

@@ -200,6 +200,9 @@ import { DEVICES_CHANNEL, DEVICES_PLUGIN_ID } from "@orquester/api";
 import { STORAGE_EVENTS_CHANNEL } from "@orquester/api";
 import { applyStorageEvent } from "../components/system/storage/storage-status";
 import { applyDevicesEvent, loadDevices, resetDevices, setDevicesPluginOn } from "../lib/devices/store";
+// Machines: tailnet and paired machines (Settings → Machines loads them; no plugin needed).
+import { MACHINES_CHANNEL } from "@orquester/api";
+import { applyMachinesEvent, resetMachines } from "../lib/machines/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -4051,6 +4054,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (devicesOn(get().plugins)) applyDevicesEvent(event);
       return;
     }
+    // Machines: the owner's whole list on every change (validated in its module store).
+    if (event.channel === MACHINES_CHANNEL) {
+      applyMachinesEvent(event);
+      return;
+    }
     if (event.channel === KNOWLEDGE_CHANNEL) {
       // Knowledge status and collections live in their own module store (validated); held only
       // while the plugin is on.
@@ -4227,6 +4235,12 @@ useAppStore.subscribe((state, previous) => {
   if (state.plugins === null) resetBoxes();
   if (on === boxesOn(previous.plugins)) return;
   if (on && state.api) void loadBoxes(state.api).catch(() => undefined);
+});
+
+// Machines: a connection switch (its plugins list goes) forgets the other daemon's machines;
+// Settings → Machines loads them again.
+useAppStore.subscribe((state, previous) => {
+  if (state.plugins === null && previous.plugins !== null) resetMachines();
 });
 
 // Devices: wired like the secret files — hosts, leases and settings load when the plugin turns on

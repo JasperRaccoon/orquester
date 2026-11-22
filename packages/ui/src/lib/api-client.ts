@@ -134,6 +134,17 @@ import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, storageRoutes, agentProfileRout
 import { accountLendRoutes, boxRoutes, type AccountLendsResponse } from "@orquester/api";
 // Devices: the Device simulators plugin's routes and payloads (answers validated by `lib/devices/validate.ts`).
 import { deviceRoutes } from "@orquester/api";
+// Machines: tailnet and paired machines (answers validated by `lib/machines/store.ts`).
+import {
+  machineRoutes,
+  type MachineResponse,
+  type MachinesResponse,
+  type PairMachineOverSshRequest,
+  type PairMachineOverSshResponse,
+  type RemoveMachineResponse,
+  type UpdateMachineRequest,
+  type WakeMachineResponse
+} from "@orquester/api";
 import { selfUpdateRoutes, type SelfUpdateStartResponse, type SelfUpdateStatusResponse } from "@orquester/api";
 import type {
   DeviceActionsResponse,
@@ -1008,6 +1019,31 @@ export class ApiClient {
     signal?: AbortSignal
   ): Promise<SecretFileCompareResponse> {
     return this.send("GET", secretFilesRoutes.compare, { query: { workspace, repoKey, projectPath, path }, signal });
+  }
+
+  // --- Machines (`machineRoutes`; answers are validated by `lib/machines/store.ts`) ---
+
+  listMachines(signal?: AbortSignal): Promise<MachinesResponse> {
+    return this.send("GET", machineRoutes.list, { signal });
+  }
+
+  /** Visibility, capabilities or SSH overrides (owner only). */
+  updateMachine(id: string, req: UpdateMachineRequest): Promise<MachineResponse> {
+    return this.send("PATCH", machineRoutes.machine(id), { body: req });
+  }
+
+  /** Unpair a paired machine, or reset an unpaired one's policy. */
+  removeMachine(id: string): Promise<RemoveMachineResponse> {
+    return this.send("DELETE", machineRoutes.machine(id));
+  }
+
+  /** "Pair over SSH"; called again with `acceptHostKeyFingerprint` after a `confirm-host-key` answer. */
+  pairMachineOverSsh(id: string, req: PairMachineOverSshRequest): Promise<PairMachineOverSshResponse> {
+    return this.send("POST", machineRoutes.pairSsh(id), { body: req });
+  }
+
+  wakeMachine(id: string): Promise<WakeMachineResponse> {
+    return this.send("POST", machineRoutes.wake(id));
   }
 
   // --- Devices (`deviceRoutes`; answers are validated by `lib/devices/store.ts`) ---
