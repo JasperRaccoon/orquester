@@ -6,7 +6,7 @@ import { deviceProfile } from "@orquester/api";
 import { evaluateReadiness } from "../../android/readiness.ts";
 import { profileHash } from "../../toolchain/android-sdk.ts";
 import { macAndroidBlocker, macAndroidCapacity, macAndroidChecks, macProfile, parseMacAndroidProbe } from "./android-darwin.ts";
-import { boxGpuModes, gpuSignature, usableHostGpu } from "./android-remote.ts";
+import { boxGpuModes, gpuSignature, hostRenderProblem, usableHostGpu } from "./android-remote.ts";
 
 // `MAC_ANDROID_PROBE_SCRIPT` on an M4 Max (macOS 26.2, Homebrew ffmpeg, no Java), the user redacted.
 const M4_MAX = `path=/Users/owner/.orquester/devices/android/ffmpeg/bin:/Users/owner/.local/bin:/opt/homebrew/bin:/usr/local/bin:/Users/owner/.nvm/versions/node/v22.21.1/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -46,6 +46,16 @@ describe("Android on an Apple Silicon Mac", () => {
     assert.deepEqual(boxGpuModes("byo", gpu, gpuSignature(gpu!, "37.3.10"), "37.3.10"), ["swangle_indirect", "swiftshader_indirect"]);
     // A newer emulator tries Metal again.
     assert.equal(boxGpuModes("byo", gpu, gpuSignature(gpu!, "37.3.10"), "37.4.1")[0], "host");
+  });
+
+  it("counts a -gpu host boot on the Mac's Metal GPU, and not its software modes", () => {
+    // `dumpsys SurfaceFlinger` and the frame size of emulator 37.3.10 cold-booted on that M4 Max.
+    const metal = " ------------RE GLES------------\nGLES: Google (Apple), Android Emulator OpenGL ES Translator (Apple M4 Max), OpenGL ES 3.0 (4.1 Metal - 90.5)\n";
+    const swangle =
+      " ------------RE GLES------------\nGLES: Google (Google Inc. (Google)), Android Emulator OpenGL ES Translator (ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver-5.0.0)), OpenGL ES 3.1 (OpenGL ES 3.1.0 (ANGLE 2.1.1 git hash: fbf66f49c7cc))\n";
+    const homeScreen = "777766\n";
+    assert.equal(hostRenderProblem(metal, homeScreen), null);
+    assert.match(hostRenderProblem(swangle, homeScreen) ?? "", /fell back to software rendering/);
   });
 
   it("refuses a virtual Mac, which has no Hypervisor.framework to give an emulator", () => {
