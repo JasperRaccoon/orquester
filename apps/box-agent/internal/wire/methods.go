@@ -277,6 +277,15 @@ type SSHKeysParams struct {
 	Keys []SSHAuthorizedKey `json:"keys"`
 }
 
+// NetWakeParams asks for one Wake-on-LAN magic packet ("net.wake", CapabilityWakeSender):
+// MAC "aa:bb:cc:dd:ee:ff", Broadcast the broadcast address of one of this box's own IPv4
+// interfaces, Port 7 or 9 (0: both).
+type NetWakeParams struct {
+	MAC       string `json:"mac"`
+	Broadcast string `json:"broadcast"`
+	Port      int    `json:"port,omitempty"`
+}
+
 type TokenGetParams struct {
 	Agent           string `json:"agent"`
 	AccountID       string `json:"accountId"`
@@ -330,6 +339,7 @@ var HostToBoxMethods = map[string]MethodTypes{
 	"agent.update":      {func() any { return &UpdateParams{} }, nil},
 	"agent.shutdown":    {func() any { return &ShutdownParams{} }, nil},
 	"ssh.keys":          {func() any { return &SSHKeysParams{} }, nil},
+	"net.wake":          {func() any { return &NetWakeParams{} }, nil},
 }
 
 // BoxToHostMethods is every BoxBoxToHostMethods entry.

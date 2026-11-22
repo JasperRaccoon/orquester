@@ -82,7 +82,7 @@ const nicWired: BoxNic = {
   mac: "aa:bb:cc:dd:ee:01",
   ipv4: "192.168.2.21",
   prefixLength: 24,
-  broadcast: "192.168.2.255",
+  broadcast: "192.168.50.255",
   wired: true,
   wolEnabled: true
 };
@@ -328,6 +328,10 @@ const hostToBox: MethodSamples<BoxHostToBoxMethods> = {
       },
       result: undefined
     }
+  ],
+  "net.wake": [
+    { params: { mac: "02:00:5e:10:00:01", broadcast: "192.168.50.255" }, result: undefined },
+    { params: { mac: "02:00:5e:10:00:02", broadcast: "192.168.50.255", port: 9 }, result: undefined }
   ]
 };
 
