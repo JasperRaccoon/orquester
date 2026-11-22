@@ -218,7 +218,7 @@ async function writePrivateFile(path: string, content: string | Buffer, mode = 0
 }
 
 /** `~/.ssh/config` with the Include line added (`enabled`) or removed; mode and every other byte kept. */
-export async function applySshConfigInclude(home: string, enabled: boolean): Promise<void> {
+async function applySshConfigInclude(home: string, enabled: boolean): Promise<void> {
   const path = join(home, ".ssh", "config");
   let target = path;
   let content: string | null = null;
@@ -290,13 +290,14 @@ export class AgentSsh {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
-    let include = false;
+    let include: boolean | null = null;
     try {
       include = await this.deps.includeSetting();
     } catch (error) {
       this.warn("agent SSH: the Include setting could not be read; leaving ~/.ssh/config alone", error);
     }
-    if (include) await this.applyInclude(true);
+    // Both ways: a line left by a run whose removal failed goes too (a file without it is not written).
+    if (include !== null) await this.applyInclude(include);
     await this.recover();
     const proxy = new SshProxyServer({
       socketPath: sshProxySocketPath(this.deps.baseDir),
@@ -360,7 +361,13 @@ export class AgentSsh {
     const chatBox = this.chatProjectBox(threadId);
     const work = this.schedule(boxId).then(() => (chatBox ? this.schedule(chatBox) : undefined));
     let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([work, new Promise<void>((resolve) => (timer = setTimeout(resolve, SETTLE_TIMEOUT_MS)))]);
+    await Promise.race([
+      work,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, SETTLE_TIMEOUT_MS);
+        timer.unref?.();
+      })
+    ]);
     clearTimeout(timer);
     return this.aliasFor(threadId, boxId);
   }
@@ -370,8 +377,11 @@ export class AgentSsh {
     this.closedThreads.add(threadId);
     const boxIds = new Set<string>();
     for (const alias of this.aliases.values()) if (alias.threadId === threadId) boxIds.add(alias.boxId);
-    for (const [projectBoxId, placed] of this.placements) if ([...placed.values()].some((placement) => placement.threadId === threadId)) boxIds.add(projectBoxId);
+    const projectBoxIds = new Set<string>();
+    for (const [projectBoxId, placed] of this.placements) if ([...placed.values()].some((placement) => placement.threadId === threadId)) projectBoxIds.add(projectBoxId);
+    // The aliases first, then their copies in a box project's box (which follow the aliases).
     await Promise.all([...boxIds].map((boxId) => this.schedule(boxId)));
+    await Promise.all([...projectBoxIds].map((boxId) => this.schedule(boxId)));
     await rm(agentChatThreadSshDir(this.deps.baseDir, threadId), { recursive: true, force: true }).catch((error) =>
       this.warn("agent SSH: a closed chat's ssh dir could not be deleted", error, { threadId })
     );
@@ -394,7 +404,8 @@ export class AgentSsh {
         this.deps.logger?.warn("agent SSH: a machine alias name is not usable; skipped", { machineId: entry.machineId });
         continue;
       }
-      if (!next.has(entry.boxId)) next.set(entry.boxId, entry);
+      // One alias per machine, and one machine per name.
+      if (!next.has(entry.boxId) && ![...next.values()].some((taken) => taken.alias === entry.alias)) next.set(entry.boxId, entry);
     }
     const boxIds = new Set([...this.machineEntries.keys(), ...next.keys()]);
     this.machinesSynced = true;
@@ -705,9 +716,11 @@ export class AgentSsh {
     if (current.size === 0 && wanted.length === 0 && !(fresh && isProjectBox)) return;
     const forwards = this.deps.projectForwards;
     // Gone (or not this project's box any more): the forwards stop; the files go with the box or are swept on its next connect.
+    let changed = fresh;
     for (const [name, placement] of current) {
       if (wanted.some((alias) => alias.name === name && alias.threadId === placement.threadId)) continue;
       current.delete(name);
+      changed = true;
       await placement.forward.close().catch(() => undefined);
     }
     if (!connection?.connected || connection.sys.os === "win32" || !forwards) {
@@ -744,17 +757,21 @@ export class AgentSsh {
           knownHostsFile: `${dir}/known_hosts`,
           transport: { kind: "forward", port: forward.boxPort }
         });
-        const written = `${conf}\0${alias.keyPath}`;
+        // Its pins too: the box's known_hosts is rewritten when the target's host key changed.
+        const written = `${conf}\0${alias.keyPath}\0${alias.hostKeys.join(",")}`;
         if (fresh || existing?.written !== written || existing.forward !== forward) {
           await connection.writeFile(keyFile, await readFile(alias.keyPath), { mode: 0o600 });
           await connection.writeFile(`${dir}/${alias.name}.conf`, conf, { mode: 0o600 });
+          changed = true;
         }
         current.set(alias.name, { threadId: alias.threadId!, name: alias.name, alias: alias.alias, forward, home, written });
       }
-      const pins = new Map<string, readonly string[]>();
-      for (const alias of wanted) if (current.has(alias.name)) pins.set(alias.alias, alias.hostKeys);
-      await connection.writeFile(`${dir}/known_hosts`, renderKnownHosts(pins), { mode: 0o600 });
-      await this.sweepBoxDir(connection, dir, current);
+      if (changed) {
+        const pins = new Map<string, readonly string[]>();
+        for (const alias of wanted) if (current.has(alias.name)) pins.set(alias.alias, alias.hostKeys);
+        await connection.writeFile(`${dir}/known_hosts`, renderKnownHosts(pins), { mode: 0o600 });
+        await this.sweepBoxDir(connection, dir, current);
+      }
     } catch (error) {
       this.warn("agent SSH: a box project's ssh files could not be written", error, { boxId: projectBoxId });
     }
