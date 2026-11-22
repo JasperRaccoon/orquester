@@ -130,6 +130,8 @@ type servicePlan struct {
 	Notes []string
 	// BestEffort: run every step even after one fails (uninstall removes what it can).
 	BestEffort bool
+	// DataDir: Windows uninstall, where the desktop-session helper's record is (desktop_task.go).
+	DataDir string
 }
 
 func (p *servicePlan) mkdir(path string, mode os.FileMode) {
@@ -262,8 +264,8 @@ func planUninstall(f serviceFacts) (servicePlan, error) {
 	}
 	switch f.GOOS {
 	case "windows":
-		p := servicePlan{Kind: kindWindows, BestEffort: true}
-		p.note("delete the Windows service OrqAgent and stop it (nothing to do if it is not installed)")
+		p := servicePlan{Kind: kindWindows, BestEffort: true, DataDir: f.DataDir}
+		p.note("end and delete the scheduled task %q (the desktop-session helper), then delete the Windows service OrqAgent and stop it (nothing to do for what is not installed)", desktopTaskName)
 		return p, nil
 	case "darwin":
 		if f.Euid == 0 {
@@ -678,7 +680,7 @@ func UninstallServiceCommand(opts ServiceOptions, out io.Writer) error {
 
 func uninstallService(plan servicePlan, logf func(string, ...any)) error {
 	if plan.Kind == kindWindows {
-		return uninstallWindowsService()
+		return uninstallWindowsService(plan.DataDir)
 	}
 	return applyPlan(plan, logf)
 }
@@ -705,6 +707,13 @@ func (a *Agent) uninstall() {
 		return
 	}
 	logf := func(format string, args ...any) { a.log.Printf("uninstall: "+format, args...) }
+	if plan.Kind == kindWindows {
+		// Windows keeps orq-agent.exe in the data dir (bootstrap.ts): it goes once this process
+		// exited. Arranged first: stopping the service below may end this process at once.
+		if err := removeDataDirAfterExit(a.cfg.DataDir); err != nil {
+			a.log.Printf("uninstall: %v", err)
+		}
+	}
 	if err := uninstallService(plan, logf); err != nil {
 		a.log.Printf("uninstall: %v", err)
 	}

@@ -20,7 +20,11 @@ func startDetached([]string, string) error {
 func installWindowsService(Config) error { return errors.New("not Windows") }
 
 // uninstallWindowsService is only meaningful on Windows.
-func uninstallWindowsService() error { return errors.New("not Windows") }
+func uninstallWindowsService(string) error { return errors.New("not Windows") }
+
+// removeDataDirAfterExit is only meaningful on Windows (elsewhere the binary stays where the
+// owner's PATH finds it).
+func removeDataDirAfterExit(string) error { return nil }
 
 // RunService is only meaningful on Windows.
 func RunService(func() int) (bool, error) { return false, nil }

@@ -239,6 +239,9 @@ type Agent struct {
 	// sshd is the built-in SSH server; nil when its host key could not be loaded.
 	sshd *sshServer
 	nics *nicMonitor
+	// desktop forwards `session: "desktop"` execs to the desktop-session helper; nil where there
+	// is none (desktop_windows.go startDesktop).
+	desktop *desktopHub
 }
 
 // New prepares an agent (data dir, credentials, sys info).
@@ -338,6 +341,10 @@ func (a *Agent) Run(ctx context.Context) (int, bool) {
 		} else {
 			defer gh.Close()
 		}
+	}
+
+	if desktop := a.startDesktop(); desktop != nil {
+		defer desktop.Close()
 	}
 
 	go a.watchNics()
@@ -613,6 +620,9 @@ func (a *Agent) hello(auth wire.Auth) wire.Hello {
 	if a.sshd != nil {
 		hello.Capabilities = append(hello.Capabilities, wire.CapabilitySSHServer)
 		hello.SSHHostKey = a.sshd.hostKey
+	}
+	if a.desktop.advertised() {
+		hello.Capabilities = append(hello.Capabilities, wire.CapabilityDesktopSession)
 	}
 	return hello
 }
