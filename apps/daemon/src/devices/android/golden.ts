@@ -13,7 +13,7 @@ import type { DeviceProfile } from "@orquester/api";
 
 import type { DeviceHostProgress } from "../host.ts";
 import { avdName, CUTOUT_FILL_LOOKUP, CUTOUT_RECT_LOOKUP, cutoutOverlayPlan, cutoutSpecInDp } from "./avd-config.ts";
-import { emulatorLogFailure, type EmulatorLaunch, findQemuPid, type KvmMode, type ProcessMarker, serialOf, signalLauncher, spawnEmulator, stopEmulator, waitForBootCompleted } from "./emulator.ts";
+import { emulatorLogFailure, type EmulatorLaunch, findQemuPid, type KvmMode, type ProcessMarker, readEmulatorLog, serialOf, signalLauncher, spawnEmulator, stopEmulator, waitForBootCompleted } from "./emulator.ts";
 import { type ExecFn, lastLine } from "./exec.ts";
 import { type DeviceExecutor, LOCAL_EXECUTOR } from "./executor.ts";
 import { delay, isProcessAlive } from "./procs.ts";
@@ -238,7 +238,7 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
       env: deps.env,
       serial,
       alive: () => isProcessAlive(qemu, x),
-      failed: async () => emulatorLogFailure((await x.readText(logPath)) ?? ""),
+      failed: async () => emulatorLogFailure(await readEmulatorLog(x, logPath)),
       signal,
       timeoutMs: deps.bootTimeoutMs ?? GOLDEN_BOOT_TIMEOUT_MS
     });

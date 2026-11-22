@@ -168,6 +168,16 @@ export function emulatorLogFailure(log: string): string | null {
   return `the emulator could not start its renderer${cause ? ` (${cause.replace(/^\S+\s*\|\s*/, "").trim()})` : ""}`;
 }
 
+/**
+ * The emulator's log: `logPath`, and `<logPath>.err` beside it when there is one (a Windows box
+ * starts it with `Start-Process`, which cannot send stdout and stderr to one file, and the
+ * renderer's errors go to stderr).
+ */
+export async function readEmulatorLog(executor: Pick<DeviceExecutor, "readText">, logPath: string): Promise<string> {
+  const [out, err] = await Promise.all([executor.readText(logPath), executor.readText(`${logPath}.err`)]);
+  return [out, err].filter((text): text is string => text !== null && text !== "").join("\n");
+}
+
 /** Resolves once `sys.boot_completed` is 1; rejects when the emulator exits, the signal aborts or time runs out. */
 export async function waitForBootCompleted(deps: BootWaitDeps): Promise<void> {
   const deadline = Date.now() + deps.timeoutMs;

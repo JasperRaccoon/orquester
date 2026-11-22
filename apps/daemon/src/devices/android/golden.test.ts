@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 
-import { fixDisplayCutout, GUEST_SETTINGS_SCRIPT, LEASE_BOOT_SCRIPT, waitForSettle } from "./golden.ts";
+import { deviceProfile } from "@orquester/api";
+
+import { createGoldenSnapshot, fixDisplayCutout, GUEST_SETTINGS_SCRIPT, LEASE_BOOT_SCRIPT, waitForSettle } from "./golden.ts";
 import type { ExecFn } from "./exec.ts";
+import type { DeviceExecutor } from "./executor.ts";
 
 function clock(t: test.TestContext) {
   t.mock.timers.enable({ apis: ["Date"], now: 0 });
@@ -85,4 +88,58 @@ test("cutout: the pixel spec of the device emulation overlay is replaced by a dp
   calls.length = 0;
   assert.equal(await fixDisplayCutout({ exec, adb: "adb", env: {}, serial: "emulator-5554", cutoutDensity: 420, signal: new AbortController().signal }), "kept");
   assert.deepEqual(calls, ["shell dumpsys display"]);
+});
+
+test("golden: a renderer failure written only to the stderr log (a Windows box's `<log>.err`) fails the boot at once", async () => {
+  const marker = { key: "ANDROID_AVD_HOME", value: "C:/root/avd" };
+  const files = new Map<string, string>();
+  let qemuAlive = false;
+  const exec: ExecFn = async (_command, args) => {
+    if (args.includes("kill")) qemuAlive = false;
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  const qemu = { pid: 7202, comm: "qemu-system-x86_64", state: "R", ppid: 7200, pgrp: 7202, cpuTicks: 0, startTicks: 1 };
+  const executor = {
+    where: "box:minipc",
+    exec,
+    async spawnDetached(_command: string, _args: readonly string[], options: { logPath: string }) {
+      // Start-Process: stdout and stderr in two files; the renderer's errors are on stderr.
+      files.set(options.logPath, "INFO         | Android emulator version 37.3.10.0 (build_id 14472402)\n");
+      files.set(`${options.logPath}.err`, "ERROR        | Could not start renderer\n");
+      qemuAlive = true;
+      return 7200;
+    },
+    readText: async (path: string) => files.get(path) ?? null,
+    exists: async () => false,
+    procStat: async (pid: number) => (pid === qemu.pid && qemuAlive ? qemu : null),
+    procStats: async () => (qemuAlive ? [qemu] : []),
+    environ: async (pid: number) => (pid === qemu.pid && qemuAlive ? new Map([[marker.key, marker.value]]) : null),
+    signal: async () => true
+  } as unknown as DeviceExecutor;
+  await assert.rejects(
+    createGoldenSnapshot(
+      deviceProfile("pixel-9")!,
+      {
+        exec,
+        sdk: "C:/root/android-sdk",
+        avdHome: marker.value,
+        logs: "C:/root/logs",
+        env: {},
+        kvm: "direct",
+        reservePorts: async () => ({ consolePort: 5586, grpcPort: 8570, release: () => undefined }),
+        track: async () => undefined,
+        untrack: async () => undefined,
+        helperApks: [],
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+        marker,
+        executor,
+        gpu: "host",
+        bootTimeoutMs: 0
+      },
+      new AbortController().signal,
+      () => undefined
+    ),
+    { message: "the emulator could not start its renderer" }
+  );
+  assert.equal(qemuAlive, false, "the stuck emulator was stopped");
 });
