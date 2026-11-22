@@ -186,6 +186,13 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
 
   type IdRequest = FastifyRequest<{ Params: { id: string } }>;
 
+  /** An owner-only action: a machine hidden from the caller is 404 first (its existence is not told), then 403. */
+  const ownerMachine = (request: IdRequest, what: string) => {
+    machineFor(request.params.id, viewerOf(request.principal));
+    requireOwner(request.principal, what);
+    return machineFor(request.params.id, { kind: "owner" });
+  };
+
   app.get(
     machineRoutes.list,
     handle(async (request): Promise<MachinesResponse> => {
@@ -202,8 +209,7 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
   app.patch(
     "/api/machines/:id",
     handle(async (request: FastifyRequest<{ Params: { id: string }; Body: unknown }>): Promise<MachineResponse> => {
-      requireOwner(request.principal, "changes a machine's settings");
-      const machine = machineFor(request.params.id, { kind: "owner" });
+      const machine = ownerMachine(request, "changes a machine's settings");
       if (machine.self) throw new MachineRouteError(409, "MACHINE_UNSUPPORTED", "This is the machine Orquester runs on: agents always work here, so it has no settings.");
       const updated = await registry.updatePolicy(machine.id, parseUpdate(request.body));
       if (!updated) throw notFound();
@@ -214,8 +220,7 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
   app.delete(
     "/api/machines/:id",
     handle(async (request: IdRequest): Promise<RemoveMachineResponse> => {
-      requireOwner(request.principal, "removes a machine");
-      const machine = machineFor(request.params.id, { kind: "owner" });
+      const machine = ownerMachine(request, "removes a machine");
       if (machine.self) throw new MachineRouteError(409, "MACHINE_UNSUPPORTED", "The machine Orquester runs on can't be removed.");
       let uninstalled = false;
       if (machine.boxId !== null) ({ uninstalled } = await boxes.removeBox(machine.boxId));
@@ -227,8 +232,7 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
   app.post(
     "/api/machines/:id/pair-ssh",
     handle(async (request: FastifyRequest<{ Params: { id: string }; Body: unknown }>): Promise<PairMachineOverSshResponse> => {
-      requireOwner(request.principal, "pairs a machine");
-      const machine = machineFor(request.params.id, { kind: "owner" });
+      const machine = ownerMachine(request, "pairs a machine");
       if (machine.self) throw new MachineRouteError(409, "MACHINE_UNSUPPORTED", "Orquester already runs on this machine; there is nothing to pair.");
       if (byoKindOfMachineOs(machine.os) === null) throw new MachineRouteError(409, "MACHINE_UNSUPPORTED", `${machine.name} runs an OS Orquester can't pair (Linux, macOS and Windows can be).`);
       if (machine.boxId !== null && machine.state !== "pairing") throw new MachineRouteError(409, "MACHINE_ALREADY_PAIRED", `${machine.name} is paired already.`);

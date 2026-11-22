@@ -6,9 +6,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { BoxesResponse, BoxKindsResponse, BoxProvidersResponse, BoxResponse, ByoPairingResponse, ProjectSummary } from "@orquester/api";
+import { PRINCIPAL_TOKEN_HEADER } from "@orquester/api/agent-chat";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 
 import { createServer } from "../../index.ts";
+import { mintPrincipalToken } from "../../mcp/principal.ts";
 import { byoAdapter } from "../providers/byo.ts";
 import { createLocalTailscale, type CommandRunner } from "../tailscale/local.ts";
 import { localBoxConnection } from "../testing.ts";
@@ -514,4 +516,27 @@ test("your machines: add, flag, new command, remove; a project placed on one kee
   const removed = await h.inject({ method: "DELETE", url: `/api/boxes/byo/${id}` });
   assert.deepEqual(removed.json(), { uninstalled: true });
   assert.equal(((await h.inject({ method: "GET", url: "/api/boxes" })).json() as BoxesResponse).boxes.length, 0);
+});
+
+test("an agent is offered only the owner's machines it may run commands on: a Hidden one is as unknown as a machine never paired", async (t) => {
+  const h = await harness(t, { byo: true });
+  const id = ((await h.inject({ method: "POST", url: "/api/boxes/byo", payload: { kind: "linux", name: "jasper" } })).json() as ByoPairingResponse).box.id;
+  h.hub.connect(id, localBoxConnection({ boxId: id }));
+  await until(h.service, id, () => h.service.registry.get(id)?.state === "ready");
+  const asked: [string, string][] = [];
+  h.service.setMachineAccess({ allowsBox: (boxId, capability) => (asked.push([boxId, capability]), false) });
+  const asAgent = async (url: string) => {
+    const minted = mintPrincipalToken({ kind: "agent", threadId: "chat-1", projectPath: "" });
+    try {
+      return (await h.inject({ method: "GET", url, headers: { [PRINCIPAL_TOKEN_HEADER]: minted.token } })).json();
+    } finally {
+      minted.release();
+    }
+  };
+  assert.deepEqual((await asAgent("/api/boxes/providers/byo/offers?kind=linux")).sizes, []);
+  assert.deepEqual((await asAgent("/api/boxes/kinds")).kinds.find((entry: { kind: string }) => entry.kind === "linux")?.providers, []);
+  assert.ok(asked.length > 0 && asked.every(([boxId, capability]) => boxId === id && capability === "commands"));
+  // The owner still sees the machine (Settings, project placement).
+  const owner = (await h.inject({ method: "GET", url: "/api/boxes/providers/byo/offers?kind=linux" })).json();
+  assert.deepEqual(owner.sizes.map((size: { id: string }) => size.id), [id]);
 });

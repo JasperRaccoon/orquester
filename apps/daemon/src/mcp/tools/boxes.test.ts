@@ -18,6 +18,7 @@ import {
   accountLendRoutes,
   boxPathMapFor,
   boxRoutes,
+  machineRoutes,
   hostToBoxPath,
   temporaryBoxRoutes,
   type BoxKindsResponse,
@@ -610,6 +611,40 @@ test("create_box on one of the owner's own machines: a 'Use your machine' card (
   assert.deepEqual(created, [{ kind: "macos", provider: "byo", size: machine.id, region: "own", lifetimeMinutes: 120, purposeNote: "run the iOS tests" }]);
 });
 
+test("create_box on the owner's machine follows its policy: Free use with Commands and SSH on lends it without a card; Ask first, or SSH off, shows the card", async () => {
+  const machine = { id: "m4c0ffee1234", label: "jasper (Linux, x86_64)", vcpu: 0, ramGb: 0, diskGb: null, gpu: null, hourlyUsd: 0, regions: [] };
+  const setup = (visibility: "ask" | "free", commands: boolean) => {
+    const { api, created } = fakeApi();
+    api
+      .on("GET", boxRoutes.kinds, { status: 200, body: { kinds: [{ kind: "linux", providers: ["hetzner", "byo"], fromHourlyUsd: 0, maxLifetimeMinutes: null, unavailableReason: null }] } })
+      .on("GET", boxRoutes.providers, { status: 200, body: { providers: [...PROVIDERS.providers, provider({ id: "byo", label: "Your machines", kinds: ["linux", "macos"], keyHint: null })] } })
+      .on("GET", boxRoutes.offers("byo", "linux"), { status: 200, body: { ...OFFERS, provider: "byo", sizes: [machine], regions: [{ id: "own", label: "Your machine", country: null }] } })
+      .on("GET", machineRoutes.list, {
+        status: 200,
+        body: { machines: [{ id: "ts:nJASPER", boxId: machine.id, visibility, capabilities: { devices: false, commands, chats: true } }], problems: [] }
+      });
+    return { api, created };
+  };
+  const lent = [{ kind: "linux", provider: "byo", size: machine.id, region: "own", lifetimeMinutes: 120, purposeNote: "build the engine on Linux" }];
+
+  const free = setup("free", true);
+  const freePort = new FakeApprovalPort();
+  const outcome = await call(free.api, "create_box", { ...createArgs, provider: "byo" }, { port: freePort });
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  assert.equal(freePort.cards.length, 0);
+  assert.deepEqual(free.created, lent);
+
+  for (const [visibility, commands] of [["ask", true], ["free", false]] as const) {
+    const asked = setup(visibility, commands);
+    const port = new FakeApprovalPort();
+    const result = await call(asked.api, "create_box", { ...createArgs, provider: "byo" }, { port });
+    assert.ok(result.ok, result.ok ? "" : result.message);
+    assert.equal(port.cards.length, 1, `${visibility}, commands ${commands}: the "Use your machine" card`);
+    assert.ok(port.cards[0]!.title.includes(machine.label));
+    assert.deepEqual(asked.created, lent);
+  }
+});
+
 test("create_box with provider byo when none of the owner's machines is free: a refusal saying so, and no card", async () => {
   const { api } = fakeApi();
   api.on("GET", boxRoutes.providers, { status: 200, body: { providers: [...PROVIDERS.providers, provider({ id: "byo", label: "Your machines", kinds: ["linux"], keyHint: null })] } })
@@ -757,6 +792,20 @@ test("box_lend_accounts: a refusal passes through with its fix, from the preview
   const late = lendApi();
   late.api.on("POST", accountLendRoutes.box("tmp-1"), { status: 409, body: { code: "BOX_NOT_READY", message: "The VM is not connected." } });
   assert.deepEqual(await call(late.api, "box_lend_accounts", lendArgs), { ok: false, code: "BOX_NOT_READY", message: "The VM is not connected." });
+});
+
+test("list_boxes shows an owner's machine lent to this chat only while the daemon lists that machine to it (never a Hidden one)", async () => {
+  const { api } = fakeApi();
+  const mine = boxSummary({ id: "byo-jasper", provider: "byo", purpose: "temporary", threadId: "me" });
+  api.on("GET", temporaryBoxRoutes.list, { status: 200, body: { boxes: [boxSummary({ id: "tmp-1" }), mine] } });
+  api.on("GET", machineRoutes.list, { status: 200, body: { machines: [], problems: [] } });
+  const hidden = await call(api, "list_boxes", {});
+  assert.ok(hidden.ok);
+  assert.deepEqual((hidden.value.boxes as { box_id: string }[]).map((box) => box.box_id), ["tmp-1"]);
+  api.on("GET", machineRoutes.list, { status: 200, body: { machines: [{ id: "ts:nJASPER", boxId: "byo-jasper" }], problems: [] } });
+  const shown = await call(api, "list_boxes", {});
+  assert.ok(shown.ok);
+  assert.deepEqual((shown.value.boxes as { box_id: string }[]).map((box) => box.box_id), ["tmp-1", "byo-jasper"]);
 });
 
 test("list_boxes carries this chat's lends on every VM, project VMs included", async () => {
