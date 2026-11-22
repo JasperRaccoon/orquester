@@ -17,6 +17,7 @@ import { codecFromAvcC } from "./h264.ts";
 import { httpError, networkError, StreamLifecycle, type StreamAttempt } from "./lifecycle.ts";
 import {
   DeviceStreamError,
+  resolveStreamUrl,
   type DeviceStreamState,
   type DeviceStreamStats,
   type DeviceVideoSession,
@@ -89,7 +90,7 @@ export class ServeSimH264Session implements DeviceVideoSession {
     const demuxer = new AvccDemuxer();
     let seedPending = false;
     try {
-      const response = await fetch(this.options.url, {
+      const response = await fetch(resolveStreamUrl(this.options.url), {
         ...(this.options.headers ? { headers: { ...this.options.headers } } : {}),
         signal: attempt.signal,
         cache: "no-store"

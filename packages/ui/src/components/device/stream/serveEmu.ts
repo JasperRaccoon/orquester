@@ -15,6 +15,7 @@ import { clampUnit } from "./pointer.ts";
 import { parseSemuPacket } from "./semu.ts";
 import {
   DeviceStreamError,
+  resolveStreamUrl,
   type DeviceButton,
   type DeviceStreamState,
   type DeviceStreamStats,
@@ -160,7 +161,7 @@ export class ServeEmuSession implements DeviceVideoSession {
     this.queued = null;
     let socket: WebSocket;
     try {
-      socket = new WebSocket(this.options.url);
+      socket = new WebSocket(resolveStreamUrl(this.options.url));
     } catch (cause) {
       this.lifecycle.fail(networkError(cause));
       return;

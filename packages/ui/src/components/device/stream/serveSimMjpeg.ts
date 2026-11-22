@@ -13,6 +13,7 @@ import { httpError, networkError, StreamLifecycle, type StreamAttempt } from "./
 import { MjpegParser, multipartBoundary } from "./mjpeg.ts";
 import {
   DeviceStreamError,
+  resolveStreamUrl,
   type DeviceStreamState,
   type DeviceStreamStats,
   type DeviceVideoSession,
@@ -54,7 +55,7 @@ export class ServeSimMjpegSession implements DeviceVideoSession {
 
   private async run(attempt: StreamAttempt): Promise<void> {
     try {
-      const response = await fetch(this.options.url, {
+      const response = await fetch(resolveStreamUrl(this.options.url), {
         ...(this.options.headers ? { headers: { ...this.options.headers } } : {}),
         signal: attempt.signal,
         cache: "no-store"

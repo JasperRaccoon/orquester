@@ -9,6 +9,7 @@ import { paintCanvas } from "./decoder.ts";
 import { httpError, networkError, StreamLifecycle, type StreamAttempt } from "./lifecycle.ts";
 import {
   DeviceStreamError,
+  resolveStreamUrl,
   type DeviceStreamState,
   type DeviceStreamStats,
   type DeviceVideoSession,
@@ -55,7 +56,7 @@ export class ScreenshotPollSession implements DeviceVideoSession {
     while (attempt.current()) {
       const started = performance.now();
       try {
-        const response = await fetch(this.options.url, {
+        const response = await fetch(resolveStreamUrl(this.options.url), {
           method: "POST",
           ...(this.options.headers ? { headers: { ...this.options.headers } } : {}),
           signal: attempt.signal,

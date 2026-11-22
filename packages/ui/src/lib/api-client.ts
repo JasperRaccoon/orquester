@@ -167,7 +167,9 @@ import type {
   DeviceUserActionRequest,
   DeviceUserActionResponse,
   AddDevicePortForwardRequest,
-  DevicePortForwardsResponse
+  DevicePortForwardsResponse,
+  DeviceStreamTicketRequest,
+  DeviceStreamTicketResponse
 } from "@orquester/api";
 // The Knowledge Graph plugin's routes and payloads (answers validated by `lib/knowledge/validate.ts`).
 import { knowledgeRoutes } from "@orquester/api";
@@ -1153,6 +1155,11 @@ export class ApiClient {
   /** The panel's buttons that are not hub input: rotate (Android), restart the app, appearance, power off. */
   deviceUserAction(leaseId: string, req: DeviceUserActionRequest): Promise<DeviceUserActionResponse> {
     return this.send("POST", deviceRoutes.userAction(leaseId), { body: req });
+  }
+
+  /** The routes to stream a leased device by, best first, and a ticket for its machine's direct ones. */
+  deviceStreamTicket(hostId: string, req: DeviceStreamTicketRequest, signal?: AbortSignal): Promise<DeviceStreamTicketResponse> {
+    return this.send("POST", deviceRoutes.streamTicket(hostId), { body: req, signal });
   }
 
   /** A lease's port forwards from the device to its chat's project (Metro is added by itself). */

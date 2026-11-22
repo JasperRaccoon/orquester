@@ -119,6 +119,20 @@ export interface DeviceActionOutcome {
   details?: Record<string, unknown>;
 }
 
+/**
+ * The direct routes of an owner's machine (tailnet machines spec §4.5): its stream gate
+ * (`direct/machine-gate.ts`) in front of the hub, and how to sign tickets for it. The secret
+ * stays inside; only tickets leave.
+ */
+export interface DeviceDirectStream {
+  /** `https://<machine>.ts.net:<port>`: the gate behind the machine's own `tailscale serve`; null while not served. */
+  tailnetUrl: string | null;
+  /** `http://<LAN IPv4>:<port>` per LAN address the machine reports (the desktop app's route). */
+  lanUrls: string[];
+  /** A ticket for one device (the hub's `device` parameter) until `expiresAt`, bound to the page `origin` when known. */
+  issueTicket(input: { device: string; expiresAt: number; origin: string | null }): string;
+}
+
 /** The status line a host reports for its summary. */
 export interface DeviceHostState {
   status: DeviceHostStatus;
@@ -168,6 +182,8 @@ export interface DeviceHost {
    * request and strips any client-supplied one. Null when the hub needs none. Never sent to clients.
    */
   hubToken?(): string | null;
+  /** An owner's machine: its direct stream routes while its stream gate runs; null or absent: only the daemon's proxy. */
+  directStream?(): DeviceDirectStream | null;
   /** What the host's hub can stream for iOS: serve-sim H.264 fails in Apple VMs (no H.264 encoder). */
   streamCapabilities?(): { iosH264: boolean };
   /** A viewer is watching one of its devices (the service relays `viewerActive`): a host may keep or end stream sessions by it. */

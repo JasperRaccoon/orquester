@@ -739,10 +739,17 @@ export interface DeviceStreamRoute {
   url: string;
 }
 
+/**
+ * Which client asks: only the desktop app is offered `lan` routes (plain `http`/`ws` to a LAN
+ * address; an HTTPS page would block them as mixed content). Absent: a browser.
+ */
+export type DeviceStreamClient = "desktop" | "browser";
+
 /** `POST deviceRoutes.streamTicket(hostId)`: a ticket for one device on the host (the owner's viewer only). */
 export interface DeviceStreamTicketRequest {
   /** The hub's device id on that host. */
   deviceId: string;
+  client?: DeviceStreamClient;
 }
 
 /**
@@ -1178,6 +1185,13 @@ export function parseDeviceCacheWarmRequest(value: unknown): DeviceParseResult<D
 export function parseDeviceControllerRequest(value: unknown): DeviceParseResult<DeviceControllerRequest> {
   if (!isRecord(value) || !isDeviceController(value.controller)) return { ok: false, message: "`controller` must be agent or user." };
   return { ok: true, value: { controller: value.controller } };
+}
+
+/** The body of POST {@link deviceRoutes.streamTicket}. */
+export function parseDeviceStreamTicketRequest(value: unknown): DeviceParseResult<DeviceStreamTicketRequest> {
+  if (!isRecord(value) || typeof value.deviceId !== "string" || value.deviceId === "" || value.deviceId.length > 200) return { ok: false, message: "`deviceId` must name the device." };
+  if (value.client !== undefined && value.client !== "desktop" && value.client !== "browser") return { ok: false, message: "`client` must be desktop or browser." };
+  return { ok: true, value: { deviceId: value.deviceId, ...(value.client !== undefined ? { client: value.client } : {}) } };
 }
 
 /** The body of POST {@link deviceRoutes.userAction}. */

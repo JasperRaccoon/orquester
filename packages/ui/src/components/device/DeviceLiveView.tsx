@@ -13,7 +13,7 @@
 import React from "react";
 import { Hand, Loader2, RefreshCw, VideoOff } from "lucide-react";
 
-import { DEVICE_PROFILES, type DeviceActionEntry, type DeviceController, type DeviceLeaseSummary } from "@orquester/api";
+import { DEVICE_PROFILES, DEVICE_STREAM_TICKET_PARAM, type DeviceActionEntry, type DeviceController, type DeviceLeaseSummary } from "@orquester/api";
 
 import { attachmentRefFromUpload } from "../../lib/agent-chat/transport";
 import type { ApiClient } from "../../lib/api-client";
@@ -47,6 +47,8 @@ import { requestAndroidFold, type AndroidFoldState } from "./fold";
 import { uprightCanvas } from "./screenshot";
 import { flatMediaRotation } from "./three/flat";
 import { useDeviceStream, type DeviceButton, type DeviceOrientation } from "./stream";
+import { directStreamUrls, routeLabel } from "./stream/routes";
+import { useStreamRoute } from "./stream/useStreamRoute";
 import { androidFoldAngle } from "./three/DeviceAndroidFoldControls";
 import { DeviceViewport, type DeviceViewportHandle, type DeviceViewUnavailable } from "./three/DeviceViewport";
 
@@ -58,6 +60,8 @@ const NEXT_ORIENTATION: Record<DeviceOrientation, DeviceOrientation> = {
   portrait_upside_down: "portrait"
 };
 const NOT_READY = "Waiting for the device's input to connect";
+/** A direct route that shows no video this long is left for the next route. */
+const DIRECT_CONNECT_TIMEOUT_MS = 15_000;
 
 function useDocumentVisible(): boolean {
   const [visible, setVisible] = React.useState(() => typeof document === "undefined" || document.visibilityState !== "hidden");
@@ -134,7 +138,17 @@ export interface DeviceLiveViewProps {
 export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
   const { lease, api } = props;
   const docVisible = useDocumentVisible();
-  const urls = React.useMemo(() => (api ? deviceStreamUrls(api, lease) : null), [api, lease.hostId, lease.stream?.kind, lease.stream?.deviceParam]);
+  const daemonUrls = React.useMemo(() => (api ? deviceStreamUrls(api, lease) : null), [api, lease.hostId, lease.stream?.kind, lease.stream?.deviceParam]);
+  // Straight from the owner's machine when this client reaches it, else through the daemon (spec §4.5).
+  const streamRoute = useStreamRoute({ api, hostId: lease.hostId, deviceParam: lease.stream?.deviceParam ?? null, enabled: props.visible && docVisible && daemonUrls !== null });
+  const route = streamRoute.route;
+  const urls = React.useMemo(() => {
+    if (!route || !lease.stream) return null;
+    if (route.kind === "daemon") return daemonUrls;
+    const direct = directStreamUrls(route, lease.stream);
+    return direct ? { ...direct, headers: {} } : daemonUrls;
+  }, [route, daemonUrls, lease.stream?.kind, lease.stream?.deviceParam]);
+  const direct = route !== null && route.kind !== "daemon" && urls !== daemonUrls;
   // Retry: one render with the stream off, then on again (a fresh connection).
   const [restarting, setRestarting] = React.useState(false);
   React.useEffect(() => {
@@ -146,9 +160,11 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
       video: urls?.video ?? "",
       ...(urls?.input ? { input: urls.input } : {}),
       ...(urls?.screenshot ? { screenshot: urls.screenshot } : {}),
-      headers: urls?.headers ?? {}
+      headers: urls?.headers ?? {},
+      // A direct route's ticket, read at each connect (renewals never reconnect).
+      ...(direct ? { query: () => ({ [DEVICE_STREAM_TICKET_PARAM]: streamRoute.ticket() }) } : {})
     }),
-    [urls]
+    [urls, direct, streamRoute.ticket]
   );
   // iOS: H.264 (and with it the 3D view) only where the host says its encoder works (physical Macs).
   const h264 = hostStreamCaps(useDeviceHosts(), lease.hostId).h264;
@@ -160,6 +176,19 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
     enabled: props.visible && docVisible && urls !== null && !restarting,
     onFrame: () => viewport.current?.notifyFrame()
   });
+  // A direct route whose stream fails (or never connects) is left for the next one; the daemon's retries itself.
+  const reportRouteFailure = streamRoute.reportFailure;
+  const streamFailure = stream.state === "error" && (stream.error?.code === "network" || stream.error?.code === "http" || stream.error?.code === "unauthorized");
+  React.useEffect(() => {
+    if (!direct) return;
+    if (streamFailure) {
+      reportRouteFailure();
+      return;
+    }
+    if (stream.state !== "connecting") return;
+    const timer = setTimeout(reportRouteFailure, DIRECT_CONNECT_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [direct, route?.url, stream.state, streamFailure, reportRouteFailure]);
 
   // --- View mode (per device model, persisted) ---------------------------------------------
   const viewKey = deviceViewKey(lease);
@@ -536,6 +565,15 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
                     {docVisible ? "Connecting video…" : "Paused while the page is hidden"}
                   </div>
                 )}
+              </div>
+            ) : null}
+            {live && route ? (
+              <div
+                className="pointer-events-none absolute bottom-2 right-3 z-10 text-[10.5px] text-neutral-500"
+                data-stream-route={route.kind}
+                title={direct ? "The video comes straight from the machine." : "The video comes through the Orquester server."}
+              >
+                {routeLabel(direct ? route : { kind: "daemon", url: "" })}
               </div>
             ) : null}
             {stream.state === "stalled" ? (

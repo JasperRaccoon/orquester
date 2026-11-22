@@ -92,10 +92,21 @@ export interface DeviceVideoSession {
   close(): void;
 }
 
+/**
+ * A session's URL, or how to make it at each (re)connect: a direct route's URL carries the stream
+ * ticket current at that moment, so renewing the ticket never reconnects a live stream.
+ */
+export type StreamUrl = string | (() => string);
+
+/** The URL to (re)connect to now. */
+export function resolveStreamUrl(url: StreamUrl): string {
+  return typeof url === "function" ? url() : url;
+}
+
 /** Options every video session takes. */
 export interface VideoSessionOptions extends DeviceStreamCallbacks {
-  /** Full URL, without credentials (`ApiClient.deviceHttpRequest`). */
-  readonly url: string;
+  /** Full URL, without credentials (`ApiClient.deviceHttpRequest`), or its maker ({@link StreamUrl}). */
+  readonly url: StreamUrl;
   /** Sent with every request: the transport's auth headers (`ApiClient.deviceHttpRequest`). */
   readonly headers?: Readonly<Record<string, string>>;
   readonly canvas: HTMLCanvasElement;

@@ -135,7 +135,15 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
     const machineAccess = deps.machineAccess?.() ?? null;
     const factories = deps.factories?.(toolchain) ?? [
       createLocalAndroidHostFactory({ toolchain, logger }),
-      createBoxHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, toolchain, logger, machineAccess }),
+      createBoxHostFactory({
+        appDir: deps.baseDir,
+        boxes: deps.boxes,
+        toolchain,
+        logger,
+        machineAccess,
+        // Own machines' stream gates: streams on direct routes count as viewers, their input switches control.
+        directActivity: { viewers: (hostId, device, count) => hubProxy.directViewers(hostId, device, count), input: (hostId, device) => hubProxy.directInput(hostId, device) }
+      }),
       createVphoneHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, logger, machineAccess })
     ];
     const built = new DeviceService({
