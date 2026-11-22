@@ -107,6 +107,8 @@ export interface SessionToolsRefreshDeps {
   imagesAvailable?(): boolean;
   /** Machines: whether any of the owner's machines is visible to agents (`list_machines` is advertised only then). Absent: never. */
   machinesAvailable?(): boolean;
+  /** Tailnet previews: whether `share_preview` can work now (Tailscale on the daemon host serves HTTPS). Absent: never. */
+  tailnetAvailable?(): boolean;
   /**
    * Knowledge Graph plugin: its view of one chat (thread id = session id) — on or off, worker or
    * not, what it sees (`knowledge/visibility.ts` `createKnowledgeForSession`). Read fresh for every
@@ -389,6 +391,8 @@ export class SessionToolsRefresher {
       imagesAvailable: this.deps.imagesAvailable?.() === true,
       // Machines: list_machines only while a machine is visible to agents.
       machinesAvailable: this.deps.machinesAvailable?.() === true,
+      // Tailnet previews: share_preview only while Tailscale can serve HTTPS.
+      tailnetAvailable: this.deps.tailnetAvailable?.() === true,
       ...(knowledge ? { knowledge } : {})
     });
     return { ...manifest, seq: this.nextSeq(), epoch: this.epoch };

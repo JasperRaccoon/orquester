@@ -5,6 +5,8 @@
  * renders it, the tests drive it.
  */
 
+import { isTailnetHost } from "@orquester/api";
+
 import type { ConnectionStatus, Runtime } from "../../types";
 import type { ConnectionLogState } from "./connection-log";
 import { redactSecrets, redactUrl, type ConnectionFailureKind } from "./failure";
@@ -130,6 +132,18 @@ function servedAnotherBuild(input: ConnectionDiagnosisInput): boolean {
   return !server.startsWith(client) && !client.startsWith(server);
 }
 
+/**
+ * The endpoint dials a Tailscale address (a `….ts.net` name or a Tailscale IPv6), so Tailscale on
+ * this device is part of the path. A bare `100.x` address is not taken for one (`isTailnetHost`).
+ */
+function dialsTailnet(endpoint: string): boolean {
+  try {
+    return isTailnetHost(new URL(endpoint).hostname);
+  } catch {
+    return false;
+  }
+}
+
 function hostOf(endpoint: string): string | null {
   try {
     const url = new URL(endpoint);
@@ -185,6 +199,9 @@ function headline(kind: ConnectionDiagnosisKind, input: ConnectionDiagnosisInput
 function steps(kind: ConnectionDiagnosisKind, input: ConnectionDiagnosisInput): string[] {
   const https = input.endpoint.startsWith("https://");
   const local = !hostOf(input.endpoint);
+  const tailnetStep = dialsTailnet(input.endpoint)
+    ? ["This is a Tailscale address: check that Tailscale is on and signed in to the same tailnet on this device."]
+    : [];
   const checkDaemon = local
     ? "Restart the Orquester app; it starts its own daemon."
     : "Check that the daemon runs on the server (`systemctl status orquester`, or `./deploy.sh verify` from your deploy checkout).";
@@ -193,8 +210,8 @@ function steps(kind: ConnectionDiagnosisKind, input: ConnectionDiagnosisInput): 
       return ["Connect this device to a network. Orquester reconnects on its own."];
     case "dns":
       return [
+        ...tailnetStep,
         "Check the server address in the server switcher for typos.",
-        "For a Tailscale address (…ts.net), make sure Tailscale is on and signed in on this device.",
         "A VPN or DNS filter on this device can hide the name; try another network."
       ];
     case "refused":
@@ -211,6 +228,7 @@ function steps(kind: ConnectionDiagnosisKind, input: ConnectionDiagnosisInput): 
       ];
     case "timeout":
       return [
+        ...tailnetStep,
         "The host may be asleep, overloaded, or off the network.",
         "A firewall dropping the port looks like this too; check that the port is open.",
         "Orquester keeps retrying on its own."
@@ -218,6 +236,7 @@ function steps(kind: ConnectionDiagnosisKind, input: ConnectionDiagnosisInput): 
     case "unreachable":
       return [
         ...(input.sameOrigin ? ["It may be restarting; Orquester reconnects on its own when it is back."] : []),
+        ...tailnetStep,
         "Check this device's network connection.",
         checkDaemon,
         ...(https

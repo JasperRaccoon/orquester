@@ -61,6 +61,8 @@ export interface ManifestInput {
   imagesAvailable?: boolean;
   /** Machines: whether any of the owner's machines is visible to agents (the `machines` toolset); absent = no. */
   machinesAvailable?: boolean;
+  /** Tailnet previews: whether `share_preview` can work (Tailscale on the daemon host serves HTTPS); absent = no. */
+  tailnetAvailable?: boolean;
   /** Knowledge Graph: the plugin's view of this chat; absent = the plugin is off. */
   knowledge?: ManifestKnowledge;
 }
@@ -95,7 +97,8 @@ const BOX_CHAT_TOOLS: readonly string[] = ["list_boxes", "box_lend_accounts", "b
  * the `knowledge` toolset only while the plugin is on, without the entry tools
  * ({@link KNOWLEDGE_SEARCH_TOOLS}) for a chat that sees no collection, and never the worker tools; a
  * worker session gets ONLY the worker tools. GPT Image: the `images` toolset only while it can make images. Machines: the
- * `machines` toolset only while one of the owner's machines is visible to agents.
+ * `machines` toolset only while one of the owner's machines is visible to agents. Tailnet previews: the `tailnet` toolset
+ * only while Tailscale on the daemon host can serve HTTPS.
  */
 function advertisedChatTools(
   catalog: readonly AnyOrquesterTool[],
@@ -105,7 +108,8 @@ function advertisedChatTools(
   devicesAvailable = false,
   inBox = false,
   imagesAvailable = false,
-  machinesAvailable = false
+  machinesAvailable = false,
+  tailnetAvailable = false
 ): string[] {
   if (knowledge?.worker === true) return catalog.filter((tool) => KNOWLEDGE_WORKER_TOOLS.includes(tool.name)).map((tool) => tool.name);
   const knowledgeTool = (tool: AnyOrquesterTool): boolean => {
@@ -122,6 +126,7 @@ function advertisedChatTools(
         (devicesAvailable || tool.toolset !== "devices") &&
         (imagesAvailable || tool.toolset !== "images") &&
         (machinesAvailable || tool.toolset !== "machines") &&
+        (tailnetAvailable || tool.toolset !== "tailnet") &&
         knowledgeTool(tool)
     )
     .map((tool) => tool.name);
@@ -186,7 +191,8 @@ export function buildSessionToolsManifest(input: ManifestInput): SessionToolsMan
     input.devicesAvailable === true,
     input.thread.inBox === true,
     input.imagesAvailable === true,
-    input.machinesAvailable === true
+    input.machinesAvailable === true,
+    input.tailnetAvailable === true
   );
   const instructions =
     knowledge?.worker === true

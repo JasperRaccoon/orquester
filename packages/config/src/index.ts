@@ -404,6 +404,14 @@ export function machinesStorePath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "machines.json");
 }
 
+/**
+ * Orquester's own `tailscale serve` routes on the daemon host (`tailnet.json`, {@link parseTailnetFile}):
+ * the daemon's HTTPS route and the shared dev-server previews. Ports and targets only, no secret.
+ */
+export function tailnetStorePath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "tailnet.json");
+}
+
 // Agent SSH (same spec §4.3): keys, the managed ssh config and the ProxyCommand socket.
 
 /**
@@ -3530,3 +3538,4 @@ export * from "./knowledge-concept-summaries.ts";
 export * from "./knowledge-concept-families.ts";
 export * from "./devices.ts";
 export * from "./machines.ts";
+export * from "./tailnet.ts";

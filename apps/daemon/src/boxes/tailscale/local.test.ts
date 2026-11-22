@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createLocalTailscale,
+  parseServeRoutes,
   parseServeStatus,
   parseTailscaleStatus,
   serveTarget,
@@ -15,7 +16,8 @@ const STATUS_RUNNING = JSON.stringify({
   BackendState: "Running",
   TailscaleIPs: ["100.80.44.62", "fd7a:115c:a1e0::8835:2c3f"],
   Self: { DNSName: "ryzen7700.taila64f1b.ts.net.", HostName: "ryzen7700", TailscaleIPs: ["fd7a:115c:a1e0::8835:2c3f", "100.80.44.62"] },
-  MagicDNSSuffix: "taila64f1b.ts.net"
+  MagicDNSSuffix: "taila64f1b.ts.net",
+  CertDomains: ["ryzen7700.taila64f1b.ts.net"]
 });
 const STATUS_STOPPED = JSON.stringify({ BackendState: "Stopped", Self: { DNSName: "ryzen7700.taila64f1b.ts.net.", TailscaleIPs: [] } });
 const SERVE_DAEMON = JSON.stringify({
@@ -46,10 +48,10 @@ const failed = (stderr: string, extra: Record<string, unknown> = {}): Error => O
 const notFound = (): Error => Object.assign(new Error("spawn tailscale ENOENT"), { code: "ENOENT" });
 
 test("parseTailscaleStatus: state, DNS name without the trailing dot, first IPv4", () => {
-  assert.deepEqual(parseTailscaleStatus(STATUS_RUNNING), { running: true, dnsName: NAME, tailnetIp: "100.80.44.62" });
-  assert.deepEqual(parseTailscaleStatus(STATUS_STOPPED), { running: false, dnsName: NAME, tailnetIp: null });
-  assert.deepEqual(parseTailscaleStatus(JSON.stringify({ BackendState: "Running", Self: { DNSName: "" } })), { running: true, dnsName: null, tailnetIp: null });
-  assert.deepEqual(parseTailscaleStatus("not json"), { running: false, dnsName: null, tailnetIp: null });
+  assert.deepEqual(parseTailscaleStatus(STATUS_RUNNING), { running: true, dnsName: NAME, tailnetIp: "100.80.44.62", httpsCerts: true });
+  assert.deepEqual(parseTailscaleStatus(STATUS_STOPPED), { running: false, dnsName: NAME, tailnetIp: null, httpsCerts: false });
+  assert.deepEqual(parseTailscaleStatus(JSON.stringify({ BackendState: "Running", Self: { DNSName: "" } })), { running: true, dnsName: null, tailnetIp: null, httpsCerts: false });
+  assert.deepEqual(parseTailscaleStatus("not json"), { running: false, dnsName: null, tailnetIp: null, httpsCerts: false });
 });
 
 test("parseServeStatus: finds the port proxied to the daemon, not one serving another target", () => {
@@ -66,6 +68,22 @@ test("parseServeStatus: finds the port proxied to the daemon, not one serving an
   assert.deepEqual(parseServeStatus(tcp, NAME, DAEMON).daemonPorts, [8443]);
   // A daemon bound to its LAN address is not reached through loopback.
   assert.deepEqual(parseServeStatus(SERVE_DAEMON, NAME, { host: "192.168.1.5", port: 47831 }).daemonPorts, []);
+});
+
+test("parseServeRoutes: each port's kind and proxy target, files and paths without one", () => {
+  const json = JSON.stringify({
+    TCP: { "443": { HTTPS: true }, "5173": { HTTPS: true }, "8443": { TCPForward: "127.0.0.1:9000", TerminateTLS: NAME }, "2222": { TCPForward: "localhost:22" } },
+    Web: {
+      [`${NAME}:443`]: { Handlers: { "/": { Path: "/srv/www" } } },
+      [`${NAME}:5173`]: { Handlers: { "/": { Proxy: "http://[::1]:5173" } } }
+    }
+  });
+  assert.deepEqual(parseServeRoutes(json, NAME).routes, [
+    { port: 443, kind: "web", https: true, target: null },
+    { port: 2222, kind: "tcp", https: false, target: { host: "localhost", port: 22, url: "http://localhost:22" } },
+    { port: 5173, kind: "web", https: true, target: { host: "::1", port: 5173, url: "http://[::1]:5173" } },
+    { port: 8443, kind: "tcp", https: true, target: { host: "127.0.0.1", port: 9000, url: "http://127.0.0.1:9000" } }
+  ]);
 });
 
 test("serveTarget: loopback for loopback and wildcard binds, else the bound host", () => {
@@ -102,8 +120,10 @@ test("state: installed but stopped, or tailscaled down", async () => {
 
 test("state: serving the daemon, cached until fresh is asked", async () => {
   let now = 0;
-  const runner = new FakeRunner((line) => (line === "tailscale status --json" ? ok(STATUS_RUNNING) : ok(SERVE_DAEMON)));
-  const local = createLocalTailscale({ daemonHttp: () => DAEMON, run: runner.run, now: () => now });
+  const runner = new FakeRunner((line) =>
+    line === "tailscale status --json" ? ok(STATUS_RUNNING) : line === "tailscale debug prefs" ? ok(JSON.stringify({ OperatorUser: "orquester", WantRunning: true })) : ok(SERVE_DAEMON)
+  );
+  const local = createLocalTailscale({ daemonHttp: () => DAEMON, run: runner.run, now: () => now, user: () => "orquester", isRoot: () => false });
   assert.equal(local.cached(), null);
   const state = await local.state();
   assert.deepEqual(state, {
@@ -114,14 +134,15 @@ test("state: serving the daemon, cached until fresh is asked", async () => {
     servePort: 10000,
     serving: true,
     suggestedUrl: `https://${NAME}:10000`,
-    serveCommand: "tailscale serve --bg --https=10000 http://127.0.0.1:47831"
+    serveCommand: "tailscale serve --bg --https=10000 http://127.0.0.1:47831",
+    operatorOk: true
   });
   assert.deepEqual(local.cached(), state);
   now = 1_000;
   await local.state();
-  assert.equal(runner.calls.length, 2);
+  assert.equal(runner.calls.length, 3);
   await local.state({ fresh: true });
-  assert.equal(runner.calls.length, 4);
+  assert.equal(runner.calls.length, 6);
 });
 
 test("state: port 10000 serving another target is left alone; the next free port is suggested", async () => {
@@ -169,4 +190,35 @@ test("serve: another failure is reported with Tailscale's line and link", async 
   const result = await createLocalTailscale({ daemonHttp: () => DAEMON, run: runner.run }).serve(10000);
   assert.deepEqual(result, { ok: false, reason: "failed", message: "Serve is not enabled on your tailnet. https://login.tailscale.com/f/serve?node=abc" });
   assert.equal(runner.calls.length, 1);
+});
+
+test("state: operatorOk follows Tailscale's OperatorUser, and is absent when it can't be told", async () => {
+  const answer = (prefs: RunResult | Error) => (line: string) =>
+    line === "tailscale status --json" ? ok(STATUS_RUNNING) : line === "tailscale debug prefs" ? prefs : ok(SERVE_DAEMON);
+  const other = createLocalTailscale({ daemonHttp: () => DAEMON, run: new FakeRunner(answer(ok(JSON.stringify({ OperatorUser: "jasper" })))).run, user: () => "orquester", isRoot: () => false });
+  assert.equal((await other.state()).operatorOk, false);
+  const unknown = createLocalTailscale({ daemonHttp: () => DAEMON, run: new FakeRunner(answer(failed("unknown subcommand"))).run, user: () => "orquester", isRoot: () => false });
+  assert.equal("operatorOk" in (await unknown.state()), false);
+  const root = new FakeRunner(answer(failed("unused")));
+  assert.equal((await createLocalTailscale({ daemonHttp: () => DAEMON, run: root.run, isRoot: () => true }).state()).operatorOk, true);
+  assert.ok(!root.calls.includes("tailscale debug prefs"));
+});
+
+test("setOperator: sudo -n tailscale set --operator=<user>; without passwordless sudo it names the command", async () => {
+  const allowed = new FakeRunner(() => ok(""));
+  const local = createLocalTailscale({ daemonHttp: () => DAEMON, run: allowed.run, user: () => "orquester", isRoot: () => false });
+  assert.deepEqual(await local.setOperator(), { ok: true, sudo: true });
+  assert.deepEqual(allowed.calls, ["sudo -n tailscale set --operator=orquester"]);
+
+  const refused = createLocalTailscale({ daemonHttp: () => DAEMON, run: new FakeRunner(() => failed("sudo: a password is required")).run, user: () => "orquester", isRoot: () => false });
+  const result = await refused.setOperator();
+  assert.ok(!result.ok && result.reason === "permission");
+  assert.equal(result.command, "sudo tailscale set --operator=orquester");
+});
+
+test("unserve: removes one port's handler, through sudo -n when Tailscale refuses the user", async () => {
+  const runner = new FakeRunner((line) => (line.startsWith("tailscale serve") ? failed("Access denied: serve config denied") : ok("")));
+  const result = await createLocalTailscale({ daemonHttp: () => DAEMON, run: runner.run }).unserve(5173);
+  assert.deepEqual(result, { ok: true, sudo: true });
+  assert.deepEqual(runner.calls, ["tailscale serve --https=5173 off", "sudo -n true", "sudo -n tailscale serve --https=5173 off"]);
 });

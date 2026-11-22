@@ -36,6 +36,8 @@ import { secretsFamily } from "../tools/secrets.ts";
 import { sessionsFamily } from "../tools/sessions.ts";
 // Workflow steps with outcomes/outputs: report_step_result, chat-only (spec 2026-11-10 §5.2).
 import { stepReportFamily } from "../tools/step-report.ts";
+// Tailnet previews: share_preview / unshare_preview for agent chats (tailnet machines spec 2026-11-22 §4.7.4).
+import { tailnetFamily } from "../tools/tailnet.ts";
 import { todosFamily } from "../tools/todos.ts";
 import { usageFamily } from "../tools/usage.ts";
 import { visualsFamily } from "../tools/visuals.ts";
@@ -97,7 +99,9 @@ export const CATALOG: readonly AnyOrquesterTool[] = buildCatalog([
   // Machines: chat-only, advertised while one of the owner's machines is visible to agents.
   machinesFamily,
   // Workflow steps: chat-only, every chat (it refuses any chat that is not a reporting step).
-  stepReportFamily
+  stepReportFamily,
+  // Tailnet previews: chat-only, advertised while Tailscale on the daemon host can serve HTTPS.
+  tailnetFamily
 ]);
 
 const byAudience = new Map<Audience, readonly AnyOrquesterTool[]>();

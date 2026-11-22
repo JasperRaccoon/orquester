@@ -14,9 +14,11 @@ import { MACHINES_CHANGED_EVENT, MACHINES_CHANNEL, machineOsOfBox } from "@orque
 import { machinesStorePath } from "@orquester/config";
 import type { FastifyInstance } from "fastify";
 
+import type { LocalTailscale } from "../boxes/tailscale/local.ts";
 import type { DaemonBoxes } from "../boxes/wiring.ts";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { MachineAccessPort } from "./ports.ts";
+import { createMachinePairing } from "./pairing/index.ts";
 import { MachineRegistry, type MachineBoxSource } from "./registry.ts";
 import { registerMachineRoutes } from "./routes.ts";
 import { MachinePolicyStore } from "./store.ts";
@@ -26,6 +28,8 @@ export interface DaemonMachinesDeps {
   baseDir: string;
   boxes: DaemonBoxes;
   broadcaster: Pick<Broadcaster, "publish">;
+  /** The daemon's one `LocalTailscale` (read only here): pairing prefers the tailnet HTTPS URL. */
+  localTailscale: LocalTailscale | null;
   /**
    * Whether any machine is visible to agents changed: `list_machines` and its instruction line
    * follow it. Called only after {@link DaemonMachines.start} (the daemon's boot refresh covers the start).
@@ -80,6 +84,22 @@ export function createDaemonMachines(deps: DaemonMachinesDeps): DaemonMachines {
     logger
   });
   service.setMachineAccess(registry);
+  // The feature ports: machine-level agent SSH aliases (boxes/agent-ssh) and pair over SSH.
+  registry.setSshAccess(deps.boxes.machineSshAccess);
+  registry.setPairing(
+    createMachinePairing({
+      byo: service.byo,
+      byoRoute: () => service.settings.route("byo"),
+      localTailscale: deps.localTailscale,
+      summarize: (machineId) => {
+        const summary = registry.get(machineId);
+        if (!summary) throw new Error(`unknown machine ${machineId}`);
+        return summary;
+      },
+      linkBox: (machineId, boxId) => registry.linkBox(machineId, boxId),
+      logger
+    })
+  );
 
   let started = false;
   let agentVisible = false;
@@ -112,6 +132,8 @@ export function createDaemonMachines(deps: DaemonMachinesDeps): DaemonMachines {
     },
     async stop() {
       offAccess();
+      registry.setPairing(null);
+      registry.setSshAccess(null);
       service.setMachineAccess(null);
       await registry.stop();
     }

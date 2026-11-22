@@ -197,6 +197,8 @@ import { KNOWLEDGE_CHANNEL, KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { applyKnowledgeEvent, loadKnowledge, resetKnowledge } from "../lib/knowledge/store";
 // The Device simulators plugin's module store (hosts, leases, settings; loaded while the plugin is on).
 import { DEVICES_CHANNEL, DEVICES_PLUGIN_ID } from "@orquester/api";
+import { TAILNET_CHANNEL } from "@orquester/api";
+import { applyTailnetEvent, resetTailnet } from "../lib/tailnet/store";
 import { STORAGE_EVENTS_CHANNEL } from "@orquester/api";
 import { applyStorageEvent } from "../components/system/storage/storage-status";
 import { applyDevicesEvent, loadDevices, resetDevices, setDevicesPluginOn } from "../lib/devices/store";
@@ -2166,6 +2168,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     resetSavedPrompts();
     resetRepoIdentities();
     resetSecretFiles();
+    // Tailnet: another daemon's tailnet address and previews.
+    resetTailnet();
     // boxes: another daemon's boxes.
     resetBoxes();
     resetKnowledge();
@@ -4057,6 +4061,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Machines: the owner's whole list on every change (validated in its module store).
     if (event.channel === MACHINES_CHANNEL) {
       applyMachinesEvent(event);
+      return;
+    }
+    // Tailnet: the daemon's tailnet HTTPS status and shared previews (Settings → Server), validated in their module store.
+    if (event.channel === TAILNET_CHANNEL) {
+      applyTailnetEvent(event);
       return;
     }
     if (event.channel === KNOWLEDGE_CHANNEL) {
