@@ -18,6 +18,7 @@ import {
   boxPathMapFor,
   boxRoutes,
   parseControlMessage,
+  type BoxAgentCapability,
   type BoxAgentConfig,
   type BoxAuth,
   type BoxBoxToHostMethods,
@@ -492,7 +493,15 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
     if (!(await handshakeVersion(boxId, hello, mux, socket))) return;
     if (links.get(boxId) !== link) return;
 
-    const info = { sys: hello.sys, paths, agentVersion: hello.agentVersion, procs: hello.procs ?? [] };
+    const info = {
+      sys: hello.sys,
+      paths,
+      agentVersion: hello.agentVersion,
+      procs: hello.procs ?? [],
+      // Unknown values are ignored by whoever checks one; anything else than strings is no capability.
+      capabilities: Array.isArray(hello.capabilities) ? hello.capabilities.filter((value): value is BoxAgentCapability => typeof value === "string") : [],
+      ...(typeof hello.sshHostKey === "string" && hello.sshHostKey.length > 0 ? { sshHostKey: hello.sshHostKey } : {})
+    };
     if (!connection) {
       connection = new LinkedBoxConnection(boxId, info, { replay: true });
       connections.set(boxId, connection);

@@ -101,8 +101,8 @@ const SECTIONS: SectionDef[] = [
     group: "personal",
     label: "Agent chat",
     icon: <MessageSquare size={15} />,
-    desc: "Composer behaviour, resuming interrupted turns, usage limits",
-    keywords: ["composer", "steer", "queue", "enter", "skills", "slash", "continue", "restart", "resume", "interrupted", "usage", "limit", "failover", "account"],
+    desc: "Composer behaviour, resuming interrupted turns, usage limits, SSH aliases",
+    keywords: ["composer", "steer", "queue", "enter", "skills", "slash", "continue", "restart", "resume", "interrupted", "usage", "limit", "failover", "account", "ssh", "include", "alias"],
     render: () => <ChatSettings />
   },
   {

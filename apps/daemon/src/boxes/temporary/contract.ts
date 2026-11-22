@@ -50,6 +50,17 @@ export interface TemporaryBoxes {
   onChange(listener: (boxId: string) => void): () => void;
 }
 
+/**
+ * Agent SSH (spec 2026-11-22 §4.3, `boxes/agent-ssh/`): a chat's `orq-<name>` alias of a box and
+ * the exact command that opens a shell with it where the chat runs. Null while it has none (not
+ * ready yet, no SSH server on the box, revoked).
+ */
+export interface TemporaryBoxSsh {
+  aliasFor(threadId: string, boxId: string): { alias: string; command: string } | null;
+  /** {@link aliasFor} once the alias work in flight for the box is done (bounded): `create_box` answers with it. */
+  settled(threadId: string, boxId: string): Promise<{ alias: string; command: string } | null>;
+}
+
 // ---------------------------------------------------------------------------
 // The DaemonApi box operations (`mcp/daemon-api.ts`)
 // ---------------------------------------------------------------------------
