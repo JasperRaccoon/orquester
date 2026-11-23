@@ -2526,16 +2526,6 @@ export function createServer(
       return;
     }
 
-    const ip = clientIp(request);
-    const retryAfterMs = throttle.retryAfterMs(ip);
-    if (retryAfterMs > 0) {
-      reply.header("retry-after", String(Math.ceil(retryAfterMs / 1000)));
-      return reply.code(429).send({
-        code: "TOO_MANY_ATTEMPTS",
-        message: "Too many failed login attempts. Try again later."
-      });
-    }
-
     // A browser download navigation (<a download>) can't set an Authorization
     // header, so /api/fs/download (and the storage view's download) also accepts
     // the token as ?token= — the same trick /ws uses. Scoped to those routes (and
@@ -2551,15 +2541,32 @@ export function createServer(
       url === storageRoutes.download ||
       deviceQueryTokenAllowed(request.method, routePath) || desktopQueryTokenAllowed(request.method, routePath);
     const queryToken = queryTokenRoute ? (request.query as { token?: string }).token : undefined;
+    // The token is checked BEFORE the IP's lockout: the lockout counts invalid tokens from an IP,
+    // and a stale tab's revoked token polling from the owner's home IP must not refuse the owner's
+    // live session from the same address (second-factor spec, "Keeping the signed-in owner in").
+    // Answering a guess while locked is no new oracle worth the lockout: a token is 256 random bits
+    // matched in constant time, so the lockout is defence in depth, not what keeps tokens secret.
+    const ip = clientIp(request);
     const session = authSessions.verify(headerToken ?? queryToken);
     if (!session) {
+      const retryAfterMs = throttle.retryAfterMs(ip);
+      if (retryAfterMs > 0) {
+        reply.header("retry-after", String(Math.ceil(retryAfterMs / 1000)));
+        return reply.code(429).send({
+          code: "TOO_MANY_ATTEMPTS",
+          message: "Too many failed login attempts. Try again later."
+        });
+      }
       throttle.recordFailure(ip);
       return reply.code(401).send({
         code: "UNAUTHORIZED",
         message: "A valid bearer token is required for this daemon transport."
       });
     }
-    throttle.recordSuccess(ip);
+    // A valid token resets only the IP's pending failure count (they were most likely the owner's
+    // own stale client), never an active lockout or its doubling: anyone else sharing the address
+    // keeps the lockout they earned, however often the owner's live client polls through it.
+    throttle.clearFails(ip);
     request.authSession = session;
     endOnRevoke(session.id, reply);
   });
