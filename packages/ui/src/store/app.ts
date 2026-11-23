@@ -437,6 +437,26 @@ function recordFailure(error: unknown): void {
 }
 
 /**
+ * Whether a bearer-gated request was refused because of its credential: a 401, or a 429 (the
+ * daemon locks out a dead token's address, and never refuses a valid token for it). Either way
+ * re-sending the token can only fail again. The public sign-in routes' 429 (the password
+ * throttle) is not this: those carry no credential.
+ */
+function isRefusedCredential(error: unknown): error is ApiError {
+  // Only the bearer lockout's 429 (`TOO_MANY_ATTEMPTS`): other 429s on bearer-gated routes (a
+  // GitHub rate limit, the push limit) say nothing about the credential.
+  return (
+    error instanceof ApiError &&
+    (error.status === 401 || (error.status === 429 && (error.body as { code?: unknown } | null | undefined)?.code === "TOO_MANY_ATTEMPTS"))
+  );
+}
+
+/** Log a refused stored credential: the diagnosis asks for a sign-in, whatever the status. */
+function recordRefusedCredential(error: ApiError): void {
+  recordConnectionFailure({ ...classifyConnectionError(error, { online: deviceOnline() }), kind: "unauthorized" });
+}
+
+/**
  * Failed reconnect probes since the connection was last stable. Unlike the
  * loop's own attempt count it survives a daemon that accepts the connection and
  * drops it again at once, so such a flap keeps backing off instead of redialing
@@ -593,9 +613,22 @@ export interface UiAppConfig {
   agents: AgentPrefs;
 }
 
+/**
+ * The client for the home daemon's remote-server list. While the home
+ * connection is the active one that is the active client: it carries the sign-in, and `homeApi`
+ * (built before auth) does not, so on web every request through it was refused. Otherwise
+ * `homeApi`, but only on a local socket, which needs no sign-in; a remote home is left alone
+ * rather than asked without a credential.
+ */
+function homeClient(get: StoreApi<AppState>["getState"]): ApiClient | null {
+  const active = get().api;
+  if (active && setup && active.connection.id === setup.localConnection.id) return active;
+  return homeApi?.connection.kind === "local" ? homeApi : null;
+}
+
 /** Persist the remote-server list to the home daemon (shared across clients). */
-async function persistRemotes(connections: UiConnection[]): Promise<void> {
-  await homeApi
+async function persistRemotes(get: StoreApi<AppState>["getState"], connections: UiConnection[]): Promise<void> {
+  await homeClient(get)
     ?.saveRemotes(connections.filter((c) => c.kind === "remote").map(toRemoteConfig))
     .catch(() => undefined);
 }
@@ -1234,6 +1267,12 @@ export interface AppState {
   addRemote: (input: { name: string; baseUrl: string }) => Promise<string>;
   removeRemote: (id: string) => Promise<void>;
   loadRemotes: () => Promise<void>;
+  /**
+   * A bearer-gated request `api` made was refused for its credential (401, or a 429: the daemon
+   * locks out only dead tokens): forget the credential and show the sign-in prompt. Ignored for
+   * any other error, a replaced client, or one without a credential.
+   */
+  credentialRefused: (api: ApiClient, error: unknown) => void;
 
   // git accounts (daemon-persisted; shared across clients of this daemon)
   loadAccounts: () => Promise<void>;
@@ -1714,15 +1753,25 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (reconnectGenAtStart !== reconnectGen) {
         return;
       }
+      if (active.connection.password && isRefusedCredential(error)) {
+        // The token was revoked or lapsed (or is an old build's credential): a
+        // 401, or a 429 once its refusals locked this address out — the daemon
+        // never locks out a valid token. Drop it and re-prompt: the sign-in
+        // goes to the public login route, under its own password throttle.
+        // Do NOT fan out and do NOT reconnect (waiting out the lockout would
+        // only send the dead token again).
+        recordRefusedCredential(error);
+        dropCredential(get, set, active);
+        return;
+      }
       if (error instanceof ApiError && error.status === 401) {
-        // The token was revoked or lapsed (or is an old build's credential):
-        // drop it and re-prompt. Do NOT fan out and do NOT reconnect.
+        // No credential to drop (a daemon that asked for none): re-prompt.
         recordFailure(error);
         dropCredential(get, set, active);
         return;
       }
       if (error instanceof ApiError && error.status === 429) {
-        // Rate-limited (too many failed attempts): back off until Retry-After
+        // Rate-limited without a credential of ours: back off until Retry-After
         // (or a capped exponential fallback) — never tight-loop.
         recordFailure(error);
         scheduleLockedReconnect(get, set, error.retryAfterSeconds);
@@ -2130,15 +2179,27 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadRemotes: async () => {
-    if (!homeApi || !setup) {
+    const client = homeClient(get);
+    if (!client || !setup) {
       return;
     }
     try {
-      const remotes = (await homeApi.listRemotes()).map(toUiConnection);
+      const remotes = (await client.listRemotes()).map(toUiConnection);
       set({ connections: [setup.localConnection, ...remotes] });
-    } catch {
-      /* keep local only */
+    } catch (error) {
+      // A refused sign-in asks for a new one; anything else keeps local only.
+      get().credentialRefused(client, error);
     }
+  },
+
+  credentialRefused: (api, error) => {
+    // Only the live client's own credential: a late answer to a replaced
+    // client, or a client that sent none, has nothing to drop.
+    if (get().api !== api || !api.connection.password || !isRefusedCredential(error)) {
+      return;
+    }
+    recordRefusedCredential(error);
+    dropCredential(get, set, api);
   },
 
   // A plain open drops any earlier deep link, so it lands on the last page.
@@ -2328,7 +2389,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
     const connections = [...get().connections, connection];
     set({ connections });
-    await persistRemotes(connections);
+    await persistRemotes(get, connections);
     return connection.id;
   },
 
@@ -2338,7 +2399,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (removed) void clearThreadCache(threadCacheScopeFor(removed));
     const connections = get().connections.filter((c) => c.id !== id);
     set({ connections });
-    await persistRemotes(connections);
+    await persistRemotes(get, connections);
     if (get().activeConnectionId === id && setup) {
       await get().selectConnection(setup.localConnection.id);
     }

@@ -6,7 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { beforeEach, describe, it, mock } from "node:test";
 
 import type { AuthLoginRequest, AuthSecondFactorChallenge, AuthSecondFactorLoginRequest } from "@orquester/api";
 
@@ -101,6 +101,42 @@ describe("establish", () => {
     assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false);
     assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id });
     assert.equal(store().connectionStatus, "error");
+  });
+
+  it("a stored token answered with the lockout's 429 is dead too: it is dropped for a sign-in, not waited out", async () => {
+    // The daemon locks out an address only for refused tokens, so waiting out
+    // Retry-After would just send the dead token again.
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
+      const api = {
+        ...fakeApi(TOKEN),
+        info: async () => {
+          infoCalls.push(TOKEN);
+          throw new ApiError(429, "GET", "/api/info", { "retry-after": "25603" }, { code: "TOO_MANY_ATTEMPTS" });
+        }
+      } as unknown as ApiClient;
+      useAppStore.setState({ api });
+      await store().establish(api);
+      assert.deepEqual(infoCalls, [TOKEN]);
+      assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false);
+      assert.ok(!store().api?.connection.password, "the client no longer carries the dead token");
+      assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id });
+      assert.equal(store().lockedUntil, null, "no lockout countdown to wait out");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("a 429 that is not the bearer lockout (a GitHub rate limit) keeps the sign-in", () => {
+    storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
+    const api = fakeApi(TOKEN) as unknown as ApiClient;
+    useAppStore.setState({ api, authPrompt: null });
+    store().credentialRefused(api, new ApiError(429, "GET", "/api/github/links", {}, { code: "RATE_LIMITED" }));
+    assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN);
+    assert.equal(store().authPrompt, null);
+    store().credentialRefused(api, new ApiError(429, "GET", "/api/system/resources", {}, { code: "TOO_MANY_ATTEMPTS" }));
+    assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false, "the bearer lockout's 429 does drop it");
   });
 });
 
@@ -275,5 +311,35 @@ describe("a sign-in with the second factor on", () => {
     assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN);
     assert.equal(store().authPrompt, null);
     assert.equal(connected, 1);
+  });
+});
+
+describe("the remote list on a client whose home is the remote (web)", () => {
+  const REMOTES = [{ id: "other", name: "Other", kind: "remote" as const, baseUrl: "https://other.example" }];
+
+  /** Set the web client up the way its page does: its home connection is the remote itself. */
+  async function signedInHome(listRemotes: () => Promise<unknown>) {
+    useAppStore.setState({ connect: async () => undefined, connectionStatus: "disconnected" });
+    await store().initConnections({ localConnection: CONNECTION, localTransporter: { kind: "stub" } as never, defaultUseTitlebar: false });
+    storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
+    useAppStore.setState({ api: { ...fakeApi(TOKEN), listRemotes } as unknown as ApiClient, connectionStatus: "connected" });
+  }
+
+  it("is read with the sign-in", async () => {
+    await signedInHome(async () => REMOTES);
+    await store().loadRemotes();
+    assert.deepEqual(
+      store().connections.map((c) => c.id),
+      [CONNECTION.id, "other"]
+    );
+  });
+
+  it("a refused sign-in there asks for a new one instead of being retried on every connect", async () => {
+    await signedInHome(async () => {
+      throw new ApiError(401, "GET", "/api/config/remotes");
+    });
+    await store().loadRemotes();
+    assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false);
+    assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id });
   });
 });
