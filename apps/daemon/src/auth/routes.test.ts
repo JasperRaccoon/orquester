@@ -204,6 +204,38 @@ test("/ws accepts a session token, refuses the legacy credential, and closes whe
   assert.equal(await closed, 1008);
 });
 
+test("a revoked token polling from the owner's IP locks out only invalid tokens; the owner's live session there keeps working", async (t) => {
+  // The bearer throttle collapses failures within 2 s into one: the clock steps past that per poll.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-22T10:00:00.000Z") });
+  const h = await harness();
+  t.after(h.close);
+  const home = "198.51.100.30";
+  const stale = (await login(h, PASSWORD, home)).json() as AuthIssuedTokenResponse;
+  const { token: owner } = (await login(h, PASSWORD, home)).json() as AuthIssuedTokenResponse;
+  assert.equal(await h.store.revoke(stale.session.id), true);
+  const poll = (token: string) =>
+    h.remote.inject({ method: "GET", url: "/api/system/resources", remoteAddress: home, headers: { authorization: `Bearer ${token}` } });
+
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal((await poll(stale.token)).statusCode, 401);
+    t.mock.timers.tick(2_000);
+  }
+  const locked = await poll(stale.token);
+  assert.equal(locked.statusCode, 429, "the dead token's polls lock the IP");
+  assert.ok(Number(locked.headers["retry-after"]) > 0);
+
+  assert.equal((await poll(owner)).statusCode, 200, "a live session from the same IP is not refused");
+  assert.equal((await poll(stale.token)).statusCode, 429, "the owner's request does not lift the lockout");
+  await h.remote.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.remote.server.address() as AddressInfo).port;
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(owner)}`, { headers: { "x-forwarded-for": home } });
+  await new Promise<void>((resolve, reject) => {
+    ws.on("open", () => resolve());
+    ws.on("error", reject);
+  });
+  ws.close();
+});
+
 test("revoking a session ends its open event stream", async (t) => {
   const h = await harness();
   const responses: ServerResponse[] = [];
