@@ -5,7 +5,7 @@
  */
 
 import assert from "node:assert/strict";
-import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
@@ -113,5 +113,38 @@ describe("the host chip in the phone drawer", () => {
     await flush();
     assert.equal(reads, 1);
     assert.equal(chip()?.getAttribute("aria-label"), "Host: CPU 12%, memory 50%");
+  });
+
+  it("stops reading once the daemon refuses the sign-in, instead of re-sending it every tick", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    try {
+      const refusing = {
+        ...api,
+        systemResources: async () => {
+          reads += 1;
+          throw Object.assign(new Error("GET /api/system/resources failed with status 429"), { status: 429 });
+        }
+      };
+      useAppStore.setState({ sidebarDrawerOpen: true });
+      await act(async () => {
+        root.render(
+          createElement(OrquesterProvider, {
+            runtime: "web",
+            api: refusing as never,
+            useTitlebar: false,
+            children: createElement(SystemStatusChip)
+          })
+        );
+      });
+      await flush();
+      assert.equal(reads, 1);
+      for (let tick = 0; tick < 3; tick += 1) {
+        await act(async () => mock.timers.tick(3000));
+        await flush();
+      }
+      assert.equal(reads, 1, "a refused credential is not sent again");
+    } finally {
+      mock.timers.reset();
+    }
   });
 });

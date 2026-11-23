@@ -149,8 +149,9 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
           }
           return { ...prev, [dir]: result.entries };
         });
-      } catch {
-        /* ignore */
+      } catch (error) {
+        // A refused sign-in asks for a new one (and stops the poll); anything else is ignored.
+        useAppStore.getState().credentialRefused(api, error);
       }
     },
     [api]
