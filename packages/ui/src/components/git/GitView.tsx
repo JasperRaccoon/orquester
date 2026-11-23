@@ -10,6 +10,7 @@ import { HistoryPanel } from "./HistoryPanel";
 import { subscribeProjectGit, subscribeProjectGitNudge, type GitWatchState } from "./git-watch";
 import { useApi } from "../../context/orquester-context";
 import { usePollWhileActive } from "../../hooks";
+import { useAppStore } from "../../store/app";
 
 type SubTab = "changes" | "history";
 
@@ -87,8 +88,9 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
         setStatus(s);
         setBranches(b);
       })
-      .catch(() => {
-        /* leave the last good snapshot in place */
+      .catch((error: unknown) => {
+        // Leave the last good snapshot in place; a refused sign-in asks for a new one (and stops the poll).
+        useAppStore.getState().credentialRefused(api, error);
       });
     return () => {
       cancelled = true;
