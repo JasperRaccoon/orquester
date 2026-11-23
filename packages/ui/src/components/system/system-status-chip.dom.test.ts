@@ -122,7 +122,7 @@ describe("the host chip in the phone drawer", () => {
         ...api,
         systemResources: async () => {
           reads += 1;
-          throw Object.assign(new Error("GET /api/system/resources failed with status 429"), { status: 429 });
+          throw Object.assign(new Error("GET /api/system/resources failed with status 429"), { status: 429, body: { code: "TOO_MANY_ATTEMPTS" } });
         }
       };
       useAppStore.setState({ sidebarDrawerOpen: true });

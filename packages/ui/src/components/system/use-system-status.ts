@@ -40,10 +40,14 @@ function statusOf(error: unknown): number | null {
   return typeof status === "number" ? status : null;
 }
 
-/** The daemon refused the request's credential (401) or locked it out (429). */
+/**
+ * The daemon refused the request's credential (401) or locked it out (the bearer lockout's 429,
+ * `TOO_MANY_ATTEMPTS`; any other 429 says nothing about the credential).
+ */
 function refusedCredential(error: unknown): boolean {
   const status = statusOf(error);
-  return status === 401 || status === 429;
+  if (status === 401) return true;
+  return status === 429 && (error as { body?: { code?: unknown } | null }).body?.code === "TOO_MANY_ATTEMPTS";
 }
 
 /**

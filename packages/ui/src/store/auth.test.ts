@@ -113,7 +113,7 @@ describe("establish", () => {
         ...fakeApi(TOKEN),
         info: async () => {
           infoCalls.push(TOKEN);
-          throw new ApiError(429, "GET", "/api/info", { "retry-after": "25603" });
+          throw new ApiError(429, "GET", "/api/info", { "retry-after": "25603" }, { code: "TOO_MANY_ATTEMPTS" });
         }
       } as unknown as ApiClient;
       useAppStore.setState({ api });
@@ -126,6 +126,17 @@ describe("establish", () => {
     } finally {
       mock.timers.reset();
     }
+  });
+
+  it("a 429 that is not the bearer lockout (a GitHub rate limit) keeps the sign-in", () => {
+    storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
+    const api = fakeApi(TOKEN) as unknown as ApiClient;
+    useAppStore.setState({ api, authPrompt: null });
+    store().credentialRefused(api, new ApiError(429, "GET", "/api/github/links", {}, { code: "RATE_LIMITED" }));
+    assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN);
+    assert.equal(store().authPrompt, null);
+    store().credentialRefused(api, new ApiError(429, "GET", "/api/system/resources", {}, { code: "TOO_MANY_ATTEMPTS" }));
+    assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false, "the bearer lockout's 429 does drop it");
   });
 });
 

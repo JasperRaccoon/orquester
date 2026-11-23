@@ -443,7 +443,12 @@ function recordFailure(error: unknown): void {
  * throttle) is not this: those carry no credential.
  */
 function isRefusedCredential(error: unknown): error is ApiError {
-  return error instanceof ApiError && (error.status === 401 || error.status === 429);
+  // Only the bearer lockout's 429 (`TOO_MANY_ATTEMPTS`): other 429s on bearer-gated routes (a
+  // GitHub rate limit, the push limit) say nothing about the credential.
+  return (
+    error instanceof ApiError &&
+    (error.status === 401 || (error.status === 429 && (error.body as { code?: unknown } | null | undefined)?.code === "TOO_MANY_ATTEMPTS"))
+  );
 }
 
 /** Log a refused stored credential: the diagnosis asks for a sign-in, whatever the status. */
