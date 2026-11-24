@@ -43,9 +43,13 @@ function DiffStatLabel({ stat }: { stat: DiffStat }): React.ReactElement | null 
  * The end-of-turn changed-files card (§7.3), fed by
  * `thread.turn-diff-completed`.
  *
+ * It opens as the summary line alone ("N changed files · +a −b" and the
+ * turn's split into code, tests, docs and generated files), so a finished turn
+ * costs one line of scroll. Pressing the summary shows the file tree with its
+ * folders collapsed; the expand-all button then opens every folder.
+ *
  * `sticky top-2` on the header is the nice touch: scroll a long file list and
- * the "N changed files · +a −b" summary stays, with the turn's split into
- * code, tests, docs and generated files beside it when there is more than code.
+ * the summary stays.
  * *T3: `ChangedFilesTree.tsx:51-56, 183, 192-212`.*
  */
 export const ChangedFilesCard = React.memo(function ChangedFilesCard({
@@ -61,7 +65,8 @@ export const ChangedFilesCard = React.memo(function ChangedFilesCard({
   const directoryPaths = React.useMemo(() => collectDirectoryPaths(tree), [tree]);
   const hasDirectories = directoryPaths.length > 0;
 
-  const [allExpanded, setAllExpanded] = React.useState(true);
+  const [listOpen, setListOpen] = React.useState(false);
+  const [allExpanded, setAllExpanded] = React.useState(false);
   // The identity key resets per-directory overrides whenever the tree's shape
   // or the expand-all state changes, so a new turn never inherits stale toggles.
   const identity = `${allExpanded ? "expanded" : "collapsed"}\u0000${directoryPaths.join("\u0000")}`;
@@ -153,9 +158,26 @@ export const ChangedFilesCard = React.memo(function ChangedFilesCard({
 
   return (
     <div className="mt-4 rounded-lg bg-neutral-900">
-      <div className="sticky top-2 z-10 flex items-center justify-between gap-2 rounded-t-lg bg-neutral-900 px-3 py-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-neutral-200">
-          <span>
+      <div
+        className={cn(
+          "flex items-center justify-between gap-2 bg-neutral-900 px-3 py-1.5",
+          listOpen ? "sticky top-2 z-10 rounded-t-lg" : "rounded-lg"
+        )}
+      >
+        <button
+          type="button"
+          aria-expanded={listOpen}
+          onClick={() => setListOpen((value) => !value)}
+          className="group -ml-1 flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-1 py-0.5 text-left text-xs font-medium text-neutral-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+        >
+          <span className="flex items-center gap-1.5">
+            <ChevronRight
+              size={14}
+              strokeWidth={1.8}
+              aria-hidden
+              className="ac-chevron shrink-0 text-neutral-500 group-hover:text-neutral-300"
+              data-open={listOpen ? "true" : "false"}
+            />
             {files.length} changed file{files.length === 1 ? "" : "s"}
           </span>
           {hasNonZeroStat(summary) ? (
@@ -165,9 +187,9 @@ export const ChangedFilesCard = React.memo(function ChangedFilesCard({
             </span>
           ) : null}
           <ChangeKindSplit files={files} />
-        </div>
+        </button>
         <div className="flex shrink-0 items-center gap-1">
-          {hasDirectories ? (
+          {listOpen && hasDirectories ? (
             <ChatIconButton
               size="xs"
               label={allExpanded ? "Collapse all folders" : "Expand all folders"}
@@ -191,7 +213,7 @@ export const ChangedFilesCard = React.memo(function ChangedFilesCard({
           ) : null}
         </div>
       </div>
-      <div className="p-2">{tree.map((node) => renderNode(node, 0))}</div>
+      {listOpen ? <div className="p-2 pt-0">{tree.map((node) => renderNode(node, 0))}</div> : null}
     </div>
   );
 });

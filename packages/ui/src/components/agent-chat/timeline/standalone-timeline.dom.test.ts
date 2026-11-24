@@ -237,6 +237,12 @@ it("with the app's callbacks, opens files and the turn diff and reads full outpu
   };
   await press((button) => button.getAttribute("aria-label") === "Open the full diff for this turn", "the turn diff");
   await press((button) => button.textContent === "the server", "the workspace link");
+  // The changed-files card opens as its summary line alone; pressing it lists
+  // the files with their folders collapsed.
+  assert.equal(buttons().some((button) => button.textContent?.includes("src") === true), false);
+  await press((button) => button.textContent?.includes("1 changed file") === true, "the changed-files summary");
+  assert.equal(buttons().some((button) => button.textContent?.includes("server.ts") === true), false);
+  await press((button) => button.textContent?.startsWith("src") === true, "the src folder");
   await press((button) => button.textContent?.includes("server.ts") === true, "the changed file");
   await press((button) => button.textContent === "Load full output", "the full output");
   assert.deepEqual(calls, ["diff:1", "file:src/server.ts", "file:src/server.ts", "output:cmd-1"]);
