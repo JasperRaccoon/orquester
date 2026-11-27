@@ -380,6 +380,28 @@ describe("claude models and the version gate", () => {
     );
   });
 
+  it("a launch naming no effort gets the catalogue default, high", () => {
+    const { options, effort } = build("approval-required", { model: "sonnet" });
+    assert.equal(options.effort, "high");
+    assert.equal(effort, "high");
+    // The picker marks the same choice it applies.
+    const sonnet = MODELS.find((entry) => entry.slug === "sonnet")!;
+    const descriptor = sonnet.capabilities?.optionDescriptors?.find((d) => d.id === "effort");
+    assert.ok(descriptor && descriptor.type === "select");
+    assert.equal(descriptor.options.find((option) => option.isDefault)?.id, "high");
+  });
+
+  it("applies no default effort without a live catalogue entry to validate it", () => {
+    // Fallback alias: capabilities unknown, the CLI keeps its own default.
+    const opus = FALLBACK_CLAUDE_MODELS.find((entry) => entry.slug === "opus")!;
+    assert.equal(resolveEffortLevel({ model: "opus" }, opus), undefined);
+    // Haiku advertises no effort support at all.
+    const haiku = MODELS.find((entry) => entry.slug === "haiku")!;
+    assert.equal(resolveEffortLevel({ model: "haiku" }, haiku), undefined);
+    // No model selection at all: nothing to validate the default against.
+    assert.equal(build("approval-required").options.effort, undefined);
+  });
+
   it("keeps the CLI's resolved id beside the launch alias", () => {
     const model = MODELS.find((entry) => entry.slug === "default")!;
     assert.equal(model.subProvider, "claude-opus-4-8[1m]");

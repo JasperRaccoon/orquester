@@ -90,7 +90,12 @@ const EFFORT_LABELS: Record<string, string> = {
   max: "Max"
 };
 
-const DEFAULT_EFFORT_CHOICE = "medium";
+/**
+ * The effort a chat naming none runs at. Marked `isDefault` on the picker's
+ * descriptor AND applied by {@link resolveEffortLevel}, so what the chip shows
+ * as the default is exactly what the launch sends.
+ */
+const DEFAULT_EFFORT_CHOICE = "high";
 
 export const CLAUDE_OPTION_IDS = {
   effort: "effort",
@@ -268,7 +273,14 @@ export function resolveEffortLevel(
   model: ProviderModel | undefined
 ): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
   const requested = selectionStringOption(selection, CLAUDE_OPTION_IDS.effort);
-  if (requested === undefined || !EFFORT_LEVELS.has(requested)) {
+  if (requested === undefined) {
+    // No choice made: apply the catalogue default the picker marks, but only
+    // where a live catalogue entry says the model supports it. An invalid or
+    // unsupported *request* below stays `undefined` so the session's warning
+    // ("the model's default is used") keeps firing.
+    return defaultEffortLevel(model);
+  }
+  if (!EFFORT_LEVELS.has(requested)) {
     return undefined;
   }
   if (!hasKnownCapabilities(model)) {
@@ -289,6 +301,30 @@ export function resolveEffortLevel(
     return undefined;
   }
   return requested as "low" | "medium" | "high" | "xhigh" | "max";
+}
+
+/**
+ * The effort a chat naming none gets: the descriptor choice marked
+ * `isDefault` ({@link DEFAULT_EFFORT_CHOICE}). A fallback alias (capabilities
+ * unknown) or a model without effort support gets none — the CLI keeps its
+ * own default rather than being sent a level nothing validated.
+ */
+function defaultEffortLevel(
+  model: ProviderModel | undefined
+): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+  if (!hasKnownCapabilities(model)) {
+    return undefined;
+  }
+  const descriptor = model.capabilities?.optionDescriptors?.find(
+    (entry) => entry.id === CLAUDE_OPTION_IDS.effort
+  );
+  if (descriptor === undefined || descriptor.type !== "select") {
+    return undefined;
+  }
+  const choice = descriptor.options.find((option) => option.isDefault)?.id;
+  return choice !== undefined && EFFORT_LEVELS.has(choice)
+    ? (choice as "low" | "medium" | "high" | "xhigh" | "max")
+    : undefined;
 }
 
 /** A boolean option only applies where the selected model advertises it. */
