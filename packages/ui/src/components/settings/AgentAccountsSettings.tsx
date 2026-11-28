@@ -242,6 +242,10 @@ export function AgentAccountsSettings() {
                 The stored login for “{removing.label}” is deleted from this server. Sessions can no longer launch
                 with it.
               </p>
+              <p className="text-neutral-500">
+                Idle chats using it switch to another {agentName(removing.agent)} account (the default first). It can't be
+                removed while a session using it is working.
+              </p>
               {isDefault(removing) && (
                 <p className="text-neutral-500">
                   It is the {agentName(removing.agent)} default; new {agentName(removing.agent)} sessions will use

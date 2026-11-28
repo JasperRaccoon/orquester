@@ -247,6 +247,7 @@ import type { ValidationCatalog } from "./workflows/agent/validation-catalog.ts"
 import { consoleWorkflowLogger, createWorkflowDaemon } from "./workflows/daemon-wiring.ts";
 import { createInternalDaemonApi } from "./chat-client/index.ts";
 import { AgentAccountsService } from "./agent-accounts.ts";
+import { releaseAccountForRemoval } from "./agent-account-removal.ts";
 import { AgentAccountError } from "./agent-account-paths.ts";
 import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService, GitWatcher, passesGitEventFilter, workingDiffMaxBytes } from "./git";
@@ -4629,6 +4630,17 @@ export function createServer(
 
   app.delete("/api/agent-accounts/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
+    // Idle chats on the account move to another one first; a working session refuses the removal.
+    if (services.agentChat) {
+      const agentChat = services.agentChat;
+      const released = await releaseAccountForRemoval(id, {
+        sessions: sessions.list(),
+        accounts: agentAccounts.list(),
+        switchAccount: (sessionId, input) => agentChat.switchAccount(sessionId, input),
+        newCommandId: () => randomUUID()
+      });
+      if (!released.ok) return reply.code(409).send({ error: released.error });
+    }
     // A session still running under the account would write its next line into
     // the deleted home and re-create it as an orphan, so it goes first.
     if (sessions.liveAccountIds().has(id)) {
